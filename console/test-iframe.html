@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iframe postMessage 测试页面</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+    .section {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .section h2 {
+      margin-bottom: 15px;
+      font-size: 16px;
+      color: #666;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: 500;
+      color: #333;
+    }
+    input, textarea, select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    textarea {
+      min-height: 100px;
+      font-family: monospace;
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .checkbox-group input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+    }
+    button {
+      background: #FF7F16;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #e67300;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background: #666;
+    }
+    button.secondary:hover {
+      background: #555;
+    }
+    .iframe-container {
+      position: relative;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 20px;
+    }
+    iframe {
+      width: 100%;
+      height: 600px;
+      border: none;
+    }
+    .status {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .status.success {
+      background: #e6f7e6;
+      color: #2e7d32;
+    }
+    .status.info {
+      background: #e3f2fd;
+      color: #1565c0;
+    }
+    .status.error {
+      background: #ffebee;
+      color: #c62828;
+    }
+    .log-container {
+      max-height: 300px;
+      overflow-y: auto;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 15px;
+      border-radius: 4px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+    .log-item {
+      padding: 3px 0;
+    }
+    .log-time {
+      color: #6a9955;
+    }
+    .log-type {
+      color: #569cd6;
+    }
+    .log-data {
+      color: #ce9178;
+    }
+    .row {
+      display: flex;
+      gap: 15px;
+    }
+    .row .form-group {
+      flex: 1;
+    }
+    .hint {
+      font-size: 12px;
+      color: #999;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>iframe postMessage 测试页面</h1>
+
+    <!-- ==================== iframe 地址配置 ==================== -->
+    <div class="section">
+      <h2>1. 配置 iframe 地址</h2>
+      <div class="form-group">
+        <label for="iframeUrl">iframe URL</label>
+        <input type="text" id="iframeUrl" value="http://localhost:5173" placeholder="http://localhost:5173">
+        <p class="hint">开发环境默认地址: http://localhost:5173</p>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="originParam">
+        <label for="originParam" style="margin-bottom: 0;">URL 参数 origin=Y（触发客户信息查询接口）</label>
+      </div>
+      <button onclick="loadIframe()">加载 iframe</button>
+      <button onclick="clearLogs()" class="secondary">清空日志</button>
+    </div>
+
+    <!-- ==================== 用户数据配置 ==================== -->
+    <div class="section">
+      <h2>2. 发送 USER_DATA 消息</h2>
+
+      <!-- sapId / clawName -->
+      <div class="row">
+        <div class="form-group">
+          <label for="sapId">sapId（用户 ID）</label>
+          <input type="text" id="sapId" value="80000001" placeholder="用户 ID（如 80000001）">
+          <p class="hint">对应 iframe 内的 userId，将作为 X-User-Id header</p>
+        </div>
+        <div class="form-group">
+          <label for="clawName">clawName（用户名称）</label>
+          <input type="text" id="clawName" value="张三" placeholder="用户名称">
+          <p class="hint">显示在 Header 的用户选择器中</p>
+        </div>
+      </div>
+
+      <!-- space / source -->
+      <div class="row">
+        <div class="form-group">
+          <label for="space">space（空间标识）</label>
+          <input type="text" id="space" value="default" placeholder="空间标识">
+        </div>
+        <div class="form-group">
+          <label for="source">source（来源/品牌标识）</label>
+          <select id="source">
+            <option value="default">default - 金葵花RM小助Claw版</option>
+            <option value="ruice">ruice - 睿策小助Claw版</option>
+            <option value="CMSJY">CMSJY - 远程RM小助Claw版</option>
+            <option value="UPPCLAW">UPPCLAW - 智像小助Claw</option>
+            <option value="copilotClaw">copilotClaw - 数据赋能小助CLAW</option>
+          </select>
+          <p class="hint">切换不同品牌主题（logo、名称、主题色）</p>
+        </div>
+      </div>
+
+      <!-- hideMenu / isSuperManager -->
+      <div class="row">
+        <div class="form-group">
+          <div class="checkbox-group">
+            <input type="checkbox" id="hideMenu">
+            <label for="hideMenu" style="margin-bottom: 0;">hideMenu（隐藏侧边栏）</label>
+          </div>
+          <p class="hint">隐藏左侧 Sidebar 菜单</p>
+        </div>
+        <div class="form-group">
+          <div class="checkbox-group">
+            <input type="checkbox" id="isSuperManager" checked>
+            <label for="isSuperManager" style="margin-bottom: 0;">isSuperManager（超级管理员）</label>
+          </div>
+          <p class="hint">开启后显示用户选择下拉框，可切换用户</p>
+        </div>
+      </div>
+
+      <!-- auth headers -->
+      <div class="form-group">
+        <label for="authHeaders">自定义 Headers (JSON 数组)</label>
+        <textarea id="authHeaders" placeholder='[{"headerName": "X-Custom-Auth", "headerValue": "custom-value"}]'>[
+  {"headerName": "X-Custom-Auth", "headerValue": "custom-auth-value"},
+  {"headerName": "X-Request-Id", "headerValue": "req-12345"}
+]</textarea>
+        <p class="hint">额外的 HTTP headers，会附加到所有 API 请求中</p>
+      </div>
+
+      <button onclick="sendUserDataMessage()" id="sendBtn" disabled>发送 USER_DATA 消息</button>
+      <button onclick="sendHeartbeat()" id="heartbeatBtn" disabled class="secondary">发送心跳</button>
+      <div id="status" class="status info" style="display: none;"></div>
+    </div>
+
+    <!-- ==================== 消息日志 ==================== -->
+    <div class="section">
+      <h2>3. 消息日志</h2>
+      <div class="log-container" id="logContainer">
+        <div class="log-item">
+          <span class="log-time">[等待 iframe 加载...]</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== iframe 容器 ==================== -->
+    <div class="iframe-container">
+      <iframe id="testIframe" src="about:blank"></iframe>
+    </div>
+  </div>
+
+  <script>
+    const iframe = document.getElementById('testIframe');
+    const sendBtn = document.getElementById('sendBtn');
+    const heartbeatBtn = document.getElementById('heartbeatBtn');
+    const statusEl = document.getElementById('status');
+    const logContainer = document.getElementById('logContainer');
+    let iframeReady = false;
+    let iframeInitialized = false;
+
+    // ==================== 日志函数 ====================
+    function log(message, type = 'info') {
+      const time = new Date().toLocaleTimeString();
+      const item = document.createElement('div');
+      item.className = 'log-item';
+
+      const typeColor = type === 'success' ? '#4ec9b0' :
+                        type === 'error' ? '#f14c4c' : '#569cd6';
+
+      item.innerHTML = `
+        <span class="log-time">[${time}]</span>
+        <span class="log-type" style="color: ${typeColor};">[${type.toUpperCase()}]</span>
+        <span class="log-data">${message}</span>
+      `;
+      logContainer.appendChild(item);
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    function clearLogs() {
+      logContainer.innerHTML = '';
+      log('日志已清空');
+    }
+
+    // ==================== 状态显示 ====================
+    function showStatus(message, type = 'info') {
+      statusEl.textContent = message;
+      statusEl.className = `status ${type}`;
+      statusEl.style.display = 'block';
+    }
+
+    // ==================== 加载 iframe ====================
+    function loadIframe() {
+      const baseUrl = document.getElementById('iframeUrl').value;
+      const originParam = document.getElementById('originParam').checked;
+
+      // 如果勾选 origin=Y，则添加 URL 参数
+      const url = originParam ? `${baseUrl}?origin=Y` : baseUrl;
+
+      log(`加载 iframe: ${url}`, 'info');
+      iframe.src = url;
+      iframeReady = false;
+      iframeInitialized = false;
+      sendBtn.disabled = true;
+      heartbeatBtn.disabled = true;
+      showStatus('等待 iframe 准备就绪...', 'info');
+    }
+
+    // ==================== 监听 iframe 消息 ====================
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+
+      if (data && data.type) {
+        log(`收到消息: ${JSON.stringify(data)}`, 'success');
+
+        if (data.type === 'READY_RESPONSE') {
+          if (!data.initialized) {
+            // iframe 已准备就绪，可以发送 USER_DATA 消息
+            iframeReady = true;
+            sendBtn.disabled = false;
+            heartbeatBtn.disabled = false;
+            showStatus('iframe 已准备就绪，可以发送 USER_DATA 消息', 'success');
+            log('iframe 准备就绪，等待发送 USER_DATA', 'success');
+          } else {
+            // iframe 已初始化完成
+            iframeInitialized = true;
+            showStatus('iframe 初始化完成！', 'success');
+            log('iframe 初始化完成', 'success');
+          }
+        }
+      }
+    });
+
+    // ==================== 发送 USER_DATA 消息 ====================
+    function sendUserDataMessage() {
+      if (!iframeReady) {
+        showStatus('iframe 尚未准备就绪', 'error');
+        return;
+      }
+
+      // 获取所有参数
+      const sapId = document.getElementById('sapId').value;
+      const clawName = document.getElementById('clawName').value;
+      const space = document.getElementById('space').value;
+      const source = document.getElementById('source').value;
+      const hideMenu = document.getElementById('hideMenu').checked;
+      const isSuperManager = document.getElementById('isSuperManager').checked;
+
+      // 解析 auth headers
+      let authHeaders = [];
+      try {
+        const authHeadersText = document.getElementById('authHeaders').value.trim();
+        if (authHeadersText) {
+          authHeaders = JSON.parse(authHeadersText);
+        }
+      } catch (e) {
+        showStatus('自定义 Headers JSON 格式错误', 'error');
+        log('JSON 解析失败: ' + e.message, 'error');
+        return;
+      }
+
+      // 构建 USER_DATA 消息
+      const message = {
+        type: 'USER_DATA',
+        sapId: sapId || undefined,
+        clawName: clawName || undefined,
+        space: space || undefined,
+        source: source || undefined,
+        hideMenu: hideMenu,
+        isSuperManager: isSuperManager,
+        auth: authHeaders.length > 0 ? authHeaders : undefined
+      };
+
+      // 获取 iframe 的 origin
+      const iframeUrl = document.getElementById('iframeUrl').value;
+      const targetOrigin = new URL(iframeUrl).origin;
+
+      log(`发送 USER_DATA 消息到 ${targetOrigin}:`, 'info');
+      log(JSON.stringify(message, null, 2), 'info');
+
+      iframe.contentWindow.postMessage(message, targetOrigin);
+      showStatus('USER_DATA 消息已发送，等待确认...', 'info');
+    }
+
+    // ==================== 发送心跳消息 ====================
+    function sendHeartbeat() {
+      if (!iframeReady) {
+        showStatus('iframe 尚未准备就绪', 'error');
+        return;
+      }
+
+      const message = {
+        type: 'HEARTBEAT',
+        timestamp: Date.now()
+      };
+
+      const iframeUrl = document.getElementById('iframeUrl').value;
+      const targetOrigin = new URL(iframeUrl).origin;
+
+      log(`发送心跳消息: ${JSON.stringify(message)}`, 'info');
+      iframe.contentWindow.postMessage(message, targetOrigin);
+    }
+
+    // ==================== 快速测试场景 ====================
+    function setTestScenario(scenario) {
+      switch (scenario) {
+        case 'superManager':
+          document.getElementById('sapId').value = '80000001';
+          document.getElementById('clawName').value = '超级管理员';
+          document.getElementById('space').value = 'default';
+          document.getElementById('source').value = 'default';
+          document.getElementById('hideMenu').checked = false;
+          document.getElementById('isSuperManager').checked = true;
+          log('已设置场景: 超级管理员测试', 'info');
+          break;
+        case 'normalUser':
+          document.getElementById('sapId').value = '80000002';
+          document.getElementById('clawName').value = '普通用户';
+          document.getElementById('space').value = 'default';
+          document.getElementById('source').value = 'default';
+          document.getElementById('hideMenu').checked = false;
+          document.getElementById('isSuperManager').checked = false;
+          log('已设置场景: 普通用户测试', 'info');
+          break;
+        case 'ruiceBrand':
+          document.getElementById('sapId').value = '80000003';
+          document.getElementById('clawName').value = '睿策用户';
+          document.getElementById('space').value = 'ruice';
+          document.getElementById('source').value = 'ruice';
+          document.getElementById('hideMenu').checked = false;
+          document.getElementById('isSuperManager').checked = false;
+          log('已设置场景: 睿策品牌测试', 'info');
+          break;
+        case 'hideMenu':
+          document.getElementById('sapId').value = '80000004';
+          document.getElementById('clawName').value = '隐藏菜单用户';
+          document.getElementById('space').value = 'default';
+          document.getElementById('source').value = 'default';
+          document.getElementById('hideMenu').checked = true;
+          document.getElementById('isSuperManager').checked = false;
+          log('已设置场景: 隐藏菜单测试', 'info');
+          break;
+        case 'originApi':
+          document.getElementById('sapId').value = '80000005';
+          document.getElementById('clawName').value = 'API触发用户';
+          document.getElementById('space').value = 'default';
+          document.getElementById('source').value = 'default';
+          document.getElementById('hideMenu').checked = false;
+          document.getElementById('isSuperManager').checked = true;
+          document.getElementById('originParam').checked = true;
+          log('已设置场景: origin=Y API 触发测试', 'info');
+          break;
+      }
+    }
+
+    // ==================== 页面加载完成 ====================
+    window.addEventListener('load', () => {
+      log('测试页面加载完成', 'success');
+      log('可用测试场景:', 'info');
+      log('  - 超管用户: setTestScenario("superManager")', 'info');
+      log('  - 普通用户: setTestScenario("normalUser")', 'info');
+      log('  - 睿策品牌: setTestScenario("ruiceBrand")', 'info');
+      log('  - 隐藏菜单: setTestScenario("hideMenu")', 'info');
+      log('  - API触发: setTestScenario("originApi")', 'info');
+    });
+  </script>
+</body>
+</html>

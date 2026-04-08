@@ -1,0 +1,514 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=redefined-outer-name,unused-argument
+import mimetypes
+import os
+import time
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from agentscope_runtime.engine.app import AgentApp
+
+from ..config import load_config  # pylint: disable=no-name-in-module
+from ..config.utils import get_config_path
+from ..constant import (
+    DOCS_ENABLED,
+    LOG_LEVEL_ENV,
+    CORS_ORIGINS,
+    WORKING_DIR,
+    DB_HOST,
+    DB_PORT,
+    DB_USER,
+    DB_PASSWORD,
+    DB_NAME,
+    DB_MIN_CONN,
+    DB_MAX_CONN,
+    # Backward compatibility
+    TRACING_DB_HOST,
+    TRACING_DB_PORT,
+    TRACING_DB_USER,
+    TRACING_DB_PASSWORD,
+    TRACING_DB_NAME,
+    TRACING_DB_MIN_CONN,
+    TRACING_DB_MAX_CONN,
+)
+from ..__version__ import __version__
+from ..utils.logging import setup_logger, add_swe_file_handler
+from .auth import AuthMiddleware
+from .middleware.tenant_identity import TenantIdentityMiddleware
+from .middleware.tenant_workspace import TenantWorkspaceMiddleware
+from .middleware.header_passthrough import HeaderPassthroughMiddleware
+from .routers import router as api_router, create_agent_scoped_router
+from .routers.agent_scoped import AgentContextMiddleware
+from .routers.voice import voice_router
+from ..envs import load_envs_into_environ
+from .multi_agent_manager import MultiAgentManager
+from .workspace.tenant_pool import TenantWorkspacePool
+from .migration import (
+    ensure_default_agent_exists,
+)
+from .channels.registry import register_custom_channel_routes
+from ..tracing import init_trace_manager, close_trace_manager
+from ..database import DatabaseConfig
+
+# Apply log level on load so reload child process gets same level as CLI.
+logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
+
+
+# Ensure static assets are served with browser-compatible MIME types across
+# platforms (notably Windows may miss .js/.mjs mappings).
+mimetypes.init()
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
+
+# Load persisted env vars into os.environ at module import time
+# so they are available before the lifespan starts.
+load_envs_into_environ()
+
+
+# Dynamic runner that selects the correct workspace runner based on request
+class DynamicMultiAgentRunner:
+    """Runner wrapper that dynamically routes to the correct workspace runner.
+
+    This allows AgentApp to work with multiple agents by inspecting
+    the X-Agent-Id header on each request.
+    """
+
+    def __init__(self):
+        self.framework_type = "agentscope"
+        self._multi_agent_manager = None
+
+    def set_multi_agent_manager(self, manager):
+        """Set the MultiAgentManager instance after initialization."""
+        self._multi_agent_manager = manager
+
+    async def _get_workspace_runner(self, request):
+        """Get the correct workspace runner based on request."""
+        from .agent_context import get_current_agent_id
+
+        # Get agent_id from context (set by middleware or header)
+        agent_id = get_current_agent_id()
+
+        logger.debug(f"_get_workspace_runner: agent_id={agent_id}")
+
+        # Get the correct workspace runner
+        if not self._multi_agent_manager:
+            raise RuntimeError("MultiAgentManager not initialized")
+
+        try:
+            workspace = await self._multi_agent_manager.get_agent(agent_id)
+            logger.debug(
+                "Got workspace: %s, runner: %s",
+                workspace.agent_id,
+                workspace.runner,
+            )
+            return workspace.runner
+        except ValueError as e:
+            logger.error(f"Agent not found: {e}")
+            raise
+        except Exception as e:
+            logger.error(
+                f"Error getting workspace runner: {e}",
+                exc_info=True,
+            )
+            raise
+
+    async def stream_query(self, request, *args, **kwargs):
+        """Dynamically route to the correct workspace runner."""
+        logger.debug("DynamicMultiAgentRunner.stream_query called")
+        try:
+            runner = await self._get_workspace_runner(request)
+            logger.debug(f"Got runner: {runner}, type: {type(runner)}")
+            # Delegate to the actual runner's stream_query generator
+            count = 0
+            async for item in runner.stream_query(request, *args, **kwargs):
+                count += 1
+                logger.debug(f"Yielding item #{count}: {type(item)}")
+                yield item
+            logger.debug(f"stream_query completed, yielded {count} items")
+        except Exception as e:
+            logger.error(
+                f"Error in stream_query: {e}",
+                exc_info=True,
+            )
+            # Yield error message to client
+            yield {
+                "error": str(e),
+                "type": "error",
+            }
+
+    async def query_handler(self, request, *args, **kwargs):
+        """Dynamically route to the correct workspace runner."""
+        runner = await self._get_workspace_runner(request)
+        # Delegate to the actual runner's query_handler generator
+        async for item in runner.query_handler(request, *args, **kwargs):
+            yield item
+
+    # Async context manager support for AgentApp lifecycle
+    async def __aenter__(self):
+        """
+        No-op context manager entry (workspaces manage their own runners).
+        """
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """No-op context manager exit (workspaces manage their own runners)."""
+        return None
+
+
+# Use dynamic runner for AgentApp
+runner = DynamicMultiAgentRunner()
+
+agent_app = AgentApp(
+    app_name="Friday",
+    app_description="A helpful assistant with background task support",
+    runner=runner,
+    enable_stream_task=True,
+    stream_task_queue="stream_query",
+    stream_task_timeout=300,
+)
+
+
+@asynccontextmanager
+async def lifespan(
+    app: FastAPI,
+):  # pylint: disable=too-many-statements,too-many-branches
+    startup_start_time = time.time()
+    add_swe_file_handler(WORKING_DIR / "swe.log")
+
+    # Auto-register admin from env vars (for automated deployments)
+    from .auth import auto_register_from_env
+
+    auto_register_from_env()
+
+    # --- Minimal startup: only ensure default agent declaration exists ---
+    logger.info("Performing minimal startup...")
+    ensure_default_agent_exists()
+
+    # --- Tenant workspace pool initialization (registry only, no runtime) ---
+    logger.info("Initializing TenantWorkspacePool (registry only)...")
+    tenant_workspace_pool = TenantWorkspacePool(WORKING_DIR)
+    app.state.tenant_workspace_pool = tenant_workspace_pool
+
+    # --- Multi-agent manager initialization (container only, no agents started) ---
+    logger.info("Initializing MultiAgentManager (container only)...")
+    multi_agent_manager = MultiAgentManager()
+
+    # Expose to endpoints - multi-agent manager
+    app.state.multi_agent_manager = multi_agent_manager
+
+    # Connect DynamicMultiAgentRunner to MultiAgentManager
+    if isinstance(runner, DynamicMultiAgentRunner):
+        runner.set_multi_agent_manager(multi_agent_manager)
+
+    # Helper function to get agent instance by ID (async)
+    async def _get_agent_by_id(agent_id: str = None):
+        """Get agent instance by ID, or active agent if not specified."""
+        if agent_id is None:
+            config = load_config(get_config_path())
+            agent_id = config.agents.active_agent or "default"
+        return await multi_agent_manager.get_agent(agent_id)
+
+    app.state.get_agent_by_id = _get_agent_by_id
+
+    # Note: ProviderManager, LocalModelManager, skill pool, and QA agent
+    # are initialized on-demand via their respective feature entrypoints.
+    # See design.md for lazy-loading architecture.
+
+    # --- Initialize tracing manager ---
+    try:
+        from ..config.config import load_agent_config
+        from ..tracing.config import TracingConfig
+
+        agent_config = load_agent_config("default")
+        tracing_config = agent_config.running.tracing
+
+        # Check if database is configured via environment variables
+        # Support both new DB_* and legacy TRACING_DB_* env vars
+        db_host = DB_HOST or TRACING_DB_HOST
+        if db_host:
+            database_config = DatabaseConfig(
+                host=db_host,
+                port=DB_PORT or TRACING_DB_PORT,
+                user=DB_USER or TRACING_DB_USER,
+                password=DB_PASSWORD or TRACING_DB_PASSWORD,
+                database=DB_NAME or TRACING_DB_NAME,
+                min_connections=DB_MIN_CONN or TRACING_DB_MIN_CONN,
+                max_connections=DB_MAX_CONN or TRACING_DB_MAX_CONN,
+            )
+            tracing_config = TracingConfig(
+                enabled=tracing_config.enabled,
+                batch_size=tracing_config.batch_size,
+                flush_interval=tracing_config.flush_interval,
+                retention_days=tracing_config.retention_days,
+                sanitize_output=tracing_config.sanitize_output,
+                max_output_length=tracing_config.max_output_length,
+                storage_path=tracing_config.storage_path,
+                database=database_config,
+            )
+            storage_path = (
+                Path(tracing_config.storage_path)
+                if tracing_config.storage_path
+                else WORKING_DIR / "tracing"
+            )
+            await init_trace_manager(tracing_config, storage_path)
+            logger.info(
+                "Tracing manager initialized (database storage: %s)",
+                db_host,
+            )
+        else:
+            storage_path = (
+                Path(tracing_config.storage_path)
+                if tracing_config.storage_path
+                else WORKING_DIR / "tracing"
+            )
+            await init_trace_manager(tracing_config, storage_path)
+            logger.info(
+                "Tracing manager initialized (JSON file storage, enabled: %s)",
+                tracing_config.enabled,
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize tracing manager: %s", e)
+
+    startup_elapsed = time.time() - startup_start_time
+    logger.info(
+        f"Application startup completed in {startup_elapsed:.3f} seconds "
+        f"(minimal initialization - runtimes deferred to first use)",
+    )
+
+    try:
+        yield
+    finally:
+        # Close tracing manager
+        try:
+            await close_trace_manager()
+            logger.info("Tracing manager closed")
+        except Exception as e:
+            logger.warning("Error closing tracing manager: %s", e)
+
+        local_model_mgr = getattr(app.state, "local_model_manager", None)
+        if local_model_mgr is not None:
+            logger.info("Stopping local model server...")
+            try:
+                await local_model_mgr.shutdown_server()
+            except Exception as exc:
+                logger.error(
+                    "Error shutting down local model server gracefully: %s",
+                    exc,
+                )
+                with suppress(OSError, RuntimeError, ValueError):
+                    local_model_mgr.force_shutdown_server()
+
+        # Stop multi-agent manager (stops all agents and their components)
+        multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
+        if multi_agent_mgr is not None:
+            logger.info("Stopping MultiAgentManager...")
+            try:
+                await multi_agent_mgr.stop_all()
+            except Exception as e:
+                logger.error(f"Error stopping MultiAgentManager: {e}")
+
+        # Stop all tenant workspaces
+        tenant_pool = getattr(app.state, "tenant_workspace_pool", None)
+        if tenant_pool is not None:
+            logger.info("Stopping all tenant workspaces...")
+            try:
+                await tenant_pool.stop_all()
+            except Exception as e:
+                logger.error(f"Error stopping tenant workspaces: {e}")
+
+        logger.info("Application shutdown complete")
+
+
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+)
+
+# Apply CORS middleware if CORS_ORIGINS is set
+# Note: add_middleware inserts at the beginning of the stack, so the LAST
+# added middleware wraps the OUTERMOST and executes FIRST on requests.
+# Order (last-added = first-executed): CORSMiddleware -> AuthMiddleware ->
+#   AgentContextMiddleware -> TenantWorkspaceMiddleware -> TenantIdentityMiddleware
+if CORS_ORIGINS:
+    origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
+    )
+
+app.add_middleware(AuthMiddleware)
+
+# Add agent context middleware for agent-scoped routes
+app.add_middleware(AgentContextMiddleware)
+
+# Add tenant workspace middleware (loads workspace from pool)
+# Must execute after TenantIdentityMiddleware sets tenant_id
+app.add_middleware(TenantWorkspaceMiddleware)
+
+# Add tenant identity middleware last so it executes FIRST
+# This must set tenant_id before TenantWorkspaceMiddleware needs it
+app.add_middleware(TenantIdentityMiddleware, default_tenant_id=None)
+
+# Add header passthrough middleware for MCP server requests
+# Extracts x-header-* headers and stores in context for MCP clients
+app.add_middleware(HeaderPassthroughMiddleware)
+
+
+# Console static dir: env, or swe package data (console), or cwd.
+_CONSOLE_STATIC_ENV = "SWE_CONSOLE_STATIC_DIR"
+
+
+def _resolve_console_static_dir() -> str:
+    if os.environ.get(_CONSOLE_STATIC_ENV):
+        return os.environ[_CONSOLE_STATIC_ENV]
+    # Shipped dist lives in swe package as static data
+    pkg_dir = Path(__file__).resolve().parent.parent
+    candidate = pkg_dir / "console"
+    if candidate.is_dir() and (candidate / "index.html").exists():
+        return str(candidate)
+
+    # Fallback to repo data
+    repo_dir = pkg_dir.parent.parent
+    candidate = repo_dir / "console" / "dist"
+    if candidate.is_dir() and (candidate / "index.html").exists():
+        return str(candidate)
+
+    # Fallback to cwd data
+    cwd = Path(os.getcwd())
+    for subdir in ("console/dist", "console_dist"):
+        candidate = cwd / subdir
+        if candidate.is_dir() and (candidate / "index.html").exists():
+            return str(candidate)
+
+    fallback = cwd / "console" / "dist"
+    logger.warning(
+        f"Console static directory not found. Falling back to '{fallback}'.",
+    )
+    return str(fallback)
+
+
+_CONSOLE_STATIC_DIR = _resolve_console_static_dir()
+_CONSOLE_INDEX = (
+    Path(_CONSOLE_STATIC_DIR) / "index.html" if _CONSOLE_STATIC_DIR else None
+)
+logger.info(f"STATIC_DIR: {_CONSOLE_STATIC_DIR}")
+
+
+@app.get("/")
+def read_root():
+    if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+        return FileResponse(_CONSOLE_INDEX)
+    return {
+        "message": (
+            "SWE Web Console is not available. "
+            "If you installed SWE from source code, please run "
+            "`npm ci && npm run build` in SWE's `console/` "
+            "directory, and restart SWE to enable the "
+            "web console."
+        ),
+    }
+
+
+@app.get("/api/version")
+def get_version():
+    """Return the current SWE version."""
+    return {"version": __version__}
+
+
+app.include_router(api_router, prefix="/api")
+
+# Agent-scoped router: /api/agents/{agentId}/chats, etc.
+agent_scoped_router = create_agent_scoped_router()
+app.include_router(agent_scoped_router, prefix="/api")
+
+
+app.include_router(
+    agent_app.router,
+    prefix="/api/agent",
+    tags=["agent"],
+)
+
+# Voice channel: Twilio-facing endpoints at root level (not under /api/).
+# POST /voice/incoming, WS /voice/ws, POST /voice/status-callback
+app.include_router(voice_router, tags=["voice"])
+
+# Custom channel routes (before SPA catch-all to ensure route priority)
+register_custom_channel_routes(app)
+
+# Console static files and SPA fallback
+# Register these AFTER API routes to ensure proper routing priority
+if os.path.isdir(_CONSOLE_STATIC_DIR):
+    _console_path = Path(_CONSOLE_STATIC_DIR)
+
+    def _serve_console_index():
+        if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+            return FileResponse(_CONSOLE_INDEX)
+
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    @app.get("/logo.png")
+    def _console_logo():
+        f = _console_path / "logo.png"
+        if f.is_file():
+            return FileResponse(f, media_type="image/png")
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    @app.get("/dark-logo.png")
+    def _console_dark_logo():
+        f = _console_path / "dark-logo.png"
+        if f.is_file():
+            return FileResponse(f, media_type="image/png")
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    @app.get("/swe-symbol.svg")
+    def _console_icon():
+        f = _console_path / "swe-symbol.svg"
+        if f.is_file():
+            return FileResponse(f, media_type="image/svg+xml")
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    @app.get("/swe-dark.png")
+    def _console_dark_icon():
+        f = _console_path / "swe-dark.png"
+        if f.is_file():
+            return FileResponse(f, media_type="image/png")
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    _assets_dir = _console_path / "assets"
+    if _assets_dir.is_dir():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=str(_assets_dir)),
+            name="assets",
+        )
+
+    @app.get("/console")
+    @app.get("/console/")
+    @app.get("/console/{full_path:path}")
+    def _console_spa_alias(full_path: str = ""):
+        _ = full_path
+        return _serve_console_index()
+
+    # SPA fallback: catch-all route for frontend routing
+    # Must be registered AFTER all API routes to avoid conflicts
+    @app.get("/{full_path:path}")
+    def _console_spa(full_path: str):
+        # Prevent catching common system/special paths
+        if full_path in ("docs", "redoc", "openapi.json"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        # Skip API routes (should already be matched due to registration order)
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        return _serve_console_index()
