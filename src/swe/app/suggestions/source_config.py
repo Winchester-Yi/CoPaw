@@ -26,7 +26,6 @@ class FollowUpSuggestionsSourceConfig(BaseModel):
     enabled: bool = True
     prompt_template: str = Field(
         default=SUGGESTION_PROMPT_TEMPLATE,
-        min_length=1,
         max_length=8000,
     )
 
@@ -74,6 +73,10 @@ def get_follow_up_suggestions_config(
         )
 
     if not parsed_config.prompt_template.strip():
-        parsed_config.prompt_template = SUGGESTION_PROMPT_TEMPLATE
+        return parsed_config.model_copy(
+            update={
+                "prompt_template": SUGGESTION_PROMPT_TEMPLATE,
+            },
+        )
 
     return parsed_config
