@@ -83,6 +83,7 @@ from ..post_turn_continuation_store import (
     store_pending_continuation,
 )
 from ..post_turn_validation import validate_task_completion
+from ..suggestions.source_config import get_follow_up_suggestions_config
 from ..suggestions import generate_suggestions, store_suggestions
 
 if TYPE_CHECKING:
@@ -1016,6 +1017,7 @@ async def _generate_and_store_suggestions(
     assistant_response: str,
     config,  # SuggestionConfig
     tenant_id: str | None = None,
+    prompt_template: str | None = None,
 ) -> None:
     """异步生成并存储建议（后台任务）."""
     from ...config.context import resolve_runtime_tenant_id
@@ -1040,6 +1042,7 @@ async def _generate_and_store_suggestions(
             timeout_seconds=config.timeout_seconds,
             user_message_max_length=config.user_message_max_length,
             assistant_response_max_length=config.assistant_response_max_length,
+            prompt_template=prompt_template,
         )
         logger.info(
             "Generated %d suggestions for session %s",
@@ -2220,11 +2223,34 @@ class AgentRunner(Runner):
         plan: _TurnPlan,
         outcome: _QueryTurnOutcome,
     ) -> None:
-        """保留旧调用点，但不再由 runner 重复生成 suggestions。"""
-        del runtime, plan, outcome
-        logger.debug(
-            "Suggestions generation handled by frontend external API; "
-            "backend does not schedule duplicate generation.",
+        """在任务完成后按配置触发后端建议生成。"""
+        suggestions_config = runtime.agent_config.running.suggestions
+        if not outcome.task_completed:
+            return
+        if not suggestions_config.enabled:
+            return
+        if suggestions_config.mode != SuggestionMode.BACKEND_GENERATE:
+            return
+
+        source_config = get_follow_up_suggestions_config()
+        if not source_config.enabled:
+            return
+
+        user_message = plan.original_user_message
+        assistant_response = (
+            outcome.assistant_response
+            or _extract_assistant_response(runtime.agent)
+        )
+        if not user_message or not assistant_response:
+            return
+
+        await _generate_and_store_suggestions(
+            runtime.session_id,
+            user_message,
+            assistant_response,
+            suggestions_config,
+            tenant_id=self.tenant_id,
+            prompt_template=source_config.prompt_template,
         )
 
     async def _index_model_output_if_needed(
