@@ -174,6 +174,36 @@ def _parse_suggestions_json(text: str, max_suggestions: int) -> List[str]:
     return []
 
 
+def _render_suggestion_prompt(
+    prompt_template: str | None,
+    max_count: int,
+    user_message: str,
+    assistant_response: str,
+) -> str:
+    """渲染建议生成 prompt，模板异常时回退到内置模板。"""
+    candidate_template = (
+        prompt_template.strip()
+        if isinstance(prompt_template, str) and prompt_template.strip()
+        else SUGGESTION_PROMPT_TEMPLATE
+    )
+    try:
+        return candidate_template.format(
+            max_count=max_count,
+            user_message=user_message,
+            assistant_response=assistant_response,
+        )
+    except (KeyError, IndexError, ValueError) as exc:
+        logger.warning(
+            "Failed to render suggestion prompt template, fallback default: %s",
+            exc,
+        )
+        return SUGGESTION_PROMPT_TEMPLATE.format(
+            max_count=max_count,
+            user_message=user_message,
+            assistant_response=assistant_response,
+        )
+
+
 async def generate_suggestions(
     user_message: str,
     assistant_response: str,
@@ -181,6 +211,7 @@ async def generate_suggestions(
     timeout_seconds: float = 5.0,
     user_message_max_length: int = 200,
     assistant_response_max_length: int = 500,
+    prompt_template: str | None = None,
 ) -> List[str]:
     """异步生成后续问题建议.
 
@@ -191,6 +222,7 @@ async def generate_suggestions(
         timeout_seconds: 超时时间（秒）
         user_message_max_length: 用户提问截断长度
         assistant_response_max_length: 助手回答截断长度
+        prompt_template: 可选的提示词模板
 
     Returns:
         建议问题列表，失败或无建议时返回空列表
@@ -221,7 +253,8 @@ async def generate_suggestions(
         truncated_response,
     )
 
-    prompt = SUGGESTION_PROMPT_TEMPLATE.format(
+    prompt = _render_suggestion_prompt(
+        prompt_template=prompt_template,
         max_count=max_suggestions,
         user_message=truncated_user,
         assistant_response=truncated_response,
