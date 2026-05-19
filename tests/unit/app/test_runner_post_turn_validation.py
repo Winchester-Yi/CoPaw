@@ -85,6 +85,26 @@ async def fake_stream_printing_messages(*, agents, coroutine_task):
     yield reply, True
 
 
+class _FakeBackgroundTask:
+    def add_done_callback(self, callback):  # noqa: ANN001
+        del callback
+
+
+def _patch_create_task(monkeypatch):
+    scheduled = []
+
+    def _create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+        return _FakeBackgroundTask()
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner.asyncio.create_task",
+        _create_task,
+    )
+    return scheduled
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _clear_store():
     await clear_pending_continuations()
@@ -141,6 +161,7 @@ async def test_query_handler_auto_runs_then_stores_pending_continuation(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    scheduled = _patch_create_task(monkeypatch)
     generate_suggestions = AsyncMock()
     incomplete_result = SimpleNamespace(
         completed=False,
@@ -177,6 +198,8 @@ async def test_query_handler_auto_runs_then_stores_pending_continuation(
         "最终答案",
         "最终答案",
     ]
+    assert not scheduled
+    assert generate_suggestions.call_count == 0
     assert generate_suggestions.await_count == 0
     pending = await peek_latest_pending_continuation(
         session_id="session-1",
@@ -192,6 +215,7 @@ async def test_query_handler_auto_run_completion_generates_backend_suggestions(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    scheduled = _patch_create_task(monkeypatch)
     generate_suggestions = AsyncMock()
     _patch_runner(
         monkeypatch,
@@ -233,7 +257,9 @@ async def test_query_handler_auto_run_completion_generates_backend_suggestions(
         "我先继续处理",
         "最终答案",
     ]
-    assert generate_suggestions.await_count == 1
+    assert len(scheduled) == 1
+    assert generate_suggestions.call_count == 1
+    assert generate_suggestions.await_count == 0
     pending = await peek_latest_pending_continuation(
         session_id="session-1",
         tenant_id=None,
@@ -246,6 +272,7 @@ async def test_query_handler_resume_consumes_pending_and_strips_hidden_prompt(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    scheduled = _patch_create_task(monkeypatch)
     generate_suggestions = AsyncMock()
     _patch_runner(
         monkeypatch,
@@ -276,7 +303,9 @@ async def test_query_handler_resume_consumes_pending_and_strips_hidden_prompt(
         outputs.append(item)
 
     assert [item[0].content for item in outputs] == ["最终答案"]
-    assert generate_suggestions.await_count == 1
+    assert len(scheduled) == 1
+    assert generate_suggestions.call_count == 1
+    assert generate_suggestions.await_count == 0
     assert (
         await peek_latest_pending_continuation(
             session_id="session-1",

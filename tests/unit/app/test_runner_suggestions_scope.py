@@ -28,6 +28,14 @@ class _BackendSuggestionConfig:
     assistant_response_max_length = 400
 
 
+class _DisabledBackendSuggestionConfig(_BackendSuggestionConfig):
+    enabled = False
+
+
+class _QaOnlyBackendSuggestionConfig(_BackendSuggestionConfig):
+    mode = SuggestionMode.QA_EXTRACTION_ONLY
+
+
 def _build_source_config(enabled: bool, prompt_template: str | None):
     return type(
         "SourceConfig",
@@ -42,6 +50,26 @@ class _QAOnlySuggestionConfig:
     user_message_max_length = 200
     assistant_response_max_length = 400
     qa_content_total_max_length = 800
+
+
+class _FakeBackgroundTask:
+    def __init__(self) -> None:
+        self.callbacks = []
+
+    def add_done_callback(self, callback) -> None:
+        self.callbacks.append(callback)
+
+
+def _patch_create_task(monkeypatch):
+    scheduled = []
+
+    def _create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+        return _FakeBackgroundTask()
+
+    monkeypatch.setattr(runner_module.asyncio, "create_task", _create_task)
+    return scheduled
 
 
 @pytest.mark.asyncio
@@ -236,10 +264,13 @@ async def test_store_qa_content_passes_scope_tenant(monkeypatch) -> None:
 async def test_backend_suggestions_run_after_completed_turn(
     monkeypatch,
 ) -> None:
-    generate = AsyncMock(return_value=["下一步建议"])
-    store = AsyncMock(return_value=None)
-    monkeypatch.setattr(runner_module, "generate_suggestions", generate)
-    monkeypatch.setattr(runner_module, "store_suggestions", store)
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
     source_config = _build_source_config(True, None)
 
     def _get_source_config():
@@ -255,6 +286,7 @@ async def test_backend_suggestions_run_after_completed_turn(
         agent_id="agent-a",
         tenant_id="scope.v1.dGVuYW50LWE.c291cmNlLWE",
     )
+    suggestions_config = _BackendSuggestionConfig()
     runtime = type(
         "Runtime",
         (),
@@ -268,7 +300,7 @@ async def test_backend_suggestions_run_after_completed_turn(
                     "running": type(
                         "Running",
                         (),
-                        {"suggestions": _BackendSuggestionConfig()},
+                        {"suggestions": suggestions_config},
                     )(),
                 },
             )(),
@@ -287,28 +319,27 @@ async def test_backend_suggestions_run_after_completed_turn(
         outcome=outcome,
     )
 
-    generate.assert_awaited_once_with(
-        user_message="用户问题",
-        assistant_response="助手回答",
-        max_suggestions=3,
-        timeout_seconds=10,
-        user_message_max_length=200,
-        assistant_response_max_length=400,
+    assert len(scheduled) == 1
+    run_task.assert_called_once_with(
+        "session-a",
+        "用户问题",
+        "助手回答",
+        suggestions_config,
+        tenant_id="dGVuYW50LWE.c291cmNlLWE",
         prompt_template=None,
     )
-    store.assert_awaited_once_with(
-        "session-a",
-        ["下一步建议"],
-        tenant_id="dGVuYW50LWE.c291cmNlLWE",
-    )
+    assert run_task.await_count == 0
 
 
 @pytest.mark.asyncio
 async def test_backend_suggestions_respect_source_switch(monkeypatch) -> None:
-    generate = AsyncMock(return_value=["下一步建议"])
-    store = AsyncMock(return_value=None)
-    monkeypatch.setattr(runner_module, "generate_suggestions", generate)
-    monkeypatch.setattr(runner_module, "store_suggestions", store)
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
     source_config = _build_source_config(False, None)
 
     def _get_source_config():
@@ -356,18 +387,21 @@ async def test_backend_suggestions_respect_source_switch(monkeypatch) -> None:
         outcome=outcome,
     )
 
-    generate.assert_not_awaited()
-    store.assert_not_awaited()
+    assert not scheduled
+    run_task.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_backend_suggestions_pass_custom_source_prompt(
     monkeypatch,
 ) -> None:
-    generate = AsyncMock(return_value=["下一步建议"])
-    store = AsyncMock(return_value=None)
-    monkeypatch.setattr(runner_module, "generate_suggestions", generate)
-    monkeypatch.setattr(runner_module, "store_suggestions", store)
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
     source_config = _build_source_config(
         True,
         "source prompt {user_message}",
@@ -380,6 +414,67 @@ async def test_backend_suggestions_pass_custom_source_prompt(
         runner_module,
         "get_follow_up_suggestions_config",
         _get_source_config,
+    )
+
+    runner = runner_module.AgentRunner(
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+    )
+    suggestions_config = _BackendSuggestionConfig()
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "session_id": "session-a",
+            "agent": None,
+            "agent_config": type(
+                "AgentConfig",
+                (),
+                {
+                    "running": type(
+                        "Running",
+                        (),
+                        {"suggestions": suggestions_config},
+                    )(),
+                },
+            )(),
+        },
+    )()
+    plan = type("Plan", (), {"original_user_message": "用户问题"})()
+    outcome = type(
+        "Outcome",
+        (),
+        {"task_completed": True, "assistant_response": "助手回答"},
+    )()
+
+    await runner._generate_backend_suggestions_if_needed(
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+
+    assert len(scheduled) == 1
+    run_task.assert_called_once_with(
+        "session-a",
+        "用户问题",
+        "助手回答",
+        suggestions_config,
+        tenant_id="tenant-a",
+        prompt_template="source prompt {user_message}",
+    )
+    assert run_task.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_backend_suggestions_skip_when_task_not_completed(
+    monkeypatch,
+) -> None:
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
     )
 
     runner = runner_module.AgentRunner(
@@ -409,6 +504,58 @@ async def test_backend_suggestions_pass_custom_source_prompt(
     outcome = type(
         "Outcome",
         (),
+        {"task_completed": False, "assistant_response": "助手回答"},
+    )()
+
+    await runner._generate_backend_suggestions_if_needed(
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+
+    assert not scheduled
+    run_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backend_suggestions_skip_when_suggestions_disabled(
+    monkeypatch,
+) -> None:
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
+
+    runner = runner_module.AgentRunner(
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+    )
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "session_id": "session-a",
+            "agent": None,
+            "agent_config": type(
+                "AgentConfig",
+                (),
+                {
+                    "running": type(
+                        "Running",
+                        (),
+                        {"suggestions": _DisabledBackendSuggestionConfig()},
+                    )(),
+                },
+            )(),
+        },
+    )()
+    plan = type("Plan", (), {"original_user_message": "用户问题"})()
+    outcome = type(
+        "Outcome",
+        (),
         {"task_completed": True, "assistant_response": "助手回答"},
     )()
 
@@ -418,12 +565,165 @@ async def test_backend_suggestions_pass_custom_source_prompt(
         outcome=outcome,
     )
 
-    generate.assert_awaited_once_with(
-        user_message="用户问题",
-        assistant_response="助手回答",
-        max_suggestions=3,
-        timeout_seconds=10,
-        user_message_max_length=200,
-        assistant_response_max_length=400,
-        prompt_template="source prompt {user_message}",
+    assert not scheduled
+    run_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backend_suggestions_skip_when_mode_not_backend_generate(
+    monkeypatch,
+) -> None:
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
     )
+
+    runner = runner_module.AgentRunner(
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+    )
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "session_id": "session-a",
+            "agent": None,
+            "agent_config": type(
+                "AgentConfig",
+                (),
+                {
+                    "running": type(
+                        "Running",
+                        (),
+                        {"suggestions": _QaOnlyBackendSuggestionConfig()},
+                    )(),
+                },
+            )(),
+        },
+    )()
+    plan = type("Plan", (), {"original_user_message": "用户问题"})()
+    outcome = type(
+        "Outcome",
+        (),
+        {"task_completed": True, "assistant_response": "助手回答"},
+    )()
+
+    await runner._generate_backend_suggestions_if_needed(
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+
+    assert not scheduled
+    run_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backend_suggestions_skip_when_user_message_missing(
+    monkeypatch,
+) -> None:
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
+
+    runner = runner_module.AgentRunner(
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+    )
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "session_id": "session-a",
+            "agent": None,
+            "agent_config": type(
+                "AgentConfig",
+                (),
+                {
+                    "running": type(
+                        "Running",
+                        (),
+                        {"suggestions": _BackendSuggestionConfig()},
+                    )(),
+                },
+            )(),
+        },
+    )()
+    plan = type("Plan", (), {"original_user_message": ""})()
+    outcome = type(
+        "Outcome",
+        (),
+        {"task_completed": True, "assistant_response": "助手回答"},
+    )()
+
+    await runner._generate_backend_suggestions_if_needed(
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+
+    assert not scheduled
+    run_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backend_suggestions_skip_when_assistant_response_missing(
+    monkeypatch,
+) -> None:
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
+
+    runner = runner_module.AgentRunner(
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+    )
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "session_id": "session-a",
+            "agent": type(
+                "Agent",
+                (),
+                {"memory": type("Memory", (), {"content": []})()},
+            )(),
+            "agent_config": type(
+                "AgentConfig",
+                (),
+                {
+                    "running": type(
+                        "Running",
+                        (),
+                        {"suggestions": _BackendSuggestionConfig()},
+                    )(),
+                },
+            )(),
+        },
+    )()
+    plan = type("Plan", (), {"original_user_message": "用户问题"})()
+    outcome = type(
+        "Outcome",
+        (),
+        {"task_completed": True, "assistant_response": ""},
+    )()
+
+    await runner._generate_backend_suggestions_if_needed(
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+
+    assert not scheduled
+    run_task.assert_not_called()

@@ -1019,7 +1019,7 @@ async def _generate_and_store_suggestions(
     tenant_id: str | None = None,
     prompt_template: str | None = None,
 ) -> None:
-    """异步生成并存储建议（后台任务）."""
+    """执行一次建议生成与存储，通常由后台调度任务调用。"""
     from ...config.context import resolve_runtime_tenant_id
 
     runtime_tenant_id = (
@@ -1063,6 +1063,16 @@ async def _generate_and_store_suggestions(
             )
     except Exception as e:
         logger.warning("Suggestion generation task failed: %s", e)
+
+
+def _log_background_suggestion_task_result(task: asyncio.Task[None]) -> None:
+    """消费后台建议任务结果，避免未处理异常泄漏到事件循环。"""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.debug("Background suggestion task was cancelled")
+    except Exception as e:  # pragma: no cover
+        logger.warning("Background suggestion task failed: %s", e)
 
 
 def _with_hook_context(
@@ -2244,14 +2254,17 @@ class AgentRunner(Runner):
         if not user_message or not assistant_response:
             return
 
-        await _generate_and_store_suggestions(
-            runtime.session_id,
-            user_message,
-            assistant_response,
-            suggestions_config,
-            tenant_id=self.tenant_id,
-            prompt_template=source_config.prompt_template,
+        task = asyncio.create_task(
+            _generate_and_store_suggestions(
+                runtime.session_id,
+                user_message,
+                assistant_response,
+                suggestions_config,
+                tenant_id=self.tenant_id,
+                prompt_template=source_config.prompt_template,
+            ),
         )
+        task.add_done_callback(_log_background_suggestion_task_result)
 
     async def _index_model_output_if_needed(
         self,
