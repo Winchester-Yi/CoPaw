@@ -328,6 +328,7 @@ async def test_query_handler_unknown_resume_id_returns_clear_message(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    scheduled = _patch_create_task(monkeypatch)
     generate_suggestions = AsyncMock()
     _patch_runner(
         monkeypatch,
@@ -350,4 +351,6 @@ async def test_query_handler_unknown_resume_id_returns_clear_message(
     assert [item[0].content for item in outputs] == [
         "续跑请求已过期或不存在，请重新发起任务。",
     ]
+    assert not scheduled
+    assert generate_suggestions.call_count == 0
     assert generate_suggestions.await_count == 0
