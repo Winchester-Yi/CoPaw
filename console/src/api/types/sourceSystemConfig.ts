@@ -10,3 +10,15 @@ export interface EffectiveSourceSystemConfig {
   updated_by?: string | null;
   updated_at?: string | null;
 }
+
+export interface SourceSystemConfigRecord {
+  source_id: string;
+  config: SourceSystemConfig;
+  version: number;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+export interface SourceSystemConfigUpsert {
+  config: SourceSystemConfig;
+}
