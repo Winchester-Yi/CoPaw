@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import swe.app._app as app_module
+import swe.app.auth as auth_module
 import swe.constant as constant_module
 from swe.app.routers import internal as internal_module
 from swe.app.routers.internal import public_router, router
@@ -307,3 +308,25 @@ def test_main_app_static_html_returns_text_html_content_type(
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"].lower()
+
+
+def test_main_app_public_text_asset_read_skips_auth_when_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    _set_app_working_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth_module, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_module, "has_registered_users", lambda: True)
+    asset_dir = tmp_path / "asset"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    (asset_dir / "public.txt").write_text("public text", encoding="utf-8")
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get("/api/assets/text/read?file_name=public.txt")
+
+    assert response.status_code == 200
+    assert response.json()["content"] == "public text"

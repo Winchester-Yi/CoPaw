@@ -53,6 +53,7 @@ _PUBLIC_PATHS: frozenset[str] = frozenset(
 # Prefixes that do NOT require authentication (static assets)
 _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/assets/",
+    "/api/assets/text/",
     "/logo.png",
     "/swe-symbol.svg",
 )
