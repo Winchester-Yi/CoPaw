@@ -353,6 +353,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     run_key must be ChatSpec.id (chat_id) so it matches list_chats/get_chat.
     """
     resume_id = None
+    turn_id = None
     if isinstance(request_data, AgentRequest):
         channel_id = getattr(request_data, "channel", None) or "console"
         sender_id = request_data.user_id or "default"
@@ -365,6 +366,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
             "post_turn_validation_resume_id",
             None,
         )
+        turn_id = getattr(request_data, "turn_id", None)
 
     else:
         channel_id = request_data.get("channel", "console")
@@ -372,6 +374,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         session_id = request_data.get("session_id", "default")
         input_data = request_data.get("input", [])
         resume_id = request_data.get("post_turn_validation_resume_id")
+        turn_id = request_data.get("turn_id")
 
         content_parts = []
         for content_part in input_data:
@@ -394,6 +397,19 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         meta = native_payload["meta"]
         if isinstance(meta, dict):
             meta["post_turn_validation_resume_id"] = resume_id
+    if turn_id:
+        meta = native_payload["meta"]
+        if isinstance(meta, dict):
+            meta["turn_id"] = str(turn_id)
+    chat_id = None
+    if isinstance(request_data, AgentRequest):
+        chat_id = getattr(request_data, "chat_id", None)
+    else:
+        chat_id = request_data.get("chat_id")
+    if chat_id:
+        meta = native_payload["meta"]
+        if isinstance(meta, dict):
+            meta["chat_id"] = str(chat_id)
     return native_payload
 
 
@@ -423,23 +439,32 @@ async def _attach_reconnect_queue(
     tracker,
     session_id: str,
     channel_id: str,
+    chat_id: str | None = None,
 ) -> tuple[asyncio.Queue, str]:
     """Attach to a running chat by chat_id or logical session_id."""
+    requested_chat_id = chat_id
     for attempt in range(_RECONNECT_ATTACH_ATTEMPTS):
+        if requested_chat_id:
+            chat = await workspace.chat_manager.get_chat(requested_chat_id)
+            if chat is not None:
+                queue = await tracker.attach(chat.id)
+                if queue is not None:
+                    return queue, chat.id
+
         chat = await workspace.chat_manager.get_chat(session_id)
         if chat is not None:
             queue = await tracker.attach(chat.id)
             if queue is not None:
                 return queue, chat.id
 
-        chat_id = await workspace.chat_manager.get_chat_id_by_session(
+        mapped_chat_id = await workspace.chat_manager.get_chat_id_by_session(
             session_id,
             channel_id,
         )
-        if chat_id is not None:
-            queue = await tracker.attach(chat_id)
+        if mapped_chat_id is not None:
+            queue = await tracker.attach(mapped_chat_id)
             if queue is not None:
-                return queue, chat_id
+                return queue, mapped_chat_id
 
         if attempt < _RECONNECT_ATTACH_ATTEMPTS - 1:
             await asyncio.sleep(_RECONNECT_ATTACH_RETRY_DELAY_SECONDS)
@@ -526,6 +551,7 @@ async def post_console_chat(
             tracker,
             session_id,
             native_payload["channel_id"],
+            native_payload.get("meta", {}).get("chat_id"),
         )
         if queue is None:
             raise HTTPException(
@@ -706,6 +732,10 @@ async def get_suggestions(
         ...,
         description="Session id to get suggestions for",
     ),
+    turn_id: str | None = Query(
+        None,
+        description="Optional response turn id to avoid cross-turn matches",
+    ),
 ):
     """Return generated suggestions for the session.
 
@@ -715,7 +745,11 @@ async def get_suggestions(
     from ..suggestions import take_suggestions
 
     tenant_id = _request_runtime_tenant_id(request)
-    suggestions = await take_suggestions(session_id, tenant_id=tenant_id)
+    suggestions = await take_suggestions(
+        session_id,
+        tenant_id=tenant_id,
+        turn_id=turn_id,
+    )
     return {"suggestions": suggestions}
 
 

@@ -102,3 +102,45 @@ async def test_suggestions_endpoint_prefers_request_scope_id() -> None:
             },
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_suggestions_endpoint_filters_by_turn_id() -> None:
+    scope_id = encode_scope_id("tenant-a", "source-a")
+    await store_suggestions(
+        "session-1",
+        ["第一轮建议"],
+        tenant_id=scope_id,
+        turn_id="response-1",
+    )
+    await store_suggestions(
+        "session-1",
+        ["第二轮建议"],
+        tenant_id=scope_id,
+        turn_id="response-2",
+    )
+    client = _client()
+
+    response = client.get(
+        "/console/suggestions?session_id=session-1&turn_id=response-2",
+        headers={"X-Tenant-Id": "tenant-a", "X-Scope-Id": scope_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "suggestions": [
+            {
+                "id": response.json()["suggestions"][0]["id"],
+                "suggestions": ["第二轮建议"],
+                "turn_id": "response-2",
+            },
+        ],
+    }
+
+    response = client.get(
+        "/console/suggestions?session_id=session-1&turn_id=response-1",
+        headers={"X-Tenant-Id": "tenant-a", "X-Scope-Id": scope_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["suggestions"][0]["suggestions"] == ["第一轮建议"]

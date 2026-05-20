@@ -65,6 +65,7 @@ async def store_suggestions(
     session_id: str,
     suggestions: List[str],
     tenant_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ) -> None:
     """存储建议列表到 session_id 对应的存储中.
 
@@ -72,6 +73,7 @@ async def store_suggestions(
         session_id: Session identifier.
         suggestions: 建议问题列表.
         tenant_id: Tenant identifier for isolation.
+        turn_id: 当前回答轮次标识，用于避免同一 session 连续轮次串建议。
     """
     if not session_id or not suggestions:
         return
@@ -79,28 +81,42 @@ async def store_suggestions(
     scoped_session_id = _compose_scope_key(scope_key, session_id)
 
     async with _lock:
-        # 每次只保留最新的一个 suggestions entry（覆盖而不是累积）
-        # 因为 suggestions 是针对最新一条回答的，不需要历史累积
+        current_entries = _session_suggestions.get(scoped_session_id, [])
+        _prune_expired(current_entries)
         suggestion_entry = {
             "id": str(uuid.uuid4()),
             "suggestions": suggestions,
             "ts": time.time(),
             "session_id": session_id,
             "tenant_id": scope_key,
+            "turn_id": turn_id,
         }
 
-        _session_suggestions[scoped_session_id] = [suggestion_entry]
+        if turn_id:
+            existing = [
+                item
+                for item in current_entries
+                if item.get("turn_id") != turn_id
+            ]
+            existing.append(suggestion_entry)
+            _session_suggestions[scoped_session_id] = existing[
+                -_MAX_SUGGESTIONS_PER_SESSION:
+            ]
+        else:
+            _session_suggestions[scoped_session_id] = [suggestion_entry]
 
 
 async def take_suggestions(
     session_id: str,
     tenant_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """获取并移除 session_id 对应的所有建议.
 
     Args:
         session_id: Session identifier.
         tenant_id: Tenant identifier for isolation.
+        turn_id: 指定回答轮次时只消费该轮建议。
 
     Returns:
         建议列表，每个建议包含 id 和 suggestions 字段。
@@ -114,7 +130,20 @@ async def take_suggestions(
         suggestions = _session_suggestions.get(scoped_session_id, [])
         _prune_expired(suggestions)
 
-        # 移除该 session 的建议
+        if turn_id:
+            matched = [
+                item for item in suggestions if item.get("turn_id") == turn_id
+            ]
+            remaining = [
+                item for item in suggestions if item.get("turn_id") != turn_id
+            ]
+            if remaining:
+                _session_suggestions[scoped_session_id] = remaining
+            elif scoped_session_id in _session_suggestions:
+                del _session_suggestions[scoped_session_id]
+            return _strip_ts(matched)
+
+        # 未指定 turn_id 时保持历史行为：消费该 session 下全部建议。
         if scoped_session_id in _session_suggestions:
             del _session_suggestions[scoped_session_id]
 
@@ -151,18 +180,23 @@ def _prune_expired(
 ) -> List[Dict[str, Any]]:
     """清理过期建议（就地清理）."""
     cutoff = time.time() - max_age_seconds
-    return [s for s in suggestions if s.get("ts", 0) >= cutoff]
+    suggestions[:] = [s for s in suggestions if s.get("ts", 0) >= cutoff]
+    return suggestions
 
 
 def _strip_ts(suggestions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """移除内部时间戳字段."""
-    return [
-        {
-            "id": s["id"],
-            "suggestions": s["suggestions"],
+    stripped = []
+    for suggestion in suggestions:
+        item = {
+            "id": suggestion["id"],
+            "suggestions": suggestion["suggestions"],
         }
-        for s in suggestions
-    ]
+        turn_id = suggestion.get("turn_id")
+        if turn_id:
+            item["turn_id"] = turn_id
+        stripped.append(item)
+    return stripped
 
 
 def get_stats() -> Dict[str, Any]:

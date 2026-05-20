@@ -1,27 +1,21 @@
-import { buildAuthHeaders } from "@/api/authHeaders";
+import { request as apiRequest } from "../request";
 
 export interface SuggestionsRequest {
-  chatId: string;
-  turnId: string;
-  userMessage: string;
-  assistantMessage: string;
+  sessionId: string;
+  turnId?: string;
 }
 
-interface SuggestionsResponse {
-  returnCode?: string;
-  errorMsg?: string;
-  body?: {
-    output?: {
-      result?: {
-        suggestions?: unknown;
-        questions?: unknown;
-      };
-    };
-  };
+interface BackendSuggestionEntry {
+  id?: string;
+  suggestions?: unknown;
+}
+
+interface BackendSuggestionsResponse {
+  suggestions?: BackendSuggestionEntry[];
 }
 
 const MOCK_DELAY = 500;
-const DEFAULT_ENABLE_MOCK = true;
+const DEFAULT_ENABLE_MOCK = false;
 
 const MOCK_SUGGESTIONS = [
   "能给我一个总结吗",
@@ -40,56 +34,34 @@ function normalizeSuggestions(value: unknown): string[] {
     .filter(Boolean);
 }
 
-function buildMockSuggestions(request: SuggestionsRequest): string[] {
-  const trimmedUserMessage = request.userMessage.trim();
-  if (!trimmedUserMessage) {
-    return MOCK_SUGGESTIONS;
-  }
-
-  return [
-    `关于“${trimmedUserMessage.slice(0, 12)}”能展开吗`,
-    "能给我一个执行建议吗",
-    "还有哪些补充信息",
-  ];
+function buildMockSuggestions(): string[] {
+  return MOCK_SUGGESTIONS;
 }
 
 export async function fetchSuggestions(
-  request: SuggestionsRequest,
+  payload: SuggestionsRequest,
 ): Promise<string[]> {
+  const sessionId = payload.sessionId.trim();
+  if (!sessionId) {
+    return [];
+  }
+
   try {
-    const baseUrl = window.__env__?.baseUrl || "";
-    const isDev = baseUrl === "yourapi";
-    const useMock = DEFAULT_ENABLE_MOCK || isDev;
-    if (useMock) {
+    if (DEFAULT_ENABLE_MOCK) {
       await new Promise((resolve) => setTimeout(resolve, MOCK_DELAY));
-      return buildMockSuggestions(request);
+      return buildMockSuggestions();
     }
 
-    const env = "prd";
-    const apiKey = "your-api-key";
-    const apiUrl = `${baseUrl}/openapi/${env}/your-suggestions-api`;
-
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-key": apiKey,
-        ...buildAuthHeaders(),
-      },
-      body: JSON.stringify({
-        inputParams: request,
-      }),
-    });
-
-    if (!response.ok) {
-      console.error("[Suggestions] API request failed:", response.status);
-      return [];
+    const query = new URLSearchParams({ session_id: sessionId });
+    if (payload.turnId?.trim()) {
+      query.set("turn_id", payload.turnId.trim());
     }
+    const result = await apiRequest<BackendSuggestionsResponse>(
+      `/console/suggestions?${query.toString()}`,
+    );
 
-    const result: SuggestionsResponse = await response.json();
-    return normalizeSuggestions(
-      result.body?.output?.result?.suggestions ??
-        result.body?.output?.result?.questions,
+    return (result.suggestions ?? []).flatMap((entry) =>
+      normalizeSuggestions(entry?.suggestions),
     );
   } catch (error) {
     console.error("[Suggestions] API request error:", error);

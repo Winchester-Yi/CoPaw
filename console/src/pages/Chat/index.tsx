@@ -990,6 +990,7 @@ export default function ChatPage() {
       session_id?: string;
       logical_session_id?: string;
       chat_id?: string | null;
+      turn_id?: string;
     }): Promise<Response> => {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
@@ -1019,6 +1020,7 @@ export default function ChatPage() {
         session_id,
         logical_session_id,
         chat_id,
+        turn_id,
       } = data;
       const session: SessionInfo = input[input.length - 1]?.session || {};
       const lastInput = input.slice(-1);
@@ -1045,6 +1047,7 @@ export default function ChatPage() {
       const requestBody = {
         input: rewrittenInput,
         session_id: resolvedLogicalSessionId,
+        turn_id,
         // ==================== userId 统一整改 (Kun He) ====================
         // 使用 getUserId()/getChannel() 获取，优先级：iframe > window > session > default
         user_id: getUserId(session?.user_id),
@@ -1357,10 +1360,7 @@ export default function ChatPage() {
             ...buildAuthHeaders(),
           };
           const logicalSessionId = resolveLogicalRequestSessionId(data);
-          const reconnectSessionId = resolveRequestChatId(
-            data,
-            logicalSessionId,
-          );
+          const reconnectChatId = resolveRequestChatId(data, logicalSessionId);
 
           const timeoutSignal = createTimedAbortSignal(data.signal);
           try {
@@ -1369,7 +1369,8 @@ export default function ChatPage() {
               headers,
               body: JSON.stringify({
                 reconnect: true,
-                session_id: reconnectSessionId,
+                session_id: logicalSessionId,
+                chat_id: reconnectChatId,
                 // ==================== userId 统一整改 (Kun He) ====================
                 // 使用 getUserId()/getChannel() 获取
                 user_id: getUserId(),

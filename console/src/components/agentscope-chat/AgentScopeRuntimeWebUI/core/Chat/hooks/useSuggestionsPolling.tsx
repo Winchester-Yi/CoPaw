@@ -1,17 +1,20 @@
 import { fetchSuggestions } from "@/api/modules/suggestions";
-import {
-  extractCopyableText,
-  extractUserMessageText,
-} from "@/pages/Chat/utils";
 import { useCallback, useEffect, useRef } from "react";
 import { useContextSelector } from "use-context-selector";
 import { ChatAnywhereSessionsContext } from "../../Context/ChatAnywhereSessionsContext";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 
+const SUGGESTIONS_POLL_INTERVAL_MS = 800;
+const SUGGESTIONS_MAX_POLL_ATTEMPTS = 5;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * 猜你想问建议获取 Hook
  *
- * 在响应完成后请求前端 external/mock suggestions API，并更新到当前响应中。
+ * 在响应完成后轮询后端 suggestions API，并更新到当前响应中。
  */
 export default function useSuggestionsPolling(options: {
   currentQARef: React.MutableRefObject<{
@@ -27,23 +30,24 @@ export default function useSuggestionsPolling(options: {
     ChatAnywhereSessionsContext,
     (v) => v.currentSessionId,
   );
-
   const sessionApi = useChatAnywhereOptions((v) => v.session?.api);
+
   const sessionIdRef = useRef(currentSessionId);
   const activePollResponseIdRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      activePollResponseIdRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     sessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
   const pollSuggestions = useCallback(async () => {
-    const sessionId = sessionIdRef.current;
-    if (!sessionId) {
-      console.debug("[Suggestions] No session ID available");
-      return;
-    }
-
-    const currentRequest = currentQARef.current.request;
     const currentResponse = currentQARef.current.response;
     const turnId = currentResponse?.id;
     if (!turnId) {
@@ -53,52 +57,8 @@ export default function useSuggestionsPolling(options: {
 
     activePollResponseIdRef.current = turnId;
 
-    try {
-      await (sessionApi as any)?.getSessionList?.();
-    } catch (error) {
-      console.debug("[Suggestions] getSessionList failed:", error);
-    }
-
-    const chatId =
-      (sessionApi as any)?.getRealIdForSession?.(sessionId) ?? sessionId;
-    const userMessage = extractUserMessageText(
-      currentRequest?.cards?.[0]?.data?.input?.[0] ?? {},
-    ).trim();
-    const assistantMessage = extractCopyableText(
-      currentResponse?.cards?.[0]?.data ?? {},
-    ).trim();
-
-    if (!userMessage || !assistantMessage) {
-      console.debug("[Suggestions] Missing request or response text");
-      return;
-    }
-
-    console.debug(
-      "[Suggestions] Fetching suggestions for chatId:",
-      chatId,
-      "turnId:",
-      turnId,
-    );
-
-    try {
-      const suggestions = await fetchSuggestions({
-        chatId,
-        turnId,
-        userMessage,
-        assistantMessage,
-      });
-
-      if (activePollResponseIdRef.current !== turnId) {
-        console.debug(
-          "[Suggestions] Request cancelled, responseId mismatch. Expected:",
-          turnId,
-          "Active:",
-          activePollResponseIdRef.current,
-        );
-        return;
-      }
-
-      if (!suggestions.length) {
+    for (let attempt = 1; attempt <= SUGGESTIONS_MAX_POLL_ATTEMPTS; attempt += 1) {
+      if (!mountedRef.current || activePollResponseIdRef.current !== turnId) {
         return;
       }
 
@@ -113,27 +73,85 @@ export default function useSuggestionsPolling(options: {
         return;
       }
 
-      if (latestResponse?.cards?.[0]?.data) {
-        const updatedCards = [
-          {
-            ...latestResponse.cards[0],
-            data: {
-              ...latestResponse.cards[0].data,
-              suggestions,
-            },
-          },
-          ...latestResponse.cards.slice(1),
-        ];
-
-        currentQARef.current.response = {
-          ...latestResponse,
-          cards: updatedCards,
-        };
-
-        updateMessage(currentQARef.current.response);
+      const latestSessionId = sessionIdRef.current;
+      if (!latestSessionId) {
+        console.debug("[Suggestions] No session ID available");
+        if (attempt < SUGGESTIONS_MAX_POLL_ATTEMPTS) {
+          await delay(SUGGESTIONS_POLL_INTERVAL_MS);
+        }
+        continue;
       }
-    } catch (error) {
-      console.debug("[Suggestions] Fetch failed:", error);
+      const pollingSessionId =
+        sessionApi?.getLogicalSessionId?.(latestSessionId) ?? latestSessionId;
+
+      console.debug(
+        "[Suggestions] Fetching suggestions for sessionId:",
+        pollingSessionId,
+        "attempt:",
+        attempt,
+      );
+
+      try {
+        const suggestions = await fetchSuggestions({
+          sessionId: pollingSessionId,
+          turnId,
+        });
+
+        if (!mountedRef.current || activePollResponseIdRef.current !== turnId) {
+          console.debug(
+            "[Suggestions] Request cancelled, responseId mismatch. Expected:",
+            turnId,
+            "Active:",
+            activePollResponseIdRef.current,
+          );
+          return;
+        }
+
+        if (!suggestions.length) {
+          if (attempt < SUGGESTIONS_MAX_POLL_ATTEMPTS) {
+            await delay(SUGGESTIONS_POLL_INTERVAL_MS);
+          }
+          continue;
+        }
+
+        const responseToUpdate = currentQARef.current.response;
+        if (responseToUpdate?.id !== turnId) {
+          console.debug(
+            "[Suggestions] Response ID mismatch, skipping update. Expected:",
+            turnId,
+            "Current:",
+            responseToUpdate?.id,
+          );
+          return;
+        }
+
+        if (responseToUpdate?.cards?.[0]?.data) {
+          const updatedCards = [
+            {
+              ...responseToUpdate.cards[0],
+              data: {
+                ...responseToUpdate.cards[0].data,
+                suggestions,
+              },
+            },
+            ...responseToUpdate.cards.slice(1),
+          ];
+
+          currentQARef.current.response = {
+            ...responseToUpdate,
+            cards: updatedCards,
+          };
+
+          updateMessage(currentQARef.current.response);
+        }
+        return;
+      } catch (error) {
+        console.debug(
+          "[Suggestions] Fetch failed:",
+          error,
+        );
+        return;
+      }
     }
   }, [currentQARef, updateMessage, sessionApi]);
 

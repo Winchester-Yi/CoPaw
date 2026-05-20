@@ -377,6 +377,7 @@ describe("useChatRequest", () => {
         session_id: "chat-a",
         logical_session_id: "logical-a",
         chat_id: "chat-real-a",
+        turn_id: "ui-response-a",
       }),
     );
   });

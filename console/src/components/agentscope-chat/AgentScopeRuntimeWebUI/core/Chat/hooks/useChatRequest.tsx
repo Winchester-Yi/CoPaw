@@ -443,6 +443,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               session_id: requestOwner.sessionId,
               logical_session_id: requestOwner.logicalSessionId,
               chat_id: requestOwner.chatId,
+              turn_id: currentQARef.current.response?.id,
             })
           : await fetch(currentApiOptions.baseURL, {
               method: "POST",

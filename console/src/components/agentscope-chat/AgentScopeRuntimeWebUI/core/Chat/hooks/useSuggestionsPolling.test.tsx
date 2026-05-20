@@ -5,10 +5,10 @@ import useSuggestionsPolling from "./useSuggestionsPolling";
 import type { CurrentQARef } from "./currentQARef";
 
 const mocks = vi.hoisted(() => ({
+  currentSessionId: "session-1" as string | undefined,
   sessionsContext: {},
   fetchSuggestions: vi.fn(),
-  getSessionList: vi.fn(),
-  getRealIdForSession: vi.fn(),
+  getLogicalSessionId: vi.fn(),
   updateMessage: vi.fn(),
 }));
 
@@ -23,7 +23,7 @@ vi.mock("use-context-selector", () => ({
     selector: (value: unknown) => unknown,
   ) => {
     if (context === mocks.sessionsContext) {
-      return selector({ currentSessionId: "session-1" });
+      return selector({ currentSessionId: mocks.currentSessionId });
     }
     return selector({});
   },
@@ -38,8 +38,7 @@ vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
     selector({
       session: {
         api: {
-          getSessionList: mocks.getSessionList,
-          getRealIdForSession: mocks.getRealIdForSession,
+          getLogicalSessionId: mocks.getLogicalSessionId,
         },
       },
     }),
@@ -105,17 +104,24 @@ function renderHarness(currentQARef: CurrentQARef) {
   });
 }
 
+function rerenderHarness(currentQARef: CurrentQARef) {
+  act(() => {
+    root?.render(<Harness currentQARef={currentQARef} />);
+  });
+}
+
 describe("useSuggestionsPolling", () => {
   beforeEach(() => {
+    mocks.currentSessionId = "session-1";
     mocks.fetchSuggestions.mockReset();
-    mocks.getSessionList.mockReset();
-    mocks.getRealIdForSession.mockReset();
+    mocks.getLogicalSessionId.mockReset();
     mocks.updateMessage.mockReset();
-    mocks.getRealIdForSession.mockReturnValue("chat-1");
-    mocks.getSessionList.mockResolvedValue(undefined);
+    mocks.getLogicalSessionId.mockImplementation((sessionId: string) => sessionId);
+    vi.useRealTimers();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     act(() => {
       root?.unmount();
     });
@@ -124,7 +130,7 @@ describe("useSuggestionsPolling", () => {
     container = undefined;
   });
 
-  it("extracts local Q&A and updates response with frontend suggestions", async () => {
+  it("polls backend suggestions by session id and updates response", async () => {
     const currentQARef = createCurrentQARef();
     mocks.fetchSuggestions.mockResolvedValue(["前端问题"]);
 
@@ -134,12 +140,9 @@ describe("useSuggestionsPolling", () => {
       await hookApi.pollSuggestions();
     });
 
-    expect(mocks.getSessionList).toHaveBeenCalled();
     expect(mocks.fetchSuggestions).toHaveBeenCalledWith({
-      chatId: "chat-1",
+      sessionId: "session-1",
       turnId: "response-1",
-      userMessage: "用户问题",
-      assistantMessage: "助手回答",
     });
     expect(currentQARef.current.response?.cards?.[0]?.data.suggestions).toEqual(
       ["前端问题"],
@@ -149,9 +152,10 @@ describe("useSuggestionsPolling", () => {
     );
   });
 
-  it("uses session id when real chat id is unavailable", async () => {
+  it("uses logical session id from session api", async () => {
     const currentQARef = createCurrentQARef();
-    mocks.getRealIdForSession.mockReturnValue(null);
+    mocks.currentSessionId = "real-session-1";
+    mocks.getLogicalSessionId.mockReturnValue("session-1");
     mocks.fetchSuggestions.mockResolvedValue(["前端问题"]);
 
     renderHarness(currentQARef);
@@ -160,18 +164,105 @@ describe("useSuggestionsPolling", () => {
       await hookApi.pollSuggestions();
     });
 
-    expect(mocks.fetchSuggestions).toHaveBeenCalledWith(
-      expect.objectContaining({ chatId: "session-1" }),
+    expect(mocks.fetchSuggestions).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      turnId: "response-1",
+    });
+  });
+
+  it("waits for session id before polling backend", async () => {
+    vi.useFakeTimers();
+    const currentQARef = createCurrentQARef();
+    mocks.currentSessionId = undefined;
+    mocks.fetchSuggestions.mockResolvedValue(["后端问题"]);
+
+    renderHarness(currentQARef);
+
+    const pollPromise = hookApi.pollSuggestions();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.fetchSuggestions).not.toHaveBeenCalled();
+
+    mocks.currentSessionId = "session-1";
+    rerenderHarness(currentQARef);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+      await pollPromise;
+    });
+
+    expect(mocks.fetchSuggestions).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      turnId: "response-1",
+    });
+    expect(currentQARef.current.response?.cards?.[0]?.data.suggestions).toEqual(
+      ["后端问题"],
     );
   });
 
-  it("does not call suggestions API when request or response text is missing", async () => {
+  it("keeps polling until backend suggestions are available", async () => {
+    vi.useFakeTimers();
     const currentQARef = createCurrentQARef();
-    currentQARef.current.request!.cards[0].data.input = [
-      {
-        content: [],
-      },
-    ];
+    mocks.fetchSuggestions
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(["后端问题"]);
+
+    renderHarness(currentQARef);
+
+    const pollPromise = hookApi.pollSuggestions();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.fetchSuggestions).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+      await pollPromise;
+    });
+
+    expect(mocks.fetchSuggestions).toHaveBeenCalledTimes(2);
+    expect(currentQARef.current.response?.cards?.[0]?.data.suggestions).toEqual(
+      ["后端问题"],
+    );
+    expect(mocks.updateMessage).toHaveBeenCalledWith(
+      currentQARef.current.response,
+    );
+  });
+
+  it("does not update stale response when response id changes", async () => {
+    const currentQARef = createCurrentQARef();
+    let resolveSuggestions!: (suggestions: string[]) => void;
+    mocks.fetchSuggestions.mockReturnValue(
+      new Promise<string[]>((resolve) => {
+        resolveSuggestions = resolve;
+      }),
+    );
+
+    renderHarness(currentQARef);
+
+    const pollPromise = hookApi.pollSuggestions();
+    currentQARef.current.response = {
+      ...currentQARef.current.response,
+      id: "response-2",
+    };
+
+    await act(async () => {
+      resolveSuggestions(["过期问题"]);
+      await pollPromise;
+    });
+
+    expect(mocks.updateMessage).not.toHaveBeenCalled();
+    expect(
+      currentQARef.current.response?.cards?.[0]?.data.suggestions,
+    ).toBeUndefined();
+  });
+
+  it("does not call suggestions API when response id is missing", async () => {
+    const currentQARef = createCurrentQARef();
+    delete currentQARef.current.response?.id;
 
     renderHarness(currentQARef);
 

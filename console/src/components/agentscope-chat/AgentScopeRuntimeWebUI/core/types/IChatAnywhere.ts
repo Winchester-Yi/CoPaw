@@ -34,6 +34,7 @@ export interface IAgentScopeRuntimeWebUIAPIOptions {
     session_id?: string;
     logical_session_id?: string;
     chat_id?: string | null;
+    turn_id?: string;
   }) => Promise<Response>;
 
   /**
@@ -345,6 +346,8 @@ export interface IAgentScopeRuntimeWebUISessionAPI {
   removeSession?: (
     session: Partial<IAgentScopeRuntimeWebUISession>,
   ) => Promise<IAgentScopeRuntimeWebUISession[]>;
+  getLogicalSessionId?: (sessionId: string) => string;
+  getChatIdForSession?: (sessionId: string) => string | null;
 }
 
 /**

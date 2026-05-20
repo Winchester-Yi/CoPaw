@@ -147,6 +147,7 @@ class _QueryRuntime:
     session_id: str
     user_id: str
     channel: str
+    turn_id: str
     skip_history: bool
 
 
@@ -1018,6 +1019,7 @@ async def _generate_and_store_suggestions(
     config,  # SuggestionConfig
     tenant_id: str | None = None,
     prompt_template: str | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """执行一次建议生成与存储，通常由后台调度任务调用。"""
     from ...config.context import resolve_runtime_tenant_id
@@ -1054,6 +1056,7 @@ async def _generate_and_store_suggestions(
                 session_id,
                 suggestions,
                 tenant_id=runtime_tenant_id,
+                turn_id=turn_id,
             )
             logger.info(
                 "Stored %d suggestions for session %s: %s",
@@ -1776,7 +1779,12 @@ class AgentRunner(Runner):
                 passthrough_headers=passthrough_headers or None,
             )
 
-            turn_id = f"turn-{uuid4().hex}"
+            channel_meta = getattr(request, "channel_meta", {}) or {}
+            turn_id = str(
+                channel_meta.get("turn_id")
+                or getattr(request, "turn_id", None)
+                or f"turn-{uuid4().hex}",
+            )
             chat = await self._get_or_create_chat(
                 session_id=session_id,
                 user_id=user_id,
@@ -1829,6 +1837,7 @@ class AgentRunner(Runner):
                 session_id=session_id,
                 user_id=user_id,
                 channel=channel,
+                turn_id=turn_id,
                 skip_history=skip_history,
             )
             self._attach_session_skill_detector(
@@ -2262,6 +2271,7 @@ class AgentRunner(Runner):
                 suggestions_config,
                 tenant_id=self.tenant_id,
                 prompt_template=source_config.prompt_template,
+                turn_id=getattr(runtime, "turn_id", None),
             ),
         )
         task.add_done_callback(_log_background_suggestion_task_result)

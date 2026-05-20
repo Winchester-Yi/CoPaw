@@ -146,3 +146,45 @@ def test_chat_payload_carries_resume_id_in_channel_meta() -> None:
     )
 
     assert payload["meta"]["post_turn_validation_resume_id"] == "validation_1"
+
+
+def test_chat_payload_carries_turn_id_in_channel_meta() -> None:
+    payload = console_router._extract_session_and_payload(
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "帮我处理"},
+                    ],
+                },
+            ],
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "channel": "console",
+            "turn_id": "response-1",
+        },
+    )
+
+    assert payload["meta"]["turn_id"] == "response-1"
+
+
+def test_chat_payload_carries_chat_id_in_channel_meta() -> None:
+    payload = console_router._extract_session_and_payload(
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "继续连接"},
+                    ],
+                },
+            ],
+            "session_id": "session-1",
+            "chat_id": "chat-real-1",
+            "user_id": "user-1",
+            "channel": "console",
+        },
+    )
+
+    assert payload["meta"]["chat_id"] == "chat-real-1"

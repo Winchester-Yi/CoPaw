@@ -1047,6 +1047,7 @@ async def test_emit_before_stop_hook_respects_active_guard(
         session_id="session-1",
         user_id="user-1",
         channel="console",
+        turn_id="turn-1",
         skip_history=False,
     )
     plan = _TurnPlan(

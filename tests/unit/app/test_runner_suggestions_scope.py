@@ -102,6 +102,7 @@ async def test_generate_and_store_suggestions_passes_scope_tenant(
         "session-a",
         ["next question"],
         tenant_id="dGVuYW50LWE.c291cmNlLWE",
+        turn_id=None,
     )
 
 
@@ -133,6 +134,31 @@ async def test_generate_and_store_suggestions_passes_prompt_template(
         prompt_template="source prompt",
     )
     store.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_and_store_suggestions_passes_turn_id(
+    monkeypatch,
+) -> None:
+    generate = AsyncMock(return_value=["next question"])
+    store = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner_module, "generate_suggestions", generate)
+    monkeypatch.setattr(runner_module, "store_suggestions", store)
+
+    await runner_module._generate_and_store_suggestions(
+        "session-a",
+        "user says hi",
+        "assistant replies",
+        _SuggestionConfig(),
+        turn_id="response-1",
+    )
+
+    store.assert_awaited_once_with(
+        "session-a",
+        ["next question"],
+        tenant_id=None,
+        turn_id="response-1",
+    )
 
 
 @pytest.mark.asyncio
@@ -292,6 +318,7 @@ async def test_backend_suggestions_run_after_completed_turn(
         (),
         {
             "session_id": "session-a",
+            "turn_id": "response-1",
             "agent": None,
             "agent_config": type(
                 "AgentConfig",
@@ -327,6 +354,7 @@ async def test_backend_suggestions_run_after_completed_turn(
         suggestions_config,
         tenant_id="dGVuYW50LWE.c291cmNlLWE",
         prompt_template=None,
+        turn_id="response-1",
     )
     assert run_task.await_count == 0
 
@@ -461,6 +489,7 @@ async def test_backend_suggestions_pass_custom_source_prompt(
         suggestions_config,
         tenant_id="tenant-a",
         prompt_template="source prompt {user_message}",
+        turn_id=None,
     )
     assert run_task.await_count == 0
 
