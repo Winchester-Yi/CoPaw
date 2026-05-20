@@ -84,6 +84,16 @@ class TestTenantWorkspaceExemptions:
         for route in exempt_routes:
             assert "login" in route or "register" in route or "auth" in route
 
+    def test_public_text_asset_api_routes_exempt(self):
+        """Public text asset API routes should bypass workspace loading."""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+
+        assert middleware._is_workspace_exempt("/api/assets/text/read") is True
+
 
 class TestTenantWorkspaceHelpers:
     """Tests for workspace helper functions."""

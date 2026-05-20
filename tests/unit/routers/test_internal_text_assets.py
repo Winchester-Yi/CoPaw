@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import swe.app._app as app_module
+import swe.constant as constant_module
 from swe.app.routers import internal as internal_module
 from swe.app.routers.internal import public_router, router
 from swe.config.context import encode_scope_id
@@ -27,6 +29,21 @@ def _build_client() -> TestClient:
 def _set_working_dir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         internal_module,
+        "WORKING_DIR",
+        tmp_path,
+        raising=False,
+    )
+
+
+def _set_app_working_dir(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        app_module,
+        "WORKING_DIR",
+        tmp_path,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        constant_module,
         "WORKING_DIR",
         tmp_path,
         raising=False,
@@ -206,3 +223,87 @@ def test_public_text_asset_write_creates_scope_static_file_without_internal_toke
         / "static"
         / payload["file_name"]
     ).read_text(encoding="utf-8") == "<p>public write</p>"
+
+
+def test_main_app_public_text_asset_read_skips_tenant_headers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    _set_app_working_dir(monkeypatch, tmp_path)
+    asset_dir = tmp_path / "asset"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    (asset_dir / "public.txt").write_text("public text", encoding="utf-8")
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get("/api/assets/text/read?file_name=public.txt")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "file_name": "public.txt",
+        "content": "public text",
+    }
+
+
+def test_main_app_public_text_asset_write_skips_tenant_headers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_working_dir(monkeypatch, tmp_path)
+    _set_app_working_dir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FILE_URL", "https://files.example")
+    scope_id = encode_scope_id("guest", "portal")
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.post(
+            "/api/assets/text/write",
+            json={
+                "user_id": "guest",
+                "source_id": "portal",
+                "content": "<p>public write</p>",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope_id"] == scope_id
+    assert payload["public_url"] == (
+        f"https://files.example/static/{scope_id}/default/"
+        f"{payload['file_name']}"
+    )
+    assert (
+        tmp_path
+        / scope_id
+        / "workspaces"
+        / "default"
+        / "static"
+        / payload["file_name"]
+    ).read_text(encoding="utf-8") == "<p>public write</p>"
+
+
+def test_main_app_static_html_returns_text_html_content_type(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _set_app_working_dir(monkeypatch, tmp_path)
+    static_file = (
+        tmp_path / "mimecheck" / "workspaces" / "default" / "static" / "x.html"
+    )
+    static_file.parent.mkdir(parents=True, exist_ok=True)
+    static_file.write_text("<p>mime ok</p>", encoding="utf-8")
+
+    with TestClient(
+        app_module.app,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get("/static/mimecheck/default/x.html")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"].lower()

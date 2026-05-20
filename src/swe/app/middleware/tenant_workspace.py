@@ -24,6 +24,9 @@ from swe.config.context import (
     set_current_workspace_dir,
     reset_current_workspace_dir,
 )
+from swe.app.middleware.tenant_identity import (
+    PUBLIC_ROUTE_EXEMPT_PREFIXES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -282,12 +285,9 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             return True
 
         # Prefix match for certain routes
-        exempt_prefixes = (
-            "/assets/",
-            "/static/",
-            "/console/",
-        )
-        if any(path.startswith(prefix) for prefix in exempt_prefixes):
+        if any(
+            path.startswith(prefix) for prefix in PUBLIC_ROUTE_EXEMPT_PREFIXES
+        ):
             return True
 
         return False

@@ -611,8 +611,9 @@ async def serve_user_static(
         raise HTTPException(status_code=404, detail="File not found")
 
     # Guess MIME type
-    _, _ = mimetypes.guess_type(str(target))
-    media_type = "application/octet-stream"
+    media_type, _ = mimetypes.guess_type(str(target))
+    if media_type is None:
+        media_type = "application/octet-stream"
     return FileResponse(Path(target), media_type=media_type)
 
 

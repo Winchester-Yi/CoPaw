@@ -118,6 +118,11 @@ def test_static_route_works_without_tenant_header():
     assert response.json() == {"user_id": "alice", "filename": "demo.txt"}
 
 
+def test_public_text_asset_api_routes_are_exempt() -> None:
+    assert tenant_identity.is_tenant_exempt("/api/assets/text/read") is True
+    assert tenant_identity.is_source_exempt("/api/assets/text/write") is True
+
+
 def test_invalid_tenant_id_returns_400():
     client = TestClient(build_test_app(), raise_server_exceptions=False)
     response = client.get(
