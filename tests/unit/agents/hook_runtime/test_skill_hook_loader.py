@@ -238,7 +238,9 @@ def test_symlink_script_escape_is_rejected(tmp_path: Path) -> None:
         )
 
 
-def test_http_handler_requires_approved_endpoint(tmp_path: Path) -> None:
+def test_http_handler_is_allowed_without_approved_endpoint(
+    tmp_path: Path,
+) -> None:
     payload = {
         "enabled": True,
         "events": {
@@ -258,20 +260,11 @@ def test_http_handler_requires_approved_endpoint(tmp_path: Path) -> None:
     }
     skill_root = _write_skill_hook(tmp_path, payload)
 
-    with pytest.raises(SkillHookLoadError, match="not approved"):
-        load_skill_hooks_for_session(
-            skill_name="xlsx",
-            skill_root=skill_root,
-            workspace_dir=tmp_path,
-            session_state=HookSessionState(),
-        )
-
     result = load_skill_hooks_for_session(
         skill_name="xlsx",
         skill_root=skill_root,
         workspace_dir=tmp_path,
         session_state=HookSessionState(),
-        approved_http_urls={"https://hooks.example.test/skill"},
     )
     handler = (
         result.loaded_skill_sources[0]
@@ -280,6 +273,20 @@ def test_http_handler_requires_approved_endpoint(tmp_path: Path) -> None:
     )
     assert handler.id == "skill:xlsx:notify"
     assert handler.header_secret_refs == {"Authorization": "TOKEN"}
+
+    repeat = load_skill_hooks_for_session(
+        skill_name="xlsx",
+        skill_root=skill_root,
+        workspace_dir=tmp_path,
+        session_state=HookSessionState(),
+        approved_http_urls={"https://hooks.example.test/skill"},
+    )
+    repeat_handler = (
+        repeat.loaded_skill_sources[0]
+        .hook_config.events[HookEventName.STOP][0]
+        .hooks[0]
+    )
+    assert repeat_handler.id == "skill:xlsx:notify"
 
 
 @pytest.mark.parametrize(

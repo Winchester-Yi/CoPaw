@@ -264,9 +264,9 @@ def _is_http_url_approved(
 ) -> bool:
     if callable(approved_http_urls):
         return bool(approved_http_urls(url))
-    if approved_http_urls is None:
-        return False
-    return url in approved_http_urls
+    # Skill-owned HTTP hooks are now allowed by default. Keep the callable
+    # branch for custom validators used by internal callers and tests.
+    return True
 
 
 def _namespace_id(namespace: str, raw_id: str) -> str:

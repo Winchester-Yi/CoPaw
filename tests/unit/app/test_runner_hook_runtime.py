@@ -224,6 +224,71 @@ async def test_create_session_skill_detector_loads_skill_hooks(
 
 
 @pytest.mark.asyncio
+async def test_create_session_skill_detector_loads_http_skill_hooks_without_approvals(
+    tmp_path,
+) -> None:
+    skill_root = tmp_path / "skills" / "xlsx"
+    (skill_root / "hooks").mkdir(parents=True)
+    (skill_root / "scripts").mkdir()
+    (skill_root / "hooks" / "hooks.json").write_text(
+        """
+        {
+          "enabled": true,
+          "events": {
+            "Stop": [
+              {
+                "hooks": [
+                  {
+                    "id": "notify",
+                    "type": "http",
+                    "url": "https://hooks.example.test/skill"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    state = HookSessionState()
+
+    def get_state() -> HookSessionState:
+        return state
+
+    def set_state(new_state: HookSessionState) -> None:
+        nonlocal state
+        state = new_state
+
+    detector = _create_session_skill_detector(
+        workspace_dir=tmp_path,
+        tenant_id="tenant-a",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        enabled_skills=["xlsx"],
+        get_hook_state=get_state,
+        set_hook_state=set_state,
+        approved_http_urls=set(),
+    )
+
+    await detector.start_skill(
+        "xlsx",
+        trigger_tool="user_message",
+        trigger_reason="declared",
+    )
+
+    handler = (
+        state.loaded_skill_sources[0]
+        .hook_config.events[HookEventName.STOP][0]
+        .hooks[0]
+    )
+    assert handler.id == "skill:xlsx:notify"
+    assert handler.url == "https://hooks.example.test/skill"
+
+
+@pytest.mark.asyncio
 async def test_query_handler_user_prompt_hook_blocks_before_command_dispatch(
     monkeypatch,
     tmp_path,
