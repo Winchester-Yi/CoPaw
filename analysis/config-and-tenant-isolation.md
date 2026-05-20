@@ -109,6 +109,23 @@ CREATE TABLE IF NOT EXISTS swe_source_system_config (
 - DB 读取失败且已有 last-known-good 缓存时继续使用缓存，并在返回配置上标记 `stale=true` 与 `last_error`。
 - DB 读取失败且没有缓存时，effective config API 返回错误，不静默返回默认配置。
 
+### 已接入业务 key
+
+`follow_up_suggestions` 是第一个 source 系统配置消费方，用于控制回答后的“猜你想问”功能：
+
+```json
+{
+  "follow_up_suggestions": {
+    "enabled": true,
+    "prompt_template": "根据以下对话，生成{max_count}个用户可能想问的后续问题..."
+  }
+}
+```
+
+- `enabled=false` 时，当前 source 下后端不再生成尾随建议。
+- `prompt_template` 由后端 `generate_suggestions()` 使用，支持 `{max_count}`、`{user_message}`、`{assistant_response}`。
+- 缺少该 key 时保持默认启用和内置 prompt，避免影响未配置 source 的既有行为。
+
 ## 关联功能域
 
 - 模型与 Provider 运行栈: [model-provider-and-local-runtime.md](model-provider-and-local-runtime.md)

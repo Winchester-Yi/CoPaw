@@ -68,6 +68,12 @@ Runner 接收请求
   -> 输出响应并回写会话状态
 ```
 
+## 猜你想问生成链路
+
+当前“猜你想问”由后端生成：`AgentRunner._generate_backend_suggestions_if_needed()` 在回答完成且 post-turn validation 未阻塞后调用 `generate_suggestions()`，后者组装 prompt 并调用模型生成 JSON 数组，再通过 `store_suggestions()` 写入 session 级短期存储。Console 前端只在响应完成后轮询 `/console/suggestions?session_id=...` 并把返回内容挂到当前 response card。
+
+Source 系统配置 key `follow_up_suggestions` 可以关闭当前 source 的生成或覆盖 prompt 模板。排查建议缺失时先看 source effective config，再看 agent runtime `running.suggestions` 是否启用且模式为 `backend_generate`。
+
 ## 扩展点
 
 | 扩展点 | 推荐位置 |

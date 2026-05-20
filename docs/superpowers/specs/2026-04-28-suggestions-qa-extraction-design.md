@@ -3,6 +3,8 @@
 > 设计日期: 2026-04-28
 > 状态: 待评审
 
+> 2026-05-19 更新：前端 external/mock 生成路径已被后端权威生成路径取代。当前设计以 `runner.py` 在回答完成后调用 `generate_suggestions()` 为准，前端只轮询 `/console/suggestions` 获取后端已生成结果。`qa_extraction_only` 保留为历史兼容模式，不再是默认推荐路径。
+
 ## 1. 背景与目标
 
 当前 Suggestions（猜你想问）功能存在以下问题：
@@ -229,10 +231,10 @@ const pollSuggestions = useCallback(async () => {
 | backend_generate | 提取 + 异步生成建议 | 轮询 GET /suggestions |
 | qa_extraction_only | 仅提取 Q&A | 获取 Q&A + 调用外部 API |
 
-当前线上行为对齐 `fix(suggestions): switch suggestion fetching to frontend API`：
-响应完成后由前端从当前 request/response card 提取用户问题和助手回答，
-直接调用 external suggestions API；本地或外部 API 未配置时使用 mock
-suggestions。后端 runner 不再重复调度异步 suggestions 生成。
+当前线上目标行为已调整为：后端 runner 在完成回答后调度
+`generate_suggestions()`，由后端组装 prompt 并调用模型生成 suggestions；
+前端不再默认调用 external/mock suggestions API，只消费
+`/console/suggestions` 中的后端生成结果。
 
 ---
 
