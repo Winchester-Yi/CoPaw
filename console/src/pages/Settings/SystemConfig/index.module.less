@@ -1,0 +1,85 @@
+.systemConfigPage {
+  min-height: calc(100vh - 128px);
+  padding: 0;
+}
+
+.centerState {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.alert {
+  margin: 0 20px 16px;
+}
+
+.content {
+  padding: 0 20px 24px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.panel {
+  border-radius: 8px;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+
+  h3 {
+    margin: 0 0 8px;
+    font-size: 18px;
+    line-height: 1.4;
+  }
+}
+
+.fieldBlock {
+  margin-top: 20px;
+}
+
+.promptEditor {
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+}
+
+.hint {
+  margin-top: 8px;
+  margin-bottom: 0 !important;
+}
+
+.actions {
+  margin-top: 16px;
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.metaValue {
+  margin-top: 4px;
+  color: #1f2937;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.jsonBlock {
+  margin: 8px 0 0;
+  padding: 12px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: #111827;
+  font-size: 12px;
+  line-height: 1.5;
+}

@@ -48,6 +48,7 @@
     "settings": "设置",
     "models": "模型",
     "environments": "环境变量",
+    "systemConfig": "系统配置",
     "security": "安全",
     "tokenUsage": "Token 消耗",
     "voiceTranscription": "语音转写",
@@ -71,6 +72,19 @@
     "market": "应用市场",
     "mySkills": "我的技能",
     "myMcp": "我的 MCP"
+  },
+  "systemConfig": {
+    "followUpTitle": "猜你想问",
+    "followUpDescription": "控制模型回答后是否展示后续问题建议，并配置后端生成建议时使用的提示词。",
+    "promptTemplate": "提示词模板",
+    "promptHint": "可使用 {max_count}、{user_message}、{assistant_response} 占位符。",
+    "sourceId": "Source ID",
+    "version": "版本",
+    "defaultConfig": "默认配置",
+    "currentConfig": "当前 source 配置",
+    "staleTitle": "当前配置来自缓存",
+    "saveSuccess": "系统配置已保存",
+    "saveFailed": "系统配置保存失败"
   },
   "cases": {
     "title": "案例管理",

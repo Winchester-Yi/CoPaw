@@ -37,6 +37,7 @@ import SecurityPage from "../../pages/Settings/Security";
 import TokenUsagePage from "../../pages/Settings/TokenUsage";
 import VoiceTranscriptionPage from "../../pages/Settings/VoiceTranscription";
 import AgentsPage from "../../pages/Settings/Agents";
+import SystemConfigPage from "../../pages/Settings/SystemConfig";
 import AnalyticsPage from "../../pages/Analytics";
 import InstancePage from "../../pages/Instance";
 import MonitorPage from "../../pages/Monitor";
@@ -67,6 +68,7 @@ const pathToKey: Record<string, string> = {
   "/agents": "agents",
   "/models": "models",
   "/environments": "environments",
+  "/system-config": "system-config",
   "/agent-config": "agent-config",
   "/security": "security",
   "/token-usage": "token-usage",
@@ -146,6 +148,7 @@ export default function MainLayout() {
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/environments" element={<EnvironmentsPage />} />
+              <Route path="/system-config" element={<SystemConfigPage />} />
               <Route path="/agent-config" element={<AgentConfigPage />} />
               <Route path="/security" element={<SecurityPage />} />
               <Route path="/token-usage" element={<TokenUsagePage />} />

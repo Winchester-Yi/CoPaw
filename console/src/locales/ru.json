@@ -41,10 +41,24 @@
     "settings": "Настройки",
     "models": "Модели",
     "environments": "Окружения",
+    "systemConfig": "Системные настройки",
     "security": "Безопасность",
     "tokenUsage": "Использование токенов",
     "voiceTranscription": "Транскрипция голоса",
     "agents": "Управление агентами"
+  },
+  "systemConfig": {
+    "followUpTitle": "Последующие вопросы",
+    "followUpDescription": "Управляет показом предложенных вопросов после ответа модели и настраивает backend prompt для их генерации.",
+    "promptTemplate": "Шаблон prompt",
+    "promptHint": "Доступные плейсхолдеры: {max_count}, {user_message}, {assistant_response}.",
+    "sourceId": "Source ID",
+    "version": "Версия",
+    "defaultConfig": "Настройка по умолчанию",
+    "currentConfig": "Текущая source config",
+    "staleTitle": "Текущая настройка получена из кеша",
+    "saveSuccess": "Системные настройки сохранены",
+    "saveFailed": "Не удалось сохранить системные настройки"
   },
   "cases": {
     "title": "Управление кейсами",

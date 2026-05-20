@@ -40,11 +40,25 @@
     "settings": "設定",
     "models": "モデル",
     "environments": "環境変数",
+    "systemConfig": "システム設定",
     "security": "セキュリティ",
     "tokenUsage": "トークン使用量",
     "tools": "ツール",
     "voiceTranscription": "音声文字起こし",
     "agents": "エージェント管理"
+  },
+  "systemConfig": {
+    "followUpTitle": "フォローアップ候補",
+    "followUpDescription": "モデル回答後に候補質問を表示するかを制御し、バックエンド生成に使うプロンプトを設定します。",
+    "promptTemplate": "プロンプトテンプレート",
+    "promptHint": "{max_count}、{user_message}、{assistant_response} を使用できます。",
+    "sourceId": "Source ID",
+    "version": "バージョン",
+    "defaultConfig": "デフォルト設定",
+    "currentConfig": "現在の source 設定",
+    "staleTitle": "現在の設定はキャッシュから提供されています",
+    "saveSuccess": "システム設定を保存しました",
+    "saveFailed": "システム設定の保存に失敗しました"
   },
   "cases": {
     "title": "ケース管理",

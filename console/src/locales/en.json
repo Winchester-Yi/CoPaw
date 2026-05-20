@@ -46,6 +46,7 @@
     "settings": "Settings",
     "models": "Models",
     "environments": "Environments",
+    "systemConfig": "System Config",
     "security": "Security",
     "tokenUsage": "Token Usage",
     "voiceTranscription": "Voice Transcription",
@@ -65,6 +66,19 @@
     "instanceOperationLogs": "Operation Logs",
     "harness": "Harness",
     "continuousIteration": "Continuous Iteration"
+  },
+  "systemConfig": {
+    "followUpTitle": "Follow-up suggestions",
+    "followUpDescription": "Control whether follow-up question suggestions appear after model replies and configure the backend prompt used to generate them.",
+    "promptTemplate": "Prompt template",
+    "promptHint": "Available placeholders: {max_count}, {user_message}, {assistant_response}.",
+    "sourceId": "Source ID",
+    "version": "Version",
+    "defaultConfig": "Default config",
+    "currentConfig": "Current source config",
+    "staleTitle": "Current config is served from cache",
+    "saveSuccess": "System config saved",
+    "saveFailed": "Failed to save system config"
   },
   "cases": {
     "title": "Cases Management",

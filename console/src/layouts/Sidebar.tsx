@@ -443,6 +443,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkInternetLine size={16} />,
         },
         {
+          key: "system-config",
+          label: collapsed ? null : t("nav.systemConfig"),
+          icon: <SparkModifyLine size={16} />,
+        },
+        {
           key: "security",
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
