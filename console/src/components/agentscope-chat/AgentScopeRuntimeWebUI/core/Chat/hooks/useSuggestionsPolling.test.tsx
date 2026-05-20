@@ -6,6 +6,9 @@ import type { CurrentQARef } from "./currentQARef";
 
 const mocks = vi.hoisted(() => ({
   currentSessionId: "session-1" as string | undefined,
+  sourceSystemConfig: {
+    config: {},
+  } as { config: Record<string, unknown> } | null,
   sessionsContext: {},
   fetchSuggestions: vi.fn(),
   getLogicalSessionId: vi.fn(),
@@ -41,6 +44,13 @@ vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
           getLogicalSessionId: mocks.getLogicalSessionId,
         },
       },
+    }),
+}));
+
+vi.mock("@/stores/sourceSystemConfigStore", () => ({
+  useSourceSystemConfigStore: (selector: (value: unknown) => unknown) =>
+    selector({
+      config: mocks.sourceSystemConfig,
     }),
 }));
 
@@ -113,6 +123,7 @@ function rerenderHarness(currentQARef: CurrentQARef) {
 describe("useSuggestionsPolling", () => {
   beforeEach(() => {
     mocks.currentSessionId = "session-1";
+    mocks.sourceSystemConfig = { config: {} };
     mocks.fetchSuggestions.mockReset();
     mocks.getLogicalSessionId.mockReset();
     mocks.updateMessage.mockReset();
@@ -229,6 +240,52 @@ describe("useSuggestionsPolling", () => {
     );
     expect(mocks.updateMessage).toHaveBeenCalledWith(
       currentQARef.current.response,
+    );
+  });
+
+  it("extends polling window to match configured timeout", async () => {
+    vi.useFakeTimers();
+    const currentQARef = createCurrentQARef();
+    mocks.sourceSystemConfig = {
+      config: {
+        follow_up_suggestions: {
+          timeout_seconds: 6.5,
+        },
+      },
+    };
+    mocks.fetchSuggestions
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(["慢一点的问题"]);
+
+    renderHarness(currentQARef);
+
+    const pollPromise = hookApi.pollSuggestions();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.fetchSuggestions).toHaveBeenCalledTimes(1);
+
+    for (let index = 0; index < 8; index += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+    }
+
+    await act(async () => {
+      await pollPromise;
+    });
+
+    expect(mocks.fetchSuggestions).toHaveBeenCalledTimes(9);
+    expect(currentQARef.current.response?.cards?.[0]?.data.suggestions).toEqual(
+      ["慢一点的问题"],
     );
   });
 

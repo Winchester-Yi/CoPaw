@@ -57,17 +57,24 @@ def _extract_text_from_response(response) -> str:
 
 
 async def _extract_text_from_streaming_response(response) -> str:
-    last_chunk_text = ""
+    accumulated = ""
     async for chunk in response:
         if not hasattr(chunk, "content") or not chunk.content:
             continue
+        chunk_text = ""
         for content_block in chunk.content:
             if (
                 isinstance(content_block, dict)
                 and content_block.get("type") == "text"
             ):
-                last_chunk_text = content_block.get("text", "")
-    return last_chunk_text
+                chunk_text += content_block.get("text", "")
+        if not chunk_text:
+            continue
+        if chunk_text.startswith(accumulated):
+            accumulated = chunk_text
+        else:
+            accumulated += chunk_text
+    return accumulated
 
 
 _SUGGESTION_SECTION_PATTERN = re.compile(
@@ -129,7 +136,10 @@ def _parse_validation_result(text: str) -> PostTurnValidationResult:
     except json.JSONDecodeError:
         match = re.search(r"\{[\s\S]*\}", payload)
         if not match:
-            logger.debug("Failed to parse post-turn validation JSON: %s", payload[:160])
+            logger.debug(
+                "Failed to parse post-turn validation JSON: %s",
+                payload[:160],
+            )
             return PostTurnValidationResult(
                 completed=True,
                 reason="invalid validation json",
@@ -137,7 +147,10 @@ def _parse_validation_result(text: str) -> PostTurnValidationResult:
         try:
             data = json.loads(match.group())
         except json.JSONDecodeError:
-            logger.debug("Failed to parse nested validation JSON: %s", payload[:160])
+            logger.debug(
+                "Failed to parse nested validation JSON: %s",
+                payload[:160],
+            )
             return PostTurnValidationResult(
                 completed=True,
                 reason="invalid nested validation json",
@@ -203,8 +216,7 @@ async def validate_task_completion(
         {
             "role": "system",
             "content": (
-                "你是严谨的任务完成校验器。"
-                "只输出 JSON，不要输出解释。"
+                "你是严谨的任务完成校验器。" "只输出 JSON，不要输出解释。"
             ),
         },
         {

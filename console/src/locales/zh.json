@@ -76,6 +76,8 @@
   "systemConfig": {
     "followUpTitle": "猜你想问",
     "followUpDescription": "控制模型回答后是否展示后续问题建议，并配置后端生成建议时使用的提示词。",
+    "timeoutSeconds": "生成超时（秒）",
+    "timeoutHint": "后端建议生成会在这个时长后超时，前端轮询窗口会自动跟随该值。",
     "promptTemplate": "提示词模板",
     "promptHint": "可使用 {max_count}、{user_message}、{assistant_response} 占位符。",
     "sourceId": "Source ID",

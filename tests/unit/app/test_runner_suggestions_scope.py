@@ -36,11 +36,19 @@ class _QaOnlyBackendSuggestionConfig(_BackendSuggestionConfig):
     mode = SuggestionMode.QA_EXTRACTION_ONLY
 
 
-def _build_source_config(enabled: bool, prompt_template: str | None):
+def _build_source_config(
+    enabled: bool,
+    prompt_template: str | None,
+    timeout_seconds: float = 5.0,
+):
     return type(
         "SourceConfig",
         (),
-        {"enabled": enabled, "prompt_template": prompt_template},
+        {
+            "enabled": enabled,
+            "prompt_template": prompt_template,
+            "timeout_seconds": timeout_seconds,
+        },
     )()
 
 
@@ -132,6 +140,35 @@ async def test_generate_and_store_suggestions_passes_prompt_template(
         user_message_max_length=200,
         assistant_response_max_length=400,
         prompt_template="source prompt",
+    )
+    store.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_and_store_suggestions_prefers_override_timeout(
+    monkeypatch,
+) -> None:
+    generate = AsyncMock(return_value=["next question"])
+    store = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner_module, "generate_suggestions", generate)
+    monkeypatch.setattr(runner_module, "store_suggestions", store)
+
+    await runner_module._generate_and_store_suggestions(
+        "session-a",
+        "user says hi",
+        "assistant replies",
+        _SuggestionConfig(),
+        timeout_seconds=6.5,
+    )
+
+    generate.assert_awaited_once_with(
+        user_message="user says hi",
+        assistant_response="assistant replies",
+        max_suggestions=3,
+        timeout_seconds=6.5,
+        user_message_max_length=200,
+        assistant_response_max_length=400,
+        prompt_template=None,
     )
     store.assert_awaited_once()
 
@@ -354,6 +391,7 @@ async def test_backend_suggestions_run_after_completed_turn(
         suggestions_config,
         tenant_id="dGVuYW50LWE.c291cmNlLWE",
         prompt_template=None,
+        timeout_seconds=5.0,
         turn_id="response-1",
     )
     assert run_task.await_count == 0
@@ -489,6 +527,84 @@ async def test_backend_suggestions_pass_custom_source_prompt(
         suggestions_config,
         tenant_id="tenant-a",
         prompt_template="source prompt {user_message}",
+        timeout_seconds=5.0,
+        turn_id=None,
+    )
+    assert run_task.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_backend_suggestions_pass_source_timeout(
+    monkeypatch,
+) -> None:
+    scheduled = _patch_create_task(monkeypatch)
+    run_task = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        runner_module,
+        "_generate_and_store_suggestions",
+        run_task,
+    )
+    source_config = _build_source_config(
+        True,
+        None,
+        timeout_seconds=6.5,
+    )
+
+    def _get_source_config():
+        return source_config
+
+    monkeypatch.setattr(
+        runner_module,
+        "get_follow_up_suggestions_config",
+        _get_source_config,
+    )
+
+    runner = runner_module.AgentRunner(
+        agent_id="agent-a",
+        tenant_id="tenant-a",
+    )
+    suggestions_config = _BackendSuggestionConfig()
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "session_id": "session-a",
+            "agent": None,
+            "agent_config": type(
+                "AgentConfig",
+                (),
+                {
+                    "running": type(
+                        "Running",
+                        (),
+                        {"suggestions": suggestions_config},
+                    )(),
+                },
+            )(),
+        },
+    )()
+    plan = type("Plan", (), {"original_user_message": "用户问题"})()
+    outcome = type(
+        "Outcome",
+        (),
+        {"task_completed": True, "assistant_response": "助手回答"},
+    )()
+
+    await runner._generate_backend_suggestions_if_needed(
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+
+    assert len(scheduled) == 1
+    run_task.assert_called_once_with(
+        "session-a",
+        "用户问题",
+        "助手回答",
+        suggestions_config,
+        tenant_id="tenant-a",
+        prompt_template=None,
+        timeout_seconds=6.5,
         turn_id=None,
     )
     assert run_task.await_count == 0

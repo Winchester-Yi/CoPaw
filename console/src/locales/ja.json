@@ -50,6 +50,8 @@
   "systemConfig": {
     "followUpTitle": "フォローアップ候補",
     "followUpDescription": "モデル回答後に候補質問を表示するかを制御し、バックエンド生成に使うプロンプトを設定します。",
+    "timeoutSeconds": "生成タイムアウト（秒）",
+    "timeoutHint": "バックエンドの候補生成はこの時間でタイムアウトし、フロントエンドのポーリング時間も自動で追従します。",
     "promptTemplate": "プロンプトテンプレート",
     "promptHint": "{max_count}、{user_message}、{assistant_response} を使用できます。",
     "sourceId": "Source ID",

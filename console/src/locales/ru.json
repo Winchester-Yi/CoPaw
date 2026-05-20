@@ -50,6 +50,8 @@
   "systemConfig": {
     "followUpTitle": "Последующие вопросы",
     "followUpDescription": "Управляет показом предложенных вопросов после ответа модели и настраивает backend prompt для их генерации.",
+    "timeoutSeconds": "Таймаут генерации (секунды)",
+    "timeoutHint": "Backend-генерация подсказок завершится по таймауту через это время, и окно frontend-опроса автоматически подстроится под него.",
     "promptTemplate": "Шаблон prompt",
     "promptHint": "Доступные плейсхолдеры: {max_count}, {user_message}, {assistant_response}.",
     "sourceId": "Source ID",

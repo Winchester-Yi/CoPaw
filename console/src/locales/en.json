@@ -70,6 +70,8 @@
   "systemConfig": {
     "followUpTitle": "Follow-up suggestions",
     "followUpDescription": "Control whether follow-up question suggestions appear after model replies and configure the backend prompt used to generate them.",
+    "timeoutSeconds": "Generation timeout (seconds)",
+    "timeoutHint": "Backend suggestion generation times out after this duration, and the frontend polling window follows it automatically.",
     "promptTemplate": "Prompt template",
     "promptHint": "Available placeholders: {max_count}, {user_message}, {assistant_response}.",
     "sourceId": "Source ID",

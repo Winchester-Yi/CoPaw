@@ -127,18 +127,25 @@ def _extract_text_from_response(response) -> str:
 
 
 async def _extract_text_from_streaming_response(response) -> str:
-    """从流式响应中提取最后一个 chunk 的文本内容."""
-    last_chunk_text = ""
+    """从流式响应中提取完整文本内容."""
+    accumulated = ""
     async for chunk in response:
         if not hasattr(chunk, "content") or not chunk.content:
             continue
+        chunk_text = ""
         for content_block in chunk.content:
             if (
                 isinstance(content_block, dict)
                 and content_block.get("type") == "text"
             ):
-                last_chunk_text = content_block.get("text", "")
-    return last_chunk_text
+                chunk_text += content_block.get("text", "")
+        if not chunk_text:
+            continue
+        if chunk_text.startswith(accumulated):
+            accumulated = chunk_text
+        else:
+            accumulated += chunk_text
+    return accumulated
 
 
 def _parse_suggestions_json(text: str, max_suggestions: int) -> List[str]:

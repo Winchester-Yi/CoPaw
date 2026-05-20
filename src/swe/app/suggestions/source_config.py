@@ -28,6 +28,7 @@ class FollowUpSuggestionsSourceConfig(BaseModel):
         default=SUGGESTION_PROMPT_TEMPLATE,
         max_length=8000,
     )
+    timeout_seconds: float = Field(default=5.0, ge=1.0, le=15.0)
 
 
 DEFAULT_FOLLOW_UP_SUGGESTIONS_CONFIG = FollowUpSuggestionsSourceConfig()

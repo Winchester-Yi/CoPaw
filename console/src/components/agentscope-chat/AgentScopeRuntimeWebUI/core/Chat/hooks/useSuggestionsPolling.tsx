@@ -1,11 +1,28 @@
 import { fetchSuggestions } from "@/api/modules/suggestions";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useContextSelector } from "use-context-selector";
+import { useSourceSystemConfigStore } from "@/stores/sourceSystemConfigStore";
+import {
+  DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS,
+  readFollowUpSuggestionsConfig,
+} from "@/pages/Settings/SystemConfig/followUpConfig";
 import { ChatAnywhereSessionsContext } from "../../Context/ChatAnywhereSessionsContext";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 
 const SUGGESTIONS_POLL_INTERVAL_MS = 800;
-const SUGGESTIONS_MAX_POLL_ATTEMPTS = 5;
+const SUGGESTIONS_POLL_BUFFER_ATTEMPTS = 2;
+
+export function getSuggestionsMaxPollAttempts(timeoutSeconds: number): number {
+  const normalizedTimeoutSeconds =
+    Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+      ? timeoutSeconds
+      : DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS;
+  return Math.max(
+    1,
+    Math.ceil((normalizedTimeoutSeconds * 1000) / SUGGESTIONS_POLL_INTERVAL_MS) +
+      SUGGESTIONS_POLL_BUFFER_ATTEMPTS,
+  );
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,10 +48,19 @@ export default function useSuggestionsPolling(options: {
     (v) => v.currentSessionId,
   );
   const sessionApi = useChatAnywhereOptions((v) => v.session?.api);
+  const effectiveSourceSystemConfig = useSourceSystemConfigStore(
+    (state) => state.config,
+  );
 
   const sessionIdRef = useRef(currentSessionId);
   const activePollResponseIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const maxPollAttempts = useMemo(() => {
+    const followUpConfig = readFollowUpSuggestionsConfig(
+      effectiveSourceSystemConfig?.config,
+    );
+    return getSuggestionsMaxPollAttempts(followUpConfig.timeout_seconds);
+  }, [effectiveSourceSystemConfig]);
 
   useEffect(() => {
     return () => {
@@ -57,7 +83,7 @@ export default function useSuggestionsPolling(options: {
 
     activePollResponseIdRef.current = turnId;
 
-    for (let attempt = 1; attempt <= SUGGESTIONS_MAX_POLL_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= maxPollAttempts; attempt += 1) {
       if (!mountedRef.current || activePollResponseIdRef.current !== turnId) {
         return;
       }
@@ -76,7 +102,7 @@ export default function useSuggestionsPolling(options: {
       const latestSessionId = sessionIdRef.current;
       if (!latestSessionId) {
         console.debug("[Suggestions] No session ID available");
-        if (attempt < SUGGESTIONS_MAX_POLL_ATTEMPTS) {
+        if (attempt < maxPollAttempts) {
           await delay(SUGGESTIONS_POLL_INTERVAL_MS);
         }
         continue;
@@ -108,7 +134,7 @@ export default function useSuggestionsPolling(options: {
         }
 
         if (!suggestions.length) {
-          if (attempt < SUGGESTIONS_MAX_POLL_ATTEMPTS) {
+          if (attempt < maxPollAttempts) {
             await delay(SUGGESTIONS_POLL_INTERVAL_MS);
           }
           continue;
@@ -153,7 +179,7 @@ export default function useSuggestionsPolling(options: {
         return;
       }
     }
-  }, [currentQARef, updateMessage, sessionApi]);
+  }, [currentQARef, maxPollAttempts, updateMessage, sessionApi]);
 
   return { pollSuggestions };
 }

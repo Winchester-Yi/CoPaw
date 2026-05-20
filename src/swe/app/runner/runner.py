@@ -1019,6 +1019,7 @@ async def _generate_and_store_suggestions(
     config,  # SuggestionConfig
     tenant_id: str | None = None,
     prompt_template: str | None = None,
+    timeout_seconds: float | None = None,
     turn_id: str | None = None,
 ) -> None:
     """执行一次建议生成与存储，通常由后台调度任务调用。"""
@@ -1028,6 +1029,11 @@ async def _generate_and_store_suggestions(
         resolve_runtime_tenant_id(tenant_id, None)
         if tenant_id is not None
         else None
+    )
+    effective_timeout_seconds = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else config.timeout_seconds
     )
     logger.info(
         "Generating suggestions for session %s: user_msg=%s chars, "
@@ -1041,7 +1047,7 @@ async def _generate_and_store_suggestions(
             user_message=user_message,
             assistant_response=assistant_response,
             max_suggestions=config.max_suggestions,
-            timeout_seconds=config.timeout_seconds,
+            timeout_seconds=effective_timeout_seconds,
             user_message_max_length=config.user_message_max_length,
             assistant_response_max_length=config.assistant_response_max_length,
             prompt_template=prompt_template,
@@ -2271,6 +2277,7 @@ class AgentRunner(Runner):
                 suggestions_config,
                 tenant_id=self.tenant_id,
                 prompt_template=source_config.prompt_template,
+                timeout_seconds=source_config.timeout_seconds,
                 turn_id=getattr(runtime, "turn_id", None),
             ),
         )

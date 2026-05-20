@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Input,
+  InputNumber,
   Space,
   Spin,
   Switch,
@@ -17,6 +18,7 @@ import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
 import { useSourceSystemConfigStore } from "@/stores/sourceSystemConfigStore";
 import {
+  DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS,
   readFollowUpSuggestionsConfig,
   writeFollowUpSuggestionsConfig,
 } from "./followUpConfig";
@@ -37,6 +39,9 @@ export default function SystemConfigPage() {
   const [saving, setSaving] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [promptTemplate, setPromptTemplate] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState(
+    DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS,
+  );
 
   const rawConfig = effectiveConfig?.config ?? {};
   const renderedConfig = useMemo(
@@ -61,12 +66,14 @@ export default function SystemConfigPage() {
     const followUp = readFollowUpSuggestionsConfig(rawConfig);
     setEnabled(followUp.enabled);
     setPromptTemplate(followUp.prompt_template);
+    setTimeoutSeconds(followUp.timeout_seconds);
   }, [rawConfig]);
 
   const handleReset = () => {
     const followUp = readFollowUpSuggestionsConfig(rawConfig);
     setEnabled(followUp.enabled);
     setPromptTemplate(followUp.prompt_template);
+    setTimeoutSeconds(followUp.timeout_seconds);
   };
 
   const handleSave = async () => {
@@ -75,6 +82,7 @@ export default function SystemConfigPage() {
       const nextConfig = writeFollowUpSuggestionsConfig(rawConfig, {
         enabled,
         prompt_template: promptTemplate,
+        timeout_seconds: timeoutSeconds,
       });
       await sourceSystemConfigApi.upsertSource(activeSourceId, {
         config: nextConfig,
@@ -137,6 +145,27 @@ export default function SystemConfigPage() {
               unCheckedChildren={t("common.disabled")}
               onChange={setEnabled}
             />
+          </div>
+
+          <div className={styles.fieldBlock}>
+            <Text strong>{t("systemConfig.timeoutSeconds")}</Text>
+            <InputNumber
+              min={1}
+              max={15}
+              step={0.5}
+              value={timeoutSeconds}
+              onChange={(value) =>
+                setTimeoutSeconds(
+                  typeof value === "number"
+                    ? value
+                    : DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS,
+                )
+              }
+              style={{ width: "100%" }}
+            />
+            <Paragraph type="secondary" className={styles.hint}>
+              {t("systemConfig.timeoutHint")}
+            </Paragraph>
           </div>
 
           <div className={styles.fieldBlock}>

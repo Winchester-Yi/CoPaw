@@ -35,6 +35,10 @@ def test_follow_up_suggestions_config_defaults_when_missing() -> None:
         config.prompt_template
         == DEFAULT_FOLLOW_UP_SUGGESTIONS_CONFIG.prompt_template
     )
+    assert (
+        config.timeout_seconds
+        == DEFAULT_FOLLOW_UP_SUGGESTIONS_CONFIG.timeout_seconds
+    )
 
 
 def test_follow_up_suggestions_config_reads_nested_values() -> None:
@@ -44,12 +48,14 @@ def test_follow_up_suggestions_config_reads_nested_values() -> None:
                 FOLLOW_UP_SUGGESTIONS_CONFIG_KEY: {
                     "enabled": False,
                     "prompt_template": "自定义模板 {max_count}",
+                    "timeout_seconds": 6.5,
                 },
             },
         ),
     )
     assert config.enabled is False
     assert config.prompt_template == "自定义模板 {max_count}"
+    assert config.timeout_seconds == 6.5
 
 
 def test_follow_up_suggestions_config_ignores_invalid_shape() -> None:
@@ -98,6 +104,31 @@ def test_follow_up_suggestions_config_invalid_dict_payload_returns_default() -> 
     assert (
         config.prompt_template
         == DEFAULT_FOLLOW_UP_SUGGESTIONS_CONFIG.prompt_template
+    )
+
+
+def test_follow_up_suggestions_config_invalid_timeout_returns_default() -> (
+    None
+):
+    config = get_follow_up_suggestions_config(
+        _effective(
+            {
+                FOLLOW_UP_SUGGESTIONS_CONFIG_KEY: {
+                    "enabled": False,
+                    "prompt_template": "自定义模板 {max_count}",
+                    "timeout_seconds": 99,
+                },
+            },
+        ),
+    )
+    assert config.enabled is True
+    assert (
+        config.prompt_template
+        == DEFAULT_FOLLOW_UP_SUGGESTIONS_CONFIG.prompt_template
+    )
+    assert (
+        config.timeout_seconds
+        == DEFAULT_FOLLOW_UP_SUGGESTIONS_CONFIG.timeout_seconds
     )
 
 
@@ -157,3 +188,39 @@ async def test_generate_suggestions_falls_back_when_custom_prompt_template_is_in
         user_message="用户问题",
         assistant_response="助手回答",
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_suggestions_accumulates_streaming_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStreamResponse:
+        def __aiter__(self):
+            async def _gen():
+                for text in ('["问题A"', ', "问题B"', "]"):
+                    yield type(
+                        "Chunk",
+                        (),
+                        {
+                            "content": [
+                                {"type": "text", "text": text},
+                            ],
+                        },
+                    )()
+
+            return _gen()
+
+    async def fake_model(_messages):
+        return FakeStreamResponse()
+
+    async def fake_get_model():
+        return fake_model
+
+    monkeypatch.setattr(SuggestionService, "get_model", fake_get_model)
+
+    suggestions = await generate_suggestions(
+        user_message="用户问题",
+        assistant_response="助手回答",
+    )
+
+    assert suggestions == ["问题A", "问题B"]

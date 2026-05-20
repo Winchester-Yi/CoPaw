@@ -1,6 +1,9 @@
 import type { SourceSystemConfig } from "@/api/types/sourceSystemConfig";
 
 export const FOLLOW_UP_SUGGESTIONS_CONFIG_KEY = "follow_up_suggestions";
+export const DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS = 5;
+const MIN_FOLLOW_UP_TIMEOUT_SECONDS = 1;
+const MAX_FOLLOW_UP_TIMEOUT_SECONDS = 15;
 
 export const DEFAULT_FOLLOW_UP_PROMPT_TEMPLATE =
   "根据以下对话，生成{max_count}个用户可能想问的后续问题。\n" +
@@ -14,6 +17,19 @@ export const DEFAULT_FOLLOW_UP_PROMPT_TEMPLATE =
 export interface FollowUpSuggestionsConfig {
   enabled: boolean;
   prompt_template: string;
+  timeout_seconds: number;
+}
+
+function normalizeTimeoutSeconds(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < MIN_FOLLOW_UP_TIMEOUT_SECONDS ||
+    value > MAX_FOLLOW_UP_TIMEOUT_SECONDS
+  ) {
+    return DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS;
+  }
+  return value;
 }
 
 export function readFollowUpSuggestionsConfig(
@@ -24,6 +40,7 @@ export function readFollowUpSuggestionsConfig(
     return {
       enabled: true,
       prompt_template: DEFAULT_FOLLOW_UP_PROMPT_TEMPLATE,
+      timeout_seconds: DEFAULT_FOLLOW_UP_TIMEOUT_SECONDS,
     };
   }
 
@@ -37,6 +54,7 @@ export function readFollowUpSuggestionsConfig(
   return {
     enabled: typeof record.enabled === "boolean" ? record.enabled : true,
     prompt_template: prompt,
+    timeout_seconds: normalizeTimeoutSeconds(record.timeout_seconds),
   };
 }
 
@@ -51,6 +69,9 @@ export function writeFollowUpSuggestionsConfig(
       prompt_template:
         followUpConfig.prompt_template.trim() ||
         DEFAULT_FOLLOW_UP_PROMPT_TEMPLATE,
+      timeout_seconds: normalizeTimeoutSeconds(
+        followUpConfig.timeout_seconds,
+      ),
     },
   };
 }

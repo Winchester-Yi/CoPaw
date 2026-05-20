@@ -58,7 +58,9 @@ async def test_validate_task_completion_does_not_send_suggestions_to_model(
         captured["prompt"] = messages[-1]["content"]
 
         class FakeResponse:
-            text = '{"completed": true, "reason": "done", "follow_up_prompt": ""}'
+            text = (
+                '{"completed": true, "reason": "done", "follow_up_prompt": ""}'
+            )
 
         return FakeResponse()
 
@@ -79,6 +81,50 @@ async def test_validate_task_completion_does_not_send_suggestions_to_model(
     )
 
     assert result.completed is True
-    assistant_section = captured["prompt"].split("助手最新回答（摘要）：", 1)[1]
+    assistant_section = captured["prompt"].split("助手最新回答（摘要）：", 1)[
+        1
+    ]
     assert "猜你想问：" not in assistant_section
     assert "怎么落地" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_validate_task_completion_accumulates_streaming_chunks(
+    monkeypatch,
+) -> None:
+    class FakeStreamResponse:
+        def __aiter__(self):
+            async def _gen():
+                for text in (
+                    '{"completed": true',
+                    ', "reason": "done"',
+                    ', "follow_up_prompt": ""}',
+                ):
+                    yield type(
+                        "Chunk",
+                        (),
+                        {
+                            "content": [
+                                {"type": "text", "text": text},
+                            ],
+                        },
+                    )()
+
+            return _gen()
+
+    async def fake_model(_messages):
+        return FakeStreamResponse()
+
+    monkeypatch.setattr(
+        validation,
+        "create_model_and_formatter",
+        lambda agent_id=None: (fake_model, None),
+    )
+
+    result = await validation.validate_task_completion(
+        user_message="帮我整理结论",
+        assistant_response="结论已经整理完成。",
+    )
+
+    assert result.completed is True
+    assert result.reason == "done"
