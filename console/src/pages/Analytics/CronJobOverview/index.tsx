@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { DatePicker, Input, Modal, Pagination, Select, Spin, Tooltip } from "antd";
+import { DatePicker, Input, Modal, Select, Spin, Tooltip } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
@@ -27,7 +27,7 @@ type MetricCard = {
   title: string;
   value: string;
   compare: string;
-  trend: "up" | "down" | null;
+  trend: "up" | "down";
   accent: string;
   icon: LucideIcon;
 };
@@ -39,38 +39,9 @@ type DistributionItem = {
   color?: string;
 };
 
-const failureReasonOptions = [
-  "渠道不存在",
-  "token过期",
-  "密文长度错误",
-  "智能体请求校验失败",
-  "其他",
-] as const;
-
-type FailureReason = (typeof failureReasonOptions)[number];
-
 const formatNumber = (value: number) => value.toLocaleString("en-US");
 const truncateAxisLabel = (value: string, maxLength = 6) =>
   value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
-
-const classifyFailureReason = (errorMessage: string): FailureReason => {
-  const message = errorMessage || "";
-  const normalizedMessage = message.toLowerCase();
-
-  if (message.includes("channel not found")) {
-    return "渠道不存在";
-  }
-  if (message.includes("cron auth user_info is expired")) {
-    return "token过期";
-  }
-  if (message.includes("Illegal Argument")) {
-    return "密文长度错误";
-  }
-  if (normalizedMessage.includes("validation error for agentrequest")) {
-    return "智能体请求校验失败";
-  }
-  return "其他";
-};
 
 const hashString = (value: string) => {
   let hash = 0;
@@ -101,7 +72,7 @@ const metricDefinitions = [
   },
   {
     key: "runs",
-    title: "执行次数",
+    title: "今日执行次数",
     accent: "#f97316",
     icon: PlaySquare,
   },
@@ -127,10 +98,7 @@ const formatMetricValue = (key: string, value: number | undefined) => {
     return `${value.toFixed(2)}%`;
   }
   if (key === "avg_cost") {
-    if (value < 60000) {
-      return `${Math.round(value / 1000)}s`;
-    }
-    return `${(value / 60000).toFixed(2)}min`;
+    return `${value.toFixed(2)}s`;
   }
   return formatNumber(value);
 };
@@ -146,17 +114,8 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function MetricCard({ metric }: { metric: MetricCard }) {
   const Icon = metric.icon;
-  const isCostMetric = metric.key === "avg_cost";
-  const isPositiveTrend = isCostMetric
-    ? metric.trend === "down"
-    : metric.trend === "up";
-  const trendClassName = metric.trend
-    ? isPositiveTrend
-      ? styles.goodTrend
-      : styles.hotTrend
-    : "";
-  const compareLabel = metric.key === "total" ? "数量" : "环比";
-  const showCompareLabel = metric.compare !== "-";
+  const trendClassName =
+    metric.trend === "up" ? styles.goodTrend : styles.hotTrend;
 
   return (
     <article
@@ -177,9 +136,12 @@ function MetricCard({ metric }: { metric: MetricCard }) {
           <strong>{metric.value}</strong>
           {metric.compare ? (
             <div className={`${styles.metricCompare} ${trendClassName}`}>
-              {showCompareLabel ? <span>{compareLabel}</span> : null}
-              {metric.trend === "up" ? <TrendingUp size={14} /> : null}
-              {metric.trend === "down" ? <TrendingDown size={14} /> : null}
+              <span>环比</span>
+              {metric.trend === "up" ? (
+                <TrendingUp size={14} />
+              ) : (
+                <TrendingDown size={14} />
+              )}
               <em>{metric.compare}</em>
             </div>
           ) : null}
@@ -243,11 +205,6 @@ function CurvedDonutChart({
   centerLabel: string;
 }) {
   const total = items.reduce((sum, item) => sum + item.value, 0);
-  const nonZeroItems = items.filter((item) => item.value > 0);
-  const singleValueItem = nonZeroItems.length === 1 ? nonZeroItems[0] : null;
-  const singleValueItemIndex = singleValueItem
-    ? items.findIndex((item) => item.name === singleValueItem.name)
-    : -1;
   const gradientPrefix = `donut-${hashString(
     `${centerLabel}-${items.map((item) => item.name).join("-")}`,
   )}`;
@@ -277,55 +234,25 @@ function CurvedDonutChart({
           );
         })}
       </defs>
-      {singleValueItem ? (
-        <circle
-          cx="74"
-          cy="74"
-          r="47.5"
-          fill="none"
-          stroke={`url(#${gradientPrefix}-${singleValueItemIndex})`}
-          strokeWidth="17"
-        >
-          <title>
-            {singleValueItem.name}: {formatNumber(singleValueItem.value)}
-            {singleValueItem.percent !== undefined
-              ? ` (${singleValueItem.percent.toFixed(2)}%)`
-              : ""}
-          </title>
-        </circle>
-      ) : (
-        items.map((item, index) => {
-          const angle = total ? (item.value / total) * Math.PI * 2 : 0;
-          const startAngle = currentAngle;
-          const endAngle = currentAngle + angle;
-          currentAngle = endAngle;
+      {items.map((item, index) => {
+        const angle = total ? (item.value / total) * Math.PI * 2 : 0;
+        const startAngle = currentAngle;
+        const endAngle = currentAngle + angle;
+        currentAngle = endAngle;
 
-          return (
-            <path
-              key={item.name}
-              d={donutSegmentPath(startAngle, endAngle)}
-              fill={`url(#${gradientPrefix}-${index})`}
-            >
-              <title>
-                {item.name}: {formatNumber(item.value)}
-                {item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""}
-              </title>
-            </path>
-          );
-        })
-      )}
-      {!total ? (
-        <circle
-          cx="74"
-          cy="74"
-          r="47.5"
-          fill="none"
-          stroke="#e2e8f0"
-          strokeWidth="17"
-        >
-          <title>{centerLabel}: 0</title>
-        </circle>
-      ) : null}
+        return (
+          <path
+            key={item.name}
+            d={donutSegmentPath(startAngle, endAngle)}
+            fill={`url(#${gradientPrefix}-${index})`}
+          >
+            <title>
+              {item.name}: {formatNumber(item.value)}
+              {item.percent !== undefined ? ` (${item.percent.toFixed(2)}%)` : ""}
+            </title>
+          </path>
+        );
+      })}
       <text
         x="74"
         y="68"
@@ -687,37 +614,17 @@ function FailedTaskModal({
   loading: boolean;
 }) {
   const [keyword, setKeyword] = useState("");
-  const [failureReason, setFailureReason] = useState<FailureReason | undefined>();
-  const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 5;
-  const normalizedKeyword = keyword.trim().toLowerCase();
-  const filteredTasks = tasks.filter((task) => {
-    const matchesKeyword = normalizedKeyword
-      ? (task.tenant_id || "").toLowerCase().includes(normalizedKeyword)
-      : true;
-    const matchesFailureReason = failureReason
-      ? classifyFailureReason(task.error_message) === failureReason
-      : true;
-
-    return matchesKeyword && matchesFailureReason;
-  });
-  const totalCount = filteredTasks.length;
-  const paginatedTasks = filteredTasks.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize,
+  const [filterField, setFilterField] = useState<"job_name" | "tenant_name">(
+    "tenant_name",
   );
-  const handlePageChange = (page: number) => {
-    setCurrentPage(page);
-  };
-  const handleFilterChange = () => {
-    setCurrentPage(1);
-  };
-  const handleClose = () => {
-    setKeyword("");
-    setFailureReason(undefined);
-    setCurrentPage(1);
-    onClose();
-  };
+  const normalizedKeyword = keyword.trim().toLowerCase();
+  const filteredTasks = normalizedKeyword
+    ? tasks.filter((task) =>
+        (task[filterField] || "").toLowerCase().includes(normalizedKeyword),
+      )
+    : tasks;
+  const searchPlaceholder =
+    filterField === "tenant_name" ? "输入用户姓名筛选" : "输入任务名称筛选";
 
   return (
     <Modal
@@ -735,31 +642,26 @@ function FailedTaskModal({
       }
       width={1080}
       footer={null}
-      onCancel={handleClose}
+      onCancel={onClose}
       destroyOnHidden
     >
       <div className={styles.failedTaskToolbar}>
+        <Select
+          value={filterField}
+          onChange={setFilterField}
+          className={styles.failedTaskFilterSelect}
+          options={[
+            { label: "用户姓名", value: "tenant_name" },
+            { label: "任务名称", value: "job_name" },
+          ]}
+        />
         <Input.Search
           value={keyword}
           onChange={(event) => setKeyword(event.target.value)}
-          onSearch={(val) => { setKeyword(val); handleFilterChange(); }}
+          onSearch={setKeyword}
           allowClear
-          placeholder="输入用户ID筛选"
+          placeholder={searchPlaceholder}
           className={styles.failedTaskSearch}
-        />
-        <Select
-          allowClear
-          value={failureReason}
-          onChange={(value) => {
-            setFailureReason(value);
-            handleFilterChange();
-          }}
-          placeholder="失败原因"
-          className={styles.failedReasonSelect}
-          options={failureReasonOptions.map((reason) => ({
-            label: reason,
-            value: reason,
-          }))}
         />
       </div>
       <Spin spinning={loading} tip="加载失败任务...">
@@ -773,7 +675,7 @@ function FailedTaskModal({
             <span>报错信息</span>
           </div>
           <div className={styles.failedTaskTableBody}>
-            {paginatedTasks.map((task) => (
+            {filteredTasks.map((task) => (
               <div key={task.id} className={styles.failedTaskTableRow}>
                 <span className={styles.failedTaskName}>{task.job_name}</span>
                 <span>{task.tenant_name}</span>
@@ -794,16 +696,6 @@ function FailedTaskModal({
               </div>
             ))}
           </div>
-        </div>
-        <div className={styles.failedTaskPagination}>
-          <Pagination
-            current={currentPage}
-            pageSize={pageSize}
-            total={totalCount}
-            onChange={handlePageChange}
-            showSizeChanger={false}
-            showTotal={(total) => `共 ${total} 条`}
-          />
         </div>
       </Spin>
     </Modal>
@@ -847,22 +739,8 @@ export default function CronJobOverviewPage() {
         ...getDateRangeParams(dateRange),
         status: "error",
       };
-      const pageSize = 100;
-      let page = 1;
-      let total = 0;
-      const allTasks: ExecutionItem[] = [];
-
-      do {
-        const response = await monitorApi.getExecutions(page, pageSize, params);
-        if (response.items.length === 0) {
-          break;
-        }
-        allTasks.push(...response.items);
-        total = response.total;
-        page += 1;
-      } while (allTasks.length < total);
-
-      setFailedTasks(allTasks);
+      const response = await monitorApi.getExecutions(1, 100, params);
+      setFailedTasks(response.items);
     } catch (error) {
       console.error("Failed to fetch failed tasks:", error);
     } finally {
@@ -930,18 +808,12 @@ export default function CronJobOverviewPage() {
   const getOverviewMetricValue = (key: string) =>
     overview?.metrics.find((item) => item.key === key)?.value;
 
-  const getOverviewMetricCompare = (key: string) =>
-    overview?.metrics.find((item) => item.key === key)?.compare ?? "";
-
-  const getOverviewMetricTrend = (key: string) =>
-    overview?.metrics.find((item) => item.key === key)?.trend ?? "up";
-
   const metricCards = metricDefinitions.map((definition) => ({
     key: definition.key,
     title: definition.title,
     value: formatMetricValue(definition.key, getOverviewMetricValue(definition.key)),
-    compare: getOverviewMetricCompare(definition.key),
-    trend: getOverviewMetricTrend(definition.key),
+    compare: "",
+    trend: "up" as const,
     accent: definition.accent,
     icon: definition.icon,
   }));
@@ -1038,7 +910,7 @@ export default function CronJobOverviewPage() {
             title="执行结果分布"
             items={executionResult}
             centerValue={formatNumber(executionResult.reduce((sum, item) => sum + item.value, 0))}
-            centerLabel="总执行次数"
+            centerLabel="执行次数"
           />
           <Panel
             title="任务失败原因分布"
@@ -1059,7 +931,7 @@ export default function CronJobOverviewPage() {
             title="任务阅读状态分布"
             items={readStatus}
             centerValue={formatNumber(readStatus.reduce((sum, item) => sum + item.value, 0))}
-            centerLabel="成功执行次数"
+            centerLabel="总任务数"
           />
         </section>
       </Spin>

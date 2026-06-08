@@ -663,9 +663,6 @@
     "weixinQrcodeFailed": "Failed to fetch QR code, please try again",
     "weixinLoginSuccess": "WeChat login successful, token has been filled in",
     "weixinQrcodeExpired": "QR code expired, please get a new one",
-    "constraints": {
-      "console_enabled_mandatory": "Console channel is system-managed and always enabled."
-    },
     "distributeToTenants": "Distribute to Tenants",
     "distributeTitle": "Distribute Channel Config to Tenants",
     "distributeHint": "Distribute the current channel config to target tenants' default agent.",

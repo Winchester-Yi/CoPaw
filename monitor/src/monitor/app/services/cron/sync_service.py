@@ -15,7 +15,7 @@ import httpx
 
 from ...database import get_db_connection
 from ...models.cron import CronJobSyncRequest, ExecutionSyncRequest
-from ....utils.bbk import get_bbk_id_by_name
+from ....utils.bbk import get_bbk_id_by_name, get_bbk_name_by_id
 from ....utils.scope_decode import (
     is_encoded_scope_id,
     try_decode_tenant_id,
@@ -205,14 +205,22 @@ async def _enrich_sync_request(
                 )
                 tenant_id_for_query = decoded_tenant_id
 
-        # 2. 补全 tenant_name 和 bbk_id（如果缺失）
-        if not request.tenant_name or not request.bbk_id:
+        # 2. 补全 tenant_name 和标准 bbk_id（如果缺失或现有 bbk_id 无法映射）
+        should_fetch_user_info = (
+            not request.tenant_name
+            or not request.bbk_id
+            or not get_bbk_name_by_id(str(request.bbk_id).strip())
+        )
+        if should_fetch_user_info:
             user_name, bbk_id = await _fetch_user_info(tenant_id_for_query)
 
             update_fields = {}
             if user_name and not request.tenant_name:
                 update_fields["tenant_name"] = user_name
-            if bbk_id and not request.bbk_id:
+            if bbk_id and (
+                not request.bbk_id
+                or not get_bbk_name_by_id(str(request.bbk_id).strip())
+            ):
                 update_fields["bbk_id"] = bbk_id
 
             if update_fields:

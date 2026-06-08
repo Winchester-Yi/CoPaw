@@ -641,9 +641,6 @@
     "weixinQrcodeFailed": "获取二维码失败，请稍后重试",
     "weixinLoginSuccess": "微信扫码登录成功，Token 已填入",
     "weixinQrcodeExpired": "二维码已过期，请重新获取",
-    "constraints": {
-      "console_enabled_mandatory": "Console 渠道由系统管理并始终保持开启。"
-    },
     "distributeToTenants": "分发到租户",
     "distributeTitle": "分发通道配置到租户",
     "distributeHint": "将当前通道配置分发到目标租户的 default agent。",

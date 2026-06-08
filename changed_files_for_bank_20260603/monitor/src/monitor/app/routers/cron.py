@@ -43,7 +43,6 @@ def _get_source_id_from_header(request: Request) -> str:
 
 @router.get("/filter-options")
 async def get_filter_options(
-    request: Request,
     service: QueryService = Depends(get_query_service),
 ) -> dict:
     """获取筛选项下拉框选项列表。
@@ -57,17 +56,16 @@ async def get_filter_options(
     Returns:
         包含各筛选项列表的字典
     """
-    actual_source_id = _get_source_id_from_header(request)
-    return await service.get_filter_options(source_id=actual_source_id)
+    return await service.get_filter_options()
 
 
 @router.get("/overview", response_model=CronOverviewResponse)
 async def get_overview(
     request: Request,
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
-    bbk_id: str | None = Query(default=None, description="分行号筛选"),
-    start_time: datetime | None = Query(default=None, description="开始时间"),
-    end_time: datetime | None = Query(default=None, description="结束时间"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
+    bbk_id: str | None = Query(default=None, description="Branch ID filter"),
+    start_time: datetime | None = Query(default=None, description="Range start"),
+    end_time: datetime | None = Query(default=None, description="Range end"),
     service: QueryService = Depends(get_query_service),
 ) -> CronOverviewResponse:
     """Get aggregated data for the cron overview page."""
@@ -84,17 +82,17 @@ async def get_overview(
 @router.get("/jobs", response_model=PaginatedResponse[CronJobModel])
 async def list_jobs(
     request: Request,
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
-    bbk_id: str | None = Query(default=None, description="分行号筛选"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
+    bbk_id: str | None = Query(default=None, description="Branch ID filter"),
     creator_user_id: str | None = Query(
         default=None,
         description="创建者ID筛选",
     ),
-    job_origin: str | None = Query(default=None, description="任务来源筛选"),
-    status: str | None = Query(default=None, description="状态筛选"),
-    enabled: bool | None = Query(default=None, description="是否启用筛选"),
-    page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=10, ge=1, le=100, description="每页数量"),
+    job_origin: str | None = Query(default=None, description="Job origin filter"),
+    status: str | None = Query(default=None, description="Status filter"),
+    enabled: bool | None = Query(default=None, description="Enabled filter"),
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Page size"),
     service: QueryService = Depends(get_query_service),
 ) -> PaginatedResponse[CronJobModel]:
     """List cron jobs with pagination and filters.
@@ -133,23 +131,22 @@ async def list_jobs(
     response_model=PaginatedResponse[SubscriptionOverviewItem],
 )
 async def get_subscription_overview(
-    request: Request,
-    keyword: str | None = Query(default=None, description="订阅任务名称搜索"),
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
-    bbk_id: str | None = Query(default=None, description="所属机构筛选"),
-    start_time: datetime | None = Query(default=None, description="开始时间"),
-    end_time: datetime | None = Query(default=None, description="结束时间"),
-    page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=10, ge=1, le=100, description="每页数量"),
+    keyword: str | None = Query(default=None, description="Subscription task keyword"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
+    bbk_id: str | None = Query(default=None, description="Branch ID filter"),
+    source_id: str | None = Query(default=None, description="Source ID filter"),
+    start_time: datetime | None = Query(default=None, description="Range start"),
+    end_time: datetime | None = Query(default=None, description="Range end"),
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Page size"),
     service: QueryService = Depends(get_query_service),
 ) -> PaginatedResponse[SubscriptionOverviewItem]:
     """查询订阅任务概览聚合数据。"""
-    actual_source_id = _get_source_id_from_header(request)
     return await service.get_subscription_overview(
         keyword=keyword,
         tenant_id=tenant_id,
         bbk_id=bbk_id,
-        source_id=actual_source_id,
+        source_id=source_id,
         start_time=start_time,
         end_time=end_time,
         page=page,
@@ -162,23 +159,22 @@ async def get_subscription_overview(
     response_model=PaginatedResponse[SubscriptionDetailItem],
 )
 async def get_subscription_details(
-    request: Request,
     subscription_key: str,
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
-    bbk_id: str | None = Query(default=None, description="所属机构筛选"),
-    start_time: datetime | None = Query(default=None, description="开始时间"),
-    end_time: datetime | None = Query(default=None, description="结束时间"),
-    page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=10, ge=1, le=100, description="每页数量"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
+    bbk_id: str | None = Query(default=None, description="Branch ID filter"),
+    source_id: str | None = Query(default=None, description="Source ID filter"),
+    start_time: datetime | None = Query(default=None, description="Range start"),
+    end_time: datetime | None = Query(default=None, description="Range end"),
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Page size"),
     service: QueryService = Depends(get_query_service),
 ) -> PaginatedResponse[SubscriptionDetailItem]:
     """查询订阅任务详情弹窗数据。"""
-    actual_source_id = _get_source_id_from_header(request)
     return await service.get_subscription_details(
         subscription_key=subscription_key,
         tenant_id=tenant_id,
         bbk_id=bbk_id,
-        source_id=actual_source_id,
+        source_id=source_id,
         start_time=start_time,
         end_time=end_time,
         page=page,
@@ -188,7 +184,6 @@ async def get_subscription_details(
 
 @router.get("/jobs/{job_id}", response_model=CronJobModel)
 async def get_job(
-    request: Request,
     job_id: str,
     service: QueryService = Depends(get_query_service),
 ) -> CronJobModel:
@@ -204,8 +199,7 @@ async def get_job(
     Raises:
         HTTPException: If job not found
     """
-    actual_source_id = _get_source_id_from_header(request)
-    job = await service.get_job(job_id, source_id=actual_source_id)
+    job = await service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
@@ -214,9 +208,9 @@ async def get_job(
 @router.get("/executions", response_model=PaginatedResponse[ExecutionModel])
 async def list_executions(
     request: Request,
-    job_id: str | None = Query(default=None, description="任务ID筛选"),
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
-    status: str | None = Query(default=None, description="执行状态筛选"),
+    job_id: str | None = Query(default=None, description="Job ID filter"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
+    status: str | None = Query(default=None, description="Execution status filter"),
     start_time: datetime | None = Query(
         default=None,
         description="开始时间范围",
@@ -225,8 +219,8 @@ async def list_executions(
         default=None,
         description="结束时间范围",
     ),
-    page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=10, ge=1, le=100, description="每页数量"),
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(default=10, ge=1, le=100, description="Page size"),
     service: QueryService = Depends(get_query_service),
 ) -> PaginatedResponse[ExecutionModel]:
     """List execution history with pagination and filters.
@@ -264,7 +258,6 @@ async def list_executions(
     response_model=ExecutionDetailResponse,
 )
 async def get_execution(
-    request: Request,
     execution_id: int,
     service: QueryService = Depends(get_query_service),
 ) -> ExecutionDetailResponse:
@@ -280,11 +273,7 @@ async def get_execution(
     Raises:
         HTTPException: If execution not found
     """
-    actual_source_id = _get_source_id_from_header(request)
-    execution = await service.get_execution(
-        execution_id,
-        source_id=actual_source_id,
-    )
+    execution = await service.get_execution(execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
     return ExecutionDetailResponse.model_validate(execution)
@@ -293,11 +282,11 @@ async def get_execution(
 @router.get("/export")
 async def export_data(
     request: Request,
-    job_id: str | None = Query(default=None, description="任务ID筛选"),
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
-    bbk_id: str | None = Query(default=None, description="分行号筛选"),
-    enabled: bool | None = Query(default=None, description="是否启用筛选"),
-    status: str | None = Query(default=None, description="状态筛选"),
+    job_id: str | None = Query(default=None, description="Job ID filter"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
+    bbk_id: str | None = Query(default=None, description="Branch ID filter"),
+    enabled: bool | None = Query(default=None, description="Enabled filter"),
+    status: str | None = Query(default=None, description="Status filter"),
     start_time: datetime | None = Query(
         default=None,
         description="开始时间范围",
@@ -371,7 +360,6 @@ async def export_data(
 
 @router.post("/jobs/{job_id}/mark-read", response_model=MarkReadResponse)
 async def mark_job_as_read(
-    request: Request,
     job_id: str,
     service: QueryService = Depends(get_query_service),
 ) -> MarkReadResponse:
@@ -387,12 +375,8 @@ async def mark_job_as_read(
     Returns:
         标记结果，包含更新的记录数
     """
-    actual_source_id = _get_source_id_from_header(request)
     try:
-        count = await service.mark_job_as_read(
-            job_id,
-            source_id=actual_source_id,
-        )
+        count = await service.mark_job_as_read(job_id)
         return MarkReadResponse(marked=True, count=count)
     except Exception as e:
         logger.error("Failed to mark job as read: %s", e)
@@ -401,8 +385,7 @@ async def mark_job_as_read(
 
 @router.get("/unread-count", response_model=UnreadCountResponse)
 async def get_unread_count(
-    request: Request,
-    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    tenant_id: str | None = Query(default=None, description="Tenant ID filter"),
     service: QueryService = Depends(get_query_service),
 ) -> UnreadCountResponse:
     """获取未读任务数量统计。
@@ -416,8 +399,4 @@ async def get_unread_count(
     Returns:
         未读数量统计
     """
-    actual_source_id = _get_source_id_from_header(request)
-    return await service.get_unread_count(
-        tenant_id,
-        source_id=actual_source_id,
-    )
+    return await service.get_unread_count(tenant_id)

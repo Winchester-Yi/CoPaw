@@ -486,8 +486,6 @@ class CronOverviewMetricItem(BaseModel):
 
     key: str = Field(..., description="Metric key")
     value: float = Field(default=0, description="Metric value")
-    compare: str = Field(default="", description="Comparison text (e.g., '+12.5%')")
-    trend: Optional[str] = Field(default=None, description="Trend: 'up' or 'down'")
 
 
 class CronOverviewDistributionItem(BaseModel):
@@ -496,7 +494,6 @@ class CronOverviewDistributionItem(BaseModel):
     name: str = Field(..., description="Item name")
     value: int = Field(default=0, description="Item count")
     percent: float = Field(default=0.0, description="Item percentage")
-    color: Optional[str] = Field(default=None, description="Item color")
 
 
 class CronOverviewBranchExecutionItem(BaseModel):
