@@ -162,6 +162,30 @@ async def test_update_chat_name_merges_title_metadata() -> None:
     }
 
 
+async def test_update_generated_chat_title_preserves_manual_rename() -> None:
+    """Automatic title writes must not overwrite a newer manual rename."""
+    repo = _InMemoryChatRepo()
+    manager = ChatManager(repo=repo)
+    chat = await manager.get_or_create_chat(
+        "session-1",
+        "user-1",
+        "console",
+        name="New Chat",
+    )
+    await manager.update_chat_name(chat.id, "我的自定义标题")
+
+    updated = await manager.update_generated_chat_title(
+        chat.id,
+        "自动生成标题",
+        fallback_name="New Chat",
+    )
+    stored = await repo.get_chat(chat.id)
+
+    assert updated is False
+    assert stored is not None
+    assert stored.name == "我的自定义标题"
+
+
 async def test_delete_chats_removes_the_chat_scoped_archive(tmp_path) -> None:
     repo = _InMemoryChatRepo()
     archive_store = ConversationArchiveStore(

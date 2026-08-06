@@ -49,6 +49,22 @@ def _keep_generated_title(existing: ChatSpec, incoming: ChatSpec) -> None:
     }
 
 
+def _can_replace_with_generated_title(
+    spec: ChatSpec,
+    fallback_name: str,
+) -> bool:
+    meta = spec.meta or {}
+    if meta.get("session_kind") == "task":
+        return False
+    if meta.get(_SESSION_TITLE_GENERATED_META_KEY):
+        return False
+    return (spec.name or "").strip() in {
+        "New Chat",
+        "新会话",
+        fallback_name,
+    }
+
+
 class ChatManager:
     """Manages chat specifications in repository.
 
@@ -323,6 +339,33 @@ class ChatManager:
                     **(spec.meta or {}),
                     **meta,
                 }
+            spec.updated_at = datetime.now(timezone.utc)
+            await self._repo.upsert_chat(spec)
+            return True
+
+    async def update_generated_chat_title(
+        self,
+        chat_id: str,
+        name: str,
+        *,
+        fallback_name: str,
+    ) -> bool:
+        """Atomically apply an automatic title only while it is eligible."""
+        async with self._lock:
+            spec = await self._repo.get_chat(chat_id)
+            if spec is None:
+                logger.warning(
+                    "update_generated_chat_title: chat not found chat_id=%s",
+                    chat_id,
+                )
+                return False
+            if not _can_replace_with_generated_title(spec, fallback_name):
+                return False
+            spec.name = name
+            spec.meta = {
+                **(spec.meta or {}),
+                _SESSION_TITLE_GENERATED_META_KEY: True,
+            }
             spec.updated_at = datetime.now(timezone.utc)
             await self._repo.upsert_chat(spec)
             return True

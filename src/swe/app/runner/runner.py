@@ -49,7 +49,10 @@ from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .utils import build_env_context
 from ..identity_resolver import resolve_user_identity
-from ..channels.schema import DEFAULT_CHANNEL
+from ..channels.schema import (
+    DEFAULT_CHANNEL,
+    SESSION_TITLE_COMMITTED_META_KEY,
+)
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
@@ -1801,9 +1804,8 @@ def _clear_session_title_meta(request: AgentRequest) -> None:
     channel_meta = getattr(request, "channel_meta", None)
     if not isinstance(channel_meta, dict):
         return
-    if "session_title" not in channel_meta:
-        return
     channel_meta.pop("session_title", None)
+    channel_meta.pop(SESSION_TITLE_COMMITTED_META_KEY, None)
     request.channel_meta = channel_meta
 
 
@@ -2043,6 +2045,7 @@ class AgentRunner(Runner):
         self._task_tracker = task_tracker  # Task tracker for background tasks
         self.session: Any | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._title_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -2398,6 +2401,7 @@ class AgentRunner(Runner):
             _clear_session_title_meta(request)
             return
 
+        fallback_name = _chat_name_from_messages(msgs)
         channel_meta = getattr(request, "channel_meta", None) or {}
         existing_title = channel_meta.get("session_title")
         if existing_title:
@@ -2406,6 +2410,7 @@ class AgentRunner(Runner):
                 title=str(existing_title),
                 trace_id=trace_id,
                 chat_id=getattr(chat, "id", None),
+                fallback_name=fallback_name,
             )
             return
 
@@ -2413,7 +2418,6 @@ class AgentRunner(Runner):
         if not user_question or not user_question.strip():
             return
 
-        fallback_name = _chat_name_from_messages(msgs)
         if not _should_generate_session_title(
             chat,
             fallback_name=fallback_name,
@@ -2425,6 +2429,7 @@ class AgentRunner(Runner):
             user_question=user_question,
             trace_id=trace_id,
             chat_id=getattr(chat, "id", None),
+            fallback_name=fallback_name,
         )
 
     async def _persist_session_title(
@@ -2434,6 +2439,7 @@ class AgentRunner(Runner):
         title: str,
         trace_id: str,
         chat_id: str | None = None,
+        fallback_name: str | None = None,
     ) -> None:
         """把已确定的标题写回 chat、trace 和 SSE 元数据。"""
         channel_meta = getattr(request, "channel_meta", None) or {}
@@ -2451,13 +2457,22 @@ class AgentRunner(Runner):
             )
         else:
             try:
-                persisted = await self._chat_manager.update_chat_name(
-                    resolved_chat_id,
-                    title,
-                    meta={
-                        _SESSION_TITLE_GENERATED_META_KEY: True,
-                    },
-                )
+                if fallback_name is None:
+                    persisted = await self._chat_manager.update_chat_name(
+                        resolved_chat_id,
+                        title,
+                        meta={
+                            _SESSION_TITLE_GENERATED_META_KEY: True,
+                        },
+                    )
+                else:
+                    persisted = (
+                        await self._chat_manager.update_generated_chat_title(
+                            resolved_chat_id,
+                            title,
+                            fallback_name=fallback_name,
+                        )
+                    )
             except Exception:
                 logger.warning(
                     "更新 chats.json 标题失败 chat_id=%s",
@@ -2472,6 +2487,7 @@ class AgentRunner(Runner):
 
         if not persisted:
             channel_meta.pop("session_title", None)
+            channel_meta.pop(SESSION_TITLE_COMMITTED_META_KEY, None)
             request.channel_meta = channel_meta
             return
 
@@ -2487,6 +2503,7 @@ class AgentRunner(Runner):
                 )
 
         channel_meta["session_title"] = title
+        channel_meta[SESSION_TITLE_COMMITTED_META_KEY] = True
         request.channel_meta = channel_meta
 
     async def _generate_and_update_title(
@@ -2495,6 +2512,7 @@ class AgentRunner(Runner):
         user_question: str | None,
         trace_id: str,
         chat_id: str | None = None,
+        fallback_name: str | None = None,
     ) -> None:
         """生成会话标题并更新存储。
 
@@ -2516,6 +2534,7 @@ class AgentRunner(Runner):
                 title=title,
                 trace_id=trace_id,
                 chat_id=chat_id,
+                fallback_name=fallback_name,
             )
 
             logger.info(
@@ -2542,7 +2561,10 @@ class AgentRunner(Runner):
         if not trace_id:
             return
 
-        existing_task = getattr(request, "_session_title_task", None)
+        chat_id = getattr(chat, "id", None)
+        if not chat_id:
+            return
+        existing_task = self._title_tasks.get(chat_id)
         if existing_task is not None and not existing_task.done():
             return
 
@@ -2553,13 +2575,16 @@ class AgentRunner(Runner):
                 msgs=msgs,
                 trace_id=trace_id,
             ),
-            name=f"session-title:{getattr(chat, 'id', '')}",
+            name=f"session-title:{chat_id}",
         )
         self._background_tasks.add(task)
+        self._title_tasks[chat_id] = task
         setattr(request, "_session_title_task", task)
 
         def _discard_completed_task(completed_task: asyncio.Task[Any]) -> None:
             self._background_tasks.discard(completed_task)
+            if self._title_tasks.get(chat_id) is completed_task:
+                self._title_tasks.pop(chat_id, None)
             try:
                 completed_task.exception()
             except asyncio.CancelledError:

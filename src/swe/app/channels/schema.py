@@ -48,6 +48,7 @@ ChannelType = str
 
 # Default channel when none is specified (runner / config).
 DEFAULT_CHANNEL: ChannelType = "console"
+SESSION_TITLE_COMMITTED_META_KEY = "session_title_committed"
 
 
 @runtime_checkable

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from swe.app.channels.console.channel import ConsoleChannel
+from swe.app.runner.runner import AgentRunner
 from swe.app.runner import runner as runner_module
 
 
@@ -33,6 +35,7 @@ async def test_console_stream_waits_for_session_title_task():
             request.channel_meta = {
                 **request.channel_meta,
                 "session_title": "费用分析",
+                "session_title_committed": True,
             }
 
         setattr(
@@ -73,6 +76,7 @@ async def test_console_stream_does_not_wait_for_title_before_first_event():
             request.channel_meta = {
                 **request.channel_meta,
                 "session_title": "费用分析",
+                "session_title_committed": True,
             }
 
         setattr(
@@ -110,6 +114,7 @@ async def test_console_stream_reads_session_title_written_during_process():
         request.channel_meta = {
             **request.channel_meta,
             "session_title": "Hook 标题",
+            "session_title_committed": True,
         }
         yield SimpleNamespace(object="message", status=None, type="message")
 
@@ -132,6 +137,72 @@ async def test_console_stream_reads_session_title_written_during_process():
         and '"session_title": "Hook 标题"' in event
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_console_stream_does_not_publish_uncommitted_title():
+    """A title is not visible until its persistence task confirms it."""
+
+    async def process(request):
+        async def update_title():
+            request.channel_meta = {
+                **request.channel_meta,
+                "session_title": "未提交标题",
+            }
+
+        setattr(
+            request,
+            "_session_title_task",
+            asyncio.create_task(update_title()),
+        )
+        yield SimpleNamespace(object="message", status=None, type="message")
+
+    channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        input=None,
+        channel_meta={},
+    )
+
+    events = [event async for event in channel.stream_one(request)]
+
+    assert not any(
+        '"object": "session_title_updated"' in event for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_deduplicates_title_tasks_by_chat_id():
+    """Concurrent turns for one chat share one title generation task."""
+    runner = AgentRunner(agent_id="test-agent")
+    runner._generate_session_title_before_stream = AsyncMock()
+    chat = SimpleNamespace(id="chat-1")
+    first_request = SimpleNamespace(channel_meta={})
+    second_request = SimpleNamespace(channel_meta={})
+
+    runner._schedule_session_title_generation(
+        request=first_request,
+        chat=chat,
+        msgs=[],
+        trace_id="trace-1",
+    )
+    runner._schedule_session_title_generation(
+        request=second_request,
+        chat=chat,
+        msgs=[],
+        trace_id="trace-2",
+    )
+
+    assert len(runner._background_tasks) == 1
+    assert getattr(second_request, "_session_title_task", None) is None
+
+    await next(iter(runner._background_tasks))
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

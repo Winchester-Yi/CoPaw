@@ -43,6 +43,7 @@ from ..base import (
     VideoContent,
     TextContent,
 )
+from ..schema import SESSION_TITLE_COMMITTED_META_KEY
 from ..utils import file_url_to_local_path
 
 logger = logging.getLogger(__name__)
@@ -460,7 +461,9 @@ class ConsoleChannel(BaseChannel):
 
                 send_meta = getattr(request, "channel_meta", None) or send_meta
                 session_title = send_meta.get("session_title")
-                if not session_title:
+                if not session_title or not send_meta.get(
+                    SESSION_TITLE_COMMITTED_META_KEY,
+                ):
                     return None
 
                 title_emitted = True
