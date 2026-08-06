@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
@@ -23,6 +24,7 @@ KEEP_FILES = {
     "agent.json",
     "chats.json",
     "jobs.json",
+    "system_jobs.json",
     "token_usage.json",
     "dream_logs.json",
     "swe_file_metadata.json",
@@ -35,6 +37,8 @@ KEEP_DIRS = {
     "backup",
     "skills",
     "governance",
+    "hooks",
+    "dialog",
 }
 
 ARCHIVE_FILES_DIR = "governance/archive/files"
@@ -338,8 +342,12 @@ def archive_old_orphans_for_workspace(
         actor=actor,
         reason=f"source_archive_maintenance_mtime_{old_orphan_days}_days",
     )
-    archived_paths = [str(item.get("original_path") or "") for item in archived_items]
-    archived_size_bytes = sum(int(item.get("size_bytes") or 0) for item in archived_items)
+    archived_paths = [
+        str(item.get("original_path") or "") for item in archived_items
+    ]
+    archived_size_bytes = sum(
+        int(item.get("size_bytes") or 0) for item in archived_items
+    )
     return WorkspaceArchiveMaintenanceResult(
         archived_items=archived_items,
         archived_paths=archived_paths,

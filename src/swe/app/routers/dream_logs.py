@@ -567,6 +567,7 @@ KEEP_FILES = {
     "agent.json",
     "chats.json",
     "jobs.json",
+    "system_jobs.json",
     "token_usage.json",
     "dream_logs.json",
     "swe_file_metadata.json",
@@ -579,6 +580,8 @@ KEEP_DIRS = {
     "backup",
     "skills",
     "governance",
+    "hooks",
+    "dialog",
 }
 
 

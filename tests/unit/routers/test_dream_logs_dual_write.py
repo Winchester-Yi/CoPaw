@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from swe.app.routers.dream_logs import (
     ARCHIVE_INDEX_FILE,
     _dual_write_workspace_governance_records,
+    _scan_orphan_files,
     router,
 )
 from swe.config.context import encode_scope_id
@@ -292,6 +293,26 @@ def test_archive_orphan_files_writes_archive_state(
     assert (
         service.archive_calls[0]["items"][0]["original_path"] == "orphan.txt"
     )
+
+
+def test_orphan_scan_keeps_system_state_files_and_directories(
+    tmp_path,
+) -> None:
+    workspace = tmp_path
+    (workspace / "old.txt").write_text("old", encoding="utf-8")
+    (workspace / "system_jobs.json").write_text("{}", encoding="utf-8")
+
+    hook_script = workspace / "hooks" / "scripts" / "guard.py"
+    hook_script.parent.mkdir(parents=True)
+    hook_script.write_text("print('guard')", encoding="utf-8")
+
+    dialog_manifest = workspace / "dialog" / "chat-1" / "manifest.json"
+    dialog_manifest.parent.mkdir(parents=True)
+    dialog_manifest.write_text('{"boundaries":[]}', encoding="utf-8")
+
+    orphan_paths = {item.path for item in _scan_orphan_files(workspace)}
+
+    assert orphan_paths == {"old.txt"}
 
 
 def test_archive_db_failure_records_reconcile_health(

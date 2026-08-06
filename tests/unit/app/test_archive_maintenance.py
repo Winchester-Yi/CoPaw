@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
@@ -90,6 +91,46 @@ def test_archive_old_orphans_for_workspace_archives_only_old_unprotected_files(
         "previous.txt",
         "old.txt",
     ]
+
+
+def test_archive_old_orphans_keeps_system_state_files_and_directories(
+    tmp_path,
+) -> None:
+    old_timestamp = datetime(2026, 6, 25, tzinfo=timezone.utc).timestamp()
+
+    old_file = tmp_path / "old.txt"
+    old_file.write_text("old", encoding="utf-8")
+    _touch_mtime(old_file, old_timestamp)
+
+    system_jobs = tmp_path / "system_jobs.json"
+    system_jobs.write_text("{}", encoding="utf-8")
+    _touch_mtime(system_jobs, old_timestamp)
+
+    hook_script = tmp_path / "hooks" / "scripts" / "guard.py"
+    hook_script.parent.mkdir(parents=True)
+    hook_script.write_text("print('guard')", encoding="utf-8")
+    _touch_mtime(hook_script, old_timestamp)
+
+    dialog_manifest = tmp_path / "dialog" / "chat-1" / "manifest.json"
+    dialog_manifest.parent.mkdir(parents=True)
+    dialog_manifest.write_text('{"boundaries":[]}', encoding="utf-8")
+    _touch_mtime(dialog_manifest, old_timestamp)
+
+    result = archive_old_orphans_for_workspace(
+        tmp_path,
+        old_orphan_days=3,
+        max_files=10,
+        remaining_files=10,
+        actor="source_archive_maintenance",
+        now=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    assert old_file.exists() is False
+    assert system_jobs.exists() is True
+    assert hook_script.exists() is True
+    assert dialog_manifest.exists() is True
+    assert result.archived_paths == ["old.txt"]
+    assert result.candidates_count == 1
 
 
 def test_archive_old_orphans_for_workspace_honors_limits(tmp_path) -> None:
