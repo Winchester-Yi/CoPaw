@@ -737,7 +737,9 @@ def _reload_persisted_skill_hook_sources(
             "Failed to resolve enabled skills for persisted hook sources",
             exc_info=True,
         )
-        return overlay
+        return HookSessionOverlay.model_validate(
+            state.model_dump(mode="json", by_alias=True),
+        )
 
     for source in overlay.loaded_skill_sources:
         if source.skill_name not in enabled_skills:

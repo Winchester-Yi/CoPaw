@@ -373,7 +373,7 @@ async def test_load_session_hook_overlay_discards_unavailable_skill_sources(
 
 
 @pytest.mark.asyncio
-async def test_load_session_hook_overlay_preserves_sources_on_resolution_error(
+async def test_load_session_hook_overlay_discards_sources_on_resolution_error(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -404,7 +404,10 @@ async def test_load_session_hook_overlay_preserves_sources_on_resolution_error(
                 ),
             ),
         ],
-        entries=[{"hookId": "skill:sample:stop-hook", "enabled": False}],
+        entries=[
+            {"hookId": "skill:sample:stop-hook", "enabled": False},
+            {"hookId": "tenant-hook", "enabled": False},
+        ],
     )
     session = SimpleNamespace(
         get_session_state_dict=AsyncMock(
@@ -433,7 +436,8 @@ async def test_load_session_hook_overlay_preserves_sources_on_resolution_error(
         channel="console",
     )
 
-    assert overlay == persisted_overlay
+    assert overlay.loaded_skill_sources == []
+    assert [entry.hook_id for entry in overlay.entries] == ["tenant-hook"]
 
 
 @pytest.mark.asyncio
