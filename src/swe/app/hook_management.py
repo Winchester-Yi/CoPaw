@@ -58,11 +58,23 @@ class HookAuditActor:
 
 
 @dataclass(frozen=True)
+class HookScriptDiagnostic:
+    """One invalid script reference retained for Hook-console repair."""
+
+    event: str
+    group_id: str
+    handler_id: str
+    argument: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class HookConfigurationSnapshot:
     """A default profile Hook draft plus its optimistic-lock revision."""
 
     hooks: dict[str, Any]
     revision: str
+    diagnostics: tuple[HookScriptDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,11 +130,12 @@ class HookManagementService:
         return self._workspace_dir / "hooks" / "scripts"
 
     def get_configuration(self) -> HookConfigurationSnapshot:
-        """Return the validated Hook configuration stored for the default profile."""
-        hooks = self._load_hooks()
+        """Return the Hook configuration and repairable script diagnostics."""
+        hooks, diagnostics = self._load_hooks()
         return HookConfigurationSnapshot(
             hooks=hooks,
             revision=self._revision_for(hooks),
+            diagnostics=diagnostics,
         )
 
     def save_configuration(
@@ -338,27 +351,31 @@ class HookManagementService:
             )
         return data
 
-    def _load_hooks(self) -> dict[str, Any]:
+    def _load_hooks(
+        self,
+    ) -> tuple[dict[str, Any], tuple[HookScriptDiagnostic, ...]]:
         agent_config = self._load_agent_config()
         raw_hooks = agent_config.get("hooks", {})
         if not isinstance(raw_hooks, dict):
             raise HookManagementValidationError(
                 "agent hooks must be an object",
             )
-        return self._validate_hooks(raw_hooks)
+        hooks = self._normalize_hook_shape(raw_hooks)
+        return hooks, self._normalize_script_references_for_load(hooks)
 
-    def _validate_hooks(self, hooks: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_hook_shape(self, hooks: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(hooks, dict):
             raise HookManagementValidationError("hooks must be an object")
-
         self._reject_command_strings(hooks)
         try:
             config = HookConfig.model_validate(hooks)
         except ValidationError as exc:
             raise HookManagementValidationError(str(exc)) from exc
-
         self._validate_unique_ids(config)
-        normalized = config.model_dump(mode="json", by_alias=True)
+        return config.model_dump(mode="json", by_alias=True)
+
+    def _validate_hooks(self, hooks: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_hook_shape(hooks)
         self._normalize_script_references(normalized)
         return normalized
 
@@ -433,6 +450,54 @@ class HookManagementService:
                             "script handlers must not set cwd",
                         )
                     handler["argv"] = normalized_argv
+
+    def _normalize_script_references_for_load(
+        self,
+        hooks: dict[str, Any],
+    ) -> tuple[HookScriptDiagnostic, ...]:
+        diagnostics: list[HookScriptDiagnostic] = []
+        events = hooks.get("events", {})
+        if not isinstance(events, dict):
+            return ()
+        for event, groups in events.items():
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                group_id = str(group.get("id", ""))
+                for handler in group.get("hooks", []):
+                    if (
+                        not isinstance(handler, dict)
+                        or handler.get("type") != "command"
+                    ):
+                        continue
+                    argv = handler.get("argv", [])
+                    if not isinstance(argv, list):
+                        continue
+                    handler_id = str(handler.get("id", ""))
+                    normalized_argv = []
+                    for index, argument in enumerate(argv):
+                        try:
+                            normalized_argv.append(
+                                self._normalize_script_argument(
+                                    argument,
+                                    index,
+                                ),
+                            )
+                        except HookManagementValidationError as exc:
+                            normalized_argv.append(argument)
+                            diagnostics.append(
+                                HookScriptDiagnostic(
+                                    event=str(event),
+                                    group_id=group_id,
+                                    handler_id=handler_id,
+                                    argument=str(argument),
+                                    reason=str(exc),
+                                ),
+                            )
+                    handler["argv"] = normalized_argv
+        return tuple(diagnostics)
 
     def _normalize_script_argument(self, argument: Any, index: int) -> str:
         if not isinstance(argument, str):

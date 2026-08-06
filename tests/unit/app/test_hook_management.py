@@ -222,6 +222,62 @@ def test_save_rejects_path_like_argv_zero_outside_script_library(
         )
 
 
+def test_get_configuration_reports_missing_script_without_blocking_load(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    agent_path = workspace_dir / "agent.json"
+    agent_data = json.loads(agent_path.read_text(encoding="utf-8"))
+    agent_data["hooks"] = {
+        "enabled": True,
+        "events": {
+            "PreToolUse": [
+                {
+                    "id": "group",
+                    "hooks": [
+                        {
+                            "id": "missing-script",
+                            "type": "command",
+                            "argv": [
+                                "python",
+                                "hooks/scripts/missing.py",
+                            ],
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    agent_path.write_text(json.dumps(agent_data), encoding="utf-8")
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+
+    snapshot = service.get_configuration()
+
+    assert (
+        snapshot.hooks["events"]["PreToolUse"][0]["hooks"][0]["argv"][1]
+        == "hooks/scripts/missing.py"
+    )
+    assert [diagnostic.__dict__ for diagnostic in snapshot.diagnostics] == [
+        {
+            "event": "PreToolUse",
+            "group_id": "group",
+            "handler_id": "missing-script",
+            "argument": "hooks/scripts/missing.py",
+            "reason": "script is not in the controlled library: missing.py",
+        },
+    ]
+    with pytest.raises(
+        HookManagementValidationError,
+        match="controlled library",
+    ):
+        service.save_configuration(
+            hooks=snapshot.hooks,
+            expected_revision=snapshot.revision,
+            actor=_actor(),
+        )
+
+
 @pytest.mark.parametrize(
     "argv",
     [
