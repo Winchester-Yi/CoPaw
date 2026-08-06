@@ -258,6 +258,32 @@
 - 再确认保存或删除后，前端已经刷新 effective config store，而不是只刷新当前页面表单
 - 如果聊天页行为没变化，抓下一轮请求的 effective config，再核对 prompt、tool、stream 三处是否都已关闭
 
+## 续会话后技能 Hook 报找不到文件
+
+### 症状
+
+- 会话曾加载过带 `hooks/hooks.json` 的技能
+- 该技能后来被禁用、卸载，或将 `hooks.json` 的 `enabled` 设为 `false`
+- 继续同一会话时，Hook 尝试执行旧脚本绝对路径并报文件不存在
+
+### 典型原因
+
+- 会话状态中的 `hook_overlay` 会保存已加载技能的 hook 配置，其中命令脚本路径已规范化为绝对路径
+- 如果恢复时直接使用该历史配置，已经失效的技能来源仍会进入 HookRuntime
+
+### 第一落点
+
+- [src/swe/app/runner/runner.py](../../src/swe/app/runner/runner.py)
+- 重点看 `_load_session_hook_overlay()` 和 `_reload_persisted_skill_hook_sources()` 是否按当前 channel 的有效技能集重新加载 `hooks.json`
+- [src/swe/agents/skills_manager.py](../../src/swe/agents/skills_manager.py)
+- 重点看 `resolve_effective_skills()` 对技能启用状态和 channel 的解析
+
+### 第一阶段处理
+
+- 续会话时只保留当前仍启用的技能来源，并从当前技能目录重新加载 hook 配置
+- 缺失、禁用或校验失败的技能来源，以及关联的技能级 overlay 条目，都应从当前会话运行状态中移除
+- 保留租户和 Agent 级 hook，不要因清理技能来源而删除非技能 overlay 条目
+
 ## Tenant bootstrap 时报 default workspace 缺少 agent.json
 
 ### 症状

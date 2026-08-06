@@ -37,6 +37,7 @@ from swe.app.runner.runner import (
     _TurnPlan,
     _QueryTurnOutcome,
     _emit_runner_hook,
+    _load_session_hook_overlay,
 )
 from swe.app.runner.session import SafeJSONSession
 from swe.config.config import SuggestionMode
@@ -293,6 +294,149 @@ def test_hook_config_enabled_accepts_loaded_skill_sources() -> None:
     )
 
     assert _hook_config_enabled(HookConfig(), _agent_config(), state)
+
+
+@pytest.mark.asyncio
+async def test_load_session_hook_overlay_discards_unavailable_skill_sources(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    persisted_overlay = HookSessionOverlay(
+        loaded_skill_sources=[
+            LoadedSkillHookSource(
+                source_id="skill:removed",
+                skill_name="removed",
+                skill_root=str(tmp_path / "skills" / "removed"),
+                source_path=str(
+                    tmp_path / "skills" / "removed" / "hooks" / "hooks.json",
+                ),
+                hook_config=HookConfig(
+                    enabled=True,
+                    events={
+                        HookEventName.STOP: [
+                            HookMatcherGroupConfig(
+                                id="skill:removed:stop",
+                                hooks=[
+                                    CommandHookHandlerConfig(
+                                        id="skill:removed:stop-hook",
+                                        argv=[
+                                            "python",
+                                            str(
+                                                tmp_path
+                                                / "skills"
+                                                / "removed"
+                                                / "scripts"
+                                                / "stop.py",
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ],
+                    },
+                ),
+            ),
+        ],
+        entries=[
+            {
+                "hookId": "skill:removed:stop-hook",
+                "enabled": False,
+            },
+            {"hookId": "tenant-hook", "enabled": False},
+        ],
+    )
+    session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(
+            return_value={
+                "hook_overlay": persisted_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.resolve_effective_skills",
+        lambda *_args, **_kwargs: [],
+    )
+
+    overlay = await _load_session_hook_overlay(
+        session,
+        session_id="session-1",
+        user_id="user-1",
+        workspace_dir=tmp_path,
+        channel="console",
+    )
+
+    assert overlay.loaded_skill_sources == []
+    assert [entry.hook_id for entry in overlay.entries] == ["tenant-hook"]
+
+
+@pytest.mark.asyncio
+async def test_load_session_hook_overlay_discards_skill_with_disabled_hooks(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    skill_root = tmp_path / "skills" / "sample"
+    (skill_root / "hooks").mkdir(parents=True)
+    (skill_root / "hooks" / "hooks.json").write_text(
+        '{"enabled": false, "events": {}}',
+        encoding="utf-8",
+    )
+    persisted_overlay = HookSessionOverlay(
+        loaded_skill_sources=[
+            LoadedSkillHookSource(
+                source_id="skill:sample",
+                skill_name="sample",
+                skill_root=str(skill_root),
+                source_path=str(skill_root / "hooks" / "hooks.json"),
+                hook_config=HookConfig(
+                    enabled=True,
+                    events={
+                        HookEventName.STOP: [
+                            HookMatcherGroupConfig(
+                                id="skill:sample:stop",
+                                hooks=[
+                                    CommandHookHandlerConfig(
+                                        id="skill:sample:stop-hook",
+                                        argv=["python", "scripts/stop.py"],
+                                    ),
+                                ],
+                            ),
+                        ],
+                    },
+                ),
+            ),
+        ],
+    )
+    session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(
+            return_value={
+                "hook_overlay": persisted_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.resolve_effective_skills",
+        lambda *_args, **_kwargs: ["sample"],
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.resolve_effective_skill_dir",
+        lambda *_args, **_kwargs: skill_root,
+    )
+
+    overlay = await _load_session_hook_overlay(
+        session,
+        session_id="session-1",
+        user_id="user-1",
+        workspace_dir=tmp_path,
+        channel="console",
+    )
+
+    assert overlay.loaded_skill_sources == []
 
 
 @pytest.mark.asyncio
@@ -862,6 +1006,28 @@ async def test_query_handler_loads_session_skill_hooks_for_media_message(
     )
     emit_hook = AsyncMock(return_value=MergedHookResult())
     monkeypatch.setattr("swe.app.runner.runner._emit_runner_hook", emit_hook)
+
+    skill_root = tmp_path / "skills" / "xlsx"
+    (skill_root / "hooks").mkdir(parents=True)
+    (skill_root / "scripts").mkdir()
+    (skill_root / "scripts" / "stop.py").write_text(
+        "print('{}')\n",
+        encoding="utf-8",
+    )
+    (skill_root / "hooks" / "hooks.json").write_text(
+        '{"enabled": true, "events": {"Stop": [{"hooks": '
+        '[{"id": "stop", "type": "command", '
+        '"argv": ["python", "scripts/stop.py"]}]}]}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.resolve_effective_skills",
+        lambda *_args, **_kwargs: ["xlsx"],
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.resolve_effective_skill_dir",
+        lambda *_args, **_kwargs: skill_root,
+    )
 
     persisted_overlay = HookSessionState(
         loaded_skill_sources=[

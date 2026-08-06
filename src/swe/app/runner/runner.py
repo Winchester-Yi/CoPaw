@@ -60,6 +60,7 @@ from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
     resolve_effective_skill_dir,
+    resolve_effective_skills,
 )
 from ...agents.hook_runtime import HookRuntime
 from ...agents.hook_runtime.conversation_snapshot import (
@@ -678,6 +679,8 @@ async def _load_session_hook_overlay(
     *,
     session_id: str,
     user_id: str,
+    workspace_dir: Path,
+    channel: str,
 ) -> HookSessionOverlay:
     if session is None or not session_id:
         return HookSessionOverlay()
@@ -696,10 +699,82 @@ async def _load_session_hook_overlay(
     if not isinstance(raw_overlay, dict):
         return HookSessionOverlay()
     try:
-        return HookSessionOverlay.model_validate(raw_overlay)
+        overlay = HookSessionOverlay.model_validate(raw_overlay)
     except Exception:
         logger.warning("Invalid hook_overlay session state", exc_info=True)
         return HookSessionOverlay()
+    return _reload_persisted_skill_hook_sources(
+        overlay,
+        workspace_dir=workspace_dir,
+        channel=channel,
+    )
+
+
+def _reload_persisted_skill_hook_sources(
+    overlay: HookSessionOverlay,
+    *,
+    workspace_dir: Path,
+    channel: str,
+) -> HookSessionOverlay:
+    """Reload persisted skill hooks only when the skill remains enabled."""
+    workspace = Path(workspace_dir)
+    non_skill_entries = [
+        entry
+        for entry in overlay.entries
+        if not entry.hook_id.startswith("skill:")
+    ]
+    state = HookSessionState(
+        entries=non_skill_entries,
+        once_executed=overlay.once_executed,
+    )
+    try:
+        enabled_skills = set(resolve_effective_skills(workspace, channel))
+    except Exception:
+        logger.warning(
+            "Failed to resolve enabled skills for persisted hook sources",
+            exc_info=True,
+        )
+        return HookSessionOverlay.model_validate(
+            state.model_dump(mode="json", by_alias=True),
+        )
+
+    for source in overlay.loaded_skill_sources:
+        if source.skill_name not in enabled_skills:
+            continue
+        skill_root = resolve_effective_skill_dir(
+            workspace,
+            source.skill_name,
+        )
+        if skill_root is None:
+            continue
+        try:
+            state = load_skill_hooks_for_session(
+                skill_name=source.skill_name,
+                skill_root=skill_root,
+                workspace_dir=workspace,
+                session_state=state,
+            )
+        except SkillHookLoadError as exc:
+            logger.warning(
+                "Discarded persisted hooks for skill '%s': %s",
+                source.skill_name,
+                exc,
+            )
+
+    available_skill_handler_ids = state.loaded_skill_handler_ids()
+    refreshed_entries = [
+        *non_skill_entries,
+        *(
+            entry
+            for entry in overlay.entries
+            if entry.hook_id in available_skill_handler_ids
+        ),
+    ]
+    return HookSessionOverlay(
+        loaded_skill_sources=state.loaded_skill_sources,
+        entries=refreshed_entries,
+        once_executed=overlay.once_executed,
+    )
 
 
 def _load_tenant_approved_skill_hook_http_urls(
@@ -2276,6 +2351,8 @@ class AgentRunner(Runner):
             getattr(self, "session", None),
             session_id=session_id,
             user_id=user_id,
+            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+            channel=getattr(request, "channel", DEFAULT_CHANNEL),
         )
         hook_additional_context = ""
         if query and _hook_config_enabled(
