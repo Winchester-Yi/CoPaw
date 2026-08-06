@@ -373,6 +373,103 @@ async def test_load_session_hook_overlay_discards_unavailable_skill_sources(
 
 
 @pytest.mark.asyncio
+async def test_load_session_hook_overlay_preserves_sources_on_resolution_error(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    persisted_overlay = HookSessionOverlay(
+        loaded_skill_sources=[
+            LoadedSkillHookSource(
+                source_id="skill:sample",
+                skill_name="sample",
+                skill_root=str(tmp_path / "skills" / "sample"),
+                source_path=str(
+                    tmp_path / "skills" / "sample" / "hooks" / "hooks.json",
+                ),
+                hook_config=HookConfig(
+                    enabled=True,
+                    events={
+                        HookEventName.STOP: [
+                            HookMatcherGroupConfig(
+                                id="skill:sample:stop",
+                                hooks=[
+                                    CommandHookHandlerConfig(
+                                        id="skill:sample:stop-hook",
+                                        command="echo {}",
+                                    ),
+                                ],
+                            ),
+                        ],
+                    },
+                ),
+            ),
+        ],
+        entries=[{"hookId": "skill:sample:stop-hook", "enabled": False}],
+    )
+    session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(
+            return_value={
+                "hook_overlay": persisted_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+            },
+        ),
+    )
+
+    def raise_resolution_error(*_args, **_kwargs) -> None:
+        raise RuntimeError("transient skill resolution failure")
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner.resolve_effective_skills",
+        raise_resolution_error,
+    )
+
+    overlay = await _load_session_hook_overlay(
+        session,
+        session_id="session-1",
+        user_id="user-1",
+        workspace_dir=tmp_path,
+        channel="console",
+    )
+
+    assert overlay == persisted_overlay
+
+
+@pytest.mark.asyncio
+async def test_load_session_hook_overlay_skips_resolution_without_skill_sources(
+    tmp_path,
+) -> None:
+    persisted_overlay = HookSessionOverlay(
+        entries=[{"hookId": "tenant-hook", "enabled": False}],
+    )
+    session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(
+            return_value={
+                "hook_overlay": persisted_overlay.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+            },
+        ),
+    )
+
+    with patch(
+        "swe.app.runner.runner.resolve_effective_skills",
+    ) as resolve_effective_skills:
+        overlay = await _load_session_hook_overlay(
+            session,
+            session_id="session-1",
+            user_id="user-1",
+            workspace_dir=tmp_path,
+            channel="console",
+        )
+
+    assert overlay == persisted_overlay
+    resolve_effective_skills.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_load_session_hook_overlay_discards_skill_with_disabled_hooks(
     monkeypatch,
     tmp_path,

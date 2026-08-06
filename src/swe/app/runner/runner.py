@@ -717,6 +717,9 @@ def _reload_persisted_skill_hook_sources(
     channel: str,
 ) -> HookSessionOverlay:
     """Reload persisted skill hooks only when the skill remains enabled."""
+    if not overlay.loaded_skill_sources:
+        return overlay
+
     workspace = Path(workspace_dir)
     non_skill_entries = [
         entry
@@ -734,9 +737,7 @@ def _reload_persisted_skill_hook_sources(
             "Failed to resolve enabled skills for persisted hook sources",
             exc_info=True,
         )
-        return HookSessionOverlay.model_validate(
-            state.model_dump(mode="json", by_alias=True),
-        )
+        return overlay
 
     for source in overlay.loaded_skill_sources:
         if source.skill_name not in enabled_skills:
