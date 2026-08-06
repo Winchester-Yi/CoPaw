@@ -37,9 +37,20 @@ from ..utils import schedule_agent_reload
 router = APIRouter(prefix="/hook-management", tags=["hook-management"])
 
 
+class HookScriptDiagnosticResponse(BaseModel):
+    event: str
+    group_id: str
+    handler_id: str
+    argument: str
+    reason: str
+
+
 class HookConfigurationResponse(BaseModel):
     hooks: dict[str, Any]
     revision: str
+    diagnostics: list[HookScriptDiagnosticResponse] = Field(
+        default_factory=list,
+    )
 
 
 class HookConfigurationUpdate(BaseModel):
@@ -90,6 +101,10 @@ def _configuration_response(
     return HookConfigurationResponse(
         hooks=snapshot.hooks,
         revision=snapshot.revision,
+        diagnostics=[
+            HookScriptDiagnosticResponse(**diagnostic.__dict__)
+            for diagnostic in snapshot.diagnostics
+        ],
     )
 
 

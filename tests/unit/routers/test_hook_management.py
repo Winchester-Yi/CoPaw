@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from swe.app.hook_management import (
     HookConfigurationSnapshot,
+    HookScriptDiagnostic,
     HookScriptUploadResult,
 )
 from swe.app.routers import hook_management
@@ -93,6 +94,36 @@ def test_put_configuration_reloads_default_agent_after_save(
         "tenant-a",
         "source-a",
     )
+
+
+def test_get_configuration_returns_script_diagnostics(monkeypatch) -> None:
+    client, service, _ = _client(monkeypatch)
+    service.snapshot = HookConfigurationSnapshot(
+        hooks={"enabled": True, "events": {}},
+        revision="revision-1",
+        diagnostics=(
+            HookScriptDiagnostic(
+                event="PreToolUse",
+                group_id="group",
+                handler_id="missing-script",
+                argument="hooks/scripts/missing.py",
+                reason="script is not in the controlled library: missing.py",
+            ),
+        ),
+    )
+
+    response = client.get("/hook-management/configuration")
+
+    assert response.status_code == 200
+    assert response.json()["diagnostics"] == [
+        {
+            "event": "PreToolUse",
+            "group_id": "group",
+            "handler_id": "missing-script",
+            "argument": "hooks/scripts/missing.py",
+            "reason": "script is not in the controlled library: missing.py",
+        },
+    ]
 
 
 def test_manual_test_requires_real_execution_confirmation(monkeypatch) -> None:
