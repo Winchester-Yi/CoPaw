@@ -93,6 +93,32 @@ describe("HookManagementPage", () => {
     );
   });
 
+  it("shows invalid script diagnostics without replacing the management page", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      hooks,
+      revision: "rev-1",
+      diagnostics: [
+        {
+          event: "PreToolUse",
+          group_id: "tool-guards",
+          handler_id: "guard-shell",
+          argument: "hooks/scripts/missing.py",
+          reason: "script is not in the controlled library: missing.py",
+        },
+      ],
+    });
+    render(<HookManagementPage />);
+
+    expect(
+      await screen.findByRole("heading", { name: /Hook 管理/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Hook 脚本引用需要修复")).toBeInTheDocument();
+    expect(
+      screen.getByText(/PreToolUse · tool-guards · guard-shell/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/hooks\/scripts\/missing.py/)).toBeInTheDocument();
+  });
+
   it("keeps a renamed Handler selected for continued editing", async () => {
     render(<HookManagementPage />);
     await openPreToolHandler();

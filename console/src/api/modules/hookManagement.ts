@@ -19,9 +19,18 @@ export type HookHandler = {
 
 export type HookContext = Record<string, unknown>;
 
+export type HookScriptDiagnostic = {
+  event: string;
+  group_id: string;
+  handler_id: string;
+  argument: string;
+  reason: string;
+};
+
 export type HookConfigurationResponse = {
   hooks: HookConfig;
   revision: string;
+  diagnostics: HookScriptDiagnostic[];
 };
 
 export type HookScript = {

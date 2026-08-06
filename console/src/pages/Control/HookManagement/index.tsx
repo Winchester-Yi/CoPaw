@@ -1,4 +1,5 @@
 import {
+  Alert,
   Button,
   Checkbox,
   Collapse,
@@ -17,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   hookManagementApi,
   type HookScript,
+  type HookScriptDiagnostic,
 } from "@/api/modules/hookManagement";
 import { useAppMessage } from "@/hooks/useAppMessage";
 
@@ -207,6 +209,7 @@ function HookManagementPage() {
   const [savedDraft, setSavedDraft] = useState("");
   const [revision, setRevision] = useState("");
   const [scripts, setScripts] = useState<HookScript[]>([]);
+  const [diagnostics, setDiagnostics] = useState<HookScriptDiagnostic[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -249,6 +252,7 @@ function HookManagementPage() {
       setDraft(snapshot.hooks as HookConfigDraft);
       setSavedDraft(serializeDraft(snapshot.hooks as HookConfigDraft));
       setRevision(snapshot.revision);
+      setDiagnostics(snapshot.diagnostics ?? []);
       setScripts(files);
       setSelected({ kind: "root" });
     } catch (cause) {
@@ -289,6 +293,7 @@ function HookManagementPage() {
       setDraft(snapshot.hooks as HookConfigDraft);
       setSavedDraft(serializeDraft(snapshot.hooks as HookConfigDraft));
       setRevision(snapshot.revision);
+      setDiagnostics(snapshot.diagnostics ?? []);
       message.success("Hook 配置已保存，Default Agent 将异步加载新配置");
     } catch (cause) {
       if ((cause as { status?: number }).status === 409) {
@@ -757,6 +762,24 @@ function HookManagementPage() {
           保存并激活
         </Button>
       </header>
+      {diagnostics.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message="Hook 脚本引用需要修复"
+          description={
+            <ul>
+              {diagnostics.map((diagnostic) => (
+                <li
+                  key={`${diagnostic.event}-${diagnostic.group_id}-${diagnostic.handler_id}-${diagnostic.argument}`}
+                >
+                  {`${diagnostic.event} · ${diagnostic.group_id} · ${diagnostic.handler_id}：${diagnostic.argument}（${diagnostic.reason}）`}
+                </li>
+              ))}
+            </ul>
+          }
+        />
+      )}
       {formError && <p className={styles.formError}>{formError}</p>}
       <Tabs
         items={[
