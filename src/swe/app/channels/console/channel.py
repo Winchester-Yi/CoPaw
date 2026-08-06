@@ -432,14 +432,21 @@ class ConsoleChannel(BaseChannel):
                     and str(status_value).lower() == "in_progress"
                 )
 
-            async def build_session_title_event() -> str | None:
-                """生成标题刷新事件；标题任务存在时先等待其完成。"""
+            async def build_session_title_event(
+                *,
+                wait_for_task: bool,
+            ) -> str | None:
+                """标题完成后生成刷新事件，首事件前不等待后台任务。"""
                 nonlocal send_meta, title_emitted, title_task_waited
                 if title_emitted:
                     return None
 
                 title_task = getattr(request, "_session_title_task", None)
-                if title_task is not None and not title_task_waited:
+                if (
+                    wait_for_task
+                    and title_task is not None
+                    and not title_task_waited
+                ):
                     title_task_waited = True
                     try:
                         await asyncio.shield(title_task)
@@ -474,7 +481,7 @@ class ConsoleChannel(BaseChannel):
                     + "\n\n"
                 )
 
-            title_event = await build_session_title_event()
+            title_event = await build_session_title_event(wait_for_task=False)
             if title_event:
                 yield title_event
 
@@ -492,7 +499,9 @@ class ConsoleChannel(BaseChannel):
                     ev_type,
                 )
 
-                title_event = await build_session_title_event()
+                title_event = await build_session_title_event(
+                    wait_for_task=False,
+                )
                 if title_event:
                     yield title_event
                     for buffered in flush_buffered_initial_events():
@@ -576,6 +585,10 @@ class ConsoleChannel(BaseChannel):
 
                 elif obj == "response":
                     last_response = event
+
+            title_event = await build_session_title_event(wait_for_task=True)
+            if title_event:
+                yield title_event
 
             for buffered in flush_buffered_initial_events():
                 yield buffered

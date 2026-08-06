@@ -1284,6 +1284,46 @@ async def test_build_and_connect_mcp_clients_passes_explicit_connect_timeout(
 
 
 @pytest.mark.asyncio
+async def test_build_and_connect_mcp_clients_connects_clients_concurrently(
+    monkeypatch,
+):
+    """Enabled MCP clients should not add their connection waits serially."""
+    import swe.app.runner.runner as runner_module
+
+    config = SimpleNamespace(
+        clients={
+            "first": SimpleNamespace(enabled=True),
+            "second": SimpleNamespace(enabled=True),
+        },
+    )
+    in_flight = 0
+    max_in_flight = 0
+
+    class FakeClient:
+        async def connect(self, timeout):
+            nonlocal in_flight, max_in_flight
+            assert timeout == runner_module._MCP_CONNECT_TIMEOUT_SECONDS
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+
+    async def create_client(*_args, **_kwargs):
+        return FakeClient()
+
+    monkeypatch.setattr(
+        runner_module,
+        "_create_mcp_client_with_headers",
+        create_client,
+    )
+
+    clients = await _build_and_connect_mcp_clients(config)
+
+    assert len(clients) == 2
+    assert max_in_flight == 2
+
+
+@pytest.mark.asyncio
 async def test_prepare_query_runtime_logs_agent_build_duration(
     monkeypatch,
     tmp_path,

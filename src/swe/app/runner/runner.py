@@ -134,7 +134,13 @@ _APPROVE_EXACT = frozenset(
     },
 )
 _MCP_HTTP_TIMEOUT_SECONDS = 240.0
-_MCP_CONNECT_TIMEOUT_SECONDS = _MCP_HTTP_TIMEOUT_SECONDS
+_MCP_CONNECT_TIMEOUT_SECONDS = float(
+    os.environ.get("SWE_MCP_CONNECT_TIMEOUT_SECONDS", "10"),
+)
+_MCP_CONNECT_MAX_CONCURRENT = max(
+    1,
+    int(os.environ.get("SWE_MCP_CONNECT_MAX_CONCURRENT", "4")),
+)
 _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS = 60.0 * 5
 
 _DENY_EXACT = frozenset(
@@ -986,33 +992,62 @@ async def _build_and_connect_mcp_clients(
         )
         return []
 
-    clients = []
-    for key, client_config in mcp_config.clients.items():
-        if not client_config.enabled:
-            continue
+    enabled_configs = [
+        (key, client_config)
+        for key, client_config in mcp_config.clients.items()
+        if client_config.enabled
+    ]
+    semaphore = asyncio.Semaphore(_MCP_CONNECT_MAX_CONCURRENT)
 
+    async def _create_and_connect(
+        key: str,
+        client_config: MCPClientConfig,
+    ) -> Any | None:
+        client = None
         try:
-            client = await _create_mcp_client_with_headers(
-                client_config,
-                passthrough_headers,
-                session_id=session_id,
-                chat_id=chat_id,
-                trace_id=trace_id,
-            )
-            if client is not None:
-                await client.connect(timeout=_MCP_CONNECT_TIMEOUT_SECONDS)
-                clients.append(client)
-                logger.info(f"MCP client '{key}' created and connected")
+            async with semaphore:
+                client = await _create_mcp_client_with_headers(
+                    client_config,
+                    passthrough_headers,
+                    session_id=session_id,
+                    chat_id=chat_id,
+                    trace_id=trace_id,
+                )
+                if client is None:
+                    return None
+                await asyncio.wait_for(
+                    client.connect(timeout=_MCP_CONNECT_TIMEOUT_SECONDS),
+                    timeout=_MCP_CONNECT_TIMEOUT_SECONDS,
+                )
+            logger.info("MCP client '%s' created and connected", key)
+            return client
         except asyncio.CancelledError:
             # MCP 连接阶段的取消（如远端 502 导致），降级跳过而非取消整个查询
             logger.warning(
                 f"MCP client '{key}' connection cancelled, skipping",
+            )
+        except TimeoutError:
+            logger.warning(
+                "MCP client '%s' connection timed out after %.1fs",
+                key,
+                _MCP_CONNECT_TIMEOUT_SECONDS,
             )
         except Exception as e:
             logger.warning(
                 f"Failed to create MCP client '{key}': {e}",
                 exc_info=True,
             )
+        if client is not None:
+            await _cleanup_mcp_clients([client])
+        return None
+
+    results = await asyncio.gather(
+        *(
+            _create_and_connect(key, client_config)
+            for key, client_config in enabled_configs
+        ),
+    )
+    clients = [client for client in results if client is not None]
 
     logger.debug(
         "mcp_client_connect_duration_ms=%d client_count=%d",
@@ -2007,6 +2042,7 @@ class AgentRunner(Runner):
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
         self.session: Any | None = None
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -2353,7 +2389,7 @@ class AgentRunner(Runner):
         msgs: list[Any],
         trace_id: str | None,
     ) -> None:
-        """在 Agent 主回答前生成标题，确保前端先收到标题刷新事件。"""
+        """生成标题并写回会话元数据，供通道以独立事件刷新。"""
         if not trace_id:
             return
 
@@ -2493,6 +2529,45 @@ class AgentRunner(Runner):
                 trace_id,
                 exc_info=True,
             )
+
+    def _schedule_session_title_generation(
+        self,
+        *,
+        request: AgentRequest,
+        chat: Any,
+        msgs: list[Any],
+        trace_id: str | None,
+    ) -> None:
+        """启动受管标题任务，不阻塞 Agent 首答路径。"""
+        if not trace_id:
+            return
+
+        existing_task = getattr(request, "_session_title_task", None)
+        if existing_task is not None and not existing_task.done():
+            return
+
+        task = asyncio.create_task(
+            self._generate_session_title_before_stream(
+                request=request,
+                chat=chat,
+                msgs=msgs,
+                trace_id=trace_id,
+            ),
+            name=f"session-title:{getattr(chat, 'id', '')}",
+        )
+        self._background_tasks.add(task)
+        setattr(request, "_session_title_task", task)
+
+        def _discard_completed_task(completed_task: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(completed_task)
+            try:
+                completed_task.exception()
+            except asyncio.CancelledError:
+                logger.debug("Session title task cancelled")
+            except Exception:
+                logger.warning("Session title task failed", exc_info=True)
+
+        task.add_done_callback(_discard_completed_task)
 
     @staticmethod
     def _attach_trace_id_to_event(event: Any, trace_id: str | None) -> Any:
@@ -3153,12 +3228,6 @@ class AgentRunner(Runner):
                 trace_id=getattr(request, "trace_id", None),
             ),
         )
-        await self._generate_session_title_before_stream(
-            request=request,
-            chat=chat,
-            msgs=msgs,
-            trace_id=getattr(request, "trace_id", None),
-        )
         env_context, block_response = await self._emit_session_start_hook(
             request=request,
             tenant_hooks=inputs.tenant_hooks,
@@ -3175,6 +3244,12 @@ class AgentRunner(Runner):
         if block_response is None:
             inputs.hook_overlay = await self._load_selected_skill_hooks(
                 inputs=inputs,
+            )
+            self._schedule_session_title_generation(
+                request=request,
+                chat=chat,
+                msgs=msgs,
+                trace_id=getattr(request, "trace_id", None),
             )
             return resources, None
         return resources, _RuntimeStartResult(

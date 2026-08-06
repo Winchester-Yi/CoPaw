@@ -64,6 +64,45 @@ async def test_console_stream_waits_for_session_title_task():
 
 
 @pytest.mark.asyncio
+async def test_console_stream_does_not_wait_for_title_before_first_event():
+    """A slow title task must not delay the first business SSE event."""
+
+    async def process(request):
+        async def update_title():
+            await asyncio.sleep(0)
+            request.channel_meta = {
+                **request.channel_meta,
+                "session_title": "费用分析",
+            }
+
+        setattr(
+            request,
+            "_session_title_task",
+            asyncio.create_task(update_title()),
+        )
+        yield SimpleNamespace(object="message", status=None, type="message")
+
+    channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        input=None,
+        channel_meta={},
+    )
+
+    events = [event async for event in channel.stream_one(request)]
+
+    assert '"object": "session_title_updated"' not in events[0]
+    assert any(
+        '"object": "session_title_updated"' in event for event in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_console_stream_reads_session_title_written_during_process():
     """同步 hook 写入标题时，SSE 结束阶段也应重新读取 channel_meta。"""
 
