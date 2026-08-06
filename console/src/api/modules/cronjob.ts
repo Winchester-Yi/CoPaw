@@ -57,11 +57,12 @@ export const cronJobApi = {
       method: "POST",
     }),
 
-  markTaskRead: (jobId: string) =>
+  markTaskRead: (jobId: string, marked_read?: boolean) =>
     request<{ marked_read: boolean }>(
       `/cron/jobs/${encodeURIComponent(jobId)}/task/mark-read`,
       {
         method: "POST",
+        body: JSON.stringify({ marked_read }),
       },
     ),
 

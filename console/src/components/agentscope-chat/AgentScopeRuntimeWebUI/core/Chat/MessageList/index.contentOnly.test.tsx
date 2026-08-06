@@ -90,6 +90,7 @@ vi.mock("@/components/agentscope-chat", () => ({
         return (
           <div
             data-testid="bubble-list"
+            data-item-ids={items.map((item) => item.id).join(",")}
             data-pagination={String(pagination)}
             onPointerMove={onReachStart}
             ref={(element) => {
@@ -134,28 +135,25 @@ vi.mock("@/components/agentscope-chat", () => ({
                   Object.defineProperty(element, "getBoundingClientRect", {
                     configurable: true,
                     value: () => ({
-                      bottom: (item.id === "online-message"
-                        ? mocks.anchorTop
-                        : 16) + 48,
+                      bottom:
+                        (item.id === "online-message"
+                          ? mocks.anchorTop
+                          : -100) + 48,
                       height: 48,
                       left: 0,
                       right: 400,
                       toJSON: () => ({}),
                       top:
-                        item.id === "online-message" ? mocks.anchorTop : 16,
+                        item.id === "online-message" ? mocks.anchorTop : -100,
                       width: 400,
                       x: 0,
-                      y:
-                        item.id === "online-message" ? mocks.anchorTop : 16,
+                      y: item.id === "online-message" ? mocks.anchorTop : -100,
                     }),
                   });
                 }}
               />
             ))}
-            <button
-              onClick={() => onBottomStateChange?.(false)}
-              type="button"
-            >
+            <button onClick={() => onBottomStateChange?.(false)} type="button">
               标记为浏览历史
             </button>
           </div>
@@ -327,6 +325,195 @@ describe("MessageList content-only composition", () => {
     );
   });
 
+  it("renders the newest 10 historical cards initially while keeping live cards visible", () => {
+    mocks.messages = [
+      ...Array.from({ length: 25 }, (_, index) => ({
+        id: `history-${index + 1}`,
+        history: true,
+      })),
+      { id: "live-message" },
+    ];
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    const bubbleList = screen.getByTestId("bubble-list");
+    expect(bubbleList).toHaveTextContent("11");
+    expect(bubbleList).toHaveAttribute(
+      "data-item-ids",
+      "live-message,history-25,history-24,history-23,history-22,history-21,history-20,history-19,history-18,history-17,history-16",
+    );
+  });
+
+  it("uses the same progressive window in normal chat mode", () => {
+    mocks.messages = Array.from({ length: 25 }, (_, index) => ({
+      id: `history-${index + 1}`,
+      history: true,
+    }));
+
+    render(<MessageList onSubmit={vi.fn()} />);
+
+    expect(screen.getByTestId("bubble-list")).toHaveTextContent("10");
+  });
+
+  it("reveals local history in 10-card batches before requesting the archive", async () => {
+    mocks.messages = Array.from({ length: 25 }, (_, index) => ({
+      id: `history-${index + 1}`,
+      history: true,
+    }));
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    const bubbleList = screen.getByTestId("bubble-list");
+    expect(bubbleList).toHaveTextContent("10");
+
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => expect(bubbleList).toHaveTextContent("20"));
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+
+    // Remaining inside the preload zone is latched and must not reveal twice.
+    fireEvent.scroll(bubbleList);
+    expect(bubbleList).toHaveTextContent("20");
+
+    bubbleList.scrollTop = -300;
+    fireEvent.scroll(bubbleList);
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => expect(bubbleList).toHaveTextContent("25"));
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+  });
+
+  it("restores the visible anchor after revealing a local history batch", async () => {
+    mocks.messages = [
+      ...Array.from({ length: 15 }, (_, index) => ({
+        id: `history-${index + 1}`,
+        history: true,
+      })),
+      { id: "online-message" },
+    ];
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    const bubbleList = screen.getByTestId("bubble-list");
+
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => expect(bubbleList).toHaveTextContent("16"));
+
+    expect(mocks.animationFrame).toBeTypeOf("function");
+    mocks.anchorTop = 140;
+    act(() => {
+      mocks.animationFrame?.(0);
+    });
+    expect(bubbleList.scrollTop).toBe(-340);
+  });
+
+  it("requests one archive page with limit 20 only after local history is fully visible", async () => {
+    mocks.messages = Array.from({ length: 11 }, (_, index) => ({
+      id: `history-${index + 1}`,
+      history: true,
+    }));
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: Array.from({ length: 20 }, (_, index) => ({
+        id: `archived-${index + 1}`,
+      })),
+      boundaries: [],
+      has_more: true,
+      next_cursor: "cursor-2",
+    });
+
+    const rendered = render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    const bubbleList = screen.getByTestId("bubble-list");
+
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => expect(bubbleList).toHaveTextContent("11"));
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+
+    bubbleList.scrollTop = -300;
+    fireEvent.scroll(bubbleList);
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenCalledWith(
+        "chat-real-1",
+        null,
+        20,
+      );
+    });
+    rendered.rerender(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    expect(bubbleList).toHaveTextContent("31");
+  });
+
+  it("continues archive paging with the returned cursor", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    apiMocks.getChatHistory
+      .mockResolvedValueOnce({
+        messages: [{ id: "archived-page-1" }],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "cursor-2",
+      })
+      .mockResolvedValueOnce({
+        messages: [{ id: "archived-page-2" }],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    const bubbleList = screen.getByTestId("bubble-list");
+
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenNthCalledWith(
+        1,
+        "chat-real-1",
+        null,
+        20,
+      );
+    });
+
+    bubbleList.scrollTop = -300;
+    fireEvent.scroll(bubbleList);
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenNthCalledWith(
+        2,
+        "chat-real-1",
+        "cursor-2",
+        20,
+      );
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("已到达会话开始处");
+  });
+
   it("does not request archived history until normal scrolling enters the preload range", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     render(
@@ -366,16 +553,18 @@ describe("MessageList content-only composition", () => {
     bubbleList.scrollTop = -380;
     fireEvent.scroll(bubbleList);
 
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "正在加载更早的消息…",
-    );
+    expect(screen.getByRole("status")).toHaveTextContent("正在加载更早的消息…");
     expect(screen.getByRole("status")).toHaveStyle({ flexShrink: "0" });
     expect(screen.getByTestId("bubble-list")).toContainElement(
       screen.getByRole("status"),
     );
 
     await waitFor(() => {
-      expect(apiMocks.getChatHistory).toHaveBeenCalledWith("chat-real-1", null);
+      expect(apiMocks.getChatHistory).toHaveBeenCalledWith(
+        "chat-real-1",
+        null,
+        20,
+      );
     });
     resolveHistory({
       messages: [{ id: "archived-message" }],
@@ -389,9 +578,7 @@ describe("MessageList content-only composition", () => {
         { id: "online-message", history: true },
       ]);
     });
-    expect(screen.getByRole("status")).not.toHaveTextContent(
-      "已到达会话开始处",
-    );
+    expect(screen.getByRole("status")).toHaveTextContent("已到达会话开始处");
     expect(mocks.messages).toEqual([
       { id: "archived-message", history: true },
       { id: "online-message", history: true },
@@ -447,7 +634,7 @@ describe("MessageList content-only composition", () => {
     expect(bubbleList.scrollTop).toBe(-340);
   });
 
-  it("only shows the start-of-conversation state when a terminal page adds no history", async () => {
+  it("shows the start-of-conversation state immediately for a terminal page", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     apiMocks.getChatHistory.mockResolvedValue({
       messages: [],
@@ -467,9 +654,7 @@ describe("MessageList content-only composition", () => {
     fireEvent.scroll(bubbleList);
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(
-        "已到达会话开始处",
-      );
+      expect(screen.getByRole("status")).toHaveTextContent("已到达会话开始处");
     });
     expect(mocks.messages).toEqual([{ id: "online-message", history: true }]);
   });
@@ -495,14 +680,26 @@ describe("MessageList content-only composition", () => {
     fireEvent.scroll(bubbleList);
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("加载历史消息失败");
+      expect(screen.getByRole("alert")).toHaveTextContent("历史消息加载失败");
     });
     expect(mocks.messages).toEqual([{ id: "online-message", history: true }]);
 
-    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    fireEvent.click(screen.getByRole("button", { name: "重试加载历史消息" }));
     await waitFor(() => {
       expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2);
     });
+    expect(apiMocks.getChatHistory).toHaveBeenNthCalledWith(
+      1,
+      "chat-real-1",
+      null,
+      20,
+    );
+    expect(apiMocks.getChatHistory).toHaveBeenNthCalledWith(
+      2,
+      "chat-real-1",
+      null,
+      20,
+    );
     expect(mocks.messages).toEqual([
       { id: "archived-message", history: true },
       { id: "online-message", history: true },
@@ -518,10 +715,7 @@ describe("MessageList content-only composition", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
-    mocks.messages = [
-      { id: "online-message" },
-      { id: "new-message" },
-    ];
+    mocks.messages = [{ id: "online-message" }, { id: "new-message" }];
     rendered.rerender(
       <ChatContentOnlyProvider enabled>
         <MessageList onSubmit={vi.fn()} />
@@ -960,6 +1154,7 @@ describe("MessageList content-only composition", () => {
       {
         id: "persisted-response",
         role: "assistant",
+        history: true,
         cards: [{ code: "Response", data: { output: "current answer" } }],
       },
     ]);
@@ -975,7 +1170,10 @@ describe("MessageList content-only composition", () => {
         cards: [{ code: "Request", data: { input: "existing" } }],
       },
     ];
-    let resolveSession!: (value: { generating: boolean; messages: unknown[] }) => void;
+    let resolveSession!: (value: {
+      generating: boolean;
+      messages: unknown[];
+    }) => void;
     apiMocks.getSession.mockReturnValue(
       new Promise((resolve) => {
         resolveSession = resolve;
@@ -1053,7 +1251,10 @@ describe("MessageList content-only composition", () => {
         cards: [{ code: "Request", data: { input: "chat-1" } }],
       },
     ];
-    let resolveSession!: (value: { generating: boolean; messages: unknown[] }) => void;
+    let resolveSession!: (value: {
+      generating: boolean;
+      messages: unknown[];
+    }) => void;
     apiMocks.getSession.mockReturnValue(
       new Promise((resolve) => {
         resolveSession = resolve;

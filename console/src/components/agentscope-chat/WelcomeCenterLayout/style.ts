@@ -48,7 +48,7 @@ export default createGlobalStyle`
   background: transparent;
   width: 100%;
   min-height: 24px;
-  max-height: 120px;
+  max-height: 200px;
   font-family: inherit;
   padding: 4px 0;
   overflow: auto;

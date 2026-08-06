@@ -1079,7 +1079,7 @@ export default function ChatPage() {
     });
 
     void cronJobApi
-      .markTaskRead(currentTask.id)
+      .markTaskRead(currentTask.id, false)
       .catch(() => {})
       .finally(() => {
         markTaskReadPendingRef.current = false;
