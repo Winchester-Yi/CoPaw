@@ -330,7 +330,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 )
                 growth_stats = {}
             else:
-                (summary_data, growth_stats) = await asyncio.gather(
+                summary_data, growth_stats = await asyncio.gather(
                     self._fetch_overview_summary_data(
                         source_id,
                         start_date,
@@ -401,7 +401,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             source_clause = "source_id = %s"
             source_values = (source_id,)
 
-        async def trace_stats(period_start: datetime, period_end: datetime) -> dict:
+        async def trace_stats(
+            period_start: datetime,
+            period_end: datetime,
+        ) -> dict:
             query = f"""
                 SELECT COUNT(*) AS calls,
                        COALESCE(SUM(total_tokens), 0) AS tokens,
@@ -424,7 +427,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 "users": int(row.get("users") or 0),
             }
 
-        async def cron_count(period_start: datetime, period_end: datetime) -> int:
+        async def cron_count(
+            period_start: datetime,
+            period_end: datetime,
+        ) -> int:
             cron_filter, cron_params = build_cron_bbk_in_filter(bbk_ids)
             query = f"""
                 SELECT COUNT(*) AS total
@@ -452,7 +458,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 FROM swe_html_preview_click_events
                 WHERE {source_clause}
                   AND clicked_at >= %s AND clicked_at < %s
-                  AND button_type = 'plan'
+                  AND event_type = 'preview_view'
+                  AND template_type = 'sub'
                   AND cron_task_id IS NOT NULL AND customer_id IS NOT NULL
                   {trace_filter}
             """
@@ -464,7 +471,14 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         current_end = end_date
         previous_end = start_date
-        current, previous, current_cron, previous_cron, current_customers, previous_customers = await asyncio.gather(
+        (
+            current,
+            previous,
+            current_cron,
+            previous_cron,
+            current_customers,
+            previous_customers,
+        ) = await asyncio.gather(
             trace_stats(start_date, current_end),
             trace_stats(previous_start, previous_end),
             cron_count(start_date, current_end),
@@ -473,12 +487,18 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             customer_count(previous_start, previous_end),
         )
 
-        def growth(current_value: float, previous_value: float) -> float | None:
+        def growth(
+            current_value: float,
+            previous_value: float,
+        ) -> float | None:
             if previous_value == 0:
                 return 100.0 if current_value > 0 else 0.0
             if current_value == 0:
                 return None
-            return round((current_value - previous_value) / previous_value * 100, 1)
+            return round(
+                (current_value - previous_value) / previous_value * 100,
+                1,
+            )
 
         return {
             "callsGrowth": growth(current["calls"], previous["calls"]),
@@ -486,7 +506,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             "sessionGrowth": growth(current["sessions"], previous["sessions"]),
             "userGrowth": growth(current["users"], previous["users"]),
             "cronGrowth": growth(current_cron, previous_cron),
-            "planCustomersGrowth": growth(current_customers, previous_customers),
+            "planCustomersGrowth": growth(
+                current_customers,
+                previous_customers,
+            ),
         }
 
     async def _fetch_overview_data(
@@ -737,7 +760,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 WHERE clicked_at >= %s AND clicked_at < %s
                   AND source_id NOT IN ({exclude_placeholders})
                   AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
-                  AND button_type = 'plan'
+                  AND event_type = 'preview_view'
+                  AND template_type = 'sub'
                   AND cron_task_id IS NOT NULL
                   AND customer_id IS NOT NULL
                 GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
@@ -764,7 +788,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 WHERE source_id = %s
                   AND clicked_at >= %s AND clicked_at < %s
                   AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
-                  AND button_type = 'plan'
+                  AND event_type = 'preview_view'
+                  AND template_type = 'sub'
                   AND cron_task_id IS NOT NULL
                   AND customer_id IS NOT NULL
                 GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
@@ -1034,7 +1059,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
-              AND button_type IN ('plan', 'insight', 'phone')
+              AND ((event_type = 'preview_view' AND template_type = 'sub')
+                   OR (button_type IN ('insight', 'phone') AND event_type = 'button_click'))
               AND cron_task_id IS NOT NULL
               AND customer_id IS NOT NULL
               {source_filter_sql}{bbk_filter_sql}
@@ -1235,7 +1261,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
                 FROM swe_html_preview_click_events
                 WHERE clicked_at >= %s AND clicked_at <= %s
-                  AND button_type IN ('plan', 'insight', 'phone')
+                  AND ((event_type = 'preview_view' AND template_type = 'sub')
+                       OR (button_type IN ('insight', 'phone') AND event_type = 'button_click'))
                   AND cron_task_id IS NOT NULL
                   AND customer_id IS NOT NULL
                   {click_source_filter_sql}{bbk_filter_sql}
@@ -2431,7 +2458,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
             FROM swe_html_preview_click_events
             WHERE {where_clause}
-                AND button_type IN ('plan', 'insight', 'phone')
+                AND ((event_type = 'preview_view' AND template_type = 'sub')
+                     OR (button_type IN ('insight', 'phone') AND event_type = 'button_click'))
                 AND cron_task_id IS NOT NULL
                 AND customer_id IS NOT NULL
             GROUP BY button_type

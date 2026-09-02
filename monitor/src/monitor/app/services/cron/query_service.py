@@ -3401,7 +3401,7 @@ class QueryService:
         click_sql = f"""
             SELECT
                 COUNT(DISTINCT CASE
-                    WHEN c.button_type = 'plan' THEN c.cron_task_id
+                    WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN c.cron_task_id
                 END) AS report_count,
                 COUNT(DISTINCT CASE
                     WHEN c.button_type = 'insight' THEN c.cron_task_id
@@ -3413,7 +3413,7 @@ class QueryService:
             JOIN swe_cron_jobs j
               ON c.cron_task_id = j.id
             WHERE c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
+              AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
               AND c.cron_task_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
@@ -5300,7 +5300,7 @@ class QueryService:
                 j.tenant_id AS user_id,
                 MAX(j.tenant_name) AS user_name,
                 COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
-                COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
+                COUNT(DISTINCT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN c.id END) AS plan_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
                 MAX(c.clicked_at) AS last_click_time
@@ -5310,7 +5310,7 @@ class QueryService:
             LEFT JOIN swe_html_preview_click_events c
                 ON c.cron_task_id = e.job_id
                 AND c.clicked_at >= %s AND c.clicked_at <= %s
-                AND c.event_type = 'button_click'
+                AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
                 {click_source_on}
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
@@ -5386,7 +5386,7 @@ class QueryService:
             SELECT
                 c.customer_id,
                 c.customer_name,
-                MAX(CASE WHEN c.button_type = 'plan' THEN 1 ELSE 0 END) AS clicked_plan,
+                MAX(CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 1 ELSE 0 END) AS clicked_plan,
                 MAX(CASE WHEN c.button_type = 'insight' THEN 1 ELSE 0 END) AS clicked_insight,
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
@@ -5397,7 +5397,7 @@ class QueryService:
               AND c.user_id = %s
               AND {skill_expr} = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
+              AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
               {source_where}
             GROUP BY c.customer_id, c.customer_name
             ORDER BY click_time DESC
@@ -5614,7 +5614,7 @@ class QueryService:
             SELECT
                 c.customer_id,
                 c.customer_name,
-                MAX(CASE WHEN c.button_type = 'plan' THEN 1 ELSE 0 END) AS clicked_plan,
+                MAX(CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 1 ELSE 0 END) AS clicked_plan,
                 MAX(CASE WHEN c.button_type = 'insight' THEN 1 ELSE 0 END) AS clicked_insight,
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
@@ -5625,7 +5625,7 @@ class QueryService:
               AND c.user_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.customer_id IS NOT NULL
-              AND c.event_type = 'button_click'
+              AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
               {skill_filter}
               {source_where}
             GROUP BY c.customer_id, c.customer_name
