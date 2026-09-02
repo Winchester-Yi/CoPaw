@@ -1808,6 +1808,87 @@ class QueryService:
             for row in rows
         ]
 
+    async def get_skill_usage_details_for_export(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        bbk_ids: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get execution/customer detail rows for the overview export.
+
+        Clicks follow the overview aggregation rule: task + customer clicks
+        are aggregated across the selected period and joined to each matching
+        execution row.  A left join keeps executions without recommendations.
+        """
+        db = get_db_connection()
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        bbk_filter_sql, bbk_filter_params = self._build_bbk_filter(bbk_ids)
+        source_filter_sql, source_filter_params = self._build_source_filter(
+            source_id,
+        )
+
+        click_source_sql = " AND c.source_id = %s" if source_id else ""
+        click_params: list[Any] = [start_time, end_time]
+        if source_id:
+            click_params.append(source_id)
+
+        sql = f"""
+            SELECT
+                e.id AS execution_id,
+                e.actual_time,
+                e.status AS execution_status,
+                e.async_status,
+                e.is_read,
+                j.name AS task_name,
+                j.tenant_id,
+                j.tenant_name,
+                j.bbk_id,
+                j.status AS task_status,
+                s.custuid,
+                s.cust_nm,
+                COALESCE(clicks.clicked_plan, 0) AS clicked_plan,
+                COALESCE(clicks.clicked_insight, 0) AS clicked_insight,
+                COALESCE(clicks.clicked_phone, 0) AS clicked_phone
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id = j.id
+            LEFT JOIN (
+                SELECT trace_id, custuid, MAX(cust_nm) AS cust_nm
+                FROM swe_cron_subtasks
+                WHERE custuid IS NOT NULL AND custuid != ''
+                GROUP BY trace_id, custuid
+            ) s ON s.trace_id = e.trace_id
+            LEFT JOIN (
+                SELECT
+                    c.cron_task_id,
+                    c.customer_id,
+                    MAX(CASE WHEN c.event_type = 'preview_view'
+                        AND c.template_type = 'sub' THEN 1 ELSE 0 END)
+                        AS clicked_plan,
+                    MAX(CASE WHEN c.button_type = 'insight'
+                        THEN 1 ELSE 0 END) AS clicked_insight,
+                    MAX(CASE WHEN c.button_type = 'phone'
+                        THEN 1 ELSE 0 END) AS clicked_phone
+                FROM swe_html_preview_click_events c
+                WHERE c.clicked_at >= %s AND c.clicked_at <= %s
+                  AND c.customer_id IS NOT NULL
+                  AND (c.event_type = 'button_click'
+                    OR (c.event_type = 'preview_view'
+                      AND c.template_type = 'sub'))
+                  {click_source_sql}
+                GROUP BY c.cron_task_id, c.customer_id
+            ) clicks ON clicks.cron_task_id = e.job_id
+                AND clicks.customer_id = s.custuid
+            WHERE e.actual_time >= %s AND e.actual_time <= %s
+              {bbk_filter_sql}
+              {source_filter_sql}
+            ORDER BY e.actual_time DESC, e.id DESC, s.custuid
+        """
+        params = click_params + [start_time, end_time]
+        params.extend(bbk_filter_params)
+        params.extend(source_filter_params)
+        return await db.fetch_all(sql, tuple(params))
+
     async def get_jobs_for_export(
         self,
         tenant_id: Optional[str] = None,

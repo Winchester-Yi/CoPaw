@@ -677,6 +677,40 @@ async def export_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/export-detail")
+async def export_skill_usage_detail(
+    request: Request,
+    start_date: str | None = Query(default=None, description="开始日期"),
+    end_date: str | None = Query(default=None, description="结束日期"),
+    bbk_ids: str | None = Query(default=None, description="分行号筛选"),
+    query_service: QueryService = Depends(get_query_service),
+    export_service: ExportService = Depends(get_export_service),
+) -> StreamingResponse:
+    """Export overview execution/customer detail rows to Excel."""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        rows = await query_service.get_skill_usage_details_for_export(
+            start_date=start_date,
+            end_date=end_date,
+            bbk_ids=bbk_ids,
+            source_id=actual_source_id,
+        )
+        excel_bytes = export_service.export_skill_usage_details(rows)
+        filename = quote("定时任务客户经理技能明细.xlsx")
+        return StreamingResponse(
+            BytesIO(excel_bytes),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            },
+        )
+    except Exception as e:
+        logger.error("Failed to export cron overview detail: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/jobs/{job_id}/mark-read", response_model=MarkReadResponse)
 async def mark_job_as_read(
     request: Request,

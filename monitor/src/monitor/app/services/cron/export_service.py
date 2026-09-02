@@ -5,7 +5,7 @@ Provides methods to export job definitions and execution history to Excel.
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
@@ -215,6 +215,94 @@ class ExportService:
             ws.cell(row=row, column=14, value=exec.output_preview)
 
         # Save to bytes
+        return self._save_to_bytes(wb)
+
+    @staticmethod
+    def _mask_customer_name(name: Any) -> str:
+        value = str(name or "")
+        if not value or "*" in value or len(value) == 1:
+            return value
+        if len(value) == 2:
+            return f"{value[0]}*"
+        return f"{value[0]}{'*' * (len(value) - 2)}{value[-1]}"
+
+    @staticmethod
+    def _execution_status(status: Any, async_status: Any) -> str:
+        if status == "success" and async_status == "error":
+            return "子任务执行失败"
+        return {
+            "success": "成功",
+            "error": "失败",
+            "cancelled": "取消",
+            "timeout": "超时",
+            "skipped": "跳过",
+            "running": "运行中",
+        }.get(str(status or ""), str(status or "未知"))
+
+    def export_skill_usage_details(self, rows: List[dict[str, Any]]) -> bytes:
+        """Export overview execution/customer details to Excel."""
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "客户经理技能明细"
+        headers = [
+            ("定时任务名称", 28),
+            ("租户ID", 20),
+            ("租户姓名", 18),
+            ("分行号", 14),
+            ("任务状态", 12),
+            ("执行记录ID", 14),
+            ("实际执行时间", 20),
+            ("执行状态", 16),
+            ("是否已读", 10),
+            ("定时任务推荐的客户UID", 24),
+            ("客户脱敏姓名", 18),
+            ("是否查看方案", 14),
+            ("是否点击去电访", 14),
+            ("是否点击去洞察", 14),
+        ]
+        header_font = Font(bold=True, size=11)
+        header_fill = PatternFill(
+            start_color="4472C4",
+            end_color="4472C4",
+            fill_type="solid",
+        )
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        for column, (header, width) in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=column, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            ws.column_dimensions[get_column_letter(column)].width = width
+
+        for row_number, row in enumerate(rows, 2):
+            actual_time = row.get("actual_time")
+            if actual_time and hasattr(actual_time, "strftime"):
+                actual_time = actual_time.strftime("%Y-%m-%d %H:%M:%S")
+            values = [
+                row.get("task_name") or "",
+                row.get("tenant_id") or "",
+                row.get("tenant_name") or "",
+                row.get("bbk_id") or "",
+                row.get("task_status") or "",
+                row.get("execution_id"),
+                actual_time or "",
+                self._execution_status(
+                    row.get("execution_status"),
+                    row.get("async_status"),
+                ),
+                "是" if row.get("is_read") else "否",
+                row.get("custuid") or "",
+                self._mask_customer_name(row.get("cust_nm")),
+                "是" if row.get("clicked_plan") else "否",
+                "是" if row.get("clicked_phone") else "否",
+                "是" if row.get("clicked_insight") else "否",
+            ]
+            for column, value in enumerate(values, 1):
+                ws.cell(row=row_number, column=column, value=value)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = (
+            f"A1:{get_column_letter(len(headers))}{max(1, len(rows) + 1)}"
+        )
         return self._save_to_bytes(wb)
 
     def _save_to_bytes(self, wb: Workbook) -> bytes:
