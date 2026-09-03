@@ -3745,17 +3745,17 @@ class QueryService:
         click_sql = f"""
             SELECT
                 bbk_id,
-                button_type,
+                CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END AS button_type,
                 COUNT(DISTINCT cron_task_id) AS task_count,
                 COUNT(*) AS total_clicks
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
-              AND event_type = 'button_click'
+              AND (event_type = 'button_click' OR (event_type = 'preview_view' AND template_type = 'sub'))
               AND cron_task_id IS NOT NULL
               AND bbk_id IS NOT NULL
               AND bbk_id != ''
               {source_where}
-            GROUP BY bbk_id, button_type
+            GROUP BY bbk_id, CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         params: list = [start_time, end_time]
         if source_id:
@@ -3817,14 +3817,15 @@ class QueryService:
         """
         source_where = " AND source_id = %s" if source_id else ""
         sql = f"""
-            SELECT button_type, COUNT(DISTINCT user_id) AS manager_count
+            SELECT CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END AS button_type,
+            COUNT(DISTINCT user_id) AS manager_count
             FROM swe_html_preview_click_events
             WHERE bbk_id = %s
               AND clicked_at >= %s AND clicked_at <= %s
-              AND event_type = 'button_click'
-              AND button_type IN ('plan', 'insight', 'phone')
+              AND (event_type = 'preview_view' AND template_type = 'sub'
+              OR (event_type = 'button_click' AND button_type IN ('insight', 'phone')))
               {source_where}
-            GROUP BY button_type
+            GROUP BY CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3852,18 +3853,19 @@ class QueryService:
         skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
-            SELECT c.button_type, COUNT(DISTINCT c.user_id) AS manager_count
+            SELECT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END AS button_type,
+            COUNT(DISTINCT c.user_id) AS manager_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
-              AND c.button_type IN ('plan', 'insight', 'phone')
+              AND (c.event_type = 'preview_view' AND c.template_type = 'sub'
+              OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND {skill_exists}
               {source_where}
-            GROUP BY c.button_type
+            GROUP BY CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3889,15 +3891,16 @@ class QueryService:
         """
         source_where = " AND source_id = %s" if source_id else ""
         sql = f"""
-            SELECT button_type, COUNT(DISTINCT customer_id) AS customer_count
+            SELECT CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END AS button_type,
+            COUNT(DISTINCT customer_id) AS customer_count
             FROM swe_html_preview_click_events
             WHERE bbk_id = %s
               AND clicked_at >= %s AND clicked_at <= %s
-              AND event_type = 'button_click'
-              AND button_type IN ('plan', 'insight', 'phone')
+              AND (event_type = 'preview_view' AND template_type = 'sub'
+              OR (event_type = 'button_click' AND button_type IN ('insight', 'phone')))
               AND customer_id IS NOT NULL
               {source_where}
-            GROUP BY button_type
+            GROUP BY CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3925,19 +3928,20 @@ class QueryService:
         skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
-            SELECT c.button_type, COUNT(DISTINCT c.customer_id) AS customer_count
+            SELECT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END AS button_type,
+            COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
-              AND c.button_type IN ('plan', 'insight', 'phone')
+              AND (c.event_type = 'preview_view' AND c.template_type = 'sub'
+              OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
               AND c.customer_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND {skill_exists}
               {source_where}
-            GROUP BY c.button_type
+            GROUP BY CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3981,7 +3985,8 @@ class QueryService:
             FROM swe_html_preview_click_events a
             LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
             WHERE a.customer_id IS NOT NULL
-              AND a.event_type = 'button_click'
+              AND (a.event_type = 'preview_view' AND a.template_type = 'sub'
+              OR (a.event_type = 'button_click' AND a.button_type IN ('insight', 'phone')))
               AND (
                 a.clicked_at >= %s AND a.clicked_at <= %s
                 OR b.clicked_at >= %s AND b.clicked_at <= %s
@@ -5148,19 +5153,19 @@ class QueryService:
         source_where = " AND c.source_id = %s" if source_id else ""
         skill_exists = self._statistics_skill_exists("j")
         sql = f"""
-            SELECT c.user_id, c.button_type,
+            SELECT c.user_id, CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END AS button_type,
                 COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
-              AND c.button_type IN ('plan', 'insight', 'phone')
+              AND (c.event_type = 'preview_view' AND c.template_type = 'sub'
+              OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
               AND c.customer_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND {skill_exists}
               {source_where}
-            GROUP BY c.user_id, c.button_type
+            GROUP BY c.user_id, CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -5206,7 +5211,8 @@ class QueryService:
             LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
             WHERE a.bbk_id = %s
               AND a.customer_id IS NOT NULL
-              AND a.event_type = 'button_click'
+              AND (a.event_type = 'preview_view' AND a.template_type = 'sub'
+              OR (a.event_type = 'button_click' AND a.button_type IN ('insight', 'phone')))
               AND (
                 a.clicked_at >= %s AND a.clicked_at <= %s
                 OR b.clicked_at >= %s AND b.clicked_at <= %s
