@@ -518,8 +518,40 @@ class QueryService:
               AND template_id > 0
               AND result_id IS NOT NULL
               AND result_id <> ''
+            ORDER BY id DESC
         """
-        return await self.db.fetch_all(query, (trace_id,))
+        rows = await self.db.fetch_all(query, (trace_id,))
+        return self._dedupe_success_subtasks(rows)
+
+    @staticmethod
+    def _dedupe_success_subtasks(rows: list[dict]) -> list[dict]:
+        """Keep one successful list per trace and one plan per customer.
+
+        Queries order rows by descending primary key, so the first row for a
+        logical result is the newest one.  The database may contain duplicate
+        subtasks from retries or older writes; indexing all of them would
+        create duplicate result-index records.
+        """
+        deduped: list[dict] = []
+        seen: set[tuple] = set()
+        ordered_rows = sorted(
+            rows,
+            key=lambda row: row.get("subtask_id") or row.get("id") or 0,
+            reverse=True,
+        )
+        for row in ordered_rows:
+            task_type = row.get("task_type")
+            if task_type == "list":
+                key = (task_type, row.get("trace_id"))
+            elif task_type == "plan":
+                key = (task_type, row.get("trace_id"), row.get("custuid"))
+            else:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+        return deduped
 
     async def _get_success_subtasks_for_traces(
         self,
@@ -552,11 +584,15 @@ class QueryService:
               AND template_id > 0
               AND result_id IS NOT NULL
               AND result_id <> ''
+            ORDER BY id DESC
         """
         rows = await self.db.fetch_all(query, tuple(trace_ids))
         grouped: dict[str, list[dict]] = {}
         for row in rows:
-            grouped.setdefault(row.get("trace_id") or "", []).append(row)
+            trace_id = row.get("trace_id") or ""
+            grouped.setdefault(trace_id, []).append(row)
+        for trace_id, subtasks in grouped.items():
+            grouped[trace_id] = self._dedupe_success_subtasks(subtasks)
         return grouped
 
     async def _mark_previous_result_index_stale(
