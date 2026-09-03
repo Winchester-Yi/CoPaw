@@ -3835,7 +3835,8 @@ class QueryService:
                 COUNT(*) AS total_clicks
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
-              AND (event_type = 'button_click' OR (event_type = 'preview_view' AND template_type = 'sub'))
+              AND (event_type = 'button_click' AND button_type IN ('insight', 'phone')
+              OR (event_type = 'preview_view' AND template_type = 'sub'))
               AND cron_task_id IS NOT NULL
               AND bbk_id IS NOT NULL
               AND bbk_id != ''

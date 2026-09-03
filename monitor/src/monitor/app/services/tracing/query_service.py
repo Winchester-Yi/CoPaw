@@ -1055,7 +1055,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         click_query = f"""
             SELECT
                 DATE(clicked_at) as date,
-                button_type,
+                CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END as button_type,
                 COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
@@ -1064,7 +1064,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
               AND cron_task_id IS NOT NULL
               AND customer_id IS NOT NULL
               {source_filter_sql}{bbk_filter_sql}
-            GROUP BY DATE(clicked_at), button_type
+            GROUP BY DATE(clicked_at), CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         return click_query, (
             start_date,
@@ -1257,7 +1257,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             click_query = f"""
                 SELECT
                     HOUR(clicked_at) as hour_bucket,
-                    button_type,
+                    CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END as button_type,
                     COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
                 FROM swe_html_preview_click_events
                 WHERE clicked_at >= %s AND clicked_at <= %s
@@ -1266,7 +1266,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   AND cron_task_id IS NOT NULL
                   AND customer_id IS NOT NULL
                   {click_source_filter_sql}{bbk_filter_sql}
-                GROUP BY HOUR(clicked_at), button_type
+                GROUP BY HOUR(clicked_at), CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
             """
             click_params = (
                 start_date,
@@ -2454,7 +2454,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         # 查询各 button_type 的去重客户数
         query = f"""
             SELECT
-                button_type,
+                CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END as button_type,
                 COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
             FROM swe_html_preview_click_events
             WHERE {where_clause}
@@ -2462,7 +2462,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                      OR (button_type IN ('insight', 'phone') AND event_type = 'button_click'))
                 AND cron_task_id IS NOT NULL
                 AND customer_id IS NOT NULL
-            GROUP BY button_type
+            GROUP BY CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
 
         rows = await db.fetch_all(query, tuple(params))
