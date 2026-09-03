@@ -28,6 +28,7 @@ from ..models.cron import (
     CronOverviewStatsResponse,
     CronDispatchBatchDetailResponse,
     CronDispatchBatchesResponse,
+    CronDispatchDetailQueryParams,
     CronDispatchWorkersResponse,
     CronBranchRankingResponse,
     CronBranchTaskRankingResponse,
@@ -193,6 +194,23 @@ async def get_dispatch_batch_detail(
         le=500,
         description="事件数量",
     ),
+    intent_page: int = Query(default=1, ge=1, description="Intent 页码"),
+    event_page: int = Query(default=1, ge=1, description="事件页码"),
+    intent_query: str | None = Query(
+        default=None,
+        max_length=256,
+        description="Intent 全局筛选",
+    ),
+    intent_role: str | None = Query(
+        default=None,
+        max_length=16,
+        description="Intent 角色",
+    ),
+    intent_status: str | None = Query(
+        default=None,
+        max_length=16,
+        description="Intent 状态",
+    ),
     service: QueryService = Depends(get_query_service),
 ) -> CronDispatchBatchDetailResponse:
     """查询单个批调度 batch 的 intent 和事件明细。"""
@@ -200,8 +218,15 @@ async def get_dispatch_batch_detail(
     detail = await service.get_dispatch_batch_detail(
         source_id=actual_source_id,
         batch_id=batch_id,
-        intent_limit=intent_limit,
-        event_limit=event_limit,
+        params=CronDispatchDetailQueryParams(
+            intent_page=intent_page,
+            intent_limit=intent_limit,
+            intent_query=intent_query,
+            intent_role=intent_role,
+            intent_status=intent_status,
+            event_page=event_page,
+            event_limit=event_limit,
+        ),
     )
     if not detail:
         raise HTTPException(status_code=404, detail="Batch not found")

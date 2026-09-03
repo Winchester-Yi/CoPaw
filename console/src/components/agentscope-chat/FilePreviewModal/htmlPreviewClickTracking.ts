@@ -608,7 +608,10 @@ export function attachHtmlPreviewExposureTracker(
         if (!state || (logData?.sectionId && moduleExposureMap.get(logData.sectionId)) || !logData.sectionId) return;
 
         if (isEffectivelyExposed(entry)) {
-          if (!state.timer && !state.reported) {
+          if (!state.reported) {
+            if(state.timer){
+              clearTimeout(state.timer);
+            }
             state.timer = setTimeout(() => {
               const payload: HtmlTrackerPayloadType = buildHtmlPreviewExposurePayload({ ...metadata, ...logData });
               reporter?.(payload);
@@ -617,7 +620,7 @@ export function attachHtmlPreviewExposureTracker(
               state.timer = null;
             }, EXPOSURE_DURATION_MS);
           }
-        } else {
+        } else if (!entry.isIntersecting) {
           if (state.timer) {
             clearTimeout(state.timer);
             state.timer = null;

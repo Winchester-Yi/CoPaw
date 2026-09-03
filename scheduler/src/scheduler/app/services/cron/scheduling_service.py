@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from scheduler.app.database import get_db_connection
 from scheduler.config.constant import (
+    DEFAULT_CAPACITY_CHECK_INTERVAL_SECONDS,
     DEFAULT_SCHEDULER_LOOP_INTERVAL_SECONDS,
     DISPATCHED_STALE_SECONDS_ENV,
     DISPATCH_INTENTS_ENABLED_ENV,
@@ -133,6 +134,18 @@ class WorkerStrategy(BaseModel):
         return max(1, parsed)
 
 
+class SweCronCallbackOutcomeUnknownError(RuntimeError):
+    """Callback may be accepted although its response was not observed."""
+
+    def __init__(self, cause: httpx.TransportError) -> None:
+        self.error_type = type(cause).__name__
+        self.error_message = str(cause).strip() or repr(cause)
+        super().__init__(
+            f"SWE cron callback outcome unknown: "
+            f"{self.error_type}: {self.error_message}",
+        )
+
+
 class SweCronCallbackClient:
     """Small client for SWE's internal cron callback."""
 
@@ -209,12 +222,26 @@ class SweCronCallbackClient:
             provider_id or DEFAULT_PROVIDER_ID,
             model_id or DEFAULT_MODEL_ID,
         )
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-            response = await client.post(
-                f"{base_url}/api/internal/cron/callback",
-                json=payload,
-                headers=headers,
-            )
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+            ) as client:
+                response = await client.post(
+                    f"{base_url}/api/internal/cron/callback",
+                    json=payload,
+                    headers=headers,
+                )
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.LocalProtocolError,
+            httpx.PoolTimeout,
+            httpx.ProxyError,
+            httpx.UnsupportedProtocol,
+        ):
+            raise
+        except httpx.TransportError as exc:
+            raise SweCronCallbackOutcomeUnknownError(exc) from exc
         if response.status_code < 200 or response.status_code >= 300:
             raise RuntimeError(
                 "SWE cron callback failed: "
@@ -451,26 +478,64 @@ class CronSchedulingService:
         *,
         stop_event: asyncio.Event,
         interval_seconds: int = DEFAULT_SCHEDULER_LOOP_INTERVAL_SECONDS,
+        capacity_interval_seconds: int = (
+            DEFAULT_CAPACITY_CHECK_INTERVAL_SECONDS
+        ),
         source_ids: list[str] | None = None,
     ) -> None:
-        """Run maintenance loop until stop_event is set."""
+        """Run independent dispatch and capacity loops until stopped."""
+        await asyncio.gather(
+            self._run_dispatch_loop(
+                stop_event=stop_event,
+                interval_seconds=interval_seconds,
+                source_ids=source_ids,
+            ),
+            self._run_capacity_loop(
+                stop_event=stop_event,
+                interval_seconds=capacity_interval_seconds,
+            ),
+        )
+
+    async def _run_dispatch_loop(
+        self,
+        *,
+        stop_event: asyncio.Event,
+        interval_seconds: int,
+        source_ids: list[str] | None,
+    ) -> None:
         interval = max(1, interval_seconds)
         while not stop_event.is_set():
             try:
-                await self.run_scheduler_once(
+                await self.dispatch_ready_once(
                     source_ids=source_ids,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
-                    "Cron scheduling loop tick failed",
+                    "Cron dispatch loop tick failed",
                     exc_info=True,
                 )
+            await _wait_for_next_loop_tick(stop_event, interval)
+
+    async def _run_capacity_loop(
+        self,
+        *,
+        stop_event: asyncio.Event,
+        interval_seconds: int,
+    ) -> None:
+        interval = max(1, interval_seconds)
+        while not stop_event.is_set():
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                continue
+                await self.adjust_worker_capacity_if_due()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Cron capacity loop tick failed",
+                    exc_info=True,
+                )
+            await _wait_for_next_loop_tick(stop_event, interval)
 
     async def enqueue_due_parent_intents_once(
         self,
@@ -519,7 +584,33 @@ class CronSchedulingService:
         )
         if passthrough_headers:
             callback_kwargs["passthrough_headers"] = passthrough_headers
-        await self._callback_client.dispatch_job(**callback_kwargs)
+        try:
+            await self._callback_client.dispatch_job(**callback_kwargs)
+        except SweCronCallbackOutcomeUnknownError as exc:
+            details = _dispatch_mark_details(callback_kwargs)
+            details.update(
+                {
+                    "callback_outcome": "unknown",
+                    "error_type": exc.error_type,
+                    "error": exc.error_message,
+                },
+            )
+            await self._dispatch_store.mark_intent_dispatch_unknown(
+                intent_id=int(callback_kwargs["dispatch_intent_id"]),
+                worker_id=self._worker_id,
+                observed_at=now_utc,
+                details=details,
+            )
+            logger.warning(
+                "scheduler_swe_callback_outcome_unknown batch_id=%s "
+                "intent_id=%s job_id=%s attempt=%s error_type=%s",
+                callback_kwargs["dispatch_batch_id"],
+                callback_kwargs["dispatch_intent_id"],
+                callback_kwargs["job_id"],
+                callback_kwargs["dispatch_attempt"],
+                exc.error_type,
+            )
+            return
         await self._dispatch_store.mark_intent_dispatched(
             intent_id=int(callback_kwargs["dispatch_intent_id"]),
             worker_id=self._worker_id,
@@ -617,20 +708,21 @@ class CronSchedulingService:
         )
         for scope in scopes:
             strategy = await self._resolve_worker_strategy(scope, now)
+            latest = await self._dispatch_store.get_latest_worker_capacity(
+                scope=scope.model_dump(),
+                strategy_id=strategy.strategy_id,
+            )
+            if not _capacity_adjustment_is_due(latest, strategy, now):
+                continue
             if not await self._acquire_scope_lease(scope, strategy, now):
                 continue
             latest = await self._dispatch_store.get_latest_worker_capacity(
                 scope=scope.model_dump(),
                 strategy_id=strategy.strategy_id,
             )
-            previous = _capacity_effective_workers(latest, strategy)
-            latest_at = _capacity_created_at(latest)
-            if (
-                latest_at is not None
-                and (now - latest_at).total_seconds()
-                < strategy.adjust_interval_seconds
-            ):
+            if not _capacity_adjustment_is_due(latest, strategy, now):
                 continue
+            previous = _capacity_effective_workers(latest, strategy)
             since = now - timedelta(seconds=strategy.feedback_window_seconds)
             feedback = await self._dispatch_store.summarize_recent_completion_feedback(
                 since=since,
@@ -1727,6 +1819,28 @@ def _capacity_effective_workers(
     except (TypeError, ValueError):
         parsed = strategy.baseline_workers
     return _clamp(parsed, strategy.min_workers, strategy.max_workers)
+
+
+def _capacity_adjustment_is_due(
+    latest: Mapping[str, Any] | None,
+    strategy: WorkerStrategy,
+    now: datetime,
+) -> bool:
+    latest_at = _capacity_created_at(latest)
+    return (
+        latest_at is None
+        or (now - latest_at).total_seconds() >= strategy.adjust_interval_seconds
+    )
+
+
+async def _wait_for_next_loop_tick(
+    stop_event: asyncio.Event,
+    interval_seconds: int,
+) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+    except asyncio.TimeoutError:
+        return
 
 
 def _capacity_created_at(latest: Mapping[str, Any] | None) -> datetime | None:

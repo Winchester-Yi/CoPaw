@@ -772,6 +772,9 @@ def _create_session_skill_detector(
     source_id: str,
     enabled_skills: list[str],
     skill_runtime_profiles: dict[str, Any] | None = None,
+    skill_metadata: dict[str, Any] | None = None,
+    skill_dirs: dict[str, Path] | None = None,
+    skill_signatures: dict[str, str] | None = None,
     get_hook_state: Callable[[], HookSessionState],
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
@@ -786,11 +789,28 @@ def _create_session_skill_detector(
     )
 
     async def _load_skill_hooks(skill_name: str) -> None:
-        skill_root = resolve_effective_skill_dir(workspace, skill_name)
+        skill_root = (skill_dirs or {}).get(skill_name)
+        if skill_root is None:
+            skill_root = resolve_effective_skill_dir(workspace, skill_name)
         if skill_root is None:
             return
+        expected_signature = (skill_signatures or {}).get(skill_name)
+        if expected_signature:
+            from ...agents.skills_manager import _build_signature
+
+            actual_signature = await asyncio.to_thread(
+                _build_signature,
+                skill_root,
+            )
+            if actual_signature != expected_signature:
+                logger.warning(
+                    "Skipping hooks for changed skill '%s'",
+                    skill_name,
+                )
+                return
         try:
-            next_state = load_skill_hooks_for_session(
+            next_state = await asyncio.to_thread(
+                load_skill_hooks_for_session,
                 skill_name=skill_name,
                 skill_root=skill_root,
                 workspace_dir=workspace,
@@ -816,7 +836,7 @@ def _create_session_skill_detector(
         skill_hook_loader=_load_skill_hooks,
         confirmed_skill_callback=confirmed_skill_callback,
     )
-    detector.set_enabled_skills(enabled_skills)
+    detector.set_enabled_skills(enabled_skills, skill_metadata)
     if skill_runtime_profiles:
         detector.set_skill_runtime_profiles(skill_runtime_profiles)
     return detector
@@ -3513,8 +3533,19 @@ class AgentRunner(Runner):
         channel_meta = _without_request_scenario_snapshot(
             getattr(request, "channel_meta", None) or {},
         )
-        plan_mode_enabled = _resolve_plan_mode_enabled(channel_meta, chat)
-        requested_plan_mode = _requested_plan_mode_update(channel_meta)
+        scheduled_request = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
+        plan_mode_enabled = (
+            False
+            if scheduled_request
+            else _resolve_plan_mode_enabled(channel_meta, chat)
+        )
+        requested_plan_mode = (
+            None
+            if scheduled_request
+            else _requested_plan_mode_update(channel_meta)
+        )
         if requested_plan_mode is not None:
             chat.meta = {
                 **(getattr(chat, "meta", None) or {}),
@@ -3597,6 +3628,7 @@ class AgentRunner(Runner):
         auth_token: str | None,
         approved_tool_call: dict[str, Any] | None,
         current_user_text: str = "",
+        workspace_skill_snapshot: Any | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
         request_enable_subagents = getattr(request, "enable_subagents", False)
@@ -3626,6 +3658,7 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "execution_origin": getattr(request, "execution_origin", None),
             "_task_tracker": self._task_tracker,
             "cron_execution_key": getattr(
                 request,
@@ -3658,7 +3691,10 @@ class AgentRunner(Runner):
         request_context["goal_mode_enabled"] = goal_mode_enabled
         plan_mode_enabled = (
             False
-            if goal_request
+            if (
+                goal_request
+                or request_context.get("execution_origin") == "scheduled"
+            )
             else bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         )
         request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
@@ -3758,6 +3794,7 @@ class AgentRunner(Runner):
             memory_manager=self.memory_manager,
             request_context=request_context,
             workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
             task_tracker=self._task_tracker,
             source_tool_versions=source_tool_versions,
         )
@@ -4198,6 +4235,12 @@ class AgentRunner(Runner):
             )
 
         source_id_for_hooks = _request_source_id(request)
+        workspace_skill_snapshot = getattr(
+            runtime.agent,
+            "_workspace_skill_snapshot",
+            None,
+        )
+        snapshot_skills = getattr(workspace_skill_snapshot, "skills", {})
         runtime.session_skill_detector = _create_session_skill_detector(
             workspace_dir=Path(self.workspace_dir or WORKING_DIR),
             tenant_id=self.tenant_id,
@@ -4215,6 +4258,18 @@ class AgentRunner(Runner):
                 if hasattr(runtime.agent, "get_skill_runtime_profiles")
                 else {}
             ),
+            skill_metadata={
+                name: dict(skill.metadata)
+                for name, skill in snapshot_skills.items()
+            },
+            skill_dirs={
+                name: skill.directory
+                for name, skill in snapshot_skills.items()
+            },
+            skill_signatures={
+                name: skill.content_signature
+                for name, skill in snapshot_skills.items()
+            },
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
             confirmed_skill_callback=(_queue_confirmed_skill_snapshot_update),

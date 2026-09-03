@@ -30,6 +30,7 @@ from ...models.cron import (
     CronDispatchBatchStats,
     CronDispatchBatchesResponse,
     CronDispatchCapacityItem,
+    CronDispatchDetailQueryParams,
     CronDispatchEventItem,
     CronDispatchIntentItem,
     CronDispatchPolicyItem,
@@ -1066,6 +1067,49 @@ class QueryService:
             updated_at=item.get("updated_at"),
         )
 
+    def _build_dispatch_intent_where_clause(
+        self,
+        *,
+        source_id: str,
+        batch_id: str,
+        params: CronDispatchDetailQueryParams,
+    ) -> tuple[str, list[Any]]:
+        conditions = ["source_id = %s", "batch_id = %s"]
+        sql_params: list[Any] = [source_id, batch_id]
+        if params.intent_role and params.intent_role != "all":
+            conditions.append("intent_role = %s")
+            sql_params.append(params.intent_role)
+        if params.intent_status and params.intent_status != "all":
+            conditions.append("status = %s")
+            sql_params.append(params.intent_status)
+        normalized_query = (params.intent_query or "").strip().lower()
+        if normalized_query:
+            escaped_query = (
+                normalized_query.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            searchable_fields = (
+                "CAST(id AS CHAR)",
+                "tenant_id",
+                "job_id",
+                "parent_job_id",
+                "agent_id",
+                "provider_id",
+                "model_id",
+                "error_message",
+            )
+            conditions.append(
+                "("
+                + " OR ".join(
+                    f"LOWER(COALESCE({field}, '')) LIKE %s ESCAPE '\\\\'"
+                    for field in searchable_fields
+                )
+                + ")",
+            )
+            sql_params.extend([f"%{escaped_query}%"] * len(searchable_fields))
+        return " AND ".join(conditions), sql_params
+
     async def _fetch_dispatch_worker_policy_rows(
         self,
         db: DatabaseConnection,
@@ -1252,11 +1296,11 @@ class QueryService:
         *,
         source_id: str,
         batch_id: str,
-        intent_limit: int = 100,
-        event_limit: int = 100,
+        params: CronDispatchDetailQueryParams | None = None,
     ) -> Optional[CronDispatchBatchDetailResponse]:
         """查询单个批调度 batch 的 intent 和事件明细。"""
         db = get_db_connection()
+        query_params = params or CronDispatchDetailQueryParams()
         batch_row = await db.fetch_one(
             """
             SELECT
@@ -1287,8 +1331,35 @@ class QueryService:
             """,
             (source_id, batch_id),
         )
-        intent_rows = await db.fetch_all(
+        intent_where, intent_sql_params = (
+            self._build_dispatch_intent_where_clause(
+                source_id=source_id,
+                batch_id=batch_id,
+                params=query_params,
+            )
+        )
+        filtered_count_row = await db.fetch_one(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM swe_cron_dispatch_intents
+            WHERE {intent_where}
+            """,
+            tuple(intent_sql_params),
+        )
+        event_count_row = await db.fetch_one(
             """
+            SELECT COUNT(*) AS count
+            FROM swe_cron_dispatch_events
+            WHERE source_id = %s AND batch_id = %s
+            """,
+            (source_id, batch_id),
+        )
+        intent_offset = (
+            query_params.intent_page - 1
+        ) * query_params.intent_limit
+        event_offset = (query_params.event_page - 1) * query_params.event_limit
+        intent_rows = await db.fetch_all(
+            f"""
             SELECT
                 id, batch_id, intent_role, status, source_id, provider_id,
                 model_id, tenant_id, agent_id, job_id, parent_job_id,
@@ -1296,14 +1367,15 @@ class QueryService:
                 attempt_count, max_attempts, lock_owner, locked_at, acked_at,
                 completed_at, error_message, created_at, updated_at
             FROM swe_cron_dispatch_intents
-            WHERE source_id = %s AND batch_id = %s
+            WHERE {intent_where}
             ORDER BY
                 CASE intent_role WHEN 'parent' THEN 0 ELSE 1 END,
                 dispatch_order,
                 id
-            LIMIT %s
+            LIMIT %s OFFSET %s
             """,
-            (source_id, batch_id, intent_limit),
+            tuple(intent_sql_params)
+            + (query_params.intent_limit, intent_offset),
         )
         event_rows = await db.fetch_all(
             """
@@ -1313,15 +1385,28 @@ class QueryService:
             FROM swe_cron_dispatch_events
             WHERE source_id = %s AND batch_id = %s
             ORDER BY created_at DESC, id DESC
-            LIMIT %s
+            LIMIT %s OFFSET %s
             """,
-            (source_id, batch_id, event_limit),
+            (
+                source_id,
+                batch_id,
+                query_params.event_limit,
+                event_offset,
+            ),
         )
         return CronDispatchBatchDetailResponse(
             batch=self._map_dispatch_batch(batch_row),
             intents=[self._map_dispatch_intent(row) for row in intent_rows],
             intent_total=int((count_row or {}).get("count") or 0),
+            intent_filtered_total=int(
+                (filtered_count_row or {}).get("count") or 0,
+            ),
+            intent_page=query_params.intent_page,
+            intent_page_size=query_params.intent_limit,
             events=[self._map_dispatch_event(row) for row in event_rows],
+            event_total=int((event_count_row or {}).get("count") or 0),
+            event_page=query_params.event_page,
+            event_page_size=query_params.event_limit,
         )
 
     async def get_dispatch_workers(

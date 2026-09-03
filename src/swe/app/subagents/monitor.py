@@ -15,6 +15,7 @@ from ...agents.tools.subagent_background import (
     get_default_background_subagent_supervisor,
 )
 from ...config.config import AgentProfileConfig
+from ...runtime_workers import run_runtime_state_work
 from .models import (
     BackgroundRunStatus,
     BackgroundSubAgentRunRecord,
@@ -134,6 +135,15 @@ class SubAgentMonitorService:
             await wait(self._scope, timeout_ms=0)
 
     async def _records_for_session(
+        self,
+        session_id: str,
+    ) -> list[BackgroundSubAgentRunRecord]:
+        return await run_runtime_state_work(
+            self._records_for_session_sync,
+            session_id,
+        )
+
+    def _records_for_session_sync(
         self,
         session_id: str,
     ) -> list[BackgroundSubAgentRunRecord]:

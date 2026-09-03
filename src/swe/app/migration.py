@@ -333,6 +333,19 @@ def migrate_legacy_skills_to_skill_pool(
 def _do_migrate_legacy_skills(
     working_dir: Path | None = None,
 ) -> bool:
+    """Run legacy migration while serializing workspace publication."""
+    from ..agents.skill_runtime_snapshot import workspace_skill_coordinator
+
+    wd = Path(working_dir or WORKING_DIR).expanduser()
+    # Migration touches multiple workspace trees; serialize each target in
+    # the implementation below and retain the existing cross-process locks.
+    with workspace_skill_coordinator(wd / "workspaces" / "default"):
+        return _do_migrate_legacy_skills_locked(wd)
+
+
+def _do_migrate_legacy_skills_locked(
+    wd: Path,
+) -> bool:
     """Internal implementation of legacy skills migration."""
     from ..agents.skills_manager import (
         _build_signature,
@@ -346,8 +359,6 @@ def _do_migrate_legacy_skills(
         get_workspace_skills_dir,
         reconcile_workspace_manifest,
     )
-
-    wd = Path(working_dir or WORKING_DIR).expanduser()
 
     # --- Phase 0: Check if migration already completed ---
     # If skill pool manifest exists, migration has been done

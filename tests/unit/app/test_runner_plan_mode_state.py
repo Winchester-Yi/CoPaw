@@ -159,6 +159,27 @@ async def test_manual_normal_mode_disables_plan_mode() -> None:
     assert request.channel_meta["plan_mode_enabled"] is False
 
 
+async def test_scheduled_request_forces_normal_mode_without_clearing_persisted_state() -> (
+    None
+):
+    runner, repo = await _runner_with_repo()
+    await runner._chat_manager.get_or_create_chat(
+        "session-1",
+        "user-1",
+        "console",
+        meta={"plan_mode_enabled": True},
+    )
+    request = _request({"plan_mode_enabled": True})
+    request.execution_origin = "scheduled"
+
+    chat = await _resolve_chat(runner, request)
+    persisted = await repo.get_chat(chat.id)
+
+    assert persisted is not None
+    assert persisted.meta["plan_mode_enabled"] is True
+    assert request.channel_meta["plan_mode_enabled"] is False
+
+
 async def test_persisted_plan_mode_reaches_agent_request_context() -> None:
     runner, _repo = await _runner_with_repo()
     chat = SimpleNamespace(id="chat-1", meta={"plan_mode_enabled": True})

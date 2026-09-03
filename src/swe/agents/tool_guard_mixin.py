@@ -1214,6 +1214,16 @@ class ToolGuardMixin:
         if detector is None or not hasattr(detector, "on_tool_call"):
             return
         try:
+            validate_snapshot = getattr(
+                detector,
+                "validate_tool_call_snapshot",
+                None,
+            )
+            if validate_snapshot is not None and not await validate_snapshot(
+                tool_name,
+                tool_input,
+            ):
+                return
             primary_skill, _ = await detector.on_tool_call(
                 tool_name=tool_name,
                 tool_input=tool_input,

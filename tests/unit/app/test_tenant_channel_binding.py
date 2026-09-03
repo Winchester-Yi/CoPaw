@@ -159,3 +159,49 @@ def test_consume_one_request_binds_workspace_tenant_context_for_tracker_path(
     assert get_current_tenant_id() is None
     assert get_current_workspace_dir() is None
     assert get_current_llm_workload() == LLM_WORKLOAD_CHAT
+
+
+def test_tracker_path_propagates_chat_id_to_request_and_payload():
+    observed = {}
+    channel = _DummyChannel(process=lambda request: None)
+    chat = types.SimpleNamespace(id="chat-a", channel="dummy")
+
+    async def get_or_create_chat(*_args, **_kwargs):
+        return chat
+
+    async def start_or_attach(chat_id, payload, *_args, **_kwargs):
+        observed["chat_id"] = chat_id
+        observed["payload_chat_id"] = payload["meta"].get("chat_id")
+        return types.SimpleNamespace(is_new_run=False)
+
+    channel.set_workspace(
+        types.SimpleNamespace(
+            chat_manager=types.SimpleNamespace(
+                get_or_create_chat=get_or_create_chat,
+            ),
+            answer_turn_coordinator=types.SimpleNamespace(
+                start_or_attach=start_or_attach,
+            ),
+            runner=None,
+        ),
+    )
+    request = types.SimpleNamespace(
+        session_id="session-a",
+        user_id="user-a",
+        channel="dummy",
+        channel_meta={},
+    )
+    payload = {
+        "session_id": "session-a",
+        "user_id": "user-a",
+        "content_parts": [],
+        "meta": {},
+    }
+
+    asyncio.run(channel._consume_with_tracker(request, payload))
+
+    assert request.channel_meta["chat_id"] == "chat-a"
+    assert observed == {
+        "chat_id": "chat-a",
+        "payload_chat_id": "chat-a",
+    }

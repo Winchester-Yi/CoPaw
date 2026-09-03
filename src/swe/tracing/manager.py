@@ -556,6 +556,9 @@ class TraceManager:
         skill_runtime_profiles: Optional[dict[str, Any]] = None,
         workspace_dir: Optional[Path] = None,
         skill_tool_registry: Optional[Any] = None,
+        skill_metadata: Optional[dict[str, Any]] = None,
+        skill_dirs: Optional[dict[str, Path]] = None,
+        skill_signatures: Optional[dict[str, str]] = None,
     ) -> None:
         """Set up skill invocation detector for a trace.
 
@@ -597,8 +600,10 @@ class TraceManager:
                 user_name=ctx.user_name,
                 bbk_id=ctx.bbk_id,
                 workspace_dir=workspace_dir,
+                skill_dirs=skill_dirs,
+                skill_signatures=skill_signatures,
             )
-            detector.set_enabled_skills(enabled_skills)
+            detector.set_enabled_skills(enabled_skills, skill_metadata)
             if skill_runtime_profiles:
                 detector.set_skill_runtime_profiles(skill_runtime_profiles)
 

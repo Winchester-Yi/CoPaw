@@ -68,6 +68,7 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/api/assets/text/",
     "/logo.png",
     "/swe-symbol.svg",
+    "/api/chat-shares/",
 )
 
 

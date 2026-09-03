@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import quote
 
 import click
@@ -54,8 +55,27 @@ def _request(
     return response
 
 
-def _scope_headers(tenant_id: str, source_id: str) -> dict[str, str]:
-    """Build the required tenant runtime scope headers."""
+def _scope_headers() -> dict[str, str]:
+    """Build scope headers from trusted shell runtime claims.
+
+    Shell commands receive these values from the current request headers via
+    ``apply_runtime_claim_env``.  They are intentionally not CLI options so a
+    caller cannot override the request scope from the command line.
+    """
+    tenant_id = os.environ.get("SWE_TENANT_ID", "").strip()
+    source_id = os.environ.get("SWE_SOURCE_ID", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("SWE_TENANT_ID", tenant_id),
+            ("SWE_SOURCE_ID", source_id),
+        )
+        if not value
+    ]
+    if missing:
+        raise click.ClickException(
+            "Runtime scope claims are required: " + ", ".join(missing),
+        )
     return {
         "X-Tenant-Id": tenant_id,
         "X-Source-Id": source_id,
@@ -76,16 +96,6 @@ def _display_value(value: str, show_values: bool) -> str:
 
 @env_group.command("list")
 @click.option(
-    "--tenant-id",
-    required=True,
-    help="Tenant ID for the runtime environment scope.",
-)
-@click.option(
-    "--source-id",
-    required=True,
-    help="Source ID for the runtime environment scope.",
-)
-@click.option(
     "--show-values",
     is_flag=True,
     help="Show environment values instead of masking them.",
@@ -93,8 +103,6 @@ def _display_value(value: str, show_values: bool) -> str:
 @click.pass_context
 def list_cmd(
     ctx: click.Context,
-    tenant_id: str,
-    source_id: str,
     show_values: bool,
 ) -> None:
     """List all environment variables."""
@@ -102,7 +110,7 @@ def list_cmd(
         ctx,
         "get",
         "/envs",
-        _scope_headers(tenant_id, source_id),
+        _scope_headers(),
     )
     envs = response.json()
     if not envs:
@@ -124,30 +132,18 @@ def list_cmd(
 @env_group.command("set")
 @click.argument("key")
 @click.argument("value")
-@click.option(
-    "--tenant-id",
-    required=True,
-    help="Tenant ID for the runtime environment scope.",
-)
-@click.option(
-    "--source-id",
-    required=True,
-    help="Source ID for the runtime environment scope.",
-)
 @click.pass_context
 def set_cmd(
     ctx: click.Context,
     key: str,
     value: str,
-    tenant_id: str,
-    source_id: str,
 ) -> None:
     """Set an environment variable (KEY VALUE)."""
     _request(
         ctx,
         "patch",
         "/envs",
-        _scope_headers(tenant_id, source_id),
+        _scope_headers(),
         json={"values": {key: value}},
     )
     click.echo(f"✓ Saved: {key}")
@@ -160,29 +156,17 @@ def set_cmd(
 
 @env_group.command("delete")
 @click.argument("key")
-@click.option(
-    "--tenant-id",
-    required=True,
-    help="Tenant ID for the runtime environment scope.",
-)
-@click.option(
-    "--source-id",
-    required=True,
-    help="Source ID for the runtime environment scope.",
-)
 @click.pass_context
 def delete_cmd(
     ctx: click.Context,
     key: str,
-    tenant_id: str,
-    source_id: str,
 ) -> None:
     """Delete an environment variable."""
     _request(
         ctx,
         "delete",
         f"/envs/{quote(key, safe='')}",
-        _scope_headers(tenant_id, source_id),
+        _scope_headers(),
     )
     click.echo(f"✓ Deleted: {key}")
 

@@ -8,6 +8,34 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 The externally returned point-in-time representation of one Chat's persisted conversation and turn state. It is a read result, not a promise to wait for an active Answer Turn to finish.
 _Avoid_: live stream, wait-for-completion read, session-file view
 
+**Shareable Answer Turn**:
+One completed selected Answer Turn within a Chat, consisting of its user question and the assistant output belonging to that turn. A shared view may contain any non-contiguous set of Shareable Answer Turns without exposing the Chat's unselected turns; active, stopping, and failed turns are not shareable.
+_Avoid_: individual token, whole Chat, arbitrary message fragment
+
+**Permanent Share Link**:
+An opaque link that grants anonymous, read-only access to a fixed set of Shareable Answer Turns and neither expires based on time nor supports owner revocation.
+_Avoid_: live Chat link, expiring link, full-history link
+
+**Shared Conversation Snapshot**:
+The immutable representation captured when a Permanent Share Link is created. It contains only the selected Shareable Answer Turns, applies the same hidden-context redaction as the ordinary Chat history view, and is independent of later changes to the source Chat.
+_Avoid_: live projection, owner Chat clone, raw session state
+
+**Share Selection**:
+The main Chat interaction in which a user chooses at least one, and any non-contiguous set of, completed Shareable Answer Turns and creates one Permanent Share Link containing their Shared Conversation Snapshot.
+_Avoid_: sidebar Chat selection, per-message export, live sharing mode
+
+**Share Token**:
+The high-entropy opaque credential embedded in a Permanent Share Link. It is the sole locator for a Shared Conversation Snapshot and does not encode or reveal Chat, session, tenant, or user identity; each generation creates an independent token even for identical selections.
+_Avoid_: Chat ID in URL, session token, bearer login token
+
+**Read-only Share View**:
+The public presentation of a Shared Conversation Snapshot using the Chat renderer's structured display while suppressing every state-changing action. It may show the source Chat title and message times, but not owner or internal identity details.
+_Avoid_: interactive Chat page, owner session, raw debug dump
+
+**Share Access Record**:
+The audit metadata for one Permanent Share Link, including its creator, creation time, access count, and most recent access time. It does not identify anonymous viewers or duplicate the shared conversation content.
+_Avoid_: viewer identity profile, access log body copy, revocation record
+
 **Stream Attachability**:
 The condition in which an active Answer Turn still accepts an additional stream subscriber for its exact turn identity. It is distinct from a previously observed Chat History Snapshot status.
 _Avoid_: historical `running` status, reconnect hint, durable completion state
@@ -150,7 +178,7 @@ The separate creation, enablement, disablement, and deletion states of an **Agen
 _Avoid_: file-exists-is-enabled, hot-reload lifecycle, run cancellation
 
 **Skill-owned Stored SubAgent Definition**:
-A reusable **SubAgent Definition** packaged by one Skill and available for new **SubAgent Runs** only while its owning Skill is enabled in the target Agent's Skill Runtime View. Disabling or deleting that Skill prevents new runs without interrupting runs that already captured the definition; updates apply to subsequent Main Agent runs.
+A reusable **SubAgent Definition** packaged by one Skill and available for new **SubAgent Runs** only while its owning Skill is enabled in the target Agent's **Query Skill Snapshot**. Disabling or deleting that Skill prevents new runs without interrupting runs that already captured the definition and snapshot; updates apply to subsequent Main Agent runs.
 _Avoid_: skill subagent, independent skill agent, user-owned stored definition
 
 **Skill-owned Definition Package**:
@@ -166,7 +194,7 @@ One available Skill in an **Effective SubAgent Dependency Set** that the worker 
 _Avoid_: embedded SKILL.md body, bypassed Skill Toolkit registration, all-workspace Skill tools
 
 **Effective SubAgent Dependency Set**:
-The available and authorized dependency subset for one **SubAgent Run**. Skills resolve only from declared names in the parent Agent's enabled Skill Runtime View; MCPs resolve from declared names when `mcps` is present, including an empty list that disables all MCPs, otherwise from the parent Agent's enabled MCP client set. Unavailable entries are silently omitted rather than blocking the run.
+The available and authorized dependency subset for one **SubAgent Run**. Skills resolve only from declared names in the parent Agent's **Query Skill Snapshot**; MCPs resolve from declared names when `mcps` is present, including an empty list that disables all MCPs, otherwise from the parent Agent's enabled MCP client set. Unavailable entries are silently omitted rather than blocking the run.
 _Avoid_: cross-agent dependency lookup, failed dependency resolution, all-or-nothing dependency loading, inherited workspace Skills
 
 **Declared MCP Client Capability**:
@@ -1293,8 +1321,12 @@ A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinar
 _Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
 
 **Skill Runtime View**:
-The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.
-_Avoid_: skill snapshot, immutable skill view, complete skill directory
+The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**; each query captures this view once at its start as a **Query Skill Snapshot**, and enablement or content changes affect subsequent queries rather than changing that query's selected set.
+_Avoid_: complete skill directory, live in-flight skill view
+
+**Query Skill Snapshot**:
+The immutable, query-scoped selection of effective skills, trusted metadata, resolved package locations, and content signatures captured when a query starts. It is the consistency boundary for that query: later skill lifecycle changes apply to later queries, while a missing or changed package fails closed for the affected skill instead of being silently represented by stale snapshot metadata; the query may continue without unconfirmed Workspace Skills.
+_Avoid_: global skill cache, mutable runtime list, full skill-content copy
 
 **Console Skill Selection Panel**:
 The command-style panel opened by `@` in Console chat for selecting ordered **User-Selected Skills**, including duplicates, from the current **Skill Runtime View**. A selection is represented both by an **Inline Skill Tag** in the message and by trusted structured selection context; the panel does not list built-in tools, MCP tools, or other callable runtime capabilities.
@@ -1305,11 +1337,11 @@ The visible, atomic `@` label for one **User-Selected Skill** occurrence inside 
 _Avoid_: trusted skill directive, tool call, execution proof
 
 **User-Selected Skill**:
-A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
+A **Skill Runtime View** member that a user explicitly selects for a single chat turn and that is admitted by the turn's **Query Skill Snapshot**. A turn may contain repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
 _Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
 
 **Explicit Skill Selection Activation**:
-The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the current **Skill Runtime View** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists them for the rest of the session; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
+The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the turn's **Query Skill Snapshot** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists them for the rest of the session; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
 _Avoid_: plain-text skill mention, filename match, automatic semantic inference, confirmed skill use
 
 **Skill Runtime Identifier**:
@@ -3070,6 +3102,26 @@ _Avoid_: long-held paused connection, reconnect auto-resume, terminal-only closu
 The intercepted normal-completion signal from a Main Agent turn while Goal Mode remains in control. The runtime settles the turn and may continue, wait, verify, or finalize without emitting a terminal Chat completion event; only the Goal Finalization Turn completes the frontend response stream.
 _Avoid_: per-turn SSE completion, hidden loop recursion, duplicate assistant response
 
+**安全策略最终一致窗口**:
+安全策略写入共享配置文件后，各应用实例通过独立的文件轮询发现并加载新版本所允许的最长时间。本项目约定轮询周期为 30 秒；保存请求所在实例立即加载，其他实例最迟在下一次轮询时加载。轮询或加载失败时，实例继续使用最近一次成功加载的规则并静默重试。
+_Avoid_: 瞬时全局生效、严格同步提交、失败时清空规则
+
+**安全策略调用边界**:
+Tool Guard 在一次工具调用开始后固定使用该调用已选定的规则快照；策略 reload 只影响之后开始的工具调用，不中断或重判正在执行的调用。
+_Avoid_: 中途切换规则、强制终止工具调用、回溯重判
+
+**配置原子写入**:
+所有通过公共配置写入口保存的配置都以同目录临时文件完成写入后再原子替换目标文件，使读取方只能看到完整的旧版本或完整的新版本。
+_Avoid_: 直接截断目标文件、读取半写入 JSON、仅安全策略专用的写入语义
+
+**安全策略实例状态**:
+每个应用实例仅在内存中维护其最近一次成功加载的安全策略文件指纹；该状态不对外暴露、不记录日志，不参与策略决策或跨实例协调。
+_Avoid_: 以单实例状态宣称全局已生效、失败即覆盖有效规则、依赖中心化通知状态
+
+**安全策略轮询周期**:
+所有应用实例使用固定的 30 秒共享配置轮询周期，不通过环境变量或实例级配置覆盖，以保持各实例的一致传播上限。
+_Avoid_: 实例间不同轮询周期、动态缩短或延长传播承诺、依赖外部调度器
+
 ## Example Dialogue
 
 Developer: "When Plan Mode starts, should we create a SubAgent?"
@@ -3115,3 +3167,11 @@ Domain Expert: "No. It receives only Skills and MCP clients named in its Definit
 Developer: "May the reviewer edit a file?"
 
 Domain Expert: "Only when its inherited built-in tool set remains permitted by its allow/deny settings and by the parent Agent's Tool Guard and approval policy. A background run never waits for a new approval."
+
+Developer: "What exactly does a shared Chat link expose?"
+
+Domain Expert: "It exposes a Shared Conversation Snapshot made from at least one completed Shareable Answer Turn. The snapshot is fixed at creation, uses the ordinary Chat history redaction rules, and is rendered through a Read-only Share View."
+
+Developer: "Can the owner revoke or expire the link?"
+
+Domain Expert: "No. It is a Permanent Share Link: every generation creates a new opaque Share Token, and the link remains valid without time expiry or owner revocation."

@@ -312,6 +312,43 @@ def test_resolve_auth_token_for_execution_includes_cookie_header(
     )
 
 
+def test_sync_identity_envs_from_cookie_updates_present_values_only(
+    tmp_path,
+    monkeypatch,
+):
+    secret_dir = tmp_path / "tenant-secret"
+    secret_dir.mkdir()
+    envs_path = secret_dir / "envs.json"
+    envs_path.write_text(
+        '{"bbkOrgId":"old-bbk","brnOrgId":"old-brn",'
+        '"sapId":"old-sap","rtlPstId":"old-position",'
+        '"custom":"keep"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        auth_state,
+        "get_tenant_secrets_dir",
+        lambda _tenant: secret_dir,
+    )
+
+    updated_keys = auth_state.sync_identity_envs_from_cookie(
+        "com.cmb.dw.rtl.sso.vbbk=new-bbk; "
+        "com.cmb.dw.rtl.sso.vorgcode=; "
+        "userid=new-sap; "
+        "positionID=new-position",
+        tenant_id="tenant-a",
+    )
+
+    assert updated_keys == ["bbkOrgId", "rtlPstId", "sapId"]
+    assert auth_state.load_envs(envs_path) == {
+        "bbkOrgId": "new-bbk",
+        "brnOrgId": "old-brn",
+        "sapId": "new-sap",
+        "rtlPstId": "new-position",
+        "custom": "keep",
+    }
+
+
 @pytest.mark.asyncio
 async def test_configure_cron_auth_always_refreshes_user_info(monkeypatch):
     async def fake_get_agent_for_request(_request):
@@ -395,6 +432,11 @@ async def test_configure_cron_auth_returns_refreshed_status(monkeypatch):
             has_auth_token=False,
         ),
     )
+    monkeypatch.setattr(
+        auth_router,
+        "sync_identity_envs_from_cookie",
+        lambda *args, **kwargs: ["bbkOrgId", "sapId"],
+    )
 
     response = await auth_router.configure_cron_auth(
         auth_router.CronAuthConfigureRequest(
@@ -404,6 +446,7 @@ async def test_configure_cron_auth_returns_refreshed_status(monkeypatch):
     )
 
     assert response["user_info_status"] == "refreshed"
+    assert response["env_synced_keys"] == ["bbkOrgId", "sapId"]
 
 
 @pytest.mark.asyncio

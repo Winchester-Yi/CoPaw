@@ -89,6 +89,11 @@
   }
 }
 
+/* Sharing is a read-only selection state; the composer is restored on exit. */
+:global(.swe-chat-share-active) :global([class*="-chat-anywhere-input-wrapper"]) {
+  display: none !important;
+}
+
 .suggestionLabel {
   display: flex;
   align-items: flex-start;

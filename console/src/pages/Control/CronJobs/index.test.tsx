@@ -379,6 +379,20 @@ describe("CronJobsPage broadcast task refresh", () => {
     await waitFor(() => {
       expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
     });
+    expect(mocks.broadcastCronJob).toHaveBeenCalledWith(
+      "job-source",
+      [
+        {
+          tenant_id: "tenant-a",
+          tenant_name: "Tenant A",
+          bbk_id: "bbk-a",
+        },
+      ],
+      {
+        enable_offset: true,
+        offset_window_hours: 4,
+      },
+    );
     expect(
       await screen.findByText("Broadcast completed 1/1 tenants"),
     ).toBeInTheDocument();

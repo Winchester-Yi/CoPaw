@@ -168,6 +168,18 @@ class BaseChatRepository(ABC):
 
         return results
 
+    async def get_chat_id_by_session(
+        self,
+        session_id: str,
+        channel: str,
+    ) -> str | None:
+        """Return the most recently updated chat for a session and channel."""
+        chats = await self.filter_chats(channel=channel)
+        matching = [chat for chat in chats if chat.session_id == session_id]
+        if not matching:
+            return None
+        return max(matching, key=lambda chat: chat.updated_at).id
+
     async def paginate_chats(
         self,
         *,

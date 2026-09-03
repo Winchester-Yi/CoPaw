@@ -14,7 +14,7 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
@@ -23,6 +23,7 @@ import frontmatter
 from pydantic import BaseModel, Field
 from ..constant import env_var_overrides
 from ..security.skill_scanner import scan_skill_directory
+from .skill_runtime_snapshot import coordinate_workspace_skill_mutation
 from ..security.skill_scanner.safe_unpack import safe_unpack_skill_zip
 from .utils.file_handling import read_text_file_with_encoding_fallback
 from ..utils.fs_text import (
@@ -734,12 +735,38 @@ def _mutate_json(
     default: dict[str, Any],
     mutator: Callable[[dict[str, Any]], _RegistryResult],
 ) -> _RegistryResult:
-    with _file_write_lock(_lock_path_for(path)):
-        payload = _read_json_unlocked(path, default)
-        result = mutator(payload)
-        if result is not False:
-            _write_json_atomic(path, payload)
-        return result
+    # Workspace and pool manifests are both named ``skill.json``.  A
+    # process-local coordinator prevents a query snapshot from being
+    # published while a manifest mutation is still assembling its payload;
+    # the existing file lock continues to provide cross-process exclusion.
+    # Do not infer manifest kind from the parent directory name: a perfectly
+    # valid workspace may itself be named ``skill_pool``.  Pool callers pass
+    # the pool schema default, so additionally verify that the path is the
+    # canonical pool manifest for its working directory.
+    is_pool_manifest = False
+    if (
+        path.name == "skill.json"
+        and default.get("schema_version") == "skill-pool-manifest.v1"
+    ):
+        expected_pool_path = get_pool_skill_manifest_path(
+            working_dir=path.parent.parent,
+        )
+        is_pool_manifest = path.expanduser().resolve() == (
+            expected_pool_path.expanduser().resolve()
+        )
+    if path.name == "skill.json" and not is_pool_manifest:
+        from .skill_runtime_snapshot import workspace_skill_coordinator
+
+        coordination = workspace_skill_coordinator(path.parent)
+    else:
+        coordination = nullcontext()
+    with coordination:
+        with _file_write_lock(_lock_path_for(path)):
+            payload = _read_json_unlocked(path, default)
+            result = mutator(payload)
+            if result is not False:
+                _write_json_atomic(path, payload)
+            return result
 
 
 def _default_workspace_manifest() -> dict[str, Any]:
@@ -1082,6 +1109,8 @@ def _build_skill_config_env_overrides(
 def apply_skill_config_env_overrides(
     workspace_dir: Path,
     channel_name: str,
+    *,
+    snapshot: Any | None = None,
 ) -> Iterator[None]:
     """Inject effective skill config into request-scoped env overrides.
 
@@ -1089,13 +1118,23 @@ def apply_skill_config_env_overrides(
     ``EnvVarLoader`` for the current agent turn only. The full config is also
     available as ``COPAW_SKILL_CONFIG_<SKILL_NAME>`` within the same scope.
     """
-    manifest = reconcile_workspace_manifest(workspace_dir)
-    entries = manifest.get("skills", {})
+    if snapshot is None:
+        manifest = reconcile_workspace_manifest(workspace_dir)
+        entries = manifest.get("skills", {})
+    else:
+        entries = {
+            name: {
+                "config": dict(skill.config),
+                "requirements": dict(skill.requirements),
+            }
+            for name, skill in snapshot.skills.items()
+        }
     overrides: dict[str, str] = {}
 
     for skill_name in resolve_effective_skills(
         workspace_dir,
         channel_name,
+        _snapshot=snapshot,
     ):
         entry = entries.get(skill_name) or {}
         config = entry.get("config") or {}
@@ -1517,6 +1556,17 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
         if registered ``demo_skill`` is disabled, the next reconcile moves it
         from ``skills/demo_skill`` to ``.disabled_skills/demo_skill``.
     """
+    from .skill_runtime_snapshot import workspace_skill_coordinator
+
+    workspace_dir = Path(workspace_dir).expanduser().resolve()
+    with workspace_skill_coordinator(workspace_dir):
+        return _reconcile_workspace_manifest_locked(workspace_dir)
+
+
+def _reconcile_workspace_manifest_locked(
+    workspace_dir: Path,
+) -> dict[str, Any]:
+    """Reconcile while holding the workspace skill coordinator."""
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     sanitized_rename_moves: list[tuple[Path, Path]] = []
 
@@ -1603,11 +1653,15 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
 
         return payload
 
-    return _mutate_workspace_manifest_strict(
+    result = _mutate_workspace_manifest_strict(
         manifest_path,
         _update,
         sanitized_rename_moves,
     )
+    from .skill_runtime_snapshot import invalidate_workspace_skill_snapshot
+
+    invalidate_workspace_skill_snapshot(workspace_dir)
+    return result
 
 
 def list_workspaces(tenant_id: str | None = None) -> list[dict[str, str]]:
@@ -1703,23 +1757,18 @@ def resolve_effective_skills(
     channel_name: str,
     *,
     _registry: dict | None = None,
+    _snapshot: Any | None = None,
 ) -> list[str]:
     """Resolve enabled workspace skills for one channel."""
-    manifest = reconcile_workspace_manifest(workspace_dir)
-    resolved = []
-    for skill_name, entry in sorted(manifest.get("skills", {}).items()):
-        if not entry.get("enabled", False):
-            continue
-        channels = entry.get("channels") or ["all"]
-        if "all" in channels or channel_name in channels:
-            skill_dir = resolve_workspace_managed_skill_dir(
-                workspace_dir,
-                skill_name,
-                enabled=True,
-            )
-            if skill_dir.exists():
-                resolved.append(skill_name)
-    return resolved
+    if _snapshot is None:
+        from .skill_runtime_snapshot import get_workspace_skill_snapshot
+
+        _snapshot = get_workspace_skill_snapshot(workspace_dir)
+    return [
+        name
+        for name, skill in sorted(_snapshot.skills.items())
+        if "all" in skill.channels or channel_name in skill.channels
+    ]
 
 
 def ensure_skills_initialized(workspace_dir: Path) -> None:
@@ -2056,6 +2105,7 @@ class SkillService:
                 skills.append(skill)
         return skills
 
+    @coordinate_workspace_skill_mutation
     def create_skill(
         self,
         name: str,
@@ -2149,6 +2199,7 @@ class SkillService:
         )
         return skill_name
 
+    @coordinate_workspace_skill_mutation
     def replace_workspace_skill_from_dir(
         self,
         *,
@@ -2224,6 +2275,7 @@ class SkillService:
         )
         return {"success": True, "name": final_name}
 
+    @coordinate_workspace_skill_mutation
     def save_skill(
         self,
         *,
@@ -2435,6 +2487,7 @@ class SkillService:
             _register,
         )
 
+    @coordinate_workspace_skill_mutation
     def import_from_zip(
         self,
         data: bytes,
@@ -2573,6 +2626,7 @@ class SkillService:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    @coordinate_workspace_skill_mutation
     def enable_skill(
         self,
         name: str,
@@ -2645,6 +2699,7 @@ class SkillService:
             "reason": None,
         }
 
+    @coordinate_workspace_skill_mutation
     def disable_skill(self, name: str) -> dict[str, Any]:
         skill_name = str(name or "")
         manifest_path = get_workspace_skill_manifest_path(self.workspace_dir)
@@ -2676,6 +2731,7 @@ class SkillService:
             "updated_workspaces": [self.workspace_dir.name],
         }
 
+    @coordinate_workspace_skill_mutation
     def set_skill_channels(
         self,
         name: str,
@@ -2701,6 +2757,7 @@ class SkillService:
         )
         return updated
 
+    @coordinate_workspace_skill_mutation
     def delete_skill(self, name: str) -> bool:
         skill_name = str(name or "")
         manifest = self._read_manifest()
@@ -3405,6 +3462,7 @@ class SkillPoolService:
             _update,
         )
 
+    @coordinate_workspace_skill_mutation
     def download_to_workspace(
         self,
         skill_name: str,

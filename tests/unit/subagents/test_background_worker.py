@@ -29,6 +29,7 @@ from swe.app.subagents.launch_snapshot import (
     resolve_skill_owned_model_slot,
 )
 from swe.app.subagents.models import AgentOwnedDefinitionMetadata
+from swe.app.subagents.models import SubAgentDefinition
 from swe.config.config import MCPClientConfig, MCPConfig
 from swe.app import subagents as subagents_module
 
@@ -327,6 +328,99 @@ def test_dependency_capture_distinguishes_inherited_and_empty_mcps(
         assert set(snapshot) == expected_names
     else:
         assert private_path is None
+
+
+def test_dependency_capture_uses_parent_snapshot_directory_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SubAgent launch must copy the parent Query's exact Skill root."""
+    workspace_skill = tmp_path / "workspace" / "quality"
+    workspace_skill.mkdir(parents=True)
+    (workspace_skill / "SKILL.md").write_text(
+        "# mutable workspace version",
+        encoding="utf-8",
+    )
+    parent_snapshot_skill = tmp_path / "snapshot" / "quality"
+    parent_snapshot_skill.mkdir(parents=True)
+    (parent_snapshot_skill / "SKILL.md").write_text(
+        "# parent query version",
+        encoding="utf-8",
+    )
+    from swe.agents.skills_manager import _build_signature
+    from swe.app.subagents.launch_snapshot import capture_launch_dependencies
+
+    definition = SubAgentDefinition(
+        name="quality:reviewer",
+        description="reviewer",
+        instruction="review",
+        source="skill_owned",
+        owner_scope="quality",
+        skill_owned=SkillOwnedDefinitionMetadata(
+            skill_name="quality",
+            local_name="reviewer",
+            declared_skills=["quality"],
+        ),
+    )
+    monkeypatch.setattr(
+        "swe.app.subagents.launch_snapshot.resolve_effective_skill_dir",
+        lambda *_args, **_kwargs: pytest.fail(
+            "mutable workspace resolution must not be used with a snapshot",
+        ),
+    )
+
+    dirs, _private_path, diagnostics = capture_launch_dependencies(
+        run_store_dir=tmp_path / "runs",
+        run_id="run-parent-snapshot",
+        workspace_dir=tmp_path / "workspace",
+        parent_agent_config=_agent_config(tmp_path),
+        definition=definition,
+        effective_skill_names=["quality"],
+        skill_snapshot_dirs={"quality": parent_snapshot_skill},
+        skill_snapshot_signatures={
+            "quality": _build_signature(parent_snapshot_skill),
+        },
+    )
+
+    assert (Path(dirs[0]) / "SKILL.md").read_text(encoding="utf-8") == (
+        "# parent query version"
+    )
+    assert diagnostics.loaded_skills == ["quality"]
+
+
+def test_dependency_capture_does_not_fallback_when_snapshot_entry_missing(
+    tmp_path: Path,
+) -> None:
+    """Missing parent-snapshot Skills fail closed instead of drifting."""
+    workspace_skill = tmp_path / "quality"
+    workspace_skill.mkdir()
+    (workspace_skill / "SKILL.md").write_text("# workspace", encoding="utf-8")
+    definition = SubAgentDefinition(
+        name="quality:reviewer",
+        description="reviewer",
+        instruction="review",
+        source="skill_owned",
+        owner_scope="quality",
+        skill_owned=SkillOwnedDefinitionMetadata(
+            skill_name="quality",
+            local_name="reviewer",
+            declared_skills=["quality"],
+        ),
+    )
+
+    dirs, _private_path, diagnostics = capture_launch_dependencies(
+        run_store_dir=tmp_path / "runs",
+        run_id="run-missing-parent-snapshot",
+        workspace_dir=tmp_path,
+        parent_agent_config=_agent_config(tmp_path),
+        definition=definition,
+        effective_skill_names=["quality"],
+        skill_snapshot_dirs={},
+    )
+
+    assert dirs == []
+    assert diagnostics.loaded_skills == []
+    assert diagnostics.skipped_skills == ["quality"]
 
 
 def test_private_mcp_snapshot_rejects_a_symlink_before_reading(

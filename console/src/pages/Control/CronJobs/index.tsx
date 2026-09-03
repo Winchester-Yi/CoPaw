@@ -346,7 +346,9 @@ function CronJobsPage() {
       }
       const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
         enable_offset: broadcastOffsetEnabled,
-        enable_batch_dispatch: shouldUseBatchDispatch,
+        ...(dispatchModeChanged
+          ? { enable_batch_dispatch: shouldUseBatchDispatch }
+          : {}),
         offset_window_hours: broadcastOffsetWindowHours,
       });
       setBroadcastTask(res);

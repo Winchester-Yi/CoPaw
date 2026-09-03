@@ -1164,6 +1164,62 @@ def test_broadcast_applies_normal_dispatch_after_distribution(monkeypatch):
     assert observed_context_flags == [True]
 
 
+@pytest.mark.parametrize("batch_dispatch_enabled", [False, True])
+def test_broadcast_does_not_resync_unchanged_dispatch_mode(
+    monkeypatch,
+    batch_dispatch_enabled,
+):
+    monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
+
+    async def _fake_broadcast_to_tenant(_context, tenant_id, _offset):
+        return api_module.CronBroadcastTenantResult(
+            tenant_id=tenant_id,
+            success=True,
+            job_id=f"job-{tenant_id}",
+        )
+
+    monkeypatch.setattr(
+        api_module,
+        "_broadcast_to_tenant",
+        _fake_broadcast_to_tenant,
+    )
+    source_meta = (
+        {"broadcast_dispatch_intents_enabled": True}
+        if batch_dispatch_enabled
+        else {}
+    )
+    source_job = CronJobSpec.model_validate(
+        {
+            **_job_spec("job-source"),
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "scope_id": encode_scope_id("tenant-a", "source-a"),
+            "meta": source_meta,
+        },
+    )
+    manager = _Manager({"job-source": source_job})
+    with _build_client(
+        manager,
+        multi_agent_manager=_MultiAgentManager({}),
+    ) as client:
+        response = client.post(
+            "/cron/jobs/job-source/broadcast",
+            json={
+                "target_tenant_ids": ["tenant-b"],
+                "enable_batch_dispatch": batch_dispatch_enabled,
+            },
+        )
+        finished = _wait_for_broadcast_task(
+            client,
+            "job-source",
+            response.json()["task_id"],
+        )
+
+    assert finished["status"] == "completed"
+    assert manager.batch_enabled == []
+    assert manager.batch_disabled == []
+
+
 def test_broadcast_job_polling_reports_failed_targets(monkeypatch):
     async def _fake_broadcast_to_tenant(_context, tenant_id, offset):
         del offset

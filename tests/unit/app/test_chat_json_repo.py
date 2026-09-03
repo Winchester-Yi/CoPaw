@@ -156,6 +156,31 @@ async def test_chat_repo_load_uses_runtime_state_worker(
 
 
 @pytest.mark.asyncio
+async def test_chat_repo_session_lookup_uses_indexed_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    older = ChatSpec(session_id="session-1", user_id="u1", channel="console")
+    newer = ChatSpec(session_id="session-1", user_id="u2", channel="console")
+    newer.updated_at = older.updated_at.replace(
+        microsecond=older.updated_at.microsecond + 1,
+    )
+    _write_chats(path, [older, newer])
+    repo = JsonChatRepository(path)
+    await repo.load()
+
+    async def fail_filter(*args, **kwargs):
+        raise AssertionError("indexed lookup must not scan via filter_chats")
+
+    monkeypatch.setattr(repo, "filter_chats", fail_filter)
+
+    assert (
+        await repo.get_chat_id_by_session("session-1", "console") == newer.id
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_repo_save_uses_runtime_state_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

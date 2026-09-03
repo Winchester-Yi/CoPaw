@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 import shutil
 import stat
+from collections.abc import Mapping
 from typing import Any
 
 from ...agents.skills_manager import (
+    _build_signature,
     get_skill_freshness_token,
     resolve_effective_skill_dir,
 )
@@ -32,6 +34,8 @@ def capture_launch_dependencies(
     parent_agent_config: AgentProfileConfig,
     definition: SubAgentDefinition,
     effective_skill_names: list[str],
+    skill_snapshot_signatures: Mapping[str, str] | None = None,
+    skill_snapshot_dirs: Mapping[str, Path] | None = None,
 ) -> tuple[list[str], str | None, SubAgentLaunchDiagnostics]:
     """Snapshot effective Skills and MCP configuration privately."""
     community = getattr(definition.agent_owned, "community", None)
@@ -63,11 +67,14 @@ def capture_launch_dependencies(
     if metadata is not None:
         available_skills = set(effective_skill_names)
         for skill_name in metadata.declared_skills:
-            source = (
-                frozen_root / "skills" / skill_name
-                if frozen_root is not None
-                else resolve_effective_skill_dir(workspace_dir, skill_name)
-            )
+            if frozen_root is not None:
+                source = frozen_root / "skills" / skill_name
+            elif skill_snapshot_dirs is not None:
+                # A parent Query snapshot is authoritative.  Never silently
+                # resolve a missing entry from the mutable workspace.
+                source = skill_snapshot_dirs.get(skill_name)
+            else:
+                source = resolve_effective_skill_dir(workspace_dir, skill_name)
             if frozen_root is None and skill_name not in available_skills:
                 skipped_skills.append(skill_name)
                 continue
@@ -84,7 +91,23 @@ def capture_launch_dependencies(
                 skipped_skills.append(skill_name)
                 continue
             try:
+                expected_signature = (skill_snapshot_signatures or {}).get(
+                    skill_name,
+                )
+                if (
+                    expected_signature is not None
+                    and _build_signature(source) != expected_signature
+                ):
+                    skipped_skills.append(skill_name)
+                    continue
                 _copy_skill_tree_no_symlinks(source, target)
+                if (
+                    expected_signature is not None
+                    and _build_signature(target) != expected_signature
+                ):
+                    _remove_snapshot_tree(target)
+                    skipped_skills.append(skill_name)
+                    continue
                 loaded_skills.append(skill_name)
                 freshness_tokens[skill_name] = get_skill_freshness_token(
                     source,

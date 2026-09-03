@@ -74,3 +74,24 @@ def test_app_cmd_passes_selected_loop_to_uvicorn(monkeypatch):
     assert result.exit_code == 0
     uvicorn_run.assert_called_once()
     assert uvicorn_run.call_args.kwargs["loop"] == "uvloop"
+
+
+def test_app_cmd_disables_uvicorn_access_log(monkeypatch):
+    """The service should not emit Uvicorn request access logs."""
+    monkeypatch.delenv("SWE_CONSOLE_OUTPUT_ENABLED", raising=False)
+    uvicorn_run = Mock()
+    monkeypatch.setattr(app_cmd_module.uvicorn, "run", uvicorn_run)
+    monkeypatch.setattr(app_cmd_module, "write_last_api", Mock())
+    monkeypatch.setattr(app_cmd_module, "setup_logger", Mock())
+
+    app_cmd(
+        host="127.0.0.1",
+        port=9123,
+        reload=False,
+        workers=None,
+        log_level="info",
+        hide_access_paths=(),
+    )
+
+    assert uvicorn_run.call_args.kwargs["access_log"] is False
+    assert app_cmd_module.os.environ["SWE_CONSOLE_OUTPUT_ENABLED"] == "false"

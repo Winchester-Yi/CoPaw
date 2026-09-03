@@ -497,28 +497,26 @@ class ChatManager:
 
         Note:
             Returns most recently updated chat if multiple matches exist.
-            O(N) scan of active chats. Future optimization: add index.
+            JSON-backed repositories serve this from an in-memory session
+            index; generic repositories retain the filter fallback.
         """
         async with self._lock:
-            chats = await self._repo.filter_chats(channel=channel)
-            matching_chats = [
-                chat for chat in chats if chat.session_id == session_id
-            ]
-
-            if not matching_chats:
+            chat_id = await self._repo.get_chat_id_by_session(
+                session_id,
+                channel,
+            )
+            if chat_id is None:
                 logger.debug(
                     f"No chat found for session={session_id[:30]} "
                     f"channel={channel}",
                 )
                 return None
-
-            most_recent = max(matching_chats, key=lambda c: c.updated_at)
             logger.debug(
-                f"Found chat_id={most_recent.id} "
+                f"Found chat_id={chat_id} "
                 f"for session={session_id[:30]} "
-                f"(from {len(matching_chats)} matches)",
+                f"channel={channel}",
             )
-            return most_recent.id
+            return chat_id
 
 
 def _is_valid_chat_id(value: object) -> bool:

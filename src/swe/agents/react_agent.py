@@ -232,6 +232,8 @@ def _add_main_agent_tools(
         tool_functions["submit_goal_turn_resolution"] = (
             create_submit_goal_turn_resolution_tool(request_context)
         )
+    if request_context.get("execution_origin") == "scheduled":
+        return
     goal_mode_enabled = bool(request_context.get("goal_mode_enabled"))
     if not goal_mode_enabled and not _plan_interaction_tools_enabled(
         plan_mode_enabled,
@@ -457,6 +459,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         task_tracker: Any | None = None,
         enable_workspace_skills: bool = True,
         workspace_skill_dirs: dict[str, Path] | None = None,
+        workspace_skill_snapshot: Any | None = None,
         model_slot_override: Any | None = None,
         model_provider_override: Any | None = None,
         fallback_model_slot: Any | None = None,
@@ -493,6 +496,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._task_tracker = task_tracker
         self._enable_workspace_skills = enable_workspace_skills
         self._workspace_skill_dirs = dict(workspace_skill_dirs or {})
+        self._workspace_skill_snapshot = workspace_skill_snapshot
         self._model_slot_override = model_slot_override
         self._model_provider_override = model_provider_override
         self._fallback_model_slot = fallback_model_slot
@@ -826,9 +830,34 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         workspace_dir = self._workspace_dir or Path(
             self._agent_config.workspace_dir or ".",
         )
-        effective_skill_names = resolve_effective_skills(
-            workspace_dir,
-            request_context.get("channel", "console"),
+        workspace_snapshot = getattr(self, "_workspace_skill_snapshot", None)
+        if workspace_snapshot is not None:
+            channel = request_context.get("channel", "console")
+            effective_skill_names = [
+                name
+                for name, skill in workspace_snapshot.skills.items()
+                if "all" in skill.channels or channel in skill.channels
+            ]
+        else:
+            effective_skill_names = resolve_effective_skills(
+                workspace_dir,
+                request_context.get("channel", "console"),
+            )
+        skill_snapshot_signatures = (
+            {
+                name: skill.content_signature
+                for name, skill in workspace_snapshot.skills.items()
+            }
+            if workspace_snapshot is not None
+            else None
+        )
+        skill_snapshot_dirs = (
+            {
+                name: skill.directory
+                for name, skill in workspace_snapshot.skills.items()
+            }
+            if workspace_snapshot is not None
+            else None
         )
         tools = create_background_subagent_tools(
             supervisor=supervisor,
@@ -836,6 +865,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             workspace_dir=workspace_dir,
             request_context=request_context,
             effective_skill_names=effective_skill_names,
+            skill_snapshot_signatures=skill_snapshot_signatures,
+            skill_snapshot_dirs=skill_snapshot_dirs,
             selected_expert_id=str(
                 request_context.get("selected_expert_id") or "",
             ).strip()
@@ -1031,6 +1062,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             return
 
         workspace_dir = self._workspace_dir or WORKING_DIR
+        request_context = getattr(self, "_request_context", {})
+        channel_name = request_context.get("channel", "console")
 
         snapshot_skill_dirs = getattr(self, "_workspace_skill_dirs", {})
         if snapshot_skill_dirs:
@@ -1040,10 +1073,49 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             return
 
-        ensure_skills_initialized(workspace_dir)
+        workspace_snapshot = getattr(self, "_workspace_skill_snapshot", None)
+        if workspace_snapshot is not None:
+            effective_skills = [
+                name
+                for name, runtime_skill in workspace_snapshot.skills.items()
+                if "all" in runtime_skill.channels
+                or channel_name in runtime_skill.channels
+            ]
+            registered_skills: list[str] = []
+            for skill_name in effective_skills:
+                runtime_skill = workspace_snapshot.skills[skill_name]
+                try:
+                    # AgentScope's public helper reparses SKILL.md.  The
+                    # query snapshot already validated and captured its
+                    # metadata, so register the equivalent adapter directly
+                    # and avoid synchronous frontmatter I/O on the loop.
+                    toolkit.skills[skill_name] = {
+                        "name": skill_name,
+                        "description": str(
+                            runtime_skill.metadata.get("description") or "",
+                        ),
+                        "dir": str(runtime_skill.directory),
+                    }
+                    registered_skills.append(skill_name)
+                    logger.debug("Registered skill: %s", skill_name)
+                except Exception as exc:
+                    logger.error(
+                        "Failed to register skill '%s': %s",
+                        skill_name,
+                        exc,
+                    )
+            self._sanitize_registered_skill_dirs(toolkit)
+            skill_runtime_profiles = {
+                name: workspace_snapshot.skills[name].runtime_profile
+                for name in registered_skills
+            }
+            self._build_skill_tool_registry(skill_runtime_profiles)
+            self._runtime_skills = registered_skills
+            self._effective_skills = registered_skills
+            self._skill_runtime_profiles = skill_runtime_profiles
+            return
 
-        request_context = getattr(self, "_request_context", {})
-        channel_name = request_context.get("channel", "console")
+        ensure_skills_initialized(workspace_dir)
 
         effective_skills = resolve_effective_skills(
             workspace_dir,
@@ -1167,7 +1239,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         try:
             self._skill_tool_registry = (
-                build_skill_tool_registry_from_profiles(profiles)
+                build_skill_tool_registry_from_profiles(
+                    profiles,
+                )
             )
         except Exception as e:
             logger.warning("Failed to build skill-tool registry: %s", e)
@@ -1183,7 +1257,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """
         if getattr(self, "_workspace_skill_dirs", {}):
             # The detector resolves manifests and asset paths relative to a
-            # workspace. Snapshot workers must never consult the mutable
+            # workspace. Snapshot-backed agents must never consult the mutable
             # parent workspace after launch.
             return
 
@@ -1214,6 +1288,45 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 skill_runtime_profiles=self.get_skill_runtime_profiles(),
                 workspace_dir=workspace_dir,
                 skill_tool_registry=self.get_skill_tool_registry(),
+                skill_metadata=(
+                    {
+                        name: dict(skill.metadata)
+                        for name, skill in getattr(
+                            self._workspace_skill_snapshot,
+                            "skills",
+                            {},
+                        ).items()
+                    }
+                    if getattr(self, "_workspace_skill_snapshot", None)
+                    is not None
+                    else None
+                ),
+                skill_dirs=(
+                    {
+                        name: skill.directory
+                        for name, skill in getattr(
+                            self._workspace_skill_snapshot,
+                            "skills",
+                            {},
+                        ).items()
+                    }
+                    if getattr(self, "_workspace_skill_snapshot", None)
+                    is not None
+                    else None
+                ),
+                skill_signatures=(
+                    {
+                        name: skill.content_signature
+                        for name, skill in getattr(
+                            self,
+                            "_workspace_skill_snapshot",
+                            None,
+                        ).skills.items()
+                    }
+                    if getattr(self, "_workspace_skill_snapshot", None)
+                    is not None
+                    else None
+                ),
             )
         except Exception as e:
             logger.debug("Failed to setup skill detector: %s", e)
@@ -2287,7 +2400,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         request_context = getattr(self, "_request_context", {}) or {}
         channel_name = request_context.get("channel", "console")
         workspace_dir = Path(self._workspace_dir or WORKING_DIR)
-        with apply_skill_config_env_overrides(workspace_dir, channel_name):
+        with apply_skill_config_env_overrides(
+            workspace_dir,
+            channel_name,
+            snapshot=getattr(self, "_workspace_skill_snapshot", None),
+        ):
             try:
                 self._start_watchdog()
                 with self.agent_phase(AgentPhase.REASONING, reason="reply"):

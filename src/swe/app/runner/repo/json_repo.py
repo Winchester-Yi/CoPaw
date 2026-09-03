@@ -42,6 +42,7 @@ class _SnapshotState:
     signature: _FileSignature
     chats_file: ChatsFile
     chat_index: dict[str, ChatSpec]
+    session_index: dict[tuple[str, str], ChatSpec]
 
 
 class JsonChatRepository(BaseChatRepository):
@@ -67,6 +68,7 @@ class JsonChatRepository(BaseChatRepository):
         self._snapshot_signature: _FileSignature | None = None
         self._snapshot: ChatsFile | None = None
         self._chat_index: dict[str, ChatSpec] = {}
+        self._session_index: dict[tuple[str, str], ChatSpec] = {}
 
     @property
     def path(self) -> Path:
@@ -183,10 +185,17 @@ class JsonChatRepository(BaseChatRepository):
         chats_file: ChatsFile,
     ) -> _SnapshotState:
         snapshot = chats_file.model_copy(deep=True)
+        session_index: dict[tuple[str, str], ChatSpec] = {}
+        for chat in snapshot.chats:
+            key = (chat.channel, chat.session_id)
+            existing = session_index.get(key)
+            if existing is None or chat.updated_at > existing.updated_at:
+                session_index[key] = chat
         return _SnapshotState(
             signature=signature,
             chats_file=snapshot,
             chat_index={chat.id: chat for chat in snapshot.chats},
+            session_index=session_index,
         )
 
     def _load_and_prepare_snapshot_sync(
@@ -236,11 +245,13 @@ class JsonChatRepository(BaseChatRepository):
             self._snapshot_signature = None
             self._snapshot = None
             self._chat_index = {}
+            self._session_index = {}
             return
 
         self._snapshot_signature = snapshot_state.signature
         self._snapshot = snapshot_state.chats_file
         self._chat_index = snapshot_state.chat_index
+        self._session_index = snapshot_state.session_index
 
     async def load(self) -> ChatsFile:
         """Load chat specs from JSON file.
@@ -372,3 +383,15 @@ class JsonChatRepository(BaseChatRepository):
             chats_file,
             chat_id,
         )
+
+    async def get_chat_id_by_session(
+        self,
+        session_id: str,
+        channel: str,
+    ) -> str | None:
+        """Return a session's latest chat using the snapshot index."""
+        signature = await run_runtime_state_work(self._file_signature)
+        if self._snapshot is None or self._snapshot_signature != signature:
+            await self.load()
+        chat = self._session_index.get((channel, session_id))
+        return chat.id if chat is not None else None

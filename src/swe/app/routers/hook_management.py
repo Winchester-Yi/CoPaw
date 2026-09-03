@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from functools import partial
 from pathlib import Path
@@ -273,7 +274,8 @@ async def upload_scripts(
         for file in files
     ]
     try:
-        result = _service_for_request(request).upload_scripts(
+        result = await asyncio.to_thread(
+            _service_for_request(request).upload_scripts,
             files=payloads,
             overwrite_names=overwrite_names,
             actor=_actor_for_request(request),

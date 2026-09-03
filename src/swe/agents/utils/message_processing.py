@@ -8,8 +8,10 @@ This module handles:
 """
 
 import asyncio
+import copy
 import logging
 import os
+import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -18,9 +20,15 @@ from typing import Optional
 from agentscope.message import Msg
 
 from ...config import load_config
-from .file_handling import download_file_from_base64, download_file_from_url
+from .file_handling import (
+    _redacted_url,
+    download_file_from_base64,
+    download_file_from_url,
+)
 
 logger = logging.getLogger(__name__)
+
+_audio_slot = threading.BoundedSemaphore(1)
 
 
 async def _process_single_file_block(
@@ -66,7 +74,7 @@ async def _process_single_file_block(
             )
             logger.debug(
                 "Processed URL file block: %s -> %s",
-                url,
+                _redacted_url(url),
                 local_path,
             )
             return local_path
@@ -348,12 +356,16 @@ async def _process_single_block(
                 # Audio blocks need transcription or format conversion
                 # depending on the configured audio_mode.
                 _update_block_with_local_path(block, block_type, local_path)
-                handled = await _process_audio_block(
-                    message_content,
-                    index,
-                    local_path,
-                    block,
-                )
+                await asyncio.to_thread(_audio_slot.acquire)
+                try:
+                    handled = await _process_audio_block(
+                        message_content,
+                        index,
+                        local_path,
+                        block,
+                    )
+                finally:
+                    _audio_slot.release()
                 if handled:
                     # Audio was transcribed or sent natively; suppress the
                     # "file downloaded" notification that would follow.
@@ -398,6 +410,11 @@ async def process_file_and_media_blocks_in_message(msg) -> None:
         [msg] if isinstance(msg, Msg) else msg if isinstance(msg, list) else []
     )
 
+    # Capture request-level presentation configuration once.  Media workers
+    # must not repeatedly consult mutable global configuration while a query
+    # is in flight.
+    language = load_config().agents.language
+
     for message in messages:
         if not isinstance(message, Msg):
             continue
@@ -405,26 +422,47 @@ async def process_file_and_media_blocks_in_message(msg) -> None:
         if not isinstance(message.content, list):
             continue
 
+        candidates = [
+            (i, block)
+            for i, block in enumerate(message.content)
+            if isinstance(block, dict)
+            and block.get("type") in ["file", "image", "audio", "video"]
+        ]
+
+        async def process_candidate(index: int, source_block: dict):
+            # Isolate worker-side mutation.  The live message is updated only
+            # after all candidates complete, preserving cancellation safety.
+            isolated = copy.deepcopy(source_block)
+            isolated_content = [isolated]
+            local_path = await _process_single_block(
+                isolated_content,
+                0,
+                isolated,
+            )
+            return index, local_path, isolated_content[0]
+
+        results = await asyncio.gather(
+            *(process_candidate(i, block) for i, block in candidates),
+            return_exceptions=True,
+        )
         downloaded_files = []
 
-        for i, block in enumerate(message.content):
-            if not isinstance(block, dict):
+        for result in results:
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                logger.error("Failed to process media block: %s", result)
                 continue
-
-            block_type = block.get("type")
-            if block_type not in ["file", "image", "audio", "video"]:
-                continue
-
-            local_path = await _process_single_block(message.content, i, block)
+            i, local_path, processed_block = result
+            message.content[i] = processed_block
             if local_path:
                 downloaded_files.append((i, local_path))
 
         if downloaded_files:
-            lang = load_config().agents.language
             for i, local_path in reversed(downloaded_files):
                 text = (
                     f"用户上传文件，已经下载到 {local_path}"
-                    if lang == "zh"
+                    if language == "zh"
                     else f"User uploaded a file, downloaded to {local_path}"
                 )
                 text_block = {"type": "text", "text": text}

@@ -303,7 +303,13 @@ export interface CronDispatchBatchDetailResponse {
   batch: CronDispatchBatchItem;
   intents: CronDispatchIntentItem[];
   intent_total: number;
+  intent_filtered_total: number;
+  intent_page: number;
+  intent_page_size: number;
   events: CronDispatchEventItem[];
+  event_total: number;
+  event_page: number;
+  event_page_size: number;
 }
 
 export interface CronDispatchPolicyItem {
@@ -929,7 +935,12 @@ export const monitorApi = {
   getCronDispatchBatchDetail: async (
     batchId: string,
     filters?: {
+      intent_page?: string;
       intent_limit?: string;
+      intent_query?: string;
+      intent_role?: string;
+      intent_status?: string;
+      event_page?: string;
       event_limit?: string;
     },
   ): Promise<CronDispatchBatchDetailResponse> => {

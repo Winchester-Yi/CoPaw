@@ -60,6 +60,22 @@ export interface ChatDeleteResponse {
   chat_id: string;
 }
 
+export interface ChatShareCreateResponse {
+  token: string;
+  share_path: string;
+}
+
+export interface ChatShareSnapshot {
+  chat_name: string;
+  messages: Message[];
+}
+
+export interface ChatShareOptions {
+  chat_name: string;
+  messages: Message[];
+  turn_statuses: Record<string, string>;
+}
+
 export type SubAgentRunStatus =
   | "pending"
   | "running"

@@ -937,6 +937,27 @@ class TenantInitializer:
         existing_target_manifest: dict[str, Any],
         original_target_manifest: bytes | None,
     ) -> dict[str, Any]:
+        """Copy prepared skills under the workspace publication lock."""
+        from ...agents.skill_runtime_snapshot import (
+            workspace_skill_coordinator,
+        )
+
+        target_workspace = self.tenant_dir / "workspaces" / "default"
+        with workspace_skill_coordinator(target_workspace):
+            return self._seed_prepared_workspace_skills_locked(
+                template_workspace,
+                source_skills_state,
+                existing_target_manifest,
+                original_target_manifest,
+            )
+
+    def _seed_prepared_workspace_skills_locked(
+        self,
+        template_workspace: Path,
+        source_skills_state: dict[str, Any],
+        existing_target_manifest: dict[str, Any],
+        original_target_manifest: bytes | None,
+    ) -> dict[str, Any]:
         """Copy prepared registered packages and publish target state."""
         from ...agents.skills_manager import (
             _default_workspace_manifest,

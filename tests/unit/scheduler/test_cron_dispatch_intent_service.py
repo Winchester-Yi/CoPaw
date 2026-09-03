@@ -29,12 +29,16 @@ def test_claim_due_intents_uses_skip_locked_and_stable_order() -> None:
         for method in (
             CronDispatchIntentService._fetch_candidate_batch_ids,
             CronDispatchIntentService._claimable_intent_ids_for_batch,
+            CronDispatchIntentService._fetch_claimed_intents,
             CronDispatchIntentService._record_exhausted_dispatched_events,
         )
     )
 
     assert "FOR UPDATE SKIP LOCKED" in source
-    assert "ORDER BY due_at, dispatch_order, id" in source
+    assert "AND due_at <= %s" in source
+    assert "ORDER BY next_dispatch_order, next_id" in source
+    assert source.count("ORDER BY dispatch_order, id") == 2
+    assert "ORDER BY due_at" not in source
     assert "status = 'pending'" in source
     assert "status IN ('claimed', 'acknowledged')" in source
     assert "attempt_count < max_attempts" in source
@@ -308,6 +312,125 @@ def test_batch_enqueue_preserves_terminal_intents() -> None:
     assert "(status = 'pending' AND attempt_count < max_attempts)" in (
         claim_source
     )
+
+
+@pytest.mark.asyncio
+async def test_unknown_callback_outcome_keeps_intent_dispatched() -> None:
+    service = CronDispatchIntentService()
+    service._transition_intent = AsyncMock(return_value=True)
+    observed_at = datetime(2026, 7, 1, 10, 0)
+    details = {
+        "callback_outcome": "unknown",
+        "error_type": "ReadTimeout",
+    }
+
+    updated = await service.mark_intent_dispatch_unknown(
+        intent_id=7,
+        worker_id="scheduler-1",
+        observed_at=observed_at,
+        details=details,
+    )
+
+    assert updated is True
+    service._transition_intent.assert_awaited_once_with(
+        intent_id=7,
+        worker_id="scheduler-1",
+        status="dispatched",
+        timestamp_column="updated_at",
+        timestamp=observed_at,
+        event_type="callback_outcome_unknown",
+        details=details,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_dispatch_requeues_retryable_and_fails_exhausted(
+    monkeypatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+    stale_rows = [
+        {
+            "id": 7,
+            "batch_id": "batch-1",
+            "job_id": "child-1",
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "attempt_count": 1,
+            "max_attempts": 3,
+        },
+        {
+            "id": 8,
+            "batch_id": "batch-1",
+            "job_id": "child-2",
+            "tenant_id": "tenant-b",
+            "source_id": "source-a",
+            "attempt_count": 3,
+            "max_attempts": 3,
+        },
+    ]
+
+    class _Cursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, sql, params):
+            executed.append((" ".join(str(sql).split()), tuple(params)))
+
+        async def fetchall(self):
+            return stale_rows
+
+    class _Connection:
+        async def begin(self):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+        def cursor(self):
+            return _Cursor()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Db:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(
+        service_module,
+        "get_db_connection",
+        lambda: _Db(),
+    )
+    service = CronDispatchIntentService()
+    service._record_event_best_effort = AsyncMock()
+    service._refresh_batch_counts_for_rows = AsyncMock()
+
+    recovered = await service.recover_stale_dispatched_intents(
+        now_utc=datetime(2026, 7, 1, 10, 0),
+    )
+
+    assert recovered == 2
+    update_sql = " ".join(sql for sql, _params in executed[1:])
+    assert "SET status = 'pending'" in update_sql
+    assert "SET status = 'failed'" in update_sql
+    event_types = [
+        call.kwargs["event_type"]
+        for call in service._record_event_best_effort.await_args_list
+    ]
+    assert event_types == [
+        "stale_dispatch_requeued",
+        "child_execution_missing_failed",
+    ]
 
 
 @pytest.mark.asyncio

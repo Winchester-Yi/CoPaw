@@ -10,6 +10,7 @@ from starlette.requests import Request
 
 from swe.app.routers import _build_router
 from swe.app.routers.experts import _repository
+from swe.app.routers import experts as experts_router
 
 
 def test_experts_router_is_registered_in_root_api_router() -> None:
@@ -48,3 +49,31 @@ async def test_experts_repository_uses_active_agent_resolution(
     assert (
         repository._owner_scope == "tenant-1/active-agent"
     )  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_experts_list_runs_repository_io_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class _Repository:
+        def list(self):
+            return []
+
+    async def run_worker(function, *args, **kwargs):
+        calls.append(function)
+        return function(*args, **kwargs)
+
+    async def repository(_request):
+        return _Repository()
+
+    monkeypatch.setattr(experts_router, "_repository", repository)
+    monkeypatch.setattr(experts_router, "run_runtime_state_work", run_worker)
+
+    result = await experts_router.list_experts(
+        Request({"type": "http", "headers": []}),
+    )
+
+    assert result == []
+    assert len(calls) == 1

@@ -2342,6 +2342,30 @@ async def post_console_chat_stop(
     }
 
 
+def _save_console_upload_sync(
+    data: bytes,
+    *,
+    media_dir: Path,
+    workspace_dir: Path | None,
+    stored_name: str,
+) -> Path:
+    """Persist an uploaded attachment outside the event-loop thread."""
+    media_dir.mkdir(parents=True, exist_ok=True)
+    path = (media_dir / stored_name).resolve()
+    path.write_bytes(data)
+    if workspace_dir is None:
+        return path
+
+    workspace_media_dir = (workspace_dir / "media").resolve()
+    workspace_media_dir.relative_to(workspace_dir)
+    if workspace_media_dir == media_dir.resolve():
+        return path
+    workspace_media_dir.mkdir(parents=True, exist_ok=True)
+    context_path = workspace_media_dir / stored_name
+    context_path.write_bytes(data)
+    return context_path
+
+
 @router.post("/upload", response_model=dict, summary="Upload file for chat")
 async def post_console_upload(
     request: Request,
@@ -2363,7 +2387,6 @@ async def post_console_upload(
             detail="Channel Console not found",
         )
     media_dir = console_channel.media_dir
-    media_dir.mkdir(parents=True, exist_ok=True)
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -2373,22 +2396,23 @@ async def post_console_upload(
         )
     safe_name = _safe_filename(file.filename or "file")
     stored_name = f"{uuid.uuid4().hex}_{safe_name}"
-
-    path = (media_dir / stored_name).resolve()
-    path.write_bytes(data)
-    context_path = path
     workspace_dir_value = getattr(workspace, "workspace_dir", None)
-    if workspace_dir_value:
-        try:
-            workspace_dir = Path(workspace_dir_value).resolve()
-            workspace_media_dir = (workspace_dir / "media").resolve()
-            workspace_media_dir.relative_to(workspace_dir)
-            if workspace_media_dir != media_dir.resolve():
-                workspace_media_dir.mkdir(parents=True, exist_ok=True)
-                context_path = workspace_media_dir / stored_name
-                context_path.write_bytes(data)
-        except (OSError, ValueError):
-            context_path = path
+    workspace_dir = (
+        Path(workspace_dir_value).resolve() if workspace_dir_value else None
+    )
+    try:
+        context_path = await run_file_manager_mutation(
+            _save_console_upload_sync,
+            data,
+            media_dir=media_dir,
+            workspace_dir=workspace_dir,
+            stored_name=stored_name,
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist uploaded file",
+        ) from exc
     return {
         "url": context_path,
         "file_name": safe_name,

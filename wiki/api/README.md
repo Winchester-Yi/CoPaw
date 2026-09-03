@@ -2,8 +2,8 @@
 
 本文档说明当前 Console 使用的三个聊天接口：
 
-- `POST /api/console/chat`：提交一轮对话并通过 SSE 接收流式结果。
-- `GET /api/chats/{chat_id}`：读取指定 ChatSpec 的当前在线会话详情。
+- `POST /api/console/chat`：提交一轮对话、连接运行中的流，或恢复当前 Chat 并通过 SSE 接收结果。
+- `GET /api/chats/{chat_id}`：非阻塞读取指定 ChatSpec 的最近持久化会话快照。
 - `GET /api/chats/{chat_id}/history`：读取指定 ChatSpec 的压缩归档历史。
 
 ## 通用约定
@@ -42,6 +42,54 @@
 Content-Type: application/json
 ```
 
+### MCP 请求头透传
+
+`POST /api/console/chat` 支持把前端请求中的 `x-header-*` 头透传给本轮使用的
+HTTP/SSE MCP 服务。Console 前端从 iframe 的 `auth` 配置生成这些头；其他调用方
+也可以直接设置同名请求头。
+
+透传规则如下：
+
+1. 服务端中间件提取所有 `x-header-*` 请求头并去掉 `x-header-` 前缀。例如
+   `x-header-cookie` 会变成 MCP 请求中的 `cookie`。
+2. B3 头会规范化为标准名称，例如 `x-header-x-b3-traceid` 会变成
+   `X-B3-Traceid`；未加前缀的 B3 头也会被保留。
+3. 透传头会与 MCP 配置中的静态 `headers` 合并；同名透传头覆盖静态头，
+   Swe 运行时保留的租户、会话、Chat 和 trace 头最终优先。
+4. MCP 工具发现和实际工具调用都使用当前请求的头快照。HTTP transport 会将
+   最终头交给 HTTPX，SSE transport 会将其交给 SSE 客户端。
+5. `stdio` MCP 没有 HTTP 请求，因此不会收到这些头。
+
+示例：
+
+```bash
+curl -N -X POST "${BASE_URL}/api/console/chat" \
+  -H "X-Tenant-Id: tenant-a" \
+  -H "X-User-Id: user-001" \
+  -H "X-Source-Id: portal" \
+  -H "x-header-cookie: session=abc123" \
+  -H "x-header-x-app-id: portal" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "input": [{
+      "role": "user",
+      "type": "message",
+      "content": [{"type": "text", "text": "查询数据"}]
+    }],
+    "session_id": "session-user-001",
+    "user_id": "user-001",
+    "channel": "console",
+    "stream": true
+  }'
+```
+
+有两个有意的边界：marketplace sandbox 会过滤透传的
+`Authorization`/`x-header-authorization`，避免覆盖服务端配置；`@` 上下文引用
+面板的独立 MCP 工具发现请求目前不携带本次 Chat 的透传头，因此要求自定义头
+才能完成 `list_tools` 的 MCP 服务可能不会出现在该面板中。已进入正常 Runner
+生命周期的实际工具调用仍按上述规则透传。
+
 ---
 
 ## 1. 提交 Console 对话
@@ -77,7 +125,10 @@ data: {"object":"response",...}
 | `user_id` | `string` | 否 | `default` | 用户 ID。开启请求身份校验时必须与已认证用户一致。 |
 | `channel` | `string` | 否 | `console` | 通道标识，Console 请求应使用 `console`。 |
 | `stream` | `boolean` | 否 | `true` | 兼容 AgentRequest 的字段；该路由始终返回 SSE 流，不建议设为 `false`。 |
-| `reconnect` | `boolean` | 否 | `false` | 为 `true` 时不新建运行，而是连接一个仍在运行的 chat。此时 `input` 内容不会启动新一轮推理。 |
+| `reconnect` | `boolean` | 否 | `false` | 旧式重连开关。单独设为 `true` 时按旧逻辑连接仍在运行的 chat；此时 `input` 内容不会启动新一轮推理。与 `reconnect_mode: "current"` 一起使用时表示当前 Chat 恢复。 |
+| `reconnect_mode` | `string` | 否 | 无 | 仅精确值 `"current"` 启用当前 Chat 恢复；缺失、非法或其他值均按既有 POST 逻辑处理。该字段不要求与 `reconnect` 成对出现。 |
+| `chat_id` | `string` | 否 | 无 | 后端 ChatSpec UUID。当前 Chat 恢复时是可选定位提示，不是必填；缺失时服务端按 `session_id` 定位。普通提交不会因缺失该字段失败。 |
+| `msgid` | `string` | 否 | 无 | 旧式重连时可指定要连接的用户问题消息 ID。当前 Chat 恢复不要求客户端提供，服务端返回实际选中的 `msgid`。 |
 | `user_name` | `string` | 否 | 无 | 用户展示名/链路追踪字段。也可以由 `X-User-Name` 身份头提供。 |
 | `bbk_id` | `string` | 否 | 无 | 组织或业务维度标识。也可以由 `X-Bbk-Id` 身份头提供。 |
 | `system_prompt_injections` | `array[string]` | 否 | 无 | 请求级 system prompt 注入片段，按字符串数组传递。 |
@@ -176,7 +227,7 @@ curl -N -X POST "${BASE_URL}/api/console/chat" \
 
 ### 重连请求示例
 
-重连只连接正在运行的任务，不会创建新的 ChatSpec，也不会使用本次请求中的 `input` 启动推理。`session_id` 可以是后端 `chat_id`，也可以是该 chat 对应的逻辑 session ID。
+以下是兼容旧调用方的重连格式。它只连接正在运行的任务，不会创建新的 ChatSpec，也不会使用本次请求中的 `input` 启动推理。`session_id` 可以是后端 `chat_id`，也可以是该 chat 对应的逻辑 session ID。
 
 ```bash
 curl -N -X POST "${BASE_URL}/api/console/chat" \
@@ -192,6 +243,46 @@ curl -N -X POST "${BASE_URL}/api/console/chat" \
   }'
 ```
 
+### 当前 Chat 恢复（`reconnect_mode: "current"`）
+
+当前 Chat 恢复复用本接口，不需要新增 endpoint，也不要求客户端知道 `msgid`。服务端会在授权成功后按以下顺序选择 Chat：
+
+1. 请求中的可选 `chat_id`；
+2. `session_id` 对应的 Chat；
+3. `get_chat_by_session(session_id, channel, user_id)` 返回的 Chat。
+
+`chat_id` 只是定位提示。缺失、非法、未知或无权访问时，统一返回 `404 Chat not found`，不会泄露其他用户的 Chat 是否存在。
+
+请求示例：
+
+```bash
+curl -N -X POST "${BASE_URL}/api/console/chat" \
+  -H "X-Tenant-Id: tenant-a" \
+  -H "X-User-Id: user-001" \
+  -H "X-Source-Id: portal" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "reconnect": true,
+    "reconnect_mode": "current",
+    "session_id": "session-user-001",
+    "chat_id": "2d5f8fb3-6b17-4c77-b5a1-1e03f9dc2d41",
+    "user_id": "user-001",
+    "channel": "console"
+  }'
+```
+
+当前 Chat 恢复只会产生以下两种结果：
+
+| Chat 状态 | HTTP/SSE 行为 | 是否重新调用模型 |
+| --- | --- | --- |
+| 存在 active Answer Turn | HTTP `200`，接入原有 SSE 流并重放已缓存帧，随后继续接收实时帧。 | 否 |
+| 没有 active Answer Turn | HTTP `200`，返回一个 `event: chat.snapshot` 快照事件后正常结束。 | 否 |
+
+active 流恢复时，响应头会返回服务端拥有的 `X-Swe-Chatid`、`X-Swe-Msgid` 和 `X-Swe-Sessionid`。客户端应使用这些值作为相关性信息，不要自行生成 `msgid`。
+
+如果终态已经产生但尚未完成持久化，接口返回 `503`，并带 `Retry-After` 响应头。响应体通常为 `{ "detail": "Chat settlement is pending" }`。这是可重试的短暂状态；服务端会重试同一个终态持久化，不会重新执行模型。
+
 ### 响应头
 
 新建运行时，响应通常包含：
@@ -202,8 +293,9 @@ curl -N -X POST "${BASE_URL}/api/console/chat" \
 | `Cache-Control` | `no-cache`。 |
 | `Connection` | `keep-alive`。 |
 | `X-Accel-Buffering` | `no`，避免 Nginx 缓冲 SSE。 |
-| `X-Swe-Msgid` | 本轮用户问题的消息 ID，仅新建运行返回；不是 `chat_id`。 |
-| `X-Swe-Sessionid` | 服务端解析出的逻辑 `session_id`，仅新建运行返回。 |
+| `X-Swe-Msgid` | 本轮用户问题的消息 ID。新建运行和 active current recovery 可能返回；不是 `chat_id`。 |
+| `X-Swe-Sessionid` | 服务端解析出的逻辑 `session_id`。新建运行和 active current recovery 可能返回。 |
+| `X-Swe-Chatid` | 后端 ChatSpec UUID。新建运行或 active current recovery 可能返回。 |
 | `X-Tenant-Id-Resolved` | 中间件解析后的租户 ID，配置启用时可能返回。 |
 | `X-Scope-Id-Resolved` | 中间件解析后的运行时 scope ID，配置启用时可能返回。 |
 
@@ -211,7 +303,7 @@ curl -N -X POST "${BASE_URL}/api/console/chat" \
 
 ### SSE 事件
 
-服务端发送的每个业务事件都是 `data: <JSON>`，没有依赖 `event:` 字段，客户端应按 JSON 的 `object` 或顶层字段区分事件。
+除当前 Chat 恢复的终态快照外，服务端业务事件通常都是 `data: <JSON>`，客户端应按 JSON 的 `object` 或顶层字段区分事件。终态快照使用命名事件 `event: chat.snapshot`。
 
 #### 1. 心跳注释帧
 
@@ -272,7 +364,29 @@ data: {"object":"response","id":"response-001","status":"completed","created_at"
 }
 ```
 
-#### 4. 对话压缩事件
+#### 4. 当前 Chat 终态快照事件
+
+当使用 `reconnect_mode: "current"` 且当前 Chat 没有 active Answer Turn 时，服务端返回一个命名 SSE 事件并结束连接：
+
+```text
+event: chat.snapshot
+data: {"object":"chat_snapshot","chat_id":"2d5f8fb3-6b17-4c77-b5a1-1e03f9dc2d41","msgid":"user-msg-025","turn_status":"completed","history":{"messages":[...],"archive":{"has_more":false,"boundaries":[]}}}
+
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `object` | `string` | 固定为 `chat_snapshot`。 |
+| `chat_id` | `string` | 被恢复的 ChatSpec UUID。 |
+| `msgid` | `string|null` | 服务端选中的最近一轮用户问题消息 ID；没有 turn 时可能为 `null`。 |
+| `turn_status` | `string|null` | `completed`、`stopped`、`failed`，或没有 turn 时为 `null`。这是业务结果，不是 HTTP 错误。 |
+| `history` | `object` | 与 Chat detail 成功响应兼容的历史快照，包含 `messages` 和 `archive`。 |
+
+客户端收到该事件后应直接用 `history` 更新会话，并将本地会话标记为非生成/`idle`，不要再次发起模型请求。
+
+#### 5. 对话压缩事件
 
 执行压缩后可能发送一个不含完整消息列表的边界事件：
 
@@ -283,7 +397,7 @@ data: {"object":"conversation_compacted","chat_id":"2d5f8fb3-6b17-4c77-b5a1-1e03
 
 `boundary` 的字段与历史接口响应中的 `boundaries[]` 相同。
 
-#### 5. 工具实时输出帧
+#### 6. 工具实时输出帧
 
 允许的工具执行期间可能收到：
 
@@ -294,7 +408,7 @@ data: {"object":"tool_output_frame","tool_call_id":"call-001","tool_name":"execu
 
 `source` 可能为 `stdout`、`stderr` 或 `message`。实时工具输出可能因行数或字节预算被截断，客户端应检查 `truncated`。
 
-#### 6. 流内错误帧
+#### 7. 流内错误帧
 
 生产者发生内部异常时，流中可能收到：
 
@@ -311,13 +425,14 @@ data: {"error":"internal server error"}
 | --- | --- | --- |
 | `400` | 缺少/非法 `X-Source-Id`，或请求字段无法提取。 | `{ "detail": "X-Source-Id header is required" }` |
 | `403` | 请求体 `user_id` 与认证用户不一致，或 agent 不一致。 | `{ "detail": "Console sender does not match authenticated user" }` |
-| `404` | `reconnect=true` 时没有可连接的运行。 | `{ "detail": "No running chat for this session" }` |
+| `404` | 旧式 `reconnect=true` 没有可连接的运行；或 current recovery 无法定位/无权访问 Chat。 | 旧式：`{ "detail": "No running chat for this session" }`；current：`{ "detail": "Chat not found" }` |
 | `422` | JSON 或 AgentRequest 校验失败。 | FastAPI 标准校验错误。 |
 | `503` | 当前 workspace 没有 Console channel。 | `{ "detail": "Channel Console not found" }` |
+| `503` | current recovery 或同 Chat 新提交正在等待终态持久化。 | `{ "detail": "Chat settlement is pending" }`，并带 `Retry-After`。 |
 
 ---
 
-## 2. 读取当前在线会话详情
+## 2. 读取当前会话详情
 
 ### 基本信息
 
@@ -325,7 +440,7 @@ data: {"error":"internal server error"}
 GET /api/chats/{chat_id}
 ```
 
-该接口返回指定 ChatSpec 的当前在线会话状态：会话元数据、当前在线消息、实时运行状态与归档可用性元数据。它读取的是尚未压缩归档的在线 memory 消息，不等同于 `GET /api/chats/{chat_id}/history` 返回的压缩归档历史。当消息因压缩被移出在线 memory 后，需要通过历史接口继续读取。响应中的消息按时间线正序排列。
+该接口返回指定 ChatSpec 的会话元数据、最近一次原子持久化的在线消息快照、运行状态与归档可用性元数据。生成期间它不会等待整个模型执行或持有执行锁，因此不会因为模型迟迟未结束而长时间阻塞；返回内容可能暂时不包含尚未持久化的最新流式 token。需要实时接入生成中的 turn 时，应随后调用 `POST /api/console/chat` 的 current recovery。它读取的是尚未压缩归档的在线 memory 快照，不等同于 `GET /api/chats/{chat_id}/history` 返回的压缩归档历史。当消息因压缩被移出在线 memory 后，需要通过历史接口继续读取。响应中的消息按时间线正序排列。
 
 ### 路径参数
 
@@ -421,7 +536,7 @@ HTTP 状态码为 `200`，响应头为 `Content-Type: application/json`。响应
 | --- | --- | --- |
 | `chat` | `object\|null` | ChatSpec 会话元数据。 |
 | `messages` | `array` | 当前在线消息，按时间线正序排列；可能包含任务会话消息与模型调用失败标记消息。 |
-| `status` | `string` | 实时运行状态：`idle`、`running` 或 `stopping`。 |
+| `status` | `string` | 实时运行状态：`idle`、`running` 或 `stopping`。历史快照内容与实时流可能存在短暂时间差。 |
 | `archive` | `object` | 归档可用性元数据，见下表。 |
 
 #### `chat` 字段（ChatSpec）
@@ -656,13 +771,38 @@ HTTP 状态码为 `200`，响应头为 `Content-Type: application/json`。响应
 
 ---
 
-## 4. 三个接口的关系
+## 4. Console 前端会话管理
+
+Console 切换会话时采用“先读快照、再按需接流”的流程：
+
+```text
+切换 Chat
+  -> GET /api/chats/{chat_id}
+  -> 立即展示已持久化历史
+  -> 若 generating=true，POST /api/console/chat
+       reconnect=true
+       reconnect_mode=current
+  -> 接入 active SSE，或消费 chat.snapshot
+```
+
+前端行为约定：
+
+- GET 返回的历史消息会标记为 `history`；current recovery 返回的快照消息也会标记为 `history`。
+- 前端不生成 `msgid`，恢复成功后使用服务端返回的 `X-Swe-Msgid` 或 `chat.snapshot.msgid`。
+- 会话切换存在请求竞态保护：用户已切换到 Chat B 后，Chat A 的迟到 GET/SSE 结果不会覆盖 Chat B。
+- current recovery 返回 `404` 时，前端只做一次不触发再次重连的历史刷新，以兼容尚未支持 `reconnect_mode` 的旧后端；第二次仍不存在才显示会话不存在。
+- current recovery 返回 `503` 时，前端按 `Retry-After` 最多重试三次；重试期间若用户切换会话，则放弃旧请求的 UI 更新。
+- 收到 `chat.snapshot` 后，前端将会话设为非生成/`idle`，清理 loading 和待处理用户消息状态，不会重新提交模型请求。
+
+因此，第三方只使用既有 POST/GET 格式时无需修改；只有需要在切回生成中的 Chat 时实时恢复流，才需要在现有 POST 请求中增加 `reconnect_mode: "current"`，并处理命名事件 `chat.snapshot` 与 `503 + Retry-After`。
+
+## 5. 三个接口的关系
 
 | 场景 | 使用接口 | 关键 ID |
 | --- | --- | --- |
 | 发送新问题、接收实时回答 | `POST /api/console/chat` | `session_id` 是逻辑会话；服务端内部运行键是 `ChatSpec.id`。 |
-| 客户端断线后接回正在运行的回答 | `POST /api/console/chat` + `reconnect=true` | `session_id` 可传 `chat_id` 或逻辑 session ID。 |
-| 读取压缩前的当前在线历史 | `GET /api/chats/{chat_id}` | 使用后端 `ChatSpec.id`。 |
+| 客户端断线后接回正在运行的回答 | `POST /api/console/chat` + `reconnect=true` | 旧式调用使用 `session_id`/可选 `msgid`；也可使用 `reconnect_mode: "current"`，由服务端选择当前 turn。 |
+| 读取压缩前的当前在线历史快照 | `GET /api/chats/{chat_id}` | 使用后端 `ChatSpec.id`；生成期间读取最近持久化快照，不等待模型结束。 |
 | 读取已经归档的较早历史 | `GET /api/chats/{chat_id}/history` | 使用同一个后端 `ChatSpec.id` 和 `next_cursor`。 |
 
-其中 `X-Swe-Msgid` 是本轮用户问题消息 ID，不能当作 `chat_id` 使用；`next_cursor` 也只能在它所属的 chat 上继续分页。
+其中 `X-Swe-Msgid` 是本轮用户问题消息 ID，不能当作 `chat_id` 使用；`reconnect_mode: "current"` 的恢复请求不要求客户端提供该值；`next_cursor` 也只能在它所属的 chat 上继续分页。

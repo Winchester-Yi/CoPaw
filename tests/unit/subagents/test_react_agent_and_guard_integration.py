@@ -731,6 +731,21 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
         tmp_path,
         request_context={"agent_role": "subagent", "plan_mode_enabled": True},
     )
+    scheduled = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "execution_origin": "scheduled",
+        },
+    )
+    scheduled_goal = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "execution_origin": "scheduled",
+            "goal_mode_enabled": True,
+        },
+    )
 
     with bind_source_system_config(
         _source_config_with_plan_interaction_tools(False),
@@ -743,12 +758,16 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
         _source_config_with_plan_interaction_tools(True),
     ):
         enabled_normal_tools = SWEAgent._create_toolkit(disabled).tools
+        scheduled_tools = SWEAgent._create_toolkit(scheduled).tools
+        scheduled_goal_tools = SWEAgent._create_toolkit(scheduled_goal).tools
 
     for tool_name in ("ask_plan_clarification", "submit_proposed_plan"):
         assert tool_name not in normal_tools
         assert tool_name in plan_mode_tools
         assert tool_name not in subagent_tools
         assert tool_name in enabled_normal_tools
+        assert tool_name not in scheduled_tools
+        assert tool_name not in scheduled_goal_tools
 
 
 def test_background_subagent_tools_require_explicit_intent(
@@ -1061,7 +1080,9 @@ def test_plan_mode_shell_policy_rejects_mutating_shell_bypasses(
         assert denial is not None, command
 
 
-def test_goal_write_tracker_ignores_readonly_tools_and_marks_mutations() -> None:
+def test_goal_write_tracker_ignores_readonly_tools_and_marks_mutations() -> (
+    None
+):
     assert not _goal_tool_may_write_environment("read_file", {})
     assert not _goal_tool_may_write_environment(
         "execute_shell_command",

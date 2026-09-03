@@ -1353,6 +1353,33 @@ def test_console_upload_uses_workspace_copy_for_context_reference(
     }
 
 
+def test_console_upload_uses_bounded_filesystem_worker(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    media_dir = tmp_path / "media"
+    client = _build_upload_client(monkeypatch, media_dir)
+    calls = []
+
+    async def _run_worker(function, *args, **kwargs):
+        calls.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(
+        console_router,
+        "run_file_manager_mutation",
+        _run_worker,
+    )
+
+    response = client.post(
+        "/console/upload",
+        files={"file": ("report.pdf", b"content", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
 def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
     monkeypatch,
 ) -> None:
