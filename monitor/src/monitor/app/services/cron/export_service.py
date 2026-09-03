@@ -244,7 +244,23 @@ class ExportService:
         wb = Workbook()
         ws = wb.active
         ws.title = "客户经理技能明细"
-        headers = [
+        headers = self._skill_usage_headers()
+        self._write_skill_usage_header(ws, headers)
+        for row_number, row in enumerate(rows, 2):
+            for column, value in enumerate(
+                self._skill_usage_row_values(row),
+                1,
+            ):
+                ws.cell(row=row_number, column=column, value=value)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = (
+            f"A1:{get_column_letter(len(headers))}{max(1, len(rows) + 1)}"
+        )
+        return self._save_to_bytes(wb)
+
+    @staticmethod
+    def _skill_usage_headers() -> list[tuple[str, int]]:
+        return [
             ("定时任务名称", 28),
             ("租户ID", 20),
             ("租户姓名", 18),
@@ -260,6 +276,12 @@ class ExportService:
             ("是否点击去电访", 14),
             ("是否点击去洞察", 14),
         ]
+
+    @staticmethod
+    def _write_skill_usage_header(
+        ws: Any,
+        headers: list[tuple[str, int]],
+    ) -> None:
         header_font = Font(bold=True, size=11)
         header_fill = PatternFill(
             start_color="4472C4",
@@ -274,36 +296,29 @@ class ExportService:
             cell.alignment = header_alignment
             ws.column_dimensions[get_column_letter(column)].width = width
 
-        for row_number, row in enumerate(rows, 2):
-            actual_time = row.get("actual_time")
-            if actual_time and hasattr(actual_time, "strftime"):
-                actual_time = actual_time.strftime("%Y-%m-%d %H:%M:%S")
-            values = [
-                row.get("task_name") or "",
-                row.get("tenant_id") or "",
-                row.get("tenant_name") or "",
-                row.get("bbk_id") or "",
-                row.get("task_status") or "",
-                row.get("execution_id"),
-                actual_time or "",
-                self._execution_status(
-                    row.get("execution_status"),
-                    row.get("async_status"),
-                ),
-                "是" if row.get("is_read") else "否",
-                row.get("custuid") or "",
-                self._mask_customer_name(row.get("cust_nm")),
-                "是" if row.get("clicked_plan") else "否",
-                "是" if row.get("clicked_phone") else "否",
-                "是" if row.get("clicked_insight") else "否",
-            ]
-            for column, value in enumerate(values, 1):
-                ws.cell(row=row_number, column=column, value=value)
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = (
-            f"A1:{get_column_letter(len(headers))}{max(1, len(rows) + 1)}"
-        )
-        return self._save_to_bytes(wb)
+    def _skill_usage_row_values(self, row: dict[str, Any]) -> list[Any]:
+        actual_time = row.get("actual_time")
+        if actual_time and hasattr(actual_time, "strftime"):
+            actual_time = actual_time.strftime("%Y-%m-%d %H:%M:%S")
+        return [
+            row.get("task_name") or "",
+            row.get("tenant_id") or "",
+            row.get("tenant_name") or "",
+            row.get("bbk_id") or "",
+            row.get("task_status") or "",
+            row.get("execution_id"),
+            actual_time or "",
+            self._execution_status(
+                row.get("execution_status"),
+                row.get("async_status"),
+            ),
+            "是" if row.get("is_read") else "否",
+            row.get("custuid") or "",
+            self._mask_customer_name(row.get("cust_nm")),
+            "是" if row.get("clicked_plan") else "否",
+            "是" if row.get("clicked_phone") else "否",
+            "是" if row.get("clicked_insight") else "否",
+        ]
 
     def _save_to_bytes(self, wb: Workbook) -> bytes:
         """Save workbook to bytes.
