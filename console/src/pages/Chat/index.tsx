@@ -2617,7 +2617,7 @@ export default function ChatPage() {
                         >
                           <FilePreviewPresentationProvider
                             value={
-                              feedbackTask?.cronTaskId ? "modal" : "drawer"
+                              feedbackTask?.cronTaskId ? "modal" : "workspace"
                             }
                           >
                             <AgentScopeRuntimeWebUILayout ref={chatRef} />

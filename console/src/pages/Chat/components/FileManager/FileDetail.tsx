@@ -146,10 +146,10 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
         <span className={styles.detailIcon} aria-hidden="true">{icon}</span>
         <div className={styles.detailTitle}><Typography.Text strong ellipsis>{entry.name}</Typography.Text></div>
         <div className={styles.detailActions}>
-          {entry.capabilities.download && <Button icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>}
-          {canEdit && !editing && <Button icon={<EditOutlined />} onClick={() => setEditing(true)}>编辑</Button>}
-          {editing && <Button type="primary" loading={saving} icon={<SaveOutlined />} onClick={() => void save()}>保存</Button>}
-          {entry.archive_item_id ? <><Button icon={<UndoOutlined />} onClick={onRestore}>还原</Button><Button danger icon={<DeleteOutlined />} onClick={onPurge}>永久删除</Button></> : entry.capabilities.archive && <Button danger type="text" icon={<DeleteOutlined />} onClick={onArchive}>移到回收站</Button>}
+          {entry.capabilities.download && <Button size="small" icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>}
+          {canEdit && !editing && <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(true)}>编辑</Button>}
+          {editing && <Button size="small" type="primary" loading={saving} icon={<SaveOutlined />} onClick={() => void save()}>保存</Button>}
+          {entry.archive_item_id ? <><Button size="small" icon={<UndoOutlined />} onClick={onRestore}>还原</Button><Button size="small" danger icon={<DeleteOutlined />} onClick={onPurge}>永久删除</Button></> : entry.capabilities.archive && <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={onArchive}>移到回收站</Button>}
         </div>
       </header>
       <Tabs

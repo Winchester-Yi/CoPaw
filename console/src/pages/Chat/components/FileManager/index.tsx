@@ -1,22 +1,27 @@
-import { App, Breadcrumb, Button, Input, Modal, Tooltip } from "antd";
+import {
+  App,
+  Breadcrumb,
+  Button,
+  Drawer,
+  Empty,
+  Input,
+  Modal,
+  Tabs,
+  Tooltip,
+} from "antd";
 import {
   CloseOutlined,
   DeleteOutlined,
   DownloadOutlined,
   FolderOpenOutlined,
   HomeOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   MessageOutlined,
   SearchOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chatApi,
   type FileManagerDirectoryListing,
@@ -26,6 +31,12 @@ import {
 } from "@/api/modules/chat";
 import FileColumn from "./FileColumn";
 import FileDetail, { type FileDetailHandle } from "./FileDetail";
+import FilePreviewModal from "@/components/agentscope-chat/FilePreviewModal";
+import {
+  CHAT_WORKSPACE_FILE_EVENT,
+  type ChatWorkspaceFile,
+  type ChatWorkspaceFileEventDetail,
+} from "@/components/agentscope-chat/FileWorkspaceEvents";
 import styles from "./index.module.less";
 
 type Columns = [
@@ -36,7 +47,13 @@ type Columns = [
 type Selected = [string | null, string | null, string | null];
 type ColumnQueries = [string, string, string];
 type PendingAction = (() => void) | null;
-type ChatAreaFrame = { left: number; width: number };
+type WorkspaceTab = "workspace" | "session";
+type FileManagerApi = typeof chatApi.fileManager;
+
+interface FileManagerProps {
+  fileManagerApi?: FileManagerApi;
+}
+
 const virtualAnchorPrefix = "__file_manager_anchor__:";
 
 const shortcutRoots: Array<{
@@ -143,7 +160,9 @@ function isListingConflict(error: unknown): error is RequestError {
   return error instanceof Error && (error as RequestError).status === 409;
 }
 
-export default function FileManager() {
+export default function FileManager({
+  fileManagerApi = chatApi.fileManager,
+}: FileManagerProps) {
   const { message } = App.useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const detailRef = useRef<FileDetailHandle>(null);
@@ -177,9 +196,11 @@ export default function FileManager() {
   const [dirty, setDirty] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [guardOpen, setGuardOpen] = useState(false);
-  const [chatAreaFrame, setChatAreaFrame] = useState<ChatAreaFrame | null>(
-    null,
-  );
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("workspace");
+  const [sessionFiles, setSessionFiles] = useState<ChatWorkspaceFile[]>([]);
+  const [sessionPreview, setSessionPreview] =
+    useState<ChatWorkspaceFile | null>(null);
+  const [sessionListCollapsed, setSessionListCollapsed] = useState(false);
 
   const currentDirectory = columns[1] || columns[0];
   const uploadReason = uploadDisabledReason(root);
@@ -199,6 +220,37 @@ export default function FileManager() {
     [binaryPreviewUrl],
   );
 
+  useEffect(() => {
+    const handleWorkspaceFile = (event: Event) => {
+      const detail = (event as CustomEvent<ChatWorkspaceFileEventDetail>)
+        .detail;
+      if (!detail?.fileUrl || !detail.fileName) return;
+      const file = {
+        fileName: detail.fileName,
+        fileUrl: detail.fileUrl,
+        enableClickTracking: detail.enableClickTracking,
+      };
+      setSessionFiles((previous) => {
+        const withoutCurrent = previous.filter(
+          (item) => item.fileUrl !== file.fileUrl,
+        );
+        return [...withoutCurrent, file];
+      });
+      if (detail.action === "open") {
+        setSessionPreview(file);
+        setSessionListCollapsed(true);
+        setActiveTab("session");
+        setOpen(true);
+      }
+    };
+    window.addEventListener(CHAT_WORKSPACE_FILE_EVENT, handleWorkspaceFile);
+    return () =>
+      window.removeEventListener(
+        CHAT_WORKSPACE_FILE_EVENT,
+        handleWorkspaceFile,
+      );
+  }, []);
+
   const setColumnLoading = useCallback((index: number, value: boolean) => {
     setLoadingColumns((previous) =>
       previous.map((item, position) => (position === index ? value : item)),
@@ -217,14 +269,14 @@ export default function FileManager() {
       cursor?: string | null,
       query?: string,
     ) => {
-      return chatApi.fileManager.listDirectory({
+      return fileManagerApi.listDirectory({
         root: targetRoot,
         path,
         cursor,
         query,
       });
     },
-    [],
+    [fileManagerApi],
   );
 
   const loadInitial = useCallback(
@@ -269,23 +321,13 @@ export default function FileManager() {
     if (open) void loadInitial(root);
   }, [loadInitial, open, root]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!open) return;
-    const chatShell =
-      document.querySelector<HTMLElement>("[data-chat-shell]") ??
-      document.querySelector<HTMLElement>("[data-chat-messages-area]");
-    if (!chatShell) return;
-    const updateFrame = () => {
-      const { left, width } = chatShell.getBoundingClientRect();
-      setChatAreaFrame({ left, width });
-    };
-    updateFrame();
-    const observer = new ResizeObserver(updateFrame);
-    observer.observe(chatShell);
-    window.addEventListener("resize", updateFrame);
+    document.documentElement.classList.add("copaw-file-manager-drawer-open");
     return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updateFrame);
+      document.documentElement.classList.remove(
+        "copaw-file-manager-drawer-open",
+      );
     };
   }, [open]);
 
@@ -328,7 +370,7 @@ export default function FileManager() {
       setDetailError(null);
       try {
         if (isBinaryPreview) {
-          const { blob } = await chatApi.fileManager.downloadFile({
+          const { blob } = await fileManagerApi.downloadFile({
             root,
             path: entry.path,
           });
@@ -336,7 +378,7 @@ export default function FileManager() {
           setPreview(null);
         } else {
           setPreview(
-            await chatApi.fileManager.readFile({ root, path: entry.path }),
+            await fileManagerApi.readFile({ root, path: entry.path }),
           );
         }
       } catch (error) {
@@ -346,7 +388,7 @@ export default function FileManager() {
         setDetailLoading(false);
       }
     },
-    [revokeBinaryPreview, root],
+    [fileManagerApi, revokeBinaryPreview, root],
   );
 
   const selectEntry = useCallback(
@@ -638,7 +680,7 @@ export default function FileManager() {
           cancelText: "取消",
           onOk: async () => {
             try {
-              await chatApi.fileManager.deleteDirectory({
+              await fileManagerApi.deleteDirectory({
                 root,
                 path: entry.path,
               });
@@ -652,14 +694,14 @@ export default function FileManager() {
         });
       });
     },
-    [anchorPath, executeOrGuard, message, root],
+    [anchorPath, executeOrGuard, fileManagerApi, message, root],
   );
 
   const saveText = useCallback(
     async (content: string, revision: string) => {
       if (!detail) return;
       try {
-        const saved = await chatApi.fileManager.saveText({
+        const saved = await fileManagerApi.saveText({
           root,
           path: detail.path,
           content,
@@ -673,7 +715,7 @@ export default function FileManager() {
         throw error;
       }
     },
-    [detail, message, root],
+    [detail, fileManagerApi, message, root],
   );
 
   const refreshCurrentDirectory = useCallback(async () => {
@@ -698,7 +740,7 @@ export default function FileManager() {
     const file = event.target.files?.[0];
     if (!file || !currentDirectory) return;
     try {
-      await chatApi.fileManager.upload(
+      await fileManagerApi.upload(
         { root, path: currentDirectory.path },
         file,
       );
@@ -714,7 +756,7 @@ export default function FileManager() {
   const doDownload = useCallback(async () => {
     if (!detail) return;
     try {
-      const { blob, filename } = await chatApi.fileManager.downloadFile({
+      const { blob, filename } = await fileManagerApi.downloadFile({
         root,
         path: detail.path,
       });
@@ -727,7 +769,7 @@ export default function FileManager() {
     } catch (error) {
       message.error(`下载失败：${requestError(error)}`);
     }
-  }, [detail, message, root]);
+  }, [detail, fileManagerApi, message, root]);
 
   const mutate = useCallback(
     (kind: "archive" | "restore" | "purge") => {
@@ -739,11 +781,11 @@ export default function FileManager() {
       };
       const performMutation = async () => {
         if (kind === "archive")
-          await chatApi.fileManager.archive({ root, path: detail.path });
+          await fileManagerApi.archive({ root, path: detail.path });
         if (kind === "restore" && detail.archive_item_id)
-          await chatApi.fileManager.restore(detail.archive_item_id);
+          await fileManagerApi.restore(detail.archive_item_id);
         if (kind === "purge" && detail.archive_item_id)
-          await chatApi.fileManager.purge(detail.archive_item_id);
+          await fileManagerApi.purge(detail.archive_item_id);
         setDetail(null);
         setPreview(null);
         await refreshCurrentDirectory();
@@ -777,7 +819,7 @@ export default function FileManager() {
         },
       });
     },
-    [detail, message, refreshCurrentDirectory, root],
+    [detail, fileManagerApi, message, refreshCurrentDirectory, root],
   );
 
   const breadcrumbPath = detail
@@ -785,10 +827,6 @@ export default function FileManager() {
     : currentDirectory?.path || "";
   const canUpload =
     !uploadReason && Boolean(currentDirectory?.capabilities.upload);
-  const modalTitle = useMemo(
-    () => <span id="file-manager-title">文件管理器</span>,
-    [],
-  );
 
   return (
     <>
@@ -800,147 +838,276 @@ export default function FileManager() {
           onClick={() => setOpen(true)}
         />
       </Tooltip>
-      <Modal
+      <Drawer
         open={open}
-        title={modalTitle}
-        footer={null}
-        width={chatAreaFrame?.width || "calc(100vw - 240px)"}
-        style={{
-          height: "100dvh",
-          minHeight: "100dvh",
-          maxHeight: "100dvh",
-          left: chatAreaFrame?.left,
-          margin: chatAreaFrame ? 0 : "0 0 0 auto",
-          padding: 0,
-          top: 0,
-        }}
-        className={styles.modal}
-        rootClassName={styles.modalRoot}
+        width="var(--copaw-file-manager-drawer-width, clamp(760px, 58vw, 920px))"
+        placement="right"
+        mask={false}
+        push={false}
         closable={false}
-        onCancel={() => executeOrGuard(() => setOpen(false))}
-        aria-labelledby="file-manager-title"
+        rootClassName={styles.drawerRoot}
+        onClose={() => executeOrGuard(() => setOpen(false))}
+        styles={{
+          body: {
+            display: "flex",
+            minHeight: 0,
+            padding: 0,
+          },
+        }}
+        aria-label="文件管理器"
       >
         <div className={styles.manager}>
-          <header className={styles.topBar}>
-            <Breadcrumb
-              className={styles.breadcrumb}
-              items={breadcrumbItems(root, breadcrumbPath, (path) =>
-                executeOrGuard(() => {
-                  void anchorPath(path);
-                }),
-              )}
-            />
-            <div className={styles.headerActions}>
-              <Input.Search
-                allowClear
-                placeholder={`在 ${currentDirectory?.path || "目录"} 中搜索`}
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                onSearch={() =>
-                  executeOrGuard(() => {
-                    void submitSearch();
-                  })
-                }
-                prefix={<SearchOutlined />}
-                aria-label="搜索当前目录"
-              />
-              <Tooltip title={uploadReason || "上传到中间栏目当前目录"}>
-                <span>
-                  <Button
-                    type="primary"
-                    icon={<UploadOutlined />}
-                    disabled={!canUpload}
-                    onClick={() => fileInputRef.current?.click()}
+          <Tabs
+            className={styles.workspaceTabs}
+            activeKey={activeTab}
+            onChange={(key) => {
+              const nextTab = key as WorkspaceTab;
+              setActiveTab(nextTab);
+              if (nextTab === "session") setSessionListCollapsed(false);
+            }}
+            tabBarExtraContent={
+              <div className={styles.drawerActions}>
+                {activeTab === "session" && sessionFiles.length > 0 && (
+                  <Tooltip
+                    title={
+                      sessionListCollapsed
+                        ? "展开会话文件列表"
+                        : "收起会话文件列表"
+                    }
                   >
-                    上传
-                  </Button>
-                </span>
-              </Tooltip>
-              <Button
-                type="text"
-                className={styles.closeButton}
-                aria-label="关闭文件管理器"
-                icon={<CloseOutlined />}
-                onClick={() => executeOrGuard(() => setOpen(false))}
-              />
-            </div>
-            <input
-              ref={fileInputRef}
-              className={styles.fileInput}
-              type="file"
-              onChange={(event) => void upload(event)}
-            />
-          </header>
-          {uploadReason && (
-            <div className={styles.rootNotice}>{uploadReason}</div>
-          )}
-          <nav className={styles.shortcutBar} aria-label="文件目录快捷方式">
-            {shortcutRoots.map((shortcut) => (
-              <Button
-                key={shortcut.root}
-                className={styles.shortcut}
-                icon={shortcut.icon}
-                aria-label={shortcut.label}
-                aria-pressed={root === shortcut.root}
-                onClick={() => switchRoot(shortcut.root)}
-              >
-                {shortcut.label}
-              </Button>
-            ))}
-          </nav>
-          <main className={styles.columns}>
-            {[0, 1].map((index) => (
-              <FileColumn
-                key={index}
-                column={(index + 1) as 1 | 2}
-                directory={columns[index as 0 | 1]}
-                selectedPath={selected[index as 0 | 1]}
-                loading={loadingColumns[index]}
-                error={columnErrors[index]}
-                onRetry={() => void retryColumn(index as 0 | 1)}
-                onSelect={(entry) => void selectEntry(index as 0 | 1, entry)}
-                onDeleteDirectory={
-                  canDeleteDirectories ? confirmDeleteDirectory : undefined
-                }
-                onLoadMore={() => void loadMore(index as 0 | 1)}
-              />
-            ))}
-            <div className={styles.detailColumn}>
-              {columns[2] && !detail ? (
-                <FileColumn
-                  column={3}
-                  directory={columns[2]}
-                  selectedPath={selected[2]}
-                  loading={loadingColumns[2]}
-                  error={columnErrors[2]}
-                  onRetry={() => void retryColumn(2)}
-                  onSelect={(entry) => void selectEntry(2, entry)}
-                  onDeleteDirectory={
-                    canDeleteDirectories ? confirmDeleteDirectory : undefined
-                  }
-                  onLoadMore={() => void loadMore(2)}
+                    <Button
+                      type="text"
+                      className={styles.sessionListToggle}
+                      aria-label={
+                        sessionListCollapsed
+                          ? "展开会话文件列表"
+                          : "收起会话文件列表"
+                      }
+                      icon={
+                        sessionListCollapsed ? (
+                          <MenuUnfoldOutlined />
+                        ) : (
+                          <MenuFoldOutlined />
+                        )
+                      }
+                      onClick={() =>
+                        setSessionListCollapsed((collapsed) => !collapsed)
+                      }
+                    />
+                  </Tooltip>
+                )}
+                <Button
+                  type="text"
+                  className={styles.closeButton}
+                  aria-label="关闭文件管理器"
+                  icon={<CloseOutlined />}
+                  onClick={() => executeOrGuard(() => setOpen(false))}
                 />
-              ) : (
-                <FileDetail
-                  ref={detailRef}
-                  entry={detail}
-                  preview={preview}
-                  binaryPreviewUrl={binaryPreviewUrl}
-                  loading={detailLoading}
-                  error={detailError}
-                  editable={root !== "conversation" && root !== "recycle"}
-                  onDownload={() => void doDownload()}
-                  onEditStateChange={setDirty}
-                  onSave={saveText}
-                  onArchive={() => mutate("archive")}
-                  onRestore={() => mutate("restore")}
-                  onPurge={() => mutate("purge")}
+              </div>
+            }
+            items={[
+              {
+                key: "workspace",
+                label: (
+                  <span className={styles.tabLabel}>
+                    <FolderOpenOutlined aria-hidden="true" />
+                    <span>工作区文件</span>
+                  </span>
+                ),
+              },
+              {
+                key: "session",
+                label: (
+                  <span
+                    className={styles.tabLabel}
+                    aria-label={`当前会话文件${sessionFiles.length > 0 ? ` ${sessionFiles.length}` : ""}`}
+                  >
+                    <MessageOutlined aria-hidden="true" />
+                    <span>当前会话文件</span>
+                    {sessionFiles.length > 0 && (
+                      <span className={styles.tabCount}>
+                        {sessionFiles.length}
+                      </span>
+                    )}
+                  </span>
+                ),
+              },
+            ]}
+          />
+          {activeTab === "workspace" ? (
+            <>
+              <header className={styles.topBar}>
+                <Breadcrumb
+                  className={styles.breadcrumb}
+                  items={breadcrumbItems(root, breadcrumbPath, (path) =>
+                    executeOrGuard(() => {
+                      void anchorPath(path);
+                    }),
+                  )}
                 />
+                <div className={styles.headerActions}>
+                  <Input.Search
+                    allowClear
+                    placeholder={`在 ${
+                      currentDirectory?.path || "目录"
+                    } 中搜索`}
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    onSearch={() =>
+                      executeOrGuard(() => {
+                        void submitSearch();
+                      })
+                    }
+                    prefix={<SearchOutlined />}
+                    aria-label="搜索当前目录"
+                  />
+                  <Tooltip title={uploadReason || "上传到中间栏目当前目录"}>
+                    <span>
+                      <Button
+                        type="primary"
+                        icon={<UploadOutlined />}
+                        disabled={!canUpload}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        上传
+                      </Button>
+                    </span>
+                  </Tooltip>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  className={styles.fileInput}
+                  type="file"
+                  onChange={(event) => void upload(event)}
+                />
+              </header>
+              {uploadReason && (
+                <div className={styles.rootNotice}>{uploadReason}</div>
               )}
-            </div>
-          </main>
+              <nav className={styles.shortcutBar} aria-label="文件目录快捷方式">
+                {shortcutRoots.map((shortcut) => (
+                  <Button
+                    key={shortcut.root}
+                    className={styles.shortcut}
+                    icon={shortcut.icon}
+                    aria-label={shortcut.label}
+                    aria-pressed={root === shortcut.root}
+                    onClick={() => switchRoot(shortcut.root)}
+                  >
+                    {shortcut.label}
+                  </Button>
+                ))}
+              </nav>
+              <main className={styles.columns}>
+                {[0, 1].map((index) => (
+                  <FileColumn
+                    key={index}
+                    column={(index + 1) as 1 | 2}
+                    directory={columns[index as 0 | 1]}
+                    selectedPath={selected[index as 0 | 1]}
+                    loading={loadingColumns[index]}
+                    error={columnErrors[index]}
+                    onRetry={() => void retryColumn(index as 0 | 1)}
+                    onSelect={(entry) =>
+                      void selectEntry(index as 0 | 1, entry)
+                    }
+                    onDeleteDirectory={
+                      canDeleteDirectories ? confirmDeleteDirectory : undefined
+                    }
+                    onLoadMore={() => void loadMore(index as 0 | 1)}
+                  />
+                ))}
+                <div className={styles.detailColumn}>
+                  {columns[2] && !detail ? (
+                    <FileColumn
+                      column={3}
+                      directory={columns[2]}
+                      selectedPath={selected[2]}
+                      loading={loadingColumns[2]}
+                      error={columnErrors[2]}
+                      onRetry={() => void retryColumn(2)}
+                      onSelect={(entry) => void selectEntry(2, entry)}
+                      onDeleteDirectory={
+                        canDeleteDirectories
+                          ? confirmDeleteDirectory
+                          : undefined
+                      }
+                      onLoadMore={() => void loadMore(2)}
+                    />
+                  ) : (
+                    <FileDetail
+                      ref={detailRef}
+                      entry={detail}
+                      preview={preview}
+                      binaryPreviewUrl={binaryPreviewUrl}
+                      loading={detailLoading}
+                      error={detailError}
+                      editable={root !== "conversation" && root !== "recycle"}
+                      onDownload={() => void doDownload()}
+                      onEditStateChange={setDirty}
+                      onSave={saveText}
+                      onArchive={() => mutate("archive")}
+                      onRestore={() => mutate("restore")}
+                      onPurge={() => mutate("purge")}
+                    />
+                  )}
+                </div>
+              </main>
+            </>
+          ) : (
+            <main
+              className={`${styles.sessionContent} ${
+                sessionListCollapsed ? styles.sessionContentCollapsed : ""
+              }`}
+            >
+              {!sessionListCollapsed && (
+                <section
+                  className={styles.sessionFileList}
+                  aria-label="当前会话文件"
+                >
+                  {sessionFiles.length === 0 ? (
+                    <div className={styles.sessionEmpty}>
+                      <Empty description="当前会话还没有可预览的文件" />
+                    </div>
+                  ) : (
+                    sessionFiles.map((file) => (
+                      <button
+                        key={file.fileUrl}
+                        type="button"
+                        className={styles.sessionFile}
+                        aria-pressed={sessionPreview?.fileUrl === file.fileUrl}
+                        onClick={() => setSessionPreview(file)}
+                      >
+                        <span className={styles.sessionFileName}>
+                          {file.fileName}
+                        </span>
+                        <span className={styles.sessionFileHint}>点击预览</span>
+                      </button>
+                    ))
+                  )}
+                </section>
+              )}
+              <section
+                className={styles.sessionPreview}
+                aria-label="会话文件预览"
+              >
+                {sessionPreview ? (
+                  <FilePreviewModal
+                    open
+                    onClose={() => setSessionPreview(null)}
+                    fileUrl={sessionPreview.fileUrl}
+                    fileName={sessionPreview.fileName}
+                    enableClickTracking={sessionPreview.enableClickTracking}
+                    presentation="workspace"
+                  />
+                ) : (
+                  <Empty description="选择一个会话文件以预览" />
+                )}
+              </section>
+            </main>
+          )}
         </div>
-      </Modal>
+      </Drawer>
       <Modal
         open={guardOpen}
         title="保存未完成的修改？"
