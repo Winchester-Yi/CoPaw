@@ -364,6 +364,7 @@ class QueryService:
         task_id: str,
         trace_id: str,
         status: str,
+        error_msg: str,
     ) -> bool:
         """Update subtask status.
 
@@ -371,6 +372,7 @@ class QueryService:
             task_id: Subtask task_id
             trace_id: Main task trace_id
             status: New status value
+            error_msg: error msg
 
         Returns:
             True if updated, False otherwise
@@ -380,17 +382,21 @@ class QueryService:
 
         query = """
             UPDATE swe_cron_subtasks
-            SET status = %s, updated_at = %s
+            SET status = %s, updated_at = %s, info = %s
             WHERE task_id = %s AND trace_id = %s
         """
         now = datetime.now()
-        await self.db.execute(query, (status, now, task_id, trace_id))
+        await self.db.execute(
+            query,
+            (status, now, error_msg, task_id, trace_id),
+        )
 
         logger.debug(
-            "Updated subtask status: task_id=%s trace_id=%s status=%s",
+            "Updated subtask status: task_id=%s trace_id=%s status=%s error_msg=%s",
             task_id[:20],
             trace_id[:20],
             status,
+            error_msg,
         )
         return True
 
