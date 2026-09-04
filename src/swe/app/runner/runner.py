@@ -3517,22 +3517,34 @@ class AgentRunner(Runner):
             )
             return None
 
-        logger.debug(
-            f"Runner: Calling get_or_create_chat for "
-            f"session_id={session_id}, user_id={user_id}, "
-            f"channel={channel}, name={name}",
-        )
-        chat = await self._chat_manager.get_or_create_chat(
-            session_id,
-            user_id,
-            channel,
-            name=name,
-            meta={"agent_id": self.agent_id},
-        )
-        logger.debug(f"Runner: Got chat: {chat.id}")
         channel_meta = _without_request_scenario_snapshot(
             getattr(request, "channel_meta", None) or {},
         )
+        chat = None
+        requested_chat_id = channel_meta.get("chat_id")
+        if isinstance(requested_chat_id, str) and requested_chat_id:
+            candidate = await self._chat_manager.get_chat(requested_chat_id)
+            if (
+                candidate is not None
+                and candidate.session_id == session_id
+                and candidate.user_id == user_id
+                and candidate.channel == channel
+            ):
+                chat = candidate
+        if chat is None:
+            logger.debug(
+                f"Runner: Calling get_or_create_chat for "
+                f"session_id={session_id}, user_id={user_id}, "
+                f"channel={channel}, name={name}",
+            )
+            chat = await self._chat_manager.get_or_create_chat(
+                session_id,
+                user_id,
+                channel,
+                name=name,
+                meta={"agent_id": self.agent_id},
+            )
+        logger.debug(f"Runner: Got chat: {chat.id}")
         scheduled_request = (
             getattr(request, "execution_origin", None) == "scheduled"
         )
