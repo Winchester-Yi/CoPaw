@@ -199,21 +199,16 @@ async def test_approval_lookup_logs_in_memory_request_ids(caplog) -> None:
                 logger="swe.app.approvals.service",
             ):
                 found = await service.get_request(pending.request_id)
+                diagnostic = await service.debug_request_lookup(
+                    pending.request_id,
+                )
         finally:
             approval_logger.removeHandler(caplog.handler)
 
     assert found is pending
-    assert any(
-        "Approval lookup state:" in record.message
-        and f"pending_request_ids=['{pending.request_id}']" in record.message
-        and (
-            f"completed_request_ids=['{completed.request_id}']"
-            in record.message
-        )
-        and record.pending_request_ids == [pending.request_id]
-        and record.completed_request_ids == [completed.request_id]
-        for record in caplog.records
-    )
+    assert diagnostic["pending"]["request_id"] == pending.request_id
+    assert diagnostic["pending_count"] == 1
+    assert diagnostic["completed_count"] == 1
 
 
 @pytest.mark.asyncio

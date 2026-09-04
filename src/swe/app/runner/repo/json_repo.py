@@ -45,6 +45,7 @@ class _SnapshotState:
     chats_file: ChatsFile
     chat_index: dict[str, ChatSpec]
     session_index: dict[tuple[str, str], ChatSpec]
+    user_session_index: dict[tuple[str, str, str], ChatSpec]
 
 
 class JsonChatRepository(BaseChatRepository):
@@ -71,6 +72,7 @@ class JsonChatRepository(BaseChatRepository):
         self._snapshot: ChatsFile | None = None
         self._chat_index: dict[str, ChatSpec] = {}
         self._session_index: dict[tuple[str, str], ChatSpec] = {}
+        self._user_session_index: dict[tuple[str, str, str], ChatSpec] = {}
         self._refresh_lock = asyncio.Lock()
 
     @property
@@ -217,16 +219,22 @@ class JsonChatRepository(BaseChatRepository):
     ) -> _SnapshotState:
         snapshot = chats_file.model_copy(deep=True)
         session_index: dict[tuple[str, str], ChatSpec] = {}
+        user_session_index: dict[tuple[str, str, str], ChatSpec] = {}
         for chat in snapshot.chats:
             key = (chat.channel, chat.session_id)
             existing = session_index.get(key)
             if existing is None or chat.updated_at > existing.updated_at:
                 session_index[key] = chat
+            user_key = (chat.channel, chat.session_id, chat.user_id)
+            existing = user_session_index.get(user_key)
+            if existing is None or chat.updated_at > existing.updated_at:
+                user_session_index[user_key] = chat
         return _SnapshotState(
             signature=signature,
             chats_file=snapshot,
             chat_index={chat.id: chat for chat in snapshot.chats},
             session_index=session_index,
+            user_session_index=user_session_index,
         )
 
     def _load_and_prepare_snapshot_sync(
@@ -277,12 +285,14 @@ class JsonChatRepository(BaseChatRepository):
             self._snapshot = None
             self._chat_index = {}
             self._session_index = {}
+            self._user_session_index = {}
             return
 
         self._snapshot_signature = snapshot_state.signature
         self._snapshot = snapshot_state.chats_file
         self._chat_index = snapshot_state.chat_index
         self._session_index = snapshot_state.session_index
+        self._user_session_index = snapshot_state.user_session_index
 
     async def load(self) -> ChatsFile:
         """Load chat specs from JSON file.
@@ -348,11 +358,9 @@ class JsonChatRepository(BaseChatRepository):
         channel: str = DEFAULT_CHANNEL,
     ) -> ChatSpec | None:
         """Find a logical session from the current immutable snapshot."""
-        chats = await self.filter_chats(user_id=user_id, channel=channel)
-        for chat in chats:
-            if chat.session_id == session_id:
-                return chat
-        return None
+        await self._ensure_snapshot()
+        chat = self._user_session_index.get((channel, session_id, user_id))
+        return await run_runtime_state_work(self._copy_chat_sync, chat)
 
     async def save(self, chats_file: ChatsFile) -> None:
         """Save chat specs to JSON file atomically.

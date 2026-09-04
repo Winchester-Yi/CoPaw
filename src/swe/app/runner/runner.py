@@ -3531,6 +3531,14 @@ class AgentRunner(Runner):
                 and candidate.channel == channel
             ):
                 chat = candidate
+                merged_meta = {
+                    **(candidate.meta or {}),
+                    "agent_id": self.agent_id,
+                }
+                if merged_meta != (candidate.meta or {}):
+                    chat.meta = merged_meta
+                    chat.updated_at = datetime.now(timezone.utc)
+                    await self._chat_manager.update_chat(chat)
         if chat is None:
             logger.debug(
                 f"Runner: Calling get_or_create_chat for "

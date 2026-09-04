@@ -33,10 +33,13 @@ from .query_contracts import (
 logger = logging.getLogger(__name__)
 
 
-def _manifest_stat_is_current(snapshot: Any) -> bool:
-    """Check query snapshot freshness using the manifest metadata only."""
+def _snapshot_stat_is_current(snapshot: Any) -> bool:
+    """Check snapshot freshness using metadata before content validation."""
     from ...agents.skill_runtime_snapshot import ManifestStat
-    from ...agents.skills_manager import get_workspace_skill_manifest_path
+    from ...agents.skills_manager import (
+        get_skill_freshness_token,
+        get_workspace_skill_manifest_path,
+    )
 
     try:
         value = get_workspace_skill_manifest_path(
@@ -44,10 +47,15 @@ def _manifest_stat_is_current(snapshot: Any) -> bool:
         ).stat()
     except OSError:
         return False
-    return snapshot.manifest_stat == ManifestStat(
+    if snapshot.manifest_stat != ManifestStat(
         value.st_mtime_ns,
         value.st_size,
         value.st_ino,
+    ):
+        return False
+    return all(
+        get_skill_freshness_token(skill.directory) == skill.freshness_token
+        for skill in snapshot.skills.values()
     )
 
 
@@ -467,7 +475,7 @@ async def finalize_query_runtime(
 
         try:
             if not await asyncio.to_thread(
-                _manifest_stat_is_current,
+                _snapshot_stat_is_current,
                 workspace_skill_snapshot,
             ):
                 workspace_skill_snapshot = (

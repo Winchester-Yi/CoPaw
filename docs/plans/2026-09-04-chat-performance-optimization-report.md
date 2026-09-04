@@ -212,7 +212,7 @@ Console 请求可能在 W+ 拦截、`_start_new_chat()` 和 Agent runtime 装配
 
 已验证通过：
 
-- `tests/unit/app/test_chat_json_repo.py`：22 passed。
+- `tests/unit/app/test_chat_json_repo.py`：24 passed。
 - `tests/unit/app/test_chat_pagination.py tests/unit/app/test_chat_manager_agent_metadata.py`：26 passed。
 - `tests/unit/app/test_answer_turn_coordinator.py tests/unit/app/test_chat_answer_turn_api.py`：17 passed。
 - `tests/unit/app/test_approval_service.py::test_get_requests_batches_scope_filtered_records` 及 Chat API 回归：8 passed。

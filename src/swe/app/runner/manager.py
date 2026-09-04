@@ -469,12 +469,11 @@ class ChatManager:
         Returns:
             Number of matching chats
         """
-        async with self._lock:
-            chats = await self._repo.filter_chats(
-                user_id=user_id,
-                channel=channel,
-            )
-            return len(chats)
+        chats = await self._repo.filter_chats(
+            user_id=user_id,
+            channel=channel,
+        )
+        return len(chats)
 
     async def get_chat_id_by_session(
         self,
@@ -495,23 +494,22 @@ class ChatManager:
             JSON-backed repositories serve this from an in-memory session
             index; generic repositories retain the filter fallback.
         """
-        async with self._lock:
-            chat_id = await self._repo.get_chat_id_by_session(
-                session_id,
-                channel,
-            )
-            if chat_id is None:
-                logger.debug(
-                    f"No chat found for session={session_id[:30]} "
-                    f"channel={channel}",
-                )
-                return None
+        chat_id = await self._repo.get_chat_id_by_session(
+            session_id,
+            channel,
+        )
+        if chat_id is None:
             logger.debug(
-                f"Found chat_id={chat_id} "
-                f"for session={session_id[:30]} "
+                f"No chat found for session={session_id[:30]} "
                 f"channel={channel}",
             )
-            return chat_id
+            return None
+        logger.debug(
+            f"Found chat_id={chat_id} "
+            f"for session={session_id[:30]} "
+            f"channel={channel}",
+        )
+        return chat_id
 
 
 def _is_valid_chat_id(value: object) -> bool:

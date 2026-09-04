@@ -721,6 +721,20 @@ async def _read_history_state(
     return await session.get_session_state_dict(session_id, user_id)
 
 
+async def _cached_history_state(
+    cache: dict[tuple[str, str], dict],
+    session: SafeJSONSession,
+    session_id: str,
+    user_id: str,
+) -> dict:
+    key = (session_id, user_id)
+    state = cache.get(key)
+    if state is None:
+        state = await session.get_session_state_dict(session_id, user_id)
+        cache[key] = state
+    return state
+
+
 async def _build_chat_history(
     chat_spec: ChatSpec,
     *,
@@ -1110,6 +1124,7 @@ async def get_answer_turn(
     candidate_chats: list[ChatSpec] = []
     selected_history: ChatHistory | None = None
     selected_state: dict | None = None
+    state_cache: dict[tuple[str, str], dict] = {}
     if chat_id:
         chat_spec = await mgr.get_chat(chat_id)
         if chat_spec:
@@ -1131,7 +1146,9 @@ async def get_answer_turn(
                 _authorize_chat(request, candidate, workspace)
             except HTTPException:
                 continue
-            state = await session.get_session_state_dict(
+            state = await _cached_history_state(
+                state_cache,
+                session,
                 candidate.session_id,
                 candidate.user_id,
             )
@@ -1157,7 +1174,9 @@ async def get_answer_turn(
         )
 
     if selected_history is None:
-        selected_state = await session.get_session_state_dict(
+        selected_state = await _cached_history_state(
+            state_cache,
+            session,
             chat_spec.session_id,
             chat_spec.user_id,
         )

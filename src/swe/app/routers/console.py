@@ -1466,6 +1466,7 @@ class _SuppressionContext:
         "proposal_id",
         "token",
         "entry_text",
+        "chat_id",
     )
 
     def __init__(
@@ -1476,12 +1477,14 @@ class _SuppressionContext:
         proposal_id: str,
         token: str,
         entry_text: str,
+        chat_id: str | None = None,
     ) -> None:
         self.suppress_implicit = suppress_implicit
         self.service = service
         self.proposal_id = proposal_id
         self.token = token
         self.entry_text = entry_text
+        self.chat_id = chat_id
 
 
 def _inject_request_metadata(
@@ -1791,6 +1794,8 @@ async def _try_wplus_entry_intercept(
         suppress_entry=suppress_implicit,
     )
     if not classification.should_offer:
+        if chat is not None:
+            native_payload["meta"]["chat_id"] = chat.id
         return None, (
             _SuppressionContext(
                 suppress_implicit=suppress_implicit,
@@ -1798,6 +1803,7 @@ async def _try_wplus_entry_intercept(
                 proposal_id=suppression_proposal_id,
                 token=suppression_token,
                 entry_text=entry_text,
+                chat_id=chat.id if chat is not None else None,
             )
             if suppress_implicit
             else None

@@ -331,27 +331,13 @@ class ApprovalService:
             scope_id = self._get_current_scope_id()
             pending = self._pending.get(request_id)
             completed = self._completed.get(request_id)
-            inventory = self._request_id_inventory_locked()
-            logger.info(
-                "Approval lookup state: request_id=%s current_scope_id=%s "
-                "pending_request_ids=%s completed_request_ids=%s "
-                "pending_count=%d completed_count=%d pending_present=%s "
-                "completed_present=%s",
+            logger.debug(
+                "Approval lookup: request_id=%s current_scope_id=%s "
+                "pending_present=%s completed_present=%s",
                 request_id,
                 scope_id,
-                inventory["pending_request_ids"],
-                inventory["completed_request_ids"],
-                inventory["pending_count"],
-                inventory["completed_count"],
                 pending is not None,
                 completed is not None,
-                extra={
-                    **inventory,
-                    "approval_request_id": request_id,
-                    "approval_current_scope_id": scope_id,
-                    "approval_pending_present": pending is not None,
-                    "approval_completed_present": completed is not None,
-                },
             )
             record = pending or completed
             if record is None:
