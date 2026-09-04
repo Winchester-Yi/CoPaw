@@ -1049,6 +1049,8 @@ class TraceManager:
                     primary_skill = self._resolve_skill_name_for_tool_span(
                         detector=detector,
                         primary_skill=primary_skill,
+                        tool_name=tool_name,
+                        tool_input=tool_input or {},
                     )
                 else:
                     # Fallback to registry-based attribution
@@ -1089,10 +1091,27 @@ class TraceManager:
         *,
         detector: Any,
         primary_skill: Optional[str],
+        tool_name: str,
+        tool_input: dict[str, Any],
     ) -> Optional[str]:
         """仅在 tracing 写出层过滤 tool span 的 skill_name。"""
         if not primary_skill:
             return None
+
+        skill_from_md_read = getattr(
+            detector,
+            "_detect_skill_from_skill_md_read",
+            None,
+        )
+        if (
+            callable(skill_from_md_read)
+            and skill_from_md_read(
+                tool_name,
+                tool_input,
+            )
+            == primary_skill
+        ):
+            return primary_skill
 
         profile = None
         getter = getattr(detector, "get_skill_runtime_profile", None)
