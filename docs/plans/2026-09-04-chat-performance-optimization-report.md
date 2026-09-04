@@ -199,3 +199,25 @@ Console 请求可能在 W+ 拦截、`_start_new_chat()` 和 Agent runtime 装配
 - 不能把实时运行状态放入 TTL 缓存。
 - 本报告不建议直接把完整 Chat History 改成分页响应，避免破坏现有 API 契约。
 
+## 8. 实施与验证结果（2026-09-04）
+
+已按上述顺序完成代码改造，并拆分为以下提交：
+
+- `8c5bc250c`：Chat Repository 进程内快照、stat 失效检测和 ChatManager 读写锁拆分。
+- `3132cb4d2`：AnswerTurnCoordinator 批量状态读取及 `/chats` 列表批量组装。
+- `70e729926`：Answer Turn state/history 请求内复用、批量审批读取和归档单次扫描。
+- `92be1c3b2`：Console 启动 Chat 身份复用及 Query Workspace Skill Snapshot 复用。
+
+实现边界与本报告一致：仍以 `chats.json` 为事实来源，没有新增持久化索引文件、没有迁移 MySQL，也没有改变完整 Chat History 默认响应契约。快照命中仅执行文件 stat；写入继续使用现有文件锁和原子替换；运行状态不使用 TTL；请求携带的 Chat ID 必须重新按 session/user/channel 校验后才复用。
+
+已验证通过：
+
+- `tests/unit/app/test_chat_json_repo.py`：22 passed。
+- `tests/unit/app/test_chat_pagination.py tests/unit/app/test_chat_manager_agent_metadata.py`：26 passed。
+- `tests/unit/app/test_answer_turn_coordinator.py tests/unit/app/test_chat_answer_turn_api.py`：17 passed。
+- `tests/unit/app/test_approval_service.py::test_get_requests_batches_scope_filtered_records` 及 Chat API 回归：8 passed。
+- `tests/unit/agents/test_conversation_archive.py`：12 passed。
+- 使用临时 `SWE_WORKING_DIR`/`SWE_SECRET_DIR` 运行 Console/Runner 受影响测试：133 passed。
+- `pre-commit` 对每个改造提交均通过（包含 AST、mypy、black、flake8、pylint）。
+
+全量受影响目录测试在收集阶段仍有一个仓库已有的缺失文件：`tests/unit/app/wplus_sop/test_stage_scripts.py` 引用不存在的 `skills/wplus-sop-miner/scripts/validate_stage_sop.py`；排除该文件后测试进程在当前执行窗口未完成，未将其结果表述为通过。未执行基准压测，因此本文不提供未经测量的延迟或吞吐数字。
