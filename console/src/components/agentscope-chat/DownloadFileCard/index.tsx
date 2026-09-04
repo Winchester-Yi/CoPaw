@@ -1,9 +1,16 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { message, Spin } from "antd";
 import { SparkDownloadLine } from "@agentscope-ai/icons";
 import FilePreviewModal from "../FilePreviewModal";
 import FilePreviewDrawer from "../FilePreviewDrawer";
 import { useFilePreviewPresentation } from "../FilePreviewPresentationContext";
+import { emitChatWorkspaceFile } from "../FileWorkspaceEvents";
 import {
   extractDecodedFileNameFromUrl,
   extractResultIdFromUrl,
@@ -110,7 +117,6 @@ function DownloadFileCard(props: DownloadFileCardProps) {
   const { renderTemplate } = useDynamicRender();
   const previewPresentation = useFilePreviewPresentation();
 
-
   // Extract filename from URL if not provided
   const fileName = useMemo(() => {
     if (propFileName) return safeDecodeFileName(propFileName);
@@ -127,21 +133,39 @@ function DownloadFileCard(props: DownloadFileCardProps) {
 
   const fileType = useMemo(() => getFileType(fileName), [fileName]);
   // 动态渲染类型也支持自动预览
-  const isDynamicRender = useMemo(
-    () => isDynamicRenderHtmlLink(url),
-    [url],
-  );
+  const isDynamicRender = useMemo(() => isDynamicRenderHtmlLink(url), [url]);
   const shouldAutoPreview = useMemo(
     () =>
       autoPreview ??
-      (pageAutoPreviewEnabled && (isAutoPreviewHtmlLink(url, fileName) || isDynamicRender)),
+      (pageAutoPreviewEnabled &&
+        (isAutoPreviewHtmlLink(url, fileName) || isDynamicRender)),
     [autoPreview, pageAutoPreviewEnabled, url, fileName, isDynamicRender],
   );
   const isAutoPreviewHtml = useMemo(
     () => isAutoPreviewHtmlLink(url, fileName),
     [fileName, url],
   );
-  const shouldEnableClickTracking = enableClickTracking || isAutoPreviewHtml || isDynamicRender;
+  const shouldEnableClickTracking =
+    enableClickTracking || isAutoPreviewHtml || isDynamicRender;
+
+  const openWorkspacePreview = useCallback(() => {
+    emitChatWorkspaceFile({
+      action: "open",
+      fileName,
+      fileUrl: url,
+      enableClickTracking: shouldEnableClickTracking,
+    });
+  }, [fileName, shouldEnableClickTracking, url]);
+
+  useEffect(() => {
+    if (previewPresentation !== "workspace") return;
+    emitChatWorkspaceFile({
+      action: "register",
+      fileName,
+      fileUrl: url,
+      enableClickTracking: shouldEnableClickTracking,
+    });
+  }, [fileName, previewPresentation, shouldEnableClickTracking, url]);
 
   useEffect(() => {
     if (
@@ -156,22 +180,36 @@ function DownloadFileCard(props: DownloadFileCardProps) {
       return registerAutoPreview({
         open: () => {
           autoPreviewOpenedRef.current = true;
-          setPreviewOpen(true);
+          if (previewPresentation === "workspace") {
+            openWorkspacePreview();
+          } else {
+            setPreviewOpen(true);
+          }
         },
       });
     }
 
     autoPreviewOpenedRef.current = true;
-    setPreviewOpen(true);
+    if (previewPresentation === "workspace") {
+      openWorkspacePreview();
+    } else {
+      setPreviewOpen(true);
+    }
   }, [
     autoPreview,
     fileType,
+    openWorkspacePreview,
     pageAutoPreviewEnabled,
+    previewPresentation,
     registerAutoPreview,
     shouldAutoPreview,
   ]);
 
   const handlePreview = () => {
+    if (previewPresentation === "workspace") {
+      openWorkspacePreview();
+      return;
+    }
     setPreviewOpen(true);
   };
 
@@ -179,16 +217,14 @@ function DownloadFileCard(props: DownloadFileCardProps) {
   const pollForData = async (
     resultId: string,
     templateId: string,
-    onSuccess: (res: Record<string, unknown>) => Promise<void>
+    onSuccess: (res: Record<string, unknown>) => Promise<void>,
   ): Promise<void> => {
     const res = await dynamicRenderApi.getRecordData(resultId, templateId);
 
-
-    if (res.code === '200') {
+    if (res.code === "200") {
       await onSuccess(res.data as Record<string, unknown>);
       return;
     }
-
 
     // 文件正在生成中，显示提示并继续轮询
     setIsDownloadingGenerating(true);
@@ -197,7 +233,6 @@ function DownloadFileCard(props: DownloadFileCardProps) {
       key: "fileGenerating",
       duration: 0,
     });
-
 
     // 10秒后继续轮询
     pollingTimerRef.current = setTimeout(() => {
@@ -237,7 +272,9 @@ function DownloadFileCard(props: DownloadFileCardProps) {
 
             const link = document.createElement("a");
             link.href = blobUrl;
-            link.download = fileName.endsWith('.html') ? fileName : `${fileName}.html`;
+            link.download = fileName.endsWith(".html")
+              ? fileName
+              : `${fileName}.html`;
             link.target = "_blank";
             document.body.appendChild(link);
             link.click();
@@ -317,36 +354,30 @@ function DownloadFileCard(props: DownloadFileCardProps) {
           }
         }}
       >
-        <div style={iconStyle}>
-          {icon}
-        </div>
+        <div style={iconStyle}>{icon}</div>
         <div style={contentStyle}>
           <div style={nameStyle}>
             {namePrefix || EMPTY}
             {nameSuffix}
           </div>
-          <div style={mergedHintStyle}>
-            {hintText}
-          </div>
+          <div style={mergedHintStyle}>{hintText}</div>
         </div>
         {/* 直接下载按钮 */}
         {!hideLoadBtn && (
-          <div
-            style={downloadBtnStyle}
-            onClick={handleDownload}
-            title="下载"
-          >
+          <div style={downloadBtnStyle} onClick={handleDownload} title="下载">
             <SparkDownloadLine style={{ fontSize: "14px" }} />
           </div>
         )}
       </div>
-      <PreviewComponent
-        open={previewOpen}
-        onClose={() => setPreviewOpen(false)}
-        fileUrl={url}
-        fileName={fileName}
-        enableClickTracking={shouldEnableClickTracking}
-      />
+      {previewPresentation !== "workspace" && (
+        <PreviewComponent
+          open={previewOpen}
+          onClose={() => setPreviewOpen(false)}
+          fileUrl={url}
+          fileName={fileName}
+          enableClickTracking={shouldEnableClickTracking}
+        />
+      )}
     </>
   );
 }

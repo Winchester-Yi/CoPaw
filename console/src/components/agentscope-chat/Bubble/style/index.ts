@@ -69,7 +69,7 @@ export default createGlobalStyle`
 .${(p) => p.theme.prefixCls}-bubble {
   &-content {
     &-filled {
-      padding: 12px 16px;
+      padding: 9px 16px;
       border-radius: ${(p) => p.theme.borderRadiusLG}px;
       background-color: ${(p) => p.theme.colorPrimaryBg};
     }

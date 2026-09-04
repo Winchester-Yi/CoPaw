@@ -41,6 +41,7 @@ import MonitorPage from "../../pages/Monitor";
 import ContinuousIterationPage from "../../pages/Harness/ContinuousIteration";
 // ==================== 测试页面 (用于验证新功能) ====================
 import TestDownloadCardPage from "../../pages/TestDownloadCard";
+import TestFileManagerDrawerPage from "../../pages/TestFileManagerDrawer";
 import TestUserDetailModalPage from "../../pages/TestUserDetailModal";
 import ReportViewPage from "../../pages/ReportView";
 // ==================== 测试页面结束 ====================
@@ -216,6 +217,10 @@ export default function MainLayout() {
               <Route
                 path="/test-download-card"
                 element={<TestDownloadCardPage />}
+              />
+              <Route
+                path="/test-file-manager-drawer"
+                element={<TestFileManagerDrawerPage />}
               />
               <Route
                 path="/test-user-detail-modal"

@@ -7,10 +7,7 @@ import React, {
 } from "react";
 import { Drawer, message, Modal, Tooltip, Spin, Tabs } from "antd";
 import { FullscreenOutlined } from "@ant-design/icons";
-import {
-  SparkFalseLine,
-  SparkDownloadLine,
-} from "@agentscope-ai/icons";
+import { SparkFalseLine, SparkDownloadLine } from "@agentscope-ai/icons";
 import { IconButton } from "@agentscope-ai/design";
 import {
   getFileIcon,
@@ -45,12 +42,11 @@ function acquireSplitPreviewLayout() {
     splitPreviewCount = Math.max(0, splitPreviewCount - 1);
     if (splitPreviewCount === 0) {
       document.documentElement.classList.remove(
-        "copaw-file-preview-drawer-open"
+        "copaw-file-preview-drawer-open",
       );
     }
   };
 }
-
 
 export interface FilePreviewModalProps {
   open: boolean;
@@ -68,7 +64,6 @@ export interface FilePreviewModalProps {
   urlParams?: Record<string, string>;
   presentation?: FilePreviewPresentation;
 }
-
 
 function FilePreviewModal(props: FilePreviewModalProps) {
   const {
@@ -103,15 +98,15 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   // 存储动态渲染的 HTML 内容（直接渲染到 div 时使用）
   const [renderedHtmlContent, setRenderedHtmlContent] = useState<string | null>(
-    null
+    null,
   );
   const [templateResult, setTemplateResult] = useState<RecordDataResponse>();
   // 客户多模板状态
   const [clawFilePlanList, setClawFilePlanList] = useState<ClawFilePlanItem[]>(
-    []
+    [],
   );
   const [activeTemplate, setActiveTemplate] = useState<ClawFilePlanItem | null>(
-    null
+    null,
   );
   const [clawPlanLoading, setClawPlanLoading] = useState(false);
   const [clawPlanFailed, setClawPlanFailed] = useState(false);
@@ -132,19 +127,19 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const isHtmlPreview = useMemo(
     () =>
       fileType === "previewable" && getContentType(fileName) === "text/html",
-    [fileName, fileType]
+    [fileName, fileType],
   );
   // 判断是否为动态渲染类型
   const isDynamicRender = useMemo(
     () => isDynamicRenderHtmlLink(fileUrl),
-    [fileUrl]
+    [fileUrl],
   );
   const resultId = useMemo(() => {
     return extractResultIdFromUrl(fileUrl) || "";
   }, [fileUrl]);
   const templateId = useMemo(
     () => extractTemplateIdFromUrl(fileUrl) || "",
-    [fileUrl]
+    [fileUrl],
   );
   // 计算有效的 templateId 和 resultId（当 custUid 存在时使用 activeTemplate 的值）
   // 若 clawPlanFailed 为 true（接口失败或返回空），则回退到 URL 中的 templateId/resultId
@@ -152,8 +147,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     ? activeTemplate?.templateId
       ? String(activeTemplate.templateId)
       : clawPlanFailed
-        ? templateId
-        : ""
+      ? templateId
+      : ""
     : templateId;
   const effectiveResultId = custUid
     ? activeTemplate?.resultId ?? (clawPlanFailed ? resultId : "")
@@ -167,7 +162,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       if (effectiveTemplateId) {
         const templateIdNum = parseInt(effectiveTemplateId, 10);
         return templateList.current.find(
-          (item) => item.templateId === templateIdNum
+          (item) => item.templateId === templateIdNum,
         );
       } else {
         return null;
@@ -176,14 +171,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     return null;
   }, [isTemplateListLoaded, effectiveTemplateId]);
 
-
   // 获取动态渲染数据的函数（带轮询逻辑）
   // 对于静态模板（templateFlag === 'no_query'），跳过数据获取，直接渲染模板内容
   const fetchDynamicRenderData = useCallback(
     async (resultId: string, templateId: string) => {
       try {
         const templateIdNum = parseInt(templateId, 10);
-
 
         // 静态模板（templateFlag === 'no_query'）：无需调用 /api/template/result 获取数据
         // 直接渲染模板内容，模板内容加载不受数据获取逻辑阻塞
@@ -196,7 +189,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           }
           return;
         }
-
 
         // 非静态模板：需要先获取数据再渲染
         const res = await dynamicRenderApi.getRecordData(resultId, templateId);
@@ -251,9 +243,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       renderStaticTemplate,
       isStaticTemplate,
       isTemplateListLoaded,
-    ]
+    ],
   );
-
 
   // 当 custUid 存在时，获取客户的所有报告模板列表
   const fetchClawFilePlan = useCallback(async () => {
@@ -299,11 +290,9 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     }
   }, [custUid, templateId, userId, bbk]);
 
-
   useEffect(() => {
     fetchClawFilePlan();
   }, [fetchClawFilePlan]);
-
 
   // fetch 文件数据并创建 Blob URL 或动态渲染
   useEffect(() => {
@@ -312,7 +301,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       return;
     }
 
-
     if (open && fileType === "previewable" && fileUrl) {
       setLoading(true);
       setError(null);
@@ -320,18 +308,15 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       setMarkdownContent(null);
       setIsFileGenerating(false);
 
-
       // 清理之前的轮询定时器
       if (pollingTimerRef.current) {
         clearTimeout(pollingTimerRef.current);
         pollingTimerRef.current = null;
       }
 
-
       // 动态渲染逻辑
       if (isDynamicRender) {
         setDynamicRenderLoading(true);
-
 
         if (!effectiveResultId || !effectiveTemplateId) {
           setError("缺少必要的参数");
@@ -341,22 +326,18 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         }
         fetchDynamicRenderData(effectiveResultId, effectiveTemplateId);
 
-
         return;
       }
-
 
       // 原有逻辑：直接加载文件
       fetch(fileUrl)
         .then(async (res) => {
           if (!res.ok) throw new Error("加载失败");
 
-
           if (isMarkdownFile) {
             setMarkdownContent(await res.text());
             return;
           }
-
 
           const blob = await res.blob();
           const contentType = getContentType(fileName);
@@ -383,7 +364,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     effectiveTemplateId,
   ]);
 
-
   // 清理 Blob URL
   useEffect(() => {
     return () => {
@@ -393,14 +373,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     };
   }, [blobUrl]);
 
-
   // 清理动态渲染的 HTML 内容
   useEffect(() => {
     return () => {
       setRenderedHtmlContent(null);
     };
   }, []);
-
 
   useEffect(() => {
     if (!open) {
@@ -423,7 +401,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     }
   }, [open]);
 
-
   useEffect(() => {
     return () => {
       cleanupTrackers();
@@ -437,7 +414,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       }
     };
   }, []);
-
 
   useEffect(() => {
     // 记录满足该条件的模板加载时间，使用click的接口
@@ -469,7 +445,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     }
   }, [templateResult, templateInfo, htmlPreviewEventsApi, effectiveResultId]);
 
-
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(fileUrl);
@@ -481,14 +456,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     }
   }, [fileUrl]);
 
-
   const handleDownload = useCallback(async () => {
     // 动态渲染类型的特殊下载逻辑
     if (isDynamicRender) {
       const downloadFunc = (htmlContent: string) => {
         const blob = new Blob([htmlContent], { type: "text/html" });
         const blobUrl = URL.createObjectURL(blob);
-
 
         const link = document.createElement("a");
         link.href = blobUrl;
@@ -500,7 +473,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         link.click();
         document.body.removeChild(link);
 
-
         // 清理Blob URL
         setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
       };
@@ -510,15 +482,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           return;
         }
 
-
         if (!effectiveTemplateId) {
           console.error("动态渲染链接缺少必要的参数: templateId");
           return;
         }
 
-
         const templateIdNum = parseInt(effectiveTemplateId, 10);
-
 
         // 静态模板：直接渲染模板内容，无需获取数据
         if (isStaticTemplate(templateIdNum)) {
@@ -538,7 +507,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const renderData = (
           await dynamicRenderApi.getRecordData(
             effectiveResultId,
-            effectiveTemplateId
+            effectiveTemplateId,
           )
         ).data;
         const { TRACE_ID, CRON_JOB_ID, custUid, custName, ...data } =
@@ -551,7 +520,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           ...data,
         });
         const renderedHtml = await renderTemplate(templateIdNum, renderData);
-
 
         if (renderedHtml) {
           // 将HTML内容转换为Blob进行下载
@@ -584,20 +552,16 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     effectiveTemplateId,
   ]);
 
-
   const handleFullscreen = useCallback(() => {
     setFullscreen((prev) => !prev);
   }, []);
-
 
   const handleIframeLoad = useCallback(() => {
     setIframeLoadKey((k) => k + 1);
     reattachTrackersRef.current?.();
   }, []);
 
-
   const shouldRecordEvents = !trackingContext.disableEventRecording;
-
 
   const metaData = useMemo(
     () => ({
@@ -627,45 +591,41 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       templateResult,
       effectiveResultId,
       effectiveTemplateId,
-    ]
+    ],
   );
 
-
-  const { cleanup: cleanupTrackers, reattach: reattachTrackers } = useIframeHtmlPreviewTracking(
-    iframeRef,
-    {
-      metaData,
-      load: htmlPreviewEventsApi.recordClick,
-      click:
-        isHtmlPreview && enableClickTracking
+  const { cleanup: cleanupTrackers, reattach: reattachTrackers } =
+    useIframeHtmlPreviewTracking(
+      iframeRef,
+      {
+        metaData,
+        load: htmlPreviewEventsApi.recordClick,
+        click:
+          isHtmlPreview && enableClickTracking
+            ? {
+                reporter: shouldRecordEvents
+                  ? htmlPreviewEventsApi.recordClick
+                  : () => undefined,
+                listSnapshotReporter:
+                  shouldRecordEvents && enableListSnapshotTracking
+                    ? htmlPreviewEventsApi.recordListSnapshot
+                    : undefined,
+                onOpenNestedPreview: setNestedPreview,
+                getTemplateName: (templateId: number) => {
+                  return templateList.current.find(
+                    (t) => t.templateId === templateId,
+                  )?.templateName;
+                },
+              }
+            : null,
+        exposure: isHtmlPreview
           ? {
-            reporter: shouldRecordEvents
-              ? htmlPreviewEventsApi.recordClick
-              : () => undefined,
-            listSnapshotReporter:
-              shouldRecordEvents && enableListSnapshotTracking
-                ? htmlPreviewEventsApi.recordListSnapshot
-                : undefined,
-            onOpenNestedPreview: setNestedPreview,
-            getTemplateName: (templateId: number) => {
-              return templateList.current.find(
-                (t) => t.templateId === templateId
-              )?.templateName;
-            },
-          }
+              reporter: htmlPreviewEventsApi.recordClick,
+            }
           : null,
-      exposure: isHtmlPreview
-        ? {
-          reporter: htmlPreviewEventsApi.recordClick,
-        }
-        : null,
-    },
-    [
-      isHtmlPreview,
-      enableClickTracking,
-      enableListSnapshotTracking,
-    ]
-  );
+      },
+      [isHtmlPreview, enableClickTracking, enableListSnapshotTracking],
+    );
   const reattachTrackersRef = useRef(reattachTrackers);
   reattachTrackersRef.current = reattachTrackers;
 
@@ -675,8 +635,11 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   }, [fullscreen, open, presentation]);
 
   const previewHeight =
-    presentation === "drawer" ? "100%" : fullscreen ? "90vh" : "500px";
-
+    presentation === "drawer" || presentation === "workspace"
+      ? "100%"
+      : fullscreen
+      ? "90vh"
+      : "500px";
 
   const renderPreviewContent = useMemo(() => {
     if (fileType === "previewable") {
@@ -684,8 +647,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const tip = isFileGenerating
           ? "文件正在生成中，内容准备完成后，页面会自动展示最新预览"
           : dynamicRenderLoading
-            ? "正在渲染报告..."
-            : "加载中...";
+          ? "正在渲染报告..."
+          : "加载中...";
         return <Spin tip={tip} />;
       }
       if (error) {
@@ -758,7 +721,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       return null;
     }
 
-
     return (
       <div
         style={{
@@ -810,7 +772,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     handleIframeLoad,
   ]);
 
-
   const headerActions = useMemo(() => {
     const actions = [
       <Tooltip key="download" title="下载文件">
@@ -823,7 +784,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       </Tooltip>,
     ];
 
-
     if (fileType === "previewable") {
       actions.unshift(
         <Tooltip key="fullscreen" title={fullscreen ? "退出全屏" : "全屏预览"}>
@@ -834,10 +794,9 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             bordered={false}
             aria-label={fullscreen ? "退出全屏" : "全屏预览"}
           />
-        </Tooltip>
+        </Tooltip>,
       );
     }
-
 
     return actions;
   }, [
@@ -848,7 +807,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     copied,
     fullscreen,
   ]);
-
 
   const previewBody = (
     <>
@@ -905,7 +863,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
 
   return (
     <>
-      {presentation === "drawer" ? (
+      {presentation === "workspace" ? (
+        <>
+          {templateTabs}
+          <div className={styles.previewContent}>{previewBody}</div>
+        </>
+      ) : presentation === "drawer" ? (
         <Drawer
           open={open}
           onClose={onClose}
