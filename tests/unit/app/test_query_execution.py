@@ -172,3 +172,56 @@ async def test_stream_query_settles_after_terminal_response_is_yielded(
     assert events[-1].object == "response"
     assert events[-1].status == "completed"
     assert order == ["message", "response", "settle"]
+
+
+@pytest.mark.asyncio
+async def test_stream_query_settles_failed_when_wrapper_processing_raises(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outcomes: list[str] = []
+
+    class RecordingCoordinator:
+        async def settle(self, outcome):
+            outcomes.append(outcome.status.value)
+
+    async def fake_stream_frames(self, _msgs, _request, _context):
+        yield Msg(name="Friday", role="assistant", content="done"), True
+
+    runner = AgentRunner(
+        agent_id="test-agent",
+        workspace_dir=tmp_path,
+        answer_turn_coordinator=RecordingCoordinator(),
+    )
+    runner._health = True
+    monkeypatch.setattr(
+        AgentRunner,
+        "_stream_query_handler_frames",
+        fake_stream_frames,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_attach_trace_id_to_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("trace attachment failed"),
+        ),
+    )
+    identity = TurnIdentity.create(chat_id="chat-1", msgid="msg-1")
+    request = AgentRequest(
+        input=[
+            Message(
+                role="user",
+                content=[{"type": "text", "text": "hello"}],
+            ),
+        ],
+    )
+    request.session_id = "session-1"
+    request.user_id = "user-1"
+    request.channel = "console"
+    request.channel_meta = {"answer_turn_identity": identity}
+
+    with pytest.raises(RuntimeError, match="trace attachment failed"):
+        async for _event in runner.stream_query(request):
+            pass
+
+    assert outcomes == ["failed"]

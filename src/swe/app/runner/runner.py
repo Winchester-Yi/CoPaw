@@ -155,6 +155,7 @@ _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 _APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
+_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY = "defer_answer_turn_settlement"
 _SCENARIO_SNAPSHOT_REQUEST_META_KEYS = frozenset(
     {
         "scenario_preset_snapshot",
@@ -5780,6 +5781,10 @@ class AgentRunner(Runner):
         task = asyncio.current_task()
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        defer_settlement = bool(
+            channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY),
+        )
         try:
             async for msg, last in self._stream_query_handler_frames(
                 msgs,
@@ -5787,6 +5792,21 @@ class AgentRunner(Runner):
                 context,
             ):
                 yield msg, last
+        except asyncio.CancelledError:
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(identity, "cancelled")
+            raise
+        except Exception as exc:
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(
+                    identity,
+                    "failed",
+                    exc,
+                )
+            raise
+        else:
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(identity, "completed")
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
@@ -6208,6 +6228,18 @@ class AgentRunner(Runner):
         )
         identity = self._answer_turn_identity(request)
         terminal_status: str | None = None
+        channel_meta = getattr(request, "channel_meta", None)
+        marker_was_present = (
+            isinstance(channel_meta, dict)
+            and _DEFER_ANSWER_TURN_SETTLEMENT_META_KEY in channel_meta
+        )
+        previous_defer_marker = (
+            channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY)
+            if isinstance(channel_meta, dict)
+            else None
+        )
+        if isinstance(channel_meta, dict):
+            channel_meta[_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY] = True
         try:
             async for event in normalize_reasoning_boundary_stream(
                 super().stream_query(request, **kwargs),
@@ -6246,6 +6278,20 @@ class AgentRunner(Runner):
         except asyncio.CancelledError:
             await self._settle_query_handler_outcome(identity, "cancelled")
             raise
+        except Exception as exc:
+            await self._settle_query_handler_outcome(identity, "failed", exc)
+            raise
+        finally:
+            if isinstance(channel_meta, dict):
+                if marker_was_present:
+                    channel_meta[_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY] = (
+                        previous_defer_marker
+                    )
+                else:
+                    channel_meta.pop(
+                        _DEFER_ANSWER_TURN_SETTLEMENT_META_KEY,
+                        None,
+                    )
         if terminal_status is not None:
             await self._settle_query_handler_outcome(
                 identity,
