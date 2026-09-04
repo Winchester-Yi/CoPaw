@@ -842,7 +842,6 @@ class QueryService:
               AND first_bbk_id = %s
               AND bbk_org_id = %s
               AND skill_id = %s
-              AND job_id = %s
               AND result_type = %s
               AND custuid = %s
               AND is_latest_success = 1
@@ -856,7 +855,6 @@ class QueryService:
               AND first_bbk_id = %s
               AND bbk_org_id = %s
               AND skill_id = %s
-              AND job_id = %s
               AND result_type = %s
               AND is_latest_success = 1
               AND execution_id <> %s
