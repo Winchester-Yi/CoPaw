@@ -376,6 +376,24 @@ class ApprovalService:
                 return None
             return record
 
+    async def get_requests(
+        self,
+        request_ids: list[str],
+    ) -> dict[str, PendingApproval]:
+        """Batch-read approval records visible in the active scope."""
+        if not request_ids:
+            return {}
+        async with self._lock:
+            scope_id = self._get_current_scope_id()
+            records: dict[str, PendingApproval] = {}
+            for request_id in dict.fromkeys(request_ids):
+                record = self._pending.get(request_id) or self._completed.get(
+                    request_id,
+                )
+                if record is not None and record.scope_id == scope_id:
+                    records[request_id] = record
+            return records
+
     async def get_request_status(
         self,
         request_id: str,

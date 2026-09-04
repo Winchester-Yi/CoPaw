@@ -105,7 +105,8 @@ async def _annotate_approval_action_statuses(
 ) -> list[ChatMessage]:
     """Attach current approval status to messages carrying approval metadata."""
     approval_service = get_approval_service()
-
+    request_ids: list[str] = []
+    actions: list[dict[str, Any]] = []
     for message in messages:
         metadata = getattr(message, "metadata", None)
         if not isinstance(metadata, dict):
@@ -122,11 +123,23 @@ async def _annotate_approval_action_statuses(
         request_id = approval_action.get("requestId")
         if not isinstance(request_id, str) or not request_id:
             continue
+        request_ids.append(request_id)
+        actions.append(approval_action)
 
-        request = await approval_service.get_request(request_id)
+    batch_get = getattr(approval_service, "get_requests", None)
+    if callable(batch_get):
+        requests = await batch_get(request_ids)
+    else:
+        requests = {
+            request_id: request
+            for request_id in request_ids
+            if (request := await approval_service.get_request(request_id))
+            is not None
+        }
+    for request_id, approval_action in zip(request_ids, actions):
+        request = requests.get(request_id)
         if request is None:
             continue
-
         approval_action["status"] = request.status
 
     return messages
@@ -715,19 +728,21 @@ async def _build_chat_history(
     workspace,
     status_override: str | None = None,
     non_blocking: bool = False,
+    state: dict | None = None,
 ) -> ChatHistory:
-    state = (
-        await _read_history_state(
-            session,
-            chat_spec.session_id,
-            chat_spec.user_id,
+    if state is None:
+        state = (
+            await _read_history_state(
+                session,
+                chat_spec.session_id,
+                chat_spec.user_id,
+            )
+            if non_blocking
+            else await session.get_session_state_dict(
+                chat_spec.session_id,
+                chat_spec.user_id,
+            )
         )
-        if non_blocking
-        else await session.get_session_state_dict(
-            chat_spec.session_id,
-            chat_spec.user_id,
-        )
-    )
     if status_override is not None:
         status = status_override
     else:
@@ -1093,6 +1108,8 @@ async def get_answer_turn(
         )
     chat_spec = None
     candidate_chats: list[ChatSpec] = []
+    selected_history: ChatHistory | None = None
+    selected_state: dict | None = None
     if chat_id:
         chat_spec = await mgr.get_chat(chat_id)
         if chat_spec:
@@ -1126,9 +1143,12 @@ async def get_answer_turn(
                 session=session,
                 workspace=workspace,
                 non_blocking=False,
+                state=state,
             )
             if _slice_answer_turn(history.messages, msgid=msgid) is not None:
                 chat_spec = candidate
+                selected_history = history
+                selected_state = state
                 break
     if not chat_spec:
         raise HTTPException(
@@ -1136,24 +1156,26 @@ async def get_answer_turn(
             detail="Answer turn not found",
         )
 
-    history = await _build_chat_history(
-        chat_spec,
-        session=session,
-        workspace=workspace,
-        non_blocking=False,
-    )
+    if selected_history is None:
+        selected_state = await session.get_session_state_dict(
+            chat_spec.session_id,
+            chat_spec.user_id,
+        )
+        selected_history = await _build_chat_history(
+            chat_spec,
+            session=session,
+            workspace=workspace,
+            non_blocking=False,
+            state=selected_state,
+        )
+    history = selected_history
     messages = _slice_answer_turn(history.messages, msgid=msgid)
     if messages is None:
         raise HTTPException(
             status_code=404,
             detail="Answer turn not found",
         )
-    state = await _read_history_state(
-        session,
-        chat_spec.session_id,
-        chat_spec.user_id,
-    )
-    turn_status = _turn_status_from_state(state, msgid)
+    turn_status = _turn_status_from_state(selected_state or {}, msgid)
     if turn_status is None:
         turn_status = next(
             (

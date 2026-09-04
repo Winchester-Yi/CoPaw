@@ -1004,7 +1004,7 @@ class ConversationArchiveStore:
                 if before
                 else None
             )
-            selected = self._select_page(
+            selected, has_previous = self._select_page(
                 chat_dir,
                 boundaries,
                 cursor,
@@ -1017,13 +1017,7 @@ class ConversationArchiveStore:
                 for item in reversed(selected)
                 if item[2].id == item[0].last_message_id
             ]
-            has_more = len(
-                selected,
-            ) == page_size and self._has_previous_message(
-                chat_dir,
-                boundaries,
-                selected,
-            )
+            has_more = has_previous
             next_cursor = None
             if has_more and selected:
                 oldest = selected[-1]
@@ -1391,7 +1385,7 @@ class ConversationArchiveStore:
         boundaries: list[ConversationArchiveBoundary],
         cursor: tuple[str, int] | None,
         limit: int,
-    ) -> list[tuple[ConversationArchiveBoundary, int, Msg]]:
+    ) -> tuple[list[tuple[ConversationArchiveBoundary, int, Msg]], bool]:
         selected: list[tuple[ConversationArchiveBoundary, int, Msg]] = []
         before_reached = cursor is None
         for boundary in reversed(boundaries):
@@ -1414,9 +1408,9 @@ class ConversationArchiveStore:
                 if message is None:
                     continue
                 selected.append((boundary, index, message))
-                if len(selected) == limit:
-                    return selected
-        return selected
+                if len(selected) == limit + 1:
+                    return selected[:limit], True
+        return selected, False
 
     @staticmethod
     def _batch_matches_boundary(
@@ -1434,24 +1428,6 @@ class ConversationArchiveStore:
             and last_message.id == boundary.last_message_id
             and first_message.timestamp == boundary.first_timestamp
             and last_message.timestamp == boundary.last_timestamp,
-        )
-
-    def _has_previous_message(
-        self,
-        chat_dir: Path,
-        boundaries: list[ConversationArchiveBoundary],
-        selected: list[tuple[ConversationArchiveBoundary, int, Msg]],
-    ) -> bool:
-        if not selected:
-            return False
-        boundary_id, message_index, _message = selected[-1]
-        return bool(
-            self._select_page(
-                chat_dir,
-                boundaries,
-                (boundary_id.id, message_index),
-                1,
-            ),
         )
 
     def _write_batch(self, path: Path, messages: Sequence[Msg]) -> None:

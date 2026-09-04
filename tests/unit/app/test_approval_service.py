@@ -76,6 +76,38 @@ async def test_resolved_goal_approval_wakes_its_goal(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_requests_batches_scope_filtered_records() -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        visible = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="read_file",
+            result=_result(),
+        )
+    with tenant_context(tenant_id="tenant-b", source_id="source-b"):
+        hidden = await service.create_pending(
+            session_id="session-2",
+            user_id="user-2",
+            channel="console",
+            tool_name="read_file",
+            result=_result(),
+        )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        records = await service.get_requests(
+            [
+                visible.request_id,
+                visible.request_id,
+                hidden.request_id,
+                "missing",
+            ],
+        )
+
+    assert records == {visible.request_id: visible}
+
+
+@pytest.mark.asyncio
 async def test_supersede_goal_review_approvals_cancels_only_its_pending_ids() -> (
     None
 ):
