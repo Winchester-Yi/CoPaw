@@ -58,6 +58,8 @@ class QueryService:
         need_notification: int = 1,
         template_id: Optional[int] = None,
         result_id: Optional[str] = None,
+        status: Optional[str] = None,
+        info: str = "",
     ) -> SubtaskCreateResponse:
         """Create a subtask record.
 
@@ -74,6 +76,8 @@ class QueryService:
             need_notification: Whether notification is needed (0 or 1)
             template_id: Template ID for html content rendering
             result_id: ES document ID for reference
+            status: Subtask status (SUC/FAIL/TIMEOUT)
+            info: Additional subtask information
 
         Returns:
             SubtaskCreateResponse with creation result
@@ -119,7 +123,7 @@ class QueryService:
                 template_id,
                 result_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s,%s, %s, %s, %s, NULL, '', %s, NULL, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s,%s, %s, %s, %s, %s, %s, %s, NULL, %s, %s)
         """
         now = datetime.now()
         await self.db.execute(
@@ -135,6 +139,8 @@ class QueryService:
                 notification_content_wplus,
                 notification_content_zhaohu,
                 need_notification,
+                status,
+                info,
                 now,
                 template_id,
                 result_id,
