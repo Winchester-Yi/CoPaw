@@ -751,7 +751,6 @@ class QueryService:
             row["first_bbk_id"],
             row["bbk_org_id"],
             row["skill_id"],
-            row["job_id"],
             row["result_type"],
         )
         if row["result_type"] == "plan":
