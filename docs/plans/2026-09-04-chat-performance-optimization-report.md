@@ -218,6 +218,7 @@ Console 请求可能在 W+ 拦截、`_start_new_chat()` 和 Agent runtime 装配
 - `tests/unit/app/test_approval_service.py::test_get_requests_batches_scope_filtered_records` 及 Chat API 回归：8 passed。
 - `tests/unit/agents/test_conversation_archive.py`：12 passed。
 - 使用临时 `SWE_WORKING_DIR`/`SWE_SECRET_DIR` 运行 Console/Runner 受影响测试：133 passed。
+- 进一步运行 `tests/unit/app/ tests/unit/routers/ tests/unit/agents/`（排除缺失 `wplus-sop` 脚本）得到 1080 passed、9 skipped；随后在既有 `tests/unit/app/test_context_references.py` 的模块导入错误（`swe.app.agents` 不存在）处失败并中断，未将该目录套件标记为全绿。
 - `pre-commit` 对每个改造提交均通过（包含 AST、mypy、black、flake8、pylint）。
 
-全量受影响目录测试在收集阶段仍有一个仓库已有的缺失文件：`tests/unit/app/wplus_sop/test_stage_scripts.py` 引用不存在的 `skills/wplus-sop-miner/scripts/validate_stage_sop.py`；排除该文件后测试进程在当前执行窗口未完成，未将其结果表述为通过。未执行基准压测，因此本文不提供未经测量的延迟或吞吐数字。
+全量受影响目录测试在收集阶段仍有一个仓库已有的缺失文件：`tests/unit/app/wplus_sop/test_stage_scripts.py` 引用不存在的 `skills/wplus-sop-miner/scripts/validate_stage_sop.py`；排除该文件后又遇到上述既有模块导入错误。未执行基准压测，因此本文不提供未经测量的延迟或吞吐数字。
