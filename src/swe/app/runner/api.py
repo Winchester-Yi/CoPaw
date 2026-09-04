@@ -2,6 +2,7 @@
 """Chat management API."""
 
 from __future__ import annotations
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
@@ -936,11 +937,29 @@ async def list_chats(
 
     coordinator = getattr(workspace, "answer_turn_coordinator", None)
 
-    async def runtime_status(chat_id: str) -> str:
+    async def runtime_statuses(chat_ids: list[str]) -> dict[str, str]:
         if coordinator is None:
-            return "idle"
-        turn_status = await coordinator.status(chat_id)
-        return turn_status.value if turn_status is not None else "idle"
+            return {chat_id: "idle" for chat_id in chat_ids}
+        batch_status = getattr(coordinator, "statuses", None)
+        if callable(batch_status):
+            statuses = await batch_status(chat_ids)
+        else:
+            statuses = dict(
+                zip(
+                    chat_ids,
+                    await asyncio.gather(
+                        *(coordinator.status(chat_id) for chat_id in chat_ids),
+                    ),
+                ),
+            )
+        return {
+            chat_id: (
+                statuses.get(chat_id).value
+                if statuses.get(chat_id) is not None
+                else "idle"
+            )
+            for chat_id in chat_ids
+        }
 
     if cursor_mode and page_size is not None:
         try:
@@ -952,10 +971,13 @@ async def list_chats(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        items = []
-        for spec in chat_page.items:
-            status = await runtime_status(spec.id)
-            items.append(spec.model_copy(update={"status": status}))
+        statuses = await runtime_statuses(
+            [spec.id for spec in chat_page.items],
+        )
+        items = [
+            spec.model_copy(update={"status": statuses.get(spec.id, "idle")})
+            for spec in chat_page.items
+        ]
         return chat_page.model_copy(update={"items": items})
 
     if page is not None and page_size is not None:
@@ -965,18 +987,21 @@ async def list_chats(
             page=page,
             page_size=page_size,
         )
-        items = []
-        for spec in chat_page.items:
-            status = await runtime_status(spec.id)
-            items.append(spec.model_copy(update={"status": status}))
+        statuses = await runtime_statuses(
+            [spec.id for spec in chat_page.items],
+        )
+        items = [
+            spec.model_copy(update={"status": statuses.get(spec.id, "idle")})
+            for spec in chat_page.items
+        ]
         return chat_page.model_copy(update={"items": items})
 
     chats = await mgr.list_chats(user_id=user_id, channel=channel)
-    result = []
-    for spec in chats:
-        status = await runtime_status(spec.id)
-        result.append(spec.model_copy(update={"status": status}))
-    return result
+    statuses = await runtime_statuses([spec.id for spec in chats])
+    return [
+        spec.model_copy(update={"status": statuses.get(spec.id, "idle")})
+        for spec in chats
+    ]
 
 
 @router.post("", response_model=ChatSpec)

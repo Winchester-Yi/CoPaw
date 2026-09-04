@@ -111,12 +111,30 @@ class _FakeTaskTracker:
         return "idle"
 
 
+class _BatchCoordinator:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def statuses(self, chat_ids: list[str]) -> dict[str, object]:
+        self.calls.append(chat_ids)
+        from src.swe.app.answer_turn.models import TurnStatus
+
+        return {
+            chat_id: TurnStatus.RUNNING if chat_id == "chat-1" else None
+            for chat_id in chat_ids
+        }
+
+    async def status(self, _chat_id: str):
+        raise AssertionError("list endpoint must use batch statuses")
+
+
 def _client(
     monkeypatch,
     *,
     include_user_identity: bool = True,
     chats: list[ChatSpec] | None = None,
     session: _FakeSession | None = None,
+    coordinator: _BatchCoordinator | None = None,
 ) -> TestClient:
     from src.swe.app.runner import api as chat_api_module
 
@@ -141,6 +159,7 @@ def _client(
         chat_manager=manager,
         task_tracker=_FakeTaskTracker(),
         runner=SimpleNamespace(session=session),
+        answer_turn_coordinator=coordinator,
     )
 
     app = FastAPI()
@@ -167,6 +186,15 @@ def _client(
     app.dependency_overrides[get_chat_manager] = _get_chat_manager
     app.dependency_overrides[get_session] = _get_session
     return TestClient(app)
+
+
+def test_chat_list_uses_one_batch_status_lookup(monkeypatch) -> None:
+    coordinator = _BatchCoordinator()
+    response = _client(monkeypatch, coordinator=coordinator).get("/chats")
+
+    assert response.status_code == 200
+    assert response.json()[0]["status"] == "running"
+    assert coordinator.calls == [["chat-1"]]
 
 
 def test_answer_turn_returns_anchor_question_and_following_messages(

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 from swe.runtime_workers import run_runtime_state_work
 
 from .base import BaseChatRepository
+from ...channels.schema import DEFAULT_CHANNEL
 from ..models import ChatSpec, ChatsFile
 
 _LOAD_STABLE_READ_ATTEMPTS = 3
@@ -69,6 +71,7 @@ class JsonChatRepository(BaseChatRepository):
         self._snapshot: ChatsFile | None = None
         self._chat_index: dict[str, ChatSpec] = {}
         self._session_index: dict[tuple[str, str], ChatSpec] = {}
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def path(self) -> Path:
@@ -295,11 +298,18 @@ class JsonChatRepository(BaseChatRepository):
 
     async def _ensure_snapshot(self) -> None:
         signature = await run_runtime_state_work(self._file_signature)
-        if self._snapshot is None or not self._signature_matches(
+        if self._snapshot is not None and self._signature_matches(
             self._snapshot_signature,
             signature,
         ):
-            await self.load()
+            return
+        async with self._refresh_lock:
+            signature = await run_runtime_state_work(self._file_signature)
+            if self._snapshot is None or not self._signature_matches(
+                self._snapshot_signature,
+                signature,
+            ):
+                await self.load()
 
     @staticmethod
     def _copy_filtered_chats_sync(
@@ -335,7 +345,7 @@ class JsonChatRepository(BaseChatRepository):
         self,
         session_id: str,
         user_id: str,
-        channel: str = "console",
+        channel: str = DEFAULT_CHANNEL,
     ) -> ChatSpec | None:
         """Find a logical session from the current immutable snapshot."""
         chats = await self.filter_chats(user_id=user_id, channel=channel)
