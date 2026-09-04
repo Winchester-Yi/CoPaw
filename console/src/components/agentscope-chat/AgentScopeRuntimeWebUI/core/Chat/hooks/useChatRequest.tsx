@@ -274,6 +274,12 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           currentQARef.current.activeRequestOwner,
           owner,
         );
+      let didFinish = false;
+      const finishOnce = () => {
+        if (didFinish) return;
+        didFinish = true;
+        onFinish(owner);
+      };
       const isLiveResponseMounted = () => {
         const responseId = currentQARef.current.response?.id;
         return Boolean(responseId && hasMessage(responseId));
@@ -503,7 +509,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
           if (isTaskCancellationFrame(chunkData)) {
             emitTaskProgressUpdate(null, owner);
-            onFinish(owner);
+            finishOnce();
             return;
           }
 
@@ -521,7 +527,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
                 },
               ];
               emitTaskProgressUpdate(null, owner);
-              onFinish(owner);
+              finishOnce();
             }
             return;
           }
@@ -534,7 +540,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
             res.status === AgentScopeRuntimeRunStatus.Completed ||
-            res.status === AgentScopeRuntimeRunStatus.Failed;
+            res.status === AgentScopeRuntimeRunStatus.Failed ||
+            res.status === AgentScopeRuntimeRunStatus.Canceled;
           const hasRenderableOutput = Boolean(
             res.output?.some((message) => message.content?.length),
           );
@@ -545,11 +552,12 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             continue;
           }
 
-          if (
+          const canUpdateLiveResponse = Boolean(
             currentQARef.current.response &&
-            isOwnerActive() &&
-            isLiveResponseMounted()
-          ) {
+              isOwnerActive() &&
+              isLiveResponseMounted(),
+          );
+          if (canUpdateLiveResponse) {
             const planInteractionCard =
               extractPlanInteractionCard(chunkData) ||
               extractPlanInteractionCard(res);
@@ -595,14 +603,22 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
             if (
               res.status === AgentScopeRuntimeRunStatus.Completed ||
-              res.status === AgentScopeRuntimeRunStatus.Failed
+              res.status === AgentScopeRuntimeRunStatus.Failed ||
+              res.status === AgentScopeRuntimeRunStatus.Canceled
             ) {
               emitTaskProgressUpdate(null, owner);
-              onFinish(owner);
+              finishOnce();
             } else {
               updateMessage(currentQARef.current.response);
             }
           }
+        }
+        if (
+          isOwnerActive() &&
+          currentQARef.current.response &&
+          isLiveResponseMounted()
+        ) {
+          finishOnce();
         }
       } catch (error) {
         console.error(error);
@@ -613,7 +629,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           currentQARef.current.response?.msgStatus === "interrupted" ||
           isAbortLikeError(error)
         ) {
-          onFinish(owner);
+          finishOnce();
           return;
         }
         failActiveResponse(owner, error);

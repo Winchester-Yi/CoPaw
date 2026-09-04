@@ -23,6 +23,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     AgentRequest,
     Event,
     Message,
+    RunStatus,
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
@@ -5786,24 +5787,6 @@ class AgentRunner(Runner):
                 context,
             ):
                 yield msg, last
-        except asyncio.CancelledError:
-            await self._settle_query_handler_outcome(
-                identity,
-                "cancelled",
-            )
-            raise
-        except Exception as exc:
-            await self._settle_query_handler_outcome(
-                identity,
-                "failed",
-                exc,
-            )
-            raise
-        else:
-            await self._settle_query_handler_outcome(
-                identity,
-                "completed",
-            )
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
@@ -6223,28 +6206,50 @@ class AgentRunner(Runner):
         task_progress_enabled = is_chat_task_progress_enabled(
             get_current_source_system_config(),
         )
-        async for event in normalize_reasoning_boundary_stream(
-            super().stream_query(request, **kwargs),
-        ):
-            trace_id = getattr(request, "trace_id", None)
-            event = self._attach_trace_id_to_event(event, trace_id)
-            progress = None
-            if task_progress_enabled:
-                channel_meta = getattr(request, "channel_meta", None) or {}
-                chat_id = channel_meta.get("chat_id")
-                if not chat_id and self._chat_manager is not None:
-                    chat_id = await self._chat_manager.get_chat_id_by_session(
-                        getattr(request, "session_id", "") or "",
-                        getattr(request, "channel", DEFAULT_CHANNEL),
-                    )
-                if chat_id and self._task_tracker is not None:
-                    progress = await self._task_tracker.get_task_progress(
-                        chat_id,
-                    )
-            yield attach_task_progress(
-                event,
-                progress,
-                enabled=task_progress_enabled,
+        identity = self._answer_turn_identity(request)
+        terminal_status: str | None = None
+        try:
+            async for event in normalize_reasoning_boundary_stream(
+                super().stream_query(request, **kwargs),
+            ):
+                if getattr(event, "object", None) == "response":
+                    status = getattr(event, "status", None)
+                    if status == RunStatus.Completed:
+                        terminal_status = "completed"
+                    elif status == RunStatus.Failed:
+                        terminal_status = "failed"
+                    elif status == RunStatus.Canceled:
+                        terminal_status = "cancelled"
+
+                trace_id = getattr(request, "trace_id", None)
+                event = self._attach_trace_id_to_event(event, trace_id)
+                progress = None
+                if task_progress_enabled:
+                    channel_meta = getattr(request, "channel_meta", None) or {}
+                    chat_id = channel_meta.get("chat_id")
+                    if not chat_id and self._chat_manager is not None:
+                        chat_id = (
+                            await self._chat_manager.get_chat_id_by_session(
+                                getattr(request, "session_id", "") or "",
+                                getattr(request, "channel", DEFAULT_CHANNEL),
+                            )
+                        )
+                    if chat_id and self._task_tracker is not None:
+                        progress = await self._task_tracker.get_task_progress(
+                            chat_id,
+                        )
+                yield attach_task_progress(
+                    event,
+                    progress,
+                    enabled=task_progress_enabled,
+                )
+        except asyncio.CancelledError:
+            await self._settle_query_handler_outcome(identity, "cancelled")
+            raise
+        if terminal_status is not None:
+            await self._settle_query_handler_outcome(
+                identity,
+                terminal_status,
             )
 
     async def init_handler(self, *args, **kwargs):

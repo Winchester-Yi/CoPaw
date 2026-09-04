@@ -160,7 +160,19 @@ export default function useChatController() {
       status: "finished" | "interrupted" = "finished",
       owner?: ChatRequestOwner,
     ) => {
-      if (!currentQARef.current.response) return;
+      const ownerIsActive =
+        !owner ||
+        isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, owner);
+      if (!currentQARef.current.response) {
+        if (ownerIsActive && !currentQARef.current.stopPending) {
+          setLoading(false);
+        }
+        if (ownerIsActive) {
+          currentQARef.current.activeRequestOwner = undefined;
+          currentQARef.current.abortController = undefined;
+        }
+        return;
+      }
 
       currentQARef.current.response.msgStatus = status;
       if (!currentQARef.current.stopPending) {
