@@ -117,11 +117,39 @@ class JsonChatRepository(BaseChatRepository):
         return signature, contents
 
     def _file_signature(self) -> _FileSignature | None:
-        state = self._read_file_state()
-        if state is None:
-            return None
-        signature, _ = state
-        return signature
+        try:
+            stat = self._path.stat()
+        except FileNotFoundError:
+            return _FileSignature(exists=False)
+        return _FileSignature(
+            exists=True,
+            mtime_ns=stat.st_mtime_ns,
+            ctime_ns=stat.st_ctime_ns,
+            size=stat.st_size,
+            inode=stat.st_ino,
+        )
+
+    @staticmethod
+    def _signature_matches(
+        left: _FileSignature | None,
+        right: _FileSignature | None,
+    ) -> bool:
+        """Compare file identity without reading its contents."""
+        if left is None or right is None:
+            return left is right
+        return (
+            left.exists,
+            left.mtime_ns,
+            left.ctime_ns,
+            left.size,
+            left.inode,
+        ) == (
+            right.exists,
+            right.mtime_ns,
+            right.ctime_ns,
+            right.size,
+            right.inode,
+        )
 
     def _load_sync(self) -> tuple[_FileSignature, ChatsFile]:
         for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
@@ -265,6 +293,57 @@ class JsonChatRepository(BaseChatRepository):
         self._set_snapshot(snapshot_state)
         return chats_file
 
+    async def _ensure_snapshot(self) -> None:
+        signature = await run_runtime_state_work(self._file_signature)
+        if self._snapshot is None or not self._signature_matches(
+            self._snapshot_signature,
+            signature,
+        ):
+            await self.load()
+
+    @staticmethod
+    def _copy_filtered_chats_sync(
+        chats: tuple[ChatSpec, ...],
+        user_id: str | None,
+        channel: str | None,
+    ) -> list[ChatSpec]:
+        return [
+            chat.model_copy(deep=True)
+            for chat in chats
+            if (user_id is None or chat.user_id == user_id)
+            and (channel is None or chat.channel == channel)
+        ]
+
+    async def filter_chats(
+        self,
+        user_id: str | None = None,
+        channel: str | None = None,
+    ) -> list[ChatSpec]:
+        """Filter chats from the current immutable snapshot."""
+        await self._ensure_snapshot()
+        snapshot = self._snapshot
+        if snapshot is None:
+            return []
+        return await run_runtime_state_work(
+            self._copy_filtered_chats_sync,
+            tuple(snapshot.chats),
+            user_id,
+            channel,
+        )
+
+    async def get_chat_by_id(
+        self,
+        session_id: str,
+        user_id: str,
+        channel: str = "console",
+    ) -> ChatSpec | None:
+        """Find a logical session from the current immutable snapshot."""
+        chats = await self.filter_chats(user_id=user_id, channel=channel)
+        for chat in chats:
+            if chat.session_id == session_id:
+                return chat
+        return None
+
     async def save(self, chats_file: ChatsFile) -> None:
         """Save chat specs to JSON file atomically.
 
@@ -363,9 +442,9 @@ class JsonChatRepository(BaseChatRepository):
     async def get_chat(self, chat_id: str) -> ChatSpec | None:
         """Get chat spec by chat_id (UUID), reusing a valid snapshot index."""
         signature = await run_runtime_state_work(self._file_signature)
-        if (
-            self._snapshot is not None
-            and self._snapshot_signature == signature
+        if self._snapshot is not None and self._signature_matches(
+            self._snapshot_signature,
+            signature,
         ):
             return await run_runtime_state_work(
                 self._copy_chat_sync,
@@ -391,7 +470,10 @@ class JsonChatRepository(BaseChatRepository):
     ) -> str | None:
         """Return a session's latest chat using the snapshot index."""
         signature = await run_runtime_state_work(self._file_signature)
-        if self._snapshot is None or self._snapshot_signature != signature:
+        if self._snapshot is None or not self._signature_matches(
+            self._snapshot_signature,
+            signature,
+        ):
             await self.load()
         chat = self._session_index.get((channel, session_id))
         return chat.id if chat is not None else None
