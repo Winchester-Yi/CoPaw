@@ -542,11 +542,11 @@ function RankingTable({
               <col style={{ width: 80 }} />
               <col style={{ width: 85 }} />
               <col style={{ width: 75 }} />
+              <col style={{ width: 70 }} />
               <col style={{ width: 65 }} />
               <col style={{ width: 65 }} />
               <col style={{ width: 65 }} />
-              <col style={{ width: 65 }} />
-              <col style={{ width: 65 }} />
+              <col style={{ width: 70 }} />
             </colgroup>
             <thead>
               <tr>
@@ -1728,7 +1728,7 @@ export default function CronJobOverviewPage() {
       <h2
         className={`${styles.sectionHeading} ${styles.sectionHeadingSpacious}`}
       >
-        分行维度报表
+        分行维度
         <span className={styles.sectionHeadingHint}>（点击分行查看明细）</span>
       </h2>
       <RankingTable
