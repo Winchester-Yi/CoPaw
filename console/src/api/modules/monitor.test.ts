@@ -64,6 +64,75 @@ describe("mapCronJobOverviewPageData", () => {
       ]),
     );
   });
+
+  it("calculates branch report ratio columns from existing ranking counts", () => {
+    const stats: CronOverviewStatsResponse = {
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      total_tasks: 0,
+      new_cron_tasks: 0,
+      total_executions: 0,
+      branch_count: 1,
+      tenant_count: 5,
+      success_rate: 0,
+      success_count: 0,
+      running_count: 0,
+      read_tasks: 0,
+      read_rate: 0,
+      error_count: 0,
+      error_rate: 0,
+      report_rate: 0,
+      report_count: 0,
+      insight_count: 0,
+      phone_count: 0,
+    };
+    const ranking: CronBranchRankingResponse = {
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      items: [
+        {
+          bbk_id: "100",
+          bbk_name: "测试分行",
+          skill_count: 3,
+          total_tasks: 20,
+          success_count: 18,
+          read_tasks: 11,
+          involved_managers: 5,
+          result_view_managers: 4,
+          plan_managers: 3,
+          insight_managers: 2,
+          phone_managers: 1,
+          recommended_customers: 30,
+          viewed_customers: 12,
+          contacted_customers: 8,
+          contact_rate: 0.4,
+          insight_customers: 5,
+          phone_customers: 2,
+        },
+      ],
+    };
+    const branchError: CronBranchErrorResponse = {
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      affected_branch_count: 0,
+      affected_manager_count: 0,
+      error_reasons: [],
+      branch_error_rank: [],
+    };
+
+    const [row] = mapCronJobOverviewPageData(
+      stats,
+      ranking,
+      branchError,
+    ).branchRankingRows;
+
+    expect(row.resultViewManagerRate).toBe("80.00%");
+    expect(row.planManagerRate).toBe("75.00%");
+    expect(row.insightManagerRate).toBe("66.67%");
+    expect(row.phoneManagerRate).toBe("33.33%");
+    expect(row.viewedCustomerRate).toBe("40.00%");
+    expect(row.contactRate).toBe("40.00%");
+  });
 });
 
 describe("monitorApi schedule distribution", () => {

@@ -294,7 +294,7 @@ describe("CronJobOverview summary cards", () => {
     ).toBeNull();
   });
 
-  it("sorts skill-view branch manager detail metrics while keeping manager name unsortable", async () => {
+  it("renders the branch-dimension report with grouped headers and sortable metrics", async () => {
     monitorApiMock.getCronJobOverviewPageData.mockResolvedValueOnce({
       summaryMetrics: [],
       branchRankingRows: [
@@ -308,11 +308,16 @@ describe("CronJobOverview summary cards", () => {
           readTasks: "11",
           involvedManagers: "5",
           resultViewManagers: "4",
+          resultViewManagerRate: "80.00%",
           planManagers: "3",
+          planManagerRate: "75.00%",
           insightManagers: "2",
+          insightManagerRate: "66.67%",
           phoneManagers: "1",
+          phoneManagerRate: "33.33%",
           recommendedCustomers: "30",
           viewedCustomers: "12",
+          viewedCustomerRate: "40.00%",
           insightCustomers: "5",
           phoneCustomers: "2",
           contactedCustomers: "8",
@@ -412,6 +417,28 @@ describe("CronJobOverview summary cards", () => {
     );
 
     expect(managerNames()).toEqual(["张三", "李四"]);
+
+    expect(screen.queryByText("技能视角-分行综合排行")).not.toBeInTheDocument();
+    expect(screen.getByText("分行维度报表")).toBeInTheDocument();
+    expect(screen.getByText("任务信息")).toBeInTheDocument();
+    expect(screen.getByText("by客户经理")).toBeInTheDocument();
+    expect(screen.getByText("by客户")).toBeInTheDocument();
+    expect(screen.getByText("RM查看Claw任务结果比例")).toBeInTheDocument();
+    expect(
+      screen.getByText("查看结果的RM中点击客户级方案的比例"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("查看结果的RM中点击去洞察的比例"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("查看结果的RM中点击去电访的比例"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("客户查看率")).toBeInTheDocument();
+    expect(screen.getAllByText("接触客户率").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("80.00%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("75.00%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("66.67%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("33.33%").length).toBeGreaterThan(0);
   });
 
   it("shows unified loading placeholders for overview cards, anomaly section, and skill-view ranking while the main query is pending", async () => {
@@ -629,7 +656,7 @@ describe("CronJobOverview summary cards", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("技能视角-分行综合排行");
+    await screen.findByText("分行维度报表");
 
     expect(
       screen.queryByRole("button", { name: "分行名称排序" }),
@@ -640,9 +667,9 @@ describe("CronJobOverview summary cards", () => {
 
     const skillViewTable = container.querySelectorAll(
       `.${styles.behaviorTable}`,
-    )[1];
+    )[0];
     const branchNames = () =>
-      Array.from(skillViewTable.querySelectorAll("tbody tr")).map(
+      Array.from(skillViewTable?.querySelectorAll("tbody tr") ?? []).map(
         (row) => row.children[1]?.textContent,
       );
 
@@ -652,7 +679,7 @@ describe("CronJobOverview summary cards", () => {
 
     expect(branchNames()).toEqual(["丙分行", "甲分行", "乙分行"]);
     expect(
-      Array.from(skillViewTable.querySelectorAll("tbody tr")).map(
+      Array.from(skillViewTable?.querySelectorAll("tbody tr") ?? []).map(
         (row) => row.children[0]?.textContent,
       ),
     ).toEqual(["1", "2", "3"]);
