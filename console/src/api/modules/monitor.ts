@@ -1236,6 +1236,41 @@ export const monitorApi = {
     return response.blob();
   },
 
+  // Export overview execution/customer detail to Excel
+  exportSkillUsageDetails: async (filters?: {
+    start_date?: string;
+    end_date?: string;
+    bbk_ids?: string;
+  }): Promise<Blob> => {
+    const params = new URLSearchParams();
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    const query = params.toString();
+    const url = getApiUrl(
+      `/monitor/cron/export-detail${query ? `?${query}` : ""}`,
+    );
+    const headers = new Headers(buildAuthHeaders());
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      let errorMessage = `Export failed: ${response.status} ${response.statusText}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.detail) {
+          errorMessage = errorData.detail;
+        }
+      } catch {
+        // Ignore JSON parse error
+      }
+      throw new Error(errorMessage);
+    }
+    return response.blob();
+  },
+
   // Mark job as read
   markJobAsRead: async (jobId: string): Promise<MarkReadResponse> => {
     return request(`/monitor/cron/jobs/${jobId}/mark-read`, { method: "POST" });

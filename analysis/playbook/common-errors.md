@@ -636,3 +636,19 @@
   - 首次初始化
   - 从 default 模板复制 agent 配置
   - cached tenant 删除 `agent.json` 后再次 `ensure_bootstrap()` 自愈
+
+## Cron 结果索引出现同一 trace 的重复子任务
+
+### 症状
+
+- `swe_cron_subtasks` 在同一 `trace_id` 下存在多条成功的 `list` 子任务，或同一客户存在多条成功的 `plan` 子任务
+- `/monitor/subtasks/executions/sync-async-status` 写入 `swe_cron_result_index` 时产生重复结果
+
+### 典型原因
+
+- 重试或历史写入留下脏子任务；索引流程若直接消费全部成功子任务，会把重复数据继续写入结果索引
+
+### 第一落点
+
+- [monitor/src/monitor/app/services/subtask/query_service.py](/Users/shixiangyi/code/Swe/monitor/src/monitor/app/services/subtask/query_service.py)
+- 重点看成功子任务查询是否按 `trace_id + task_type`（`list`）及 `trace_id + custuid`（`plan`）去重，并优先保留最新子任务
