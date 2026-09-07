@@ -524,28 +524,28 @@ function RankingTable({
             className={`${styles.behaviorTable} ${styles.branchDimensionTable}`}
           >
             <colgroup>
-              <col style={{ width: 42 }} />
-              <col style={{ width: 100 }} />
+              <col style={{ width: 30 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 60 }} />
+              <col style={{ width: 65 }} />
               <col style={{ width: 72 }} />
               <col style={{ width: 72 }} />
               <col style={{ width: 72 }} />
-              <col style={{ width: 72 }} />
-              <col style={{ width: 92 }} />
-              <col style={{ width: 112 }} />
-              <col style={{ width: 104 }} />
-              <col style={{ width: 104 }} />
-              <col style={{ width: 104 }} />
-              <col style={{ width: 118 }} />
-              <col style={{ width: 136 }} />
-              <col style={{ width: 128 }} />
-              <col style={{ width: 128 }} />
-              <col style={{ width: 92 }} />
-              <col style={{ width: 104 }} />
-              <col style={{ width: 92 }} />
-              <col style={{ width: 92 }} />
-              <col style={{ width: 92 }} />
-              <col style={{ width: 92 }} />
-              <col style={{ width: 92 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 75 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 75 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 85 }} />
+              <col style={{ width: 75 }} />
+              <col style={{ width: 65 }} />
+              <col style={{ width: 65 }} />
+              <col style={{ width: 65 }} />
+              <col style={{ width: 65 }} />
+              <col style={{ width: 65 }} />
             </colgroup>
             <thead>
               <tr>
