@@ -466,11 +466,16 @@ export interface CronJobOverviewBranchRankingRow {
   readTasks: string;
   involvedManagers: string;
   resultViewManagers: string;
+  resultViewManagerRate: string;
   planManagers: string;
+  planManagerRate: string;
   insightManagers: string;
+  insightManagerRate: string;
   phoneManagers: string;
+  phoneManagerRate: string;
   recommendedCustomers: string;
   viewedCustomers: string;
+  viewedCustomerRate: string;
   contactedCustomers: string;
   contactRate: string;
   insightCustomers: string;
@@ -785,6 +790,18 @@ function formatRatioPercentText(value: number | null | undefined) {
   return `${(Number(value ?? 0) * 100).toFixed(2)}%`;
 }
 
+function formatDivisionPercentText(
+  numerator: number | null | undefined,
+  denominator: number | null | undefined,
+) {
+  const denominatorValue = Number(denominator ?? 0);
+  if (!Number.isFinite(denominatorValue) || denominatorValue <= 0) {
+    return "0.00%";
+  }
+  const numeratorValue = Number(numerator ?? 0);
+  return `${((numeratorValue / denominatorValue) * 100).toFixed(2)}%`;
+}
+
 export function mapCronJobOverviewPageData(
   stats: CronOverviewStatsResponse,
   behavior: CronBranchRankingResponse,
@@ -830,11 +847,31 @@ export function mapCronJobOverviewPageData(
       readTasks: formatInteger(item.read_tasks),
       involvedManagers: formatInteger(item.involved_managers),
       resultViewManagers: formatInteger(item.result_view_managers),
+      resultViewManagerRate: formatDivisionPercentText(
+        item.result_view_managers,
+        item.involved_managers,
+      ),
       planManagers: formatInteger(item.plan_managers),
+      planManagerRate: formatDivisionPercentText(
+        item.plan_managers,
+        item.result_view_managers,
+      ),
       insightManagers: formatInteger(item.insight_managers),
+      insightManagerRate: formatDivisionPercentText(
+        item.insight_managers,
+        item.plan_managers,
+      ),
       phoneManagers: formatInteger(item.phone_managers),
+      phoneManagerRate: formatDivisionPercentText(
+        item.phone_managers,
+        item.plan_managers,
+      ),
       recommendedCustomers: formatInteger(item.recommended_customers),
       viewedCustomers: formatInteger(item.viewed_customers),
+      viewedCustomerRate: formatDivisionPercentText(
+        item.viewed_customers,
+        item.recommended_customers,
+      ),
       contactedCustomers: formatInteger(item.contacted_customers ?? 0),
       contactRate: formatRatioPercentText(item.contact_rate ?? 0),
       insightCustomers: formatInteger(item.insight_customers),

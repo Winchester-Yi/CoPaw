@@ -742,6 +742,75 @@ class TestTraceManager:
         await manager.close()
 
     @pytest.mark.asyncio
+    async def test_emit_tool_call_keeps_hook_skill_md_read_in_span(
+        self,
+        enabled_config,
+        mock_db,
+    ):
+        """hook 技能读取自身 SKILL.md 时，tool span 仍应保留 skill_name。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="default",
+        )
+
+        class FakeDetector:
+            def __init__(self):
+                self._skill_runtime_profiles = {
+                    "hook-http-demo": type(
+                        "Profile",
+                        (),
+                        {"has_hook_config": True},
+                    )(),
+                }
+
+            async def on_tool_call(self, **kwargs):
+                return "hook-http-demo", {"hook-http-demo": 1.0}
+
+            def get_skill_description(self, skill_name):
+                return f"desc:{skill_name}"
+
+            def get_skill_runtime_profile(self, skill_name):
+                return self._skill_runtime_profiles.get(skill_name)
+
+            def _detect_skill_from_skill_md_read(self, tool_name, tool_input):
+                if (
+                    tool_name == "read_file"
+                    and tool_input.get(
+                        "file_path",
+                    )
+                    == "/workspace/skills/hook-http-demo/SKILL.md"
+                ):
+                    return "hook-http-demo"
+                return None
+
+        from swe.tracing.manager import get_current_trace
+
+        ctx = get_current_trace()
+        assert ctx is not None
+        ctx.set_skill_detector(FakeDetector(), ["hook-http-demo"])
+
+        span_id = await manager.emit_tool_call_start(
+            trace_id=trace_id,
+            tool_name="read_file",
+            tool_input={
+                "file_path": "/workspace/skills/hook-http-demo/SKILL.md",
+            },
+            source_id="default",
+        )
+
+        span = manager._pending_spans[
+            span_id
+        ]  # pylint: disable=protected-access
+        assert span.skill_name == "hook-http-demo"
+
+        await manager.close()
+
+    @pytest.mark.asyncio
     async def test_emit_tool_call_keeps_non_hook_skill_in_span(
         self,
         enabled_config,

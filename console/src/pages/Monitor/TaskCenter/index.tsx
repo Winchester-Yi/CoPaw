@@ -54,6 +54,15 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "失败",
 };
 
+const ITEM_STATUS_ORDER: Record<string, number> = {
+  failed: 0,
+  running: 1,
+  queued: 2,
+  created: 3,
+  succeeded: 4,
+  skipped: 5,
+};
+
 const TASK_TYPE_TITLE_MAP: Record<string, string> = {
   "cron.broadcast.distribute": "定时任务分发",
   "market.mcp.distribute": "MCP 分发",
@@ -136,6 +145,10 @@ function StatusTag({ status }: { status: string }) {
       {STATUS_LABEL[status] || status || "-"}
     </Tag>
   );
+}
+
+function getItemStatusRank(status: string) {
+  return ITEM_STATUS_ORDER[status] ?? Number.MAX_SAFE_INTEGER;
 }
 
 export default function TaskCenterPage() {
@@ -416,7 +429,12 @@ export default function TaskCenterPage() {
                       pageSizeOptions: PAGE_SIZE_OPTIONS,
                       showTotal: (count) => `共 ${count} 条`,
                     }}
-                    dataSource={selectedTask.items}
+                    dataSource={[...selectedTask.items].sort(
+                      (left, right) =>
+                        getItemStatusRank(left.status) -
+                          getItemStatusRank(right.status) ||
+                        left.target_id.localeCompare(right.target_id),
+                    )}
                     columns={[
                       {
                         title: "目标",
@@ -434,6 +452,11 @@ export default function TaskCenterPage() {
                         dataIndex: "status",
                         key: "status",
                         width: 120,
+                        sorter: (left, right) =>
+                          getItemStatusRank(left.status) -
+                            getItemStatusRank(right.status) ||
+                          left.target_id.localeCompare(right.target_id),
+                        defaultSortOrder: "ascend",
                         render: (value) => <StatusTag status={String(value)} />,
                       },
                       {
