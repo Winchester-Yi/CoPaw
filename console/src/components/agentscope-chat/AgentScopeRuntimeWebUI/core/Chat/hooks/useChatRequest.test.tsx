@@ -842,6 +842,85 @@ describe("useChatRequest", () => {
     expect(onFinish).toHaveBeenCalledWith(createOwner());
   });
 
+  it("renders approval metadata from a fast live assistant message", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks.splice(
+      0,
+      mocks.streamChunks.length,
+      {
+        data: JSON.stringify({
+          object: "message",
+          id: "approval-message-1",
+          role: "assistant",
+          type: "message",
+          status: "in_progress",
+          content: null,
+          metadata: {
+            approval_action: {
+              requestId: "approval-1",
+              toolName: "execute_shell_command",
+              toolInput: { command: "echo ok" },
+              triggerLabel: "Tool Guard",
+              approveCommand: "/approve approval-1",
+              denyCommand: "/deny approval-1",
+            },
+          },
+        }),
+      },
+      {
+        data: JSON.stringify({
+          object: "content",
+          type: "text",
+          status: "in_progress",
+          index: 0,
+          delta: true,
+          msg_id: "approval-message-1",
+          text: "等待审批",
+        }),
+      },
+    );
+
+    const updateMessage = vi.fn();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          role: "assistant",
+          msgStatus: "generating",
+          cards: [],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={vi.fn()}
+      />,
+    );
+
+    const requestPromise = hookApi.request([], undefined, createOwner());
+    mocks.streamGate.resolve();
+
+    await act(async () => {
+      await requestPromise;
+    });
+
+    expect(currentQARef.current.response?.cards?.map((card) => card.code)).toEqual(
+      ["AgentScopeRuntimeResponseCard", "ApprovalAction"],
+    );
+    expect(currentQARef.current.response?.cards?.[1]?.data).toMatchObject({
+      requestId: "approval-1",
+      toolName: "execute_shell_command",
+    });
+    expect(updateMessage).toHaveBeenCalled();
+  });
+
   it("places plan review before the response feedback card", async () => {
     mocks.fetch.mockResolvedValue({
       ok: true,

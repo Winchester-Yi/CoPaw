@@ -123,6 +123,96 @@ def test_batch_update_indexes_success_execution_results():
     assert skill_config_params == ("771",)
 
 
+def test_batch_update_deduplicates_successful_subtasks_per_trace_and_customer():
+    db = FakeDb()
+    db.fetch_all_results[1] = [
+        {
+            "subtask_id": 10,
+            "trace_id": "trace-1",
+            "task_id": "list-old",
+            "filename": "list-old.html",
+            "task_type": "list",
+            "custuid": "cust-1",
+            "cust_nm": "Old",
+            "bbk_org_id": "772",
+            "template_id": 11,
+            "result_id": "doc-list-old",
+            "status": "SUC",
+            "created_at": datetime(2026, 8, 16, 10, 0, 2),
+        },
+        {
+            "subtask_id": 11,
+            "trace_id": "trace-1",
+            "task_id": "list-new",
+            "filename": "list-new.html",
+            "task_type": "list",
+            "custuid": "cust-1",
+            "cust_nm": "New",
+            "bbk_org_id": "772",
+            "template_id": 11,
+            "result_id": "doc-list-new",
+            "status": "SUC",
+            "created_at": datetime(2026, 8, 16, 10, 0, 3),
+        },
+        {
+            "subtask_id": 12,
+            "trace_id": "trace-1",
+            "task_id": "plan-cust-1-old",
+            "filename": "plan-old.html",
+            "task_type": "plan",
+            "custuid": "cust-1",
+            "cust_nm": "Customer",
+            "bbk_org_id": "772",
+            "template_id": 11,
+            "result_id": "doc-plan-old",
+            "status": "SUC",
+            "created_at": datetime(2026, 8, 16, 10, 0, 4),
+        },
+        {
+            "subtask_id": 13,
+            "trace_id": "trace-1",
+            "task_id": "plan-cust-1-new",
+            "filename": "plan-new.html",
+            "task_type": "plan",
+            "custuid": "cust-1",
+            "cust_nm": "Customer",
+            "bbk_org_id": "772",
+            "template_id": 11,
+            "result_id": "doc-plan-new",
+            "status": "SUC",
+            "created_at": datetime(2026, 8, 16, 10, 0, 5),
+        },
+        {
+            "subtask_id": 14,
+            "trace_id": "trace-1",
+            "task_id": "plan-cust-2",
+            "filename": "plan-cust-2.html",
+            "task_type": "plan",
+            "custuid": "cust-2",
+            "cust_nm": "Customer Two",
+            "bbk_org_id": "772",
+            "template_id": 11,
+            "result_id": "doc-plan-cust-2",
+            "status": "SUC",
+            "created_at": datetime(2026, 8, 16, 10, 0, 6),
+        },
+    ]
+
+    success_count, error_count, indexed_count, _ = asyncio.run(
+        QueryService(db=db).batch_update_execution_async_status(),
+    )
+
+    assert (success_count, error_count, indexed_count) == (1, 0, 6)
+    insert_calls = _result_index_batch_insert_calls(db)
+    assert len(insert_calls) == 1
+    assert len(insert_calls[0][1]) == 6
+    assert {params[11] for params in insert_calls[0][1]} == {
+        "list-new",
+        "plan-cust-1-new",
+        "plan-cust-2",
+    }
+
+
 def test_build_result_index_users_filters_by_enabled_skill_config():
     db = FakeDb()
     db.fetch_all_results = [

@@ -1724,7 +1724,7 @@ describe("WPlusSopWorkspace", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("navigates back to the receipt Chat after saving and exiting", async () => {
+  it("does not expose save and exit from the workspace header", async () => {
     apiMock.getSession.mockResolvedValue(
       makeSession({
         state: "AwaitingAnswer",
@@ -1736,24 +1736,15 @@ describe("WPlusSopWorkspace", () => {
         },
       }),
     );
-    apiMock.sendCommand.mockResolvedValue({
-      command_request_id: "save-1",
-      accepted: true,
-      session: makeSession({
-        chat_id: "chat-from-receipt",
-        state: "Paused",
-        state_version: 8,
-      }),
-    });
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: "保存并退出" }));
-
-    expect(await screen.findByText("所属 Chat")).toBeInTheDocument();
-    expect(apiMock.sendCommand).toHaveBeenCalledWith(
-      "sop-1",
-      expect.objectContaining({ command: "save_and_exit" }),
-    );
+    expect(
+      await screen.findByRole("heading", { name: "客户经营 SOP" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "保存并退出" }),
+    ).not.toBeInTheDocument();
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
   });
 
   it("isolates answer drafts by session and question batch", async () => {
@@ -2864,6 +2855,75 @@ describe("WPlusSopWorkspace", () => {
     });
   });
 
+  it.each([
+    ["补充澄清", "clarify"],
+    ["按反馈重新预跑", "rerun"],
+  ])(
+    "submits stage report feedback through %s",
+    async (buttonLabel, nextAction) => {
+      apiMock.getSession.mockResolvedValue(
+        makeSession({
+          state: "AwaitingStageConfirmation",
+          state_version: 8,
+          trial: {
+            run_id: "run-stage-report",
+            status: "completed",
+            steps: [],
+          },
+          stage_reports: [
+            {
+              stage_id: "stage-1",
+              report_no: 1,
+              revision: 1,
+              superseded_by: null,
+              created_at: "2026-08-21T01:00:00Z",
+              artifacts: [
+                {
+                  artifact_id: "stage_sop_json",
+                  name: "stage_sop.json",
+                  format: "json",
+                  status: "validated",
+                },
+                {
+                  artifact_id: "stage_sop_md",
+                  name: "stage_sop.md",
+                  format: "markdown",
+                  status: "validated",
+                },
+                {
+                  artifact_id: "stage_sop_html",
+                  name: "stage_sop.html",
+                  format: "html",
+                  status: "validated",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      renderPage();
+
+      fireEvent.change(await screen.findByLabelText("阶段 SOP 反馈"), {
+        target: { value: "补充异常处理规则后继续" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: buttonLabel }));
+
+      await waitFor(() =>
+        expect(apiMock.sendCommand).toHaveBeenCalledWith(
+          "sop-1",
+          expect.objectContaining({
+            command: "submit_trial_feedback",
+            payload: {
+              feedback: "补充异常处理规则后继续",
+              rerun_of_run_id: "run-stage-report",
+              next_action: nextAction,
+            },
+          }),
+        ),
+      );
+    },
+  );
+
   it("switches stage preview formats, pretty prints JSON, and downloads the selected version", async () => {
     const createObjectURL = vi.fn(() => "blob:stage-artifact");
     const revokeObjectURL = vi.fn();
@@ -2986,7 +3046,7 @@ describe("WPlusSopWorkspace", () => {
     ).toContain("<article>累计 SOP 已恢复</article>");
   });
 
-  it("keeps the cumulative preview visible after advancing to the next stage", async () => {
+  it("hides the cumulative preview while the next stage is in progress", async () => {
     apiMock.getSession.mockResolvedValue(
       makeSession({
         state: "GeneratingQuestions",
@@ -3033,16 +3093,10 @@ describe("WPlusSopWorkspace", () => {
     renderPage();
 
     expect(
-      await screen.findByRole("heading", {
-        name: "已确认内容（累计 v1）",
-      }),
+      await screen.findByRole("heading", { name: "客户经营 SOP" }),
     ).toBeVisible();
-    expect(screen.getAllByText("累计 SOP 预览")).toHaveLength(1);
-    expect(
-      (await screen.findByTitle("HTML 累计 SOP v1 预览")).getAttribute(
-        "srcdoc",
-      ),
-    ).toContain("<article>累计 SOP v1</article>");
+    expect(screen.queryByText("累计 SOP 预览")).not.toBeInTheDocument();
+    expect(apiMock.readCumulativeArtifact).not.toHaveBeenCalled();
   });
 
   it("blocks stage confirmation until the latest report is fully validated", async () => {

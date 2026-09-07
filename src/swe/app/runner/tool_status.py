@@ -11,12 +11,49 @@ TOOL_STATUS_RUNNING = "running"
 TOOL_STATUS_SUCCESS = "success"
 TOOL_STATUS_FAILED = "failed"
 
+# Tool Guard governance statuses.  These describe why a tool did NOT run
+# (waiting for approval, rejected by the user, intercepted by policy) and
+# must never be conflated with a real execution failure.
+TOOL_STATUS_PENDING = "pending"
+TOOL_STATUS_REJECTED = "rejected"
+TOOL_STATUS_BLOCKED = "blocked"
+
 TOOL_STATUS_FIELD = "tool_status"
 TOOL_ERROR_FIELD = "tool_error"
+GOVERNANCE_FIELD = "tool_governance"
 TOOL_ERROR_SUMMARY_LIMIT = 500
 
 _DEFAULT_TOOL_ERROR = "Tool error"
 _UNSET = object()
+
+_GOVERNANCE_STATUSES = frozenset(
+    {TOOL_STATUS_PENDING, TOOL_STATUS_REJECTED, TOOL_STATUS_BLOCKED},
+)
+
+
+def resolve_governance_status(value: Any) -> str | None:
+    """仅接受 Tool Guard 内部写入的规范治理状态。"""
+    if isinstance(value, str) and value in _GOVERNANCE_STATUSES:
+        return value
+    return None
+
+
+def apply_governance_tool_status(
+    data: MutableMapping[str, Any],
+    governance_status: Any,
+) -> str | None:
+    """附加来自可信内部标记的治理状态。
+
+    Tool Guard 治理结果与执行结果相互独立。治理命中时清除展示层的
+    执行状态和错误字段，避免旧的失败投影覆盖治理状态。
+    """
+    governance = resolve_governance_status(governance_status)
+    if governance is None:
+        return None
+    data[GOVERNANCE_FIELD] = governance
+    data.pop(TOOL_STATUS_FIELD, None)
+    data.pop(TOOL_ERROR_FIELD, None)
+    return governance
 
 
 def apply_running_tool_status(

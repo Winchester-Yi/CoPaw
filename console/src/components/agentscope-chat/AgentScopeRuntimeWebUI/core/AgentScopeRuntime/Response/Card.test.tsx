@@ -24,11 +24,17 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 vi.mock("@agentscope-ai/icons", () => ({
+  SparkCheckCircleFill: () => <span data-testid="success-icon" />,
   SparkDownLine: () => <span data-testid="chevron-down" />,
+  SparkErrorCircleFill: () => <span data-testid="error-icon" />,
+  SparkLoadingLine: () => <span data-testid="loading-icon" />,
+  SparkLockFill: () => <span data-testid="lock-icon" />,
+  SparkStopCircleLine: () => <span data-testid="stop-icon" />,
   SparkTimeLine: () => <span data-testid="time-icon" />,
   SparkTodoListLine: () => <span data-testid="todo-list-icon" />,
   SparkToolLine: () => <span data-testid="tool-icon" />,
   SparkUpLine: () => <span data-testid="chevron-up" />,
+  SparkWarningCircleFill: () => <span data-testid="warning-icon" />,
 }));
 
 vi.mock("./style", () => ({
@@ -77,10 +83,7 @@ vi.mock("./Error", () => ({
 
 vi.mock("./Actions", () => ({
   default: ({ hideReplace }: { hideReplace?: boolean }) => (
-    <div
-      data-testid="actions"
-      data-hide-replace={String(Boolean(hideReplace))}
-    >
+    <div data-testid="actions" data-hide-replace={String(Boolean(hideReplace))}>
       actions
     </div>
   ),
@@ -168,6 +171,19 @@ function toolMessage(
   } as IAgentScopeRuntimeMessage;
 }
 
+function groupedToolMessage(
+  id: string,
+  status = AgentScopeRuntimeRunStatus.InProgress,
+  toolStatus: "running" | "success" | "failed" = "running",
+): IAgentScopeRuntimeMessage {
+  return toolMessage(id, status, {
+    call_id: id,
+    summary: "正在查看工作目录文件",
+    tool_status: toolStatus,
+    operation_group: { id: "inspect", title: "查看工作目录文件" },
+  });
+}
+
 function errorMessage(id: string, message: string): IAgentScopeRuntimeMessage {
   return {
     id,
@@ -193,9 +209,7 @@ describe("AgentScopeRuntimeResponseCard", () => {
     } as React.ComponentProps<typeof AgentScopeRuntimeResponseCard> & {
       beforeActions: React.ReactNode;
     };
-    const { container } = render(
-      <AgentScopeRuntimeResponseCard {...props} />,
-    );
+    const { container } = render(<AgentScopeRuntimeResponseCard {...props} />);
 
     expect(container.textContent).toBe("正文plan-reviewactions");
   });
@@ -442,6 +456,78 @@ describe("AgentScopeRuntimeResponseCard", () => {
     expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
     expect(screen.getByText("正在思考")).toBeInTheDocument();
     expect(screen.getByText("tool-1")).toBeInTheDocument();
+  });
+
+  it("renders the first running operation group immediately", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response(
+          [groupedToolMessage("tool-group-1")],
+          AgentScopeRuntimeRunStatus.InProgress,
+        )}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /展开操作组：查看工作目录文件/ }),
+    ).toBeVisible();
+  });
+
+  it("folds a completed operation group into process disclosure", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          groupedToolMessage(
+            "tool-group-1",
+            AgentScopeRuntimeRunStatus.Completed,
+            "success",
+          ),
+          textMessage("message-1", "最终正文"),
+        ])}
+      />,
+    );
+
+    const processTrigger = screen.getByRole("button", {
+      name: /展开执行过程 · 1 个步骤 · 工具调用 1 次/,
+    });
+    expect(screen.getByText("查看工作目录文件")).not.toBeVisible();
+
+    fireEvent.click(processTrigger);
+    expect(
+      screen.getByRole("button", { name: /展开操作组：查看工作目录文件/ }),
+    ).toBeVisible();
+  });
+
+  it("counts grouped reasoning and tools inside process disclosure", () => {
+    render(
+      <AgentScopeRuntimeResponseCard
+        data={response([
+          groupedToolMessage(
+            "tool-group-1",
+            AgentScopeRuntimeRunStatus.Completed,
+            "success",
+          ),
+          textMessage(
+            "reason-1",
+            "继续确认目录内容",
+            AgentScopeRuntimeMessageType.REASONING,
+          ),
+          groupedToolMessage(
+            "tool-group-2",
+            AgentScopeRuntimeRunStatus.Completed,
+            "success",
+          ),
+          textMessage("message-1", "最终正文"),
+        ])}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: /展开执行过程 · 3 个步骤 · 工具调用 2 次/,
+      }),
+    ).toBeInTheDocument();
   });
 
   it("keeps approval requests visible when a final answer exists", () => {

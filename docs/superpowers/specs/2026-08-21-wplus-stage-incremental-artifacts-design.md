@@ -55,7 +55,7 @@ related:
 ### D3. 报告版本号与 Answer Revision 联动
 
 - 报告版本标识 = `(revision, report_no)`：`report_no` 为该环节在当前 revision 下的成功预跑序号（1 起）。
-- 修订任一回答（`REVISION_APPLIED`）后，下游环节的既有报告按现有 invalidate 语义全部失效：状态回到未生成，`report_no` 重新计数；`revision` 递增保证新旧报告在审计上可区分。
+- `REVISION_APPLIED` 只允许修改当前尚未确认环节的回答；已确认环节及其锁定报告永久只读。当前环节修订后 `revision` 递增、旧报告保留为历史，新 revision 的 `report_no` 从 1 重新计数。
 - 前端展示用 `report_no`（"v2"），审计与存储用完整标识 `(revision, report_no)`（回应需求 Q1 的溯源需求）。
 
 ### D4. 环节级 vs 整体级字段边界（回应 Q2）
@@ -149,13 +149,16 @@ class SessionState(str, Enum):
   → GeneratingStageReport          ← 新增：生成三格式环节报告
   → (报告校验失败 → RecoverableFailure，保留上一稳定版本，可 Retry)
   → AwaitingStageConfirmation      ← 三格式均 validated 才允许确认（R3）
-  → 用户 confirm_stage
+      ├─ 补充澄清 → GeneratingQuestions
+      ├─ 按反馈重新预跑 → GeneratingTrial → 生成新报告版本
+      └─ 用户 confirm_stage
   → RefreshingCumulative           ← 新增：锁定 + 重算累计（同一事务）
   → (刷新失败 → RecoverableFailure，不进入下一环节)
   → GeneratingQuestions（下一环节）或 FinalizingOutputs（最后环节）
 ```
 
 - 最后环节确认且累计刷新成功后，直接进入现有 `FinalizingOutputs → OutputReview`，但最终结果由累计组装（R10）。
+- `confirm_stage` 启动的所属 Chat Agent 回合只负责累计刷新，事件序列固定为 `cumulative_refreshed`。该事件持久化后，服务端拒绝旧 run 提交下一环节或最终结果事件；只有旧 run 完整结束，完成回调才原子结算它并认领一个新的 Agent run：非最后环节的新 run 进入 `GeneratingQuestions`，最后环节的新 run 进入 `FinalizingOutputs`。进程在结算与认领后、实际启动前中断时，新 run 仍以 `CLAIMED` 持久化并可由孤儿恢复处理。
 - `OutputReview` 确认（`confirm_outputs`）后仍走现有 `MemoryReview`（R12：记忆授权顺序不变）。
 
 ### 5.3 状态机约束
@@ -191,6 +194,7 @@ class SessionState(str, Enum):
 ```
 
 - 旧版本文件**只增不删**（R5 审计）。
+- `.wplus` 只是产物 staging/cache，不是 Session 恢复源。每次新澄清使用平台生成的全新 `sop_session_id` 目录；运行时和 Miner 不得扫描其他 Session、读取跨 Session 的固定 `latest` 文件或从旧产物重建新会话。
 - 通过现有 `copy_file_to_static` 机制暴露 `static_url` 供前端预览/下载；sha256 随工件记录。
 - store 的 `commit_event` 在 `STAGE_CONFIRMED` 时校验：确认的 report_no 必须存在且为最新；随后在**同一文件写事务**内写入 `confirmed_snapshots` 与 `cumulative_preview`（D2 事务边界）。
 
@@ -251,16 +255,18 @@ Miner 是 Agent 驱动，技能契约必须与新事件协议同步（参考蓝�
 
 落点文件：`console/src/pages/WPlusSopWorkspace/index.tsx`（主组件，含报告版本切换与累计预览面板；路由已在 `console/src/layouts/MainLayout/index.tsx` 注册）、`console/src/api/types/wplusSop.ts`（类型）、`console/src/api/modules/wplusSop.ts`（API 调用）。
 
-- **环节报告面板**：默认展示最新版本；版本切换器（只读加载历史版本，R5）；明确"最新 vN / 历史只读"标签。页面内提供 JSON / Markdown / HTML 标签页并读取当前所选版本的内容，下载是预览之外的次级操作。
-- **累计 SOP 预览面板**：每次 `cumulative_refreshed` 事件后刷新；显示已确认环节顺序与各环节版本，并在页面内提供累计 JSON / Markdown / HTML 标签页。
+- **环节报告面板**：只在 `AwaitingStageConfirmation` 展示，默认加载最新版本；版本切换器只读加载历史版本（R5）。最新版本提供“补充澄清”“按反馈重新预跑”“确认并锁定”三路操作；确认后不再开放反馈或修订。
+- **累计 SOP 预览面板**：仅在 `AwaitingStageConfirmation` 与当前阶段报告一起展示，作为此前已确认环节的辅助上下文；`GeneratingQuestions`、`AwaitingAnswer`、预跑、报告生成和累计刷新期间均不渲染累计正文。
 - **确认按钮门控**：仅当当前环节最新报告三格式全部 `validated` 且无失败时可用（R3 的前端强制）。
 - **最终结果视图**：复用现有 OutputReview，新增"与累计逐环节一致"的状态提示（R10 的可见化）。
 - **状态呈现**：`GeneratingStageReport` / `RefreshingCumulative` 参考 `GeneratingTrial` / `ExecutingTrial` / `FinalizingOutputs` 的既有呈现（生命周期进度行 + 状态标签），不新增独立复杂视图（决策 A4）。
+- **退出入口**：正常工作台顶栏不展示“保存并退出”；返回所属 Chat 只执行路由跳转，不自动暂停或修改 Session。
 
 ## 11. 失败恢复与一致性
 
 - **报告生成失败**（预跑成功但渲染/校验失败）：不产生可确认版本；复用 `RecoverableFailure`：保留该环节最后一个稳定报告版本为只读兜底，提供 `retry_current_turn`（幂等，不追加重复审计记录）。
 - **累计刷新失败**：会话处于"已锁定待刷新"恢复态（`RecoverableFailure` 变体，附失败码 `cumulative_refresh_failed`），不得进入下一环节；Retry 重算（确定性幂等）。
+- **Agent 提前结束**：任何生成态（包括 `GeneratingStageReport` 和 `RefreshingCumulative`）在所属 Agent 回合结束时仍未到达所需结构化边界，都必须把 run 标记为失败并进入 `RecoverableFailure`，保留原生成态作为 `resume_state`；不得把 run 标记为完成后让会话永久停留在生成态。
 - **事件幂等**：`event_key` 稳定（§6），重发不产生重复版本。
 - **状态机合法性**：新增状态加入 `_validate_agent_event_state` 与前端状态机映射，防止非法迁移。
 
@@ -273,7 +279,7 @@ Miner 是 Agent 驱动，技能契约必须与新事件协议同步（参考蓝�
 ## 13. 测试计划
 
 - **store 层**：`commit_event` 的 STAGE_CONFIRMED 事务（成功/累计失败回滚/并发 state_version 冲突）；报告版本只增不改。
-- **service 层**：confirm_stage 门控（无有效版本拒绝）；revision 后下游报告失效与重计数；最后环节 → 最终组装；累计与最终 sha256 一致性。
+- **service 层**：confirm_stage 门控（无有效版本拒绝）；当前未确认环节 revision 重计数；已确认环节修订拒绝；最后环节 → 最终组装；累计与最终 sha256 一致性。
 - **渲染层**：环节/累计/最终三格式同一内容语义（回应 R1）；摘要白名单映射不越界。
 - **前端**：类型契约测试（现有 `wplusSop.test.ts` 模式）、版本切换 UI、确认门控状态。
 - **产物读取**：覆盖阶段历史版本与最新版本、累计版本、跨 Session ownership 拒绝、未知版本 404，以及页面内 JSON / Markdown / HTML 加载与失败状态；测试必须实际点击阶段预览和下载，不能只断言按钮存在。

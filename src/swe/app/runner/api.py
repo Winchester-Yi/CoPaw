@@ -2,17 +2,27 @@
 """Chat management API."""
 
 from __future__ import annotations
+
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from agentscope.memory import InMemoryMemory
 
 from .session import (
     SafeJSONSession,
     _normalize_state_for_load,
+)
+from .context_usage import (
+    CONTEXT_USAGE_INVALID_STATE_KEY,
+    CONTEXT_USAGE_STATE_KEY,
+    ContextUsageAvailable,
+    ContextUsageResponse,
+    ContextUsageSnapshot,
+    ContextUsageUnavailable,
 )
 from .manager import ChatManager
 from .models import (
@@ -31,6 +41,7 @@ from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
 
 router = APIRouter(prefix="/chats", tags=["chats"])
+logger = logging.getLogger(__name__)
 TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_RUNS_STATE_KEY = "task_runs"
 TASK_RUN_SECTION_STEP = "step"
@@ -1235,6 +1246,68 @@ async def get_chat_history_page(
         return await _archive_page(workspace, chat_spec.id, before, limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/{chat_id}/context-usage",
+    response_model=ContextUsageResponse,
+)
+async def get_chat_context_usage(
+    request: Request,
+    chat_id: str,
+    mgr: ChatManager = Depends(get_chat_manager),
+    session: SafeJSONSession = Depends(get_session),
+    workspace=Depends(get_workspace),
+) -> ContextUsageResponse:
+    """Return the last committed numeric context-occupancy snapshot."""
+    chat_spec = await mgr.get_chat(chat_id)
+    if not chat_spec:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    _authorize_chat(request, chat_spec, workspace)
+
+    state = await _read_history_state(
+        session,
+        chat_spec.session_id,
+        chat_spec.user_id,
+    )
+    raw_snapshot = state.get(CONTEXT_USAGE_STATE_KEY)
+    if not isinstance(raw_snapshot, dict):
+        return ContextUsageUnavailable()
+
+    try:
+        snapshot = ContextUsageSnapshot.model_validate(raw_snapshot)
+    except ValidationError:
+        raw_schema_version = raw_snapshot.get("schema_version")
+        schema_metadata = (
+            raw_schema_version
+            if isinstance(raw_schema_version, int)
+            else type(raw_schema_version).__name__
+        )
+        logger.warning(
+            "Ignoring invalid context usage snapshot "
+            "(chat_id=%s session_id=%s schema_version=%s)",
+            chat_spec.id,
+            chat_spec.session_id,
+            schema_metadata,
+        )
+        return ContextUsageUnavailable()
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+    turn_status = (
+        await coordinator.status(chat_spec.id)
+        if coordinator is not None
+        else None
+    )
+    status_value = getattr(turn_status, "value", turn_status)
+    return ContextUsageAvailable(
+        **snapshot.model_dump(),
+        stale=(
+            status_value in {"running", "stopping"}
+            or state.get(CONTEXT_USAGE_INVALID_STATE_KEY) is True
+        ),
+    )
 
 
 @router.get("/{chat_id}", response_model=ChatHistory)

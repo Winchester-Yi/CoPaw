@@ -1456,6 +1456,7 @@ export default function WPlusSopWorkspace() {
     values: {},
   });
   const [feedback, setFeedback] = useState("");
+  const [stageReportFeedback, setStageReportFeedback] = useState("");
   const [memoryDecisionDraft, setMemoryDecisionDraft] =
     useState<MemoryDecisionDraft>({
       scope: null,
@@ -1493,6 +1494,7 @@ export default function WPlusSopWorkspace() {
   useEffect(() => {
     setSelectedStageReportKey(null);
     setSelectedStageReportIsLatest(true);
+    setStageReportFeedback("");
   }, [stageReportScope]);
 
   useEffect(() => {
@@ -1957,6 +1959,23 @@ export default function WPlusSopWorkspace() {
     }
   }, [answers, sendCommand, session]);
 
+  const submitStageReportFeedback = useCallback(
+    async (nextAction: "clarify" | "rerun") => {
+      const feedbackText = stageReportFeedback.trim();
+      if (!feedbackText) return;
+      const payload: Record<string, unknown> = {
+        feedback: feedbackText,
+        next_action: nextAction,
+      };
+      if (session?.trial?.run_id) {
+        payload.rerun_of_run_id = session.trial.run_id;
+      }
+      const next = await sendCommand("submit_trial_feedback", payload);
+      if (next) setStageReportFeedback("");
+    },
+    [sendCommand, session?.trial?.run_id, stageReportFeedback],
+  );
+
   const mainPanel = useMemo(() => {
     if (!session) return null;
     const runtimeReady = session.runtime_status?.runtime_ready === true;
@@ -2050,6 +2069,13 @@ export default function WPlusSopWorkspace() {
             pendingDownloadKeys={pendingDownloadKeys}
             onDownload={downloadStageReportArtifact}
           />
+          <CumulativePreviewPanel
+            sessionId={session.session_id}
+            preview={session.cumulative_preview}
+            stages={session.stages}
+            pendingDownloadKeys={pendingDownloadKeys}
+            onDownload={downloadCumulativeArtifact}
+          />
           <div className={styles.stageConfirmActions}>
             {!allValidated && (
               <Alert
@@ -2059,6 +2085,41 @@ export default function WPlusSopWorkspace() {
                 description="JSON、Markdown 与 HTML 三份报告全部生成并校验通过后，才能确认本环节。"
               />
             )}
+            <div className={styles.feedbackBox}>
+              <label htmlFor="wplus-stage-report-feedback">阶段 SOP 反馈</label>
+              <Input.TextArea
+                id="wplus-stage-report-feedback"
+                autoSize={{ minRows: 3, maxRows: 8 }}
+                value={stageReportFeedback}
+                disabled={busy || !selectedStageReportIsLatest}
+                onChange={(event) => setStageReportFeedback(event.target.value)}
+                placeholder="例如：补充异常处理规则，或调整条件后重新预跑"
+              />
+              <div className={styles.sectionActions}>
+                <Button
+                  disabled={
+                    busy ||
+                    !runtimeReady ||
+                    !selectedStageReportIsLatest ||
+                    !stageReportFeedback.trim()
+                  }
+                  onClick={() => void submitStageReportFeedback("clarify")}
+                >
+                  补充澄清
+                </Button>
+                <Button
+                  disabled={
+                    busy ||
+                    !runtimeReady ||
+                    !selectedStageReportIsLatest ||
+                    !stageReportFeedback.trim()
+                  }
+                  onClick={() => void submitStageReportFeedback("rerun")}
+                >
+                  按反馈重新预跑
+                </Button>
+              </div>
+            </div>
             <Button
               type="primary"
               size="large"
@@ -2440,6 +2501,7 @@ export default function WPlusSopWorkspace() {
     answers,
     busy,
     downloadArtifact,
+    downloadCumulativeArtifact,
     downloadStageReportArtifact,
     pendingDownloadKeys,
     feedback,
@@ -2448,8 +2510,10 @@ export default function WPlusSopWorkspace() {
     session,
     selectedStageReportIsLatest,
     selectedStageReportKey,
+    stageReportFeedback,
     stages,
     submitAnswers,
+    submitStageReportFeedback,
     answerScope,
   ]);
 
@@ -2534,17 +2598,6 @@ export default function WPlusSopWorkspace() {
           >
             {getSessionStateLabel(session)}
           </Tag>
-          {!["Completed", "Terminated", "Paused", "PendingExit"].includes(
-            session.state,
-          ) && (
-            <Button
-              icon={<Pause size={15} />}
-              disabled={busy}
-              onClick={() => void sendCommand("save_and_exit")}
-            >
-              保存并退出
-            </Button>
-          )}
         </div>
       </header>
 
@@ -2626,13 +2679,6 @@ export default function WPlusSopWorkspace() {
             />
           ) : null}
           {mainPanel}
-          <CumulativePreviewPanel
-            sessionId={session.session_id}
-            preview={session.cumulative_preview}
-            stages={session.stages}
-            pendingDownloadKeys={pendingDownloadKeys}
-            onDownload={downloadCumulativeArtifact}
-          />
         </div>
         <EvidenceRail session={session} />
       </div>

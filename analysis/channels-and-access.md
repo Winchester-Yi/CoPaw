@@ -64,6 +64,10 @@
 | `console/src/pages/` | 页面入口 |
 | `console/src/components/` | 通用 UI 组件 |
 
+AgentScope Chat 的工具调用先按 `tool_call_id` 合并调用与结果，再按后端校验后的显式操作组 ID 聚合。首个分组工具进入流时即显示默认折叠的操作组；展开后按原始顺序呈现任意多个 reasoning 与原有独立工具卡，每张工具卡继续默认折叠并可单独展开详情。响应结束后，操作组整体进入既有“执行过程”折叠；缺少操作组声明的历史事件继续使用原有独立工具卡片。
+
+Tool Guard 的 `pending`、`rejected` 和 `blocked` 属于治理状态，不复用工具执行 loading。Console 在发起 SSE 前同步挂载新响应消息，确保快速到达的等待审批文本和 `approval_action` metadata 能在当前会话立即形成审批信息与审批框，而不依赖历史重载。
+
 ### 主要前端组件
 
 | 组件 | 路径 | 说明 |

@@ -82,12 +82,10 @@ class _ParentCallbackContext(NamedTuple):
 class _ExecutionFeedbackContext(NamedTuple):
     intent_id: int
     dispatch_attempt: int | None
-    completed_at: datetime
     batch_id: str
     job_id: str
     tenant_id: str
     source_id: str | None
-    error: str
 
 
 class WorkerScope(BaseModel):
@@ -415,6 +413,13 @@ class CronSchedulingService:
             strategy = await self._resolve_worker_strategy(scope, now)
             if not await self._acquire_scope_lease(scope, strategy, now):
                 continue
+            await self._dispatch_store.reconcile_dispatched_executions(
+                now_utc=now,
+                retry_delay_seconds=self._retry_delay_seconds,
+                source_ids=scope_source_ids,
+                provider_id=scope.provider_id,
+                model_id=scope.model_id,
+            )
             await self._dispatch_store.recover_stale_dispatched_intents(
                 now_utc=now,
                 dispatched_stale_seconds=strategy.stale_execution_seconds,
@@ -630,14 +635,12 @@ class CronSchedulingService:
         error_message: str = "",
         completed_at: datetime | None = None,
     ) -> bool:
-        """Mark an intent from SWE execution meta and immediately refill."""
+        """Validate SWE feedback before persistence; the loop settles results."""
         feedback = _build_execution_feedback_context(
             meta=meta,
             job_id=job_id,
             tenant_id=tenant_id,
             source_id=source_id,
-            error_message=error_message,
-            completed_at=completed_at,
         )
         if feedback is None:
             return False
@@ -649,49 +652,15 @@ class CronSchedulingService:
             feedback.job_id,
             status,
         )
-        updated = await self._dispatch_store.complete_from_execution(
+        return await self._dispatch_store.accept_execution_feedback(
             intent_id=feedback.intent_id,
             execution_id=execution_id,
-            status=status,
-            completed_at=feedback.completed_at,
-            error=feedback.error,
-            retry_delay_seconds=self._retry_delay_seconds,
             expected_batch_id=feedback.batch_id,
             expected_job_id=feedback.job_id,
             expected_tenant_id=feedback.tenant_id,
             expected_source_id=feedback.source_id,
             expected_attempt_count=feedback.dispatch_attempt,
         )
-        return await self._finalize_execution_feedback(
-            feedback=feedback,
-            status=status,
-            updated=updated,
-        )
-
-    async def _finalize_execution_feedback(
-        self,
-        *,
-        feedback: _ExecutionFeedbackContext,
-        status: str,
-        updated: bool,
-    ) -> bool:
-        if not updated:
-            return False
-        logger.info(
-            "scheduler_dispatch_task_finished intent_id=%s batch_id=%s "
-            "job_id=%s status=%s",
-            feedback.intent_id,
-            feedback.batch_id,
-            feedback.job_id,
-            status,
-        )
-        if feedback.batch_id:
-            await self._dispatch_store.update_batch_counts(
-                batch_id=feedback.batch_id,
-                updated_at=feedback.completed_at,
-            )
-        await self.dispatch_ready_once(now_utc=feedback.completed_at)
-        return True
 
     async def adjust_worker_capacity_if_due(
         self,
@@ -1141,8 +1110,6 @@ def _build_execution_feedback_context(
     job_id: str,
     tenant_id: str,
     source_id: str | None,
-    error_message: str,
-    completed_at: datetime | None,
 ) -> _ExecutionFeedbackContext | None:
     dispatch_meta = _extract_dispatch_meta(meta)
     if not dispatch_meta:
@@ -1158,14 +1125,10 @@ def _build_execution_feedback_context(
     return _ExecutionFeedbackContext(
         intent_id=intent_id,
         dispatch_attempt=_positive_int(dispatch_meta.get("dispatch_attempt")),
-        completed_at=_ensure_aware_utc(
-            completed_at or datetime.now(timezone.utc),
-        ),
         batch_id=str(dispatch_meta.get("batch_id") or ""),
         job_id=str(dispatch_meta.get("job_id") or job_id or ""),
         tenant_id=str(dispatch_meta.get("tenant_id") or tenant_id or ""),
         source_id=expected_source_id,
-        error=error_message or str(dispatch_meta.get("error") or ""),
     )
 
 
@@ -1829,7 +1792,8 @@ def _capacity_adjustment_is_due(
     latest_at = _capacity_created_at(latest)
     return (
         latest_at is None
-        or (now - latest_at).total_seconds() >= strategy.adjust_interval_seconds
+        or (now - latest_at).total_seconds()
+        >= strategy.adjust_interval_seconds
     )
 
 

@@ -65,7 +65,7 @@ async def record_dispatch_execution(
         get_cron_scheduling_service,
     ),
 ) -> RecordExecutionResponse:
-    """Persist dispatch-managed execution and update scheduler intent state."""
+    """Validate and persist SWE results for the Scheduler's table scan."""
     dispatch_identity = _extract_dispatch_identity(request.meta)
     if dispatch_identity is None:
         logger.warning(
@@ -81,10 +81,10 @@ async def record_dispatch_execution(
             batch_id=batch_id,
             dispatch_attempt=dispatch_attempt,
         )
-        if execution_id is None:
-            execution_id = await sync_service.record_execution(request)
-        updated = await scheduling_service.handle_execution_recorded(
-            execution_id=int(execution_id) if execution_id is not None else None,
+        accepted = await scheduling_service.handle_execution_recorded(
+            execution_id=(
+                int(execution_id) if execution_id is not None else None
+            ),
             status=request.status,
             meta=request.meta,
             job_id=request.job_id,
@@ -93,10 +93,12 @@ async def record_dispatch_execution(
             error_message=request.error_message,
             completed_at=request.end_time or request.actual_time,
         )
-        if not updated:
+        if not accepted:
             raise RuntimeError(
                 "dispatch intent was not updated from scheduler feedback",
             )
+        if execution_id is None:
+            execution_id = await sync_service.record_execution(request)
         return RecordExecutionResponse(
             recorded=True,
             execution_id=execution_id,
@@ -113,7 +115,9 @@ async def record_dispatch_execution(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-def _extract_dispatch_identity(raw_meta: str | None) -> tuple[int, str, int] | None:
+def _extract_dispatch_identity(
+    raw_meta: str | None,
+) -> tuple[int, str, int] | None:
     if not raw_meta:
         return None
     try:

@@ -1,7 +1,6 @@
 import { uuid } from "@/components/agentscope-chat";
 import { useCallback } from "react";
 import ReactDOM from "react-dom";
-import { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import { useChatAnywhereMessages } from "../../Context/ChatAnywhereMessagesContext";
 import AgentScopeRuntimeRequestBuilder from "../../AgentScopeRuntime/Request/Builder";
 import { InputProps } from "../Input";
@@ -93,7 +92,9 @@ export default function useChatMessageHandler(
       liveHeaderTimestamp: responseTimestamp,
     };
 
-    updateMessage(currentQARef.current.response);
+    ReactDOM.flushSync(() => {
+      updateMessage(currentQARef.current.response!);
+    });
 
     return currentQARef.current.response;
   }, [currentQARef, updateMessage]);

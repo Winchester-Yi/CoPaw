@@ -39,13 +39,13 @@ API_TIMEOUT = 10.0
 RESULT_INDEX_PUSH_TIMEOUT = 10.0
 
 # 每批处理数量
-BATCH_SIZE = 50
+BATCH_SIZE = 100
 
 # 有效状态值
 VALID_SUBTASK_STATUSES = ("SUC", "FAIL", "PART_SUC")
 
 # 兜底超时小时数
-FALLBACK_TIMEOUT_HOURS = 24
+FALLBACK_TIMEOUT_HOURS = 2
 
 
 class SyncService:
@@ -183,11 +183,11 @@ class SyncService:
         """
         return_code = data.get("returnCode", "")
         if return_code != "SUC0000":
-            return None, f"returnCode={return_code}"
+            return "FAIL", f"returnCode={return_code}"
 
         body = data.get("body", {})
         if not body:
-            return None, "No body"
+            return "FAIL", "No body"
 
         status = body.get("status", "")
         if status not in VALID_SUBTASK_STATUSES:
@@ -284,6 +284,7 @@ class SyncService:
                 subtask.task_id,
                 subtask.trace_id,
                 "SUC",
+                "",
             )
             detail.new_status = "SUC"
             logger.info(
@@ -292,7 +293,7 @@ class SyncService:
             )
             return detail
 
-        # 兜底检查：超过24小时的pending子任务标记TIMEOUT
+        # 兜底检查：超过2小时的pending子任务标记TIMEOUT
         if self._check_pending_timeout(subtask, now):
             hours_pending = int(
                 (now - subtask.created_at).total_seconds() / 3600,
@@ -307,6 +308,7 @@ class SyncService:
                 subtask.task_id,
                 subtask.trace_id,
                 "TIMEOUT",
+                "",
             )
             detail.new_status = "TIMEOUT"
             detail.error = (
@@ -324,6 +326,7 @@ class SyncService:
                 subtask.task_id,
                 subtask.trace_id,
                 status,
+                error or "",
             )
             detail.new_status = status
             logger.info(
@@ -347,7 +350,7 @@ class SyncService:
         """Sync subtask statuses from external API.
 
         只查询无状态的子任务，查询API并更新。
-        过24小时的pending子任务标记TIMEOUT（兜底）。
+        过2小时的pending子任务标记TIMEOUT（兜底）。
         FAIL/PART_SUC/TIMEOUT/SUC 视为终态，不再查询。
         """
         now = datetime.now()

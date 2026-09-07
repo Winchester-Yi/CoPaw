@@ -583,6 +583,7 @@ KEEP_DIRS = {
     "backup",
     "skills",
     "governance",
+    "dialog",
 }
 
 
@@ -2418,7 +2419,7 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
         """Recursively scan a directory for orphan files."""
         try:
             for item in dir_path.iterdir():
-                # Skip hidden files (starting with .)
+                relative_path = item.relative_to(relative_base).as_posix()
                 if item.name.startswith("."):
                     continue
 
@@ -2439,8 +2440,6 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
                 if item.is_file():
                     try:
                         stat = item.stat()
-                        relative_path = str(item.relative_to(relative_base))
-                        relative_path = relative_path.replace("\\", "/")
                         if relative_path in _protected_path_set(workspace_dir):
                             continue
                         orphan_files.append(
@@ -2761,13 +2760,6 @@ async def delete_orphan_file(
         raise HTTPException(
             status_code=403,
             detail="Cannot delete protected file",
-        )
-
-    # Extra check: ensure file is NOT hidden (starting with .)
-    if file_path.name.startswith("."):
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot delete hidden file",
         )
 
     try:

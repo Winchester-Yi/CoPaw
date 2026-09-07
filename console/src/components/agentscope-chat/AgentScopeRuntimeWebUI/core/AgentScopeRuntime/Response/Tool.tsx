@@ -9,7 +9,11 @@ import {
   resolveServerLabel,
   resolveToolName,
 } from "./ToolTitle";
-import { isToolMessageLoading, resolveToolMessageStatus } from "./ToolStatus";
+import {
+  isToolMessageLoading,
+  resolveToolGovernanceStatus,
+  resolveToolMessageStatus,
+} from "./ToolStatus";
 
 const HIDDEN_TOOL_NAMES = new Set(["update_task_progress"]);
 
@@ -38,13 +42,17 @@ const Tool = React.memo(function ({
   }>[];
   const inputData = (content[0]?.data || {}) as Record<string, any>;
   const outputData = (content[1]?.data || {}) as Record<string, any>;
-  const msgStatus = resolveToolMessageStatus({
+  const statusOptions = {
     messageStatus: data.status,
     hasOutputContent: content.length > 1,
     inputData,
     outputData,
-  });
-  const loading = isToolMessageLoading(msgStatus);
+  };
+  const governanceStatus = resolveToolGovernanceStatus(statusOptions);
+  const msgStatus = resolveToolMessageStatus(statusOptions);
+  const loading =
+    governanceStatus === undefined && isToolMessageLoading(msgStatus);
+  const displayStatus = governanceStatus || msgStatus;
   const toolName = resolveToolName(inputData) || resolveToolName(outputData);
   if (HIDDEN_TOOL_NAMES.has(toolName)) return null;
 
@@ -77,7 +85,7 @@ const Tool = React.memo(function ({
     node = (
       <ToolCall
         loading={loading}
-        msgStatus={msgStatus}
+        msgStatus={displayStatus}
         defaultOpen={false}
         title={title}
         input={input}

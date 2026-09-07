@@ -10,6 +10,7 @@
 |-----------|------|
 | `src/swe/agents/react_agent.py` | 主 Agent 实现 |
 | `src/swe/agents/tool_guard_mixin.py` | 工具调用前的治理拦截层 |
+| `src/swe/app/runner/operation_group.py` | Agent 显式操作组声明的校验、展示投影与审批重放辅助 |
 | `src/swe/agents/model_factory.py` | 模型实例与格式化器装配 |
 | `src/swe/agents/routing_chat_model.py` | 模型路由封装 |
 | `src/swe/agents/prompt.py` | 系统提示构造 |
@@ -64,6 +65,7 @@ Runner 接收请求
   -> 生成系统提示
   -> 进入 ReAct 循环
   -> 工具调用前经过 Tool Guard
+  -> 从执行参数副本剥离操作组展示元数据
   -> 工具 / 技能 / 记忆协同
   -> 输出响应并回写会话状态
 ```

@@ -1870,7 +1870,7 @@ async def _try_wplus_entry_intercept(
             "chat_id": chat.id,
             "session_id": chat.session_id,
             "title": "进入 W+ SOP 工作台",
-            "message": "CoPaw 将替你完成逐环节澄清、系统预跑和反馈重跑。",
+            "message": "Claw 将替你完成逐环节澄清、系统预跑和反馈重跑。",
         }
         yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 

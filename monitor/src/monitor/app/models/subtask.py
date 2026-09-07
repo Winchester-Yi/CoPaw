@@ -9,7 +9,7 @@ Defines models for:
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -133,6 +133,14 @@ class SubtaskCreateRequest(BaseModel):
         default=None,
         max_length=10,
         description="客户归属分行ID",
+    )
+    status: Optional[Literal["SUC", "FAIL", "TIMEOUT"]] = Field(
+        default=None,
+        description="子任务状态: SUC/FAIL/TIMEOUT",
+    )
+    info: str = Field(
+        default="",
+        description="预留扩展信息",
     )
 
 

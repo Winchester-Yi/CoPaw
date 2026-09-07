@@ -1,0 +1,162 @@
+.trigger {
+  display: inline-flex;
+  width: 28px;
+  flex: none;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+  color: #4d5a70;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease;
+
+  &:hover {
+    color: #244fca;
+    background: #f3f6ff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #3769fc;
+    outline-offset: 1px;
+  }
+}
+
+.ring {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke-width: 3px;
+}
+
+.ringTrack {
+  stroke: #e8edf5;
+}
+
+.ringFill {
+  stroke: currentColor;
+}
+
+.trigger.normal {
+  color: var(--console-conversation-primary, #3769fc);
+}
+
+.normal {
+  color: #326749;
+}
+
+.governance,
+.active {
+  color: #8a5a00;
+}
+
+.emergency,
+.overflow {
+  color: #b42318;
+}
+
+.popover :global(.ant-popover-inner) {
+  width: min(320px, calc(100vw - 24px));
+  padding: 14px;
+  border-radius: 10px;
+}
+
+.details {
+  color: #263247;
+  font-size: 13px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title {
+  color: #172033;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.total {
+  margin-top: 3px;
+  color: #657188;
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  flex: none;
+  color: #326749;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.progress {
+  margin-top: 12px;
+  color: #3769fc;
+
+  :global(.ant-progress) {
+    display: block;
+    line-height: 1;
+  }
+}
+
+.remaining {
+  margin-top: 4px;
+  color: #657188;
+  font-size: 12px;
+}
+
+.categories {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #e8edf5;
+}
+
+.category {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.value {
+  flex: none;
+  color: #3a465a;
+  font-variant-numeric: tabular-nums;
+}
+
+.fullValue {
+  margin-left: 6px;
+  color: #7a8598;
+  font-size: 11px;
+}
+
+.notice {
+  margin: 10px 0 0;
+  color: #657188;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.notice {
+  color: #8a5a00;
+}
+
+@media (max-width: 520px) {
+  .fullValue {
+    display: none;
+  }
+}

@@ -178,6 +178,22 @@ _COMPLETION_JUDGE_ALLOWED_TOOLS = frozenset(
         "get_current_time",
     },
 )
+_OPERATION_GROUP_DECLARATION_INSTRUCTION = """[Operation Group Declaration]
+When several tool calls belong to one user-visible task phase (for example:
+inspect an image, then recognize its text, then verify the result), attach a
+consistent display-only metadata object to EACH of those tool calls' arguments:
+
+{"__swe_operation_group": {"id": "<stable-phase-id>", "name": "<short user-facing phase name>"}}
+
+Rules:
+- Reuse the exact same id and name for every tool call in the same phase.
+  Use a NEW id whenever the phase changes.
+- The name is plain Chinese or English text, at most 40 characters. It MUST
+  NOT contain paths, commands, quotes, credentials, environment variables,
+  or any sensitive values.
+- The field is stripped before the tool runs and never reaches the tool.
+- When tool calls are unrelated to a shared phase, do not attach
+  __swe_operation_group at all."""
 _GOAL_TURN_INSTRUCTION = """[Goal Mode]
 You are advancing a confirmed Goal Contract. Perform one focused Main Agent turn,
 then you MUST call `submit_goal_turn_resolution` exactly once. Use `continue`
@@ -1013,7 +1029,13 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             if isinstance(registered_schema, dict)
             else None
         )
-        if registered_parameters != version.json_schema:
+        from ..app.runner.operation_group import (
+            schema_parameters_without_operation_group,
+        )
+
+        if schema_parameters_without_operation_group(
+            registered_parameters,
+        ) != schema_parameters_without_operation_group(version.json_schema):
             raise RuntimeError(
                 "source override schema must match the code-defined builtin: "
                 f"{version.name}",
@@ -1039,13 +1061,23 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         toolkit: Toolkit,
         tool_names: list[str],
     ) -> None:
-        """Wrap registered tools so failures use Swe's structured contract."""
+        """Wrap registered tools so failures use Swe's structured contract.
+
+        Also declares the optional display-only operation_group argument
+        in each tool schema so the agent may group tool calls of one
+        user-visible task phase without breaking strict providers.
+        """
+        from ..app.runner.operation_group import inject_operation_group_schema
+
         for tool_name in tool_names:
             tool_entry = toolkit.tools.get(tool_name)
             if tool_entry is None:
                 continue
             tool_entry.original_func = normalize_tool_function_errors(
                 tool_entry.original_func,
+            )
+            inject_operation_group_schema(
+                getattr(tool_entry, "json_schema", None),
             )
 
     def _register_skills(self, toolkit: Toolkit) -> None:
@@ -1532,6 +1564,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 "For analysis, coding, debugging, refactoring, optimization, or any "
                 "multi-step request — ALWAYS use the tool. When in doubt, use it."
             )
+
+        sys_prompt += _OPERATION_GROUP_DECLARATION_INSTRUCTION
 
         return sys_prompt
 

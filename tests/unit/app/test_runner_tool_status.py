@@ -183,3 +183,98 @@ def test_history_tool_result_rebuilds_structured_failed_status() -> None:
     data = messages[0].content[0].data
     assert data["tool_status"] == "failed"
     assert data["tool_error"] == "permission denied"
+
+
+def test_apply_governance_marks_pending_approval() -> None:
+    module = _tool_status_module()
+    data = {
+        "name": "execute_shell_command",
+        "output": {
+            "isError": True,
+            "error_type": "approval_required",
+            "content": [{"type": "text", "text": "risk detected"}],
+        },
+    }
+
+    module.apply_terminal_tool_status(data)
+    result = module.apply_governance_tool_status(data, "pending")
+
+    assert result == module.TOOL_STATUS_PENDING
+    assert data["tool_governance"] == module.TOOL_STATUS_PENDING
+    assert "tool_status" not in data
+    assert "tool_error" not in data
+
+
+def test_apply_governance_marks_rejected_decision() -> None:
+    module = _tool_status_module()
+    result = module.apply_governance_tool_status(
+        {"name": "execute_shell_command"},
+        "rejected",
+    )
+
+    assert result == module.TOOL_STATUS_REJECTED
+
+
+def test_apply_governance_marks_blocked_policy() -> None:
+    module = _tool_status_module()
+    for governance in ("blocked",):
+        result = module.apply_governance_tool_status(
+            {"name": "execute_shell_command"},
+            governance,
+        )
+        assert result == module.TOOL_STATUS_BLOCKED
+
+
+def test_apply_governance_ignores_untrusted_output_error_type() -> None:
+    module = _tool_status_module()
+    data = {"name": "execute_shell_command"}
+
+    result = module.apply_governance_tool_status(
+        data,
+        '{"error_type": "approval_rejected"}',
+    )
+
+    assert result is None
+    assert module.GOVERNANCE_FIELD not in data
+
+
+def test_apply_governance_ignores_real_execution_failures() -> None:
+    module = _tool_status_module()
+    data = {"name": "grep_search", "tool_status": module.TOOL_STATUS_FAILED}
+
+    result = module.apply_governance_tool_status(
+        data,
+        None,
+    )
+
+    assert result is None
+    assert data["tool_status"] == module.TOOL_STATUS_FAILED
+    assert module.GOVERNANCE_FIELD not in data
+
+
+def test_history_rebuild_uses_trusted_governance_marker() -> None:
+    messages = agentscope_msg_to_message(
+        Msg(
+            name="Friday",
+            role="system",
+            content=[
+                {
+                    "type": "tool_result",
+                    "id": "tool-1",
+                    "name": "execute_shell_command",
+                    "_swe_tool_governance": "pending",
+                    "output": {
+                        "isError": True,
+                        "error_type": "approval_required",
+                        "content": [{"type": "text", "text": "risk"}],
+                    },
+                },
+            ],
+            timestamp="2026-08-31T08:00:00Z",
+        ),
+    )
+
+    data = messages[0].content[0].data
+    assert data["tool_governance"] == "pending"
+    assert "tool_status" not in data
+    assert "tool_error" not in data

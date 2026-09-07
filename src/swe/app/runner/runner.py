@@ -38,6 +38,11 @@ from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
 )
+from .context_usage import (
+    CONTEXT_USAGE_INVALID_STATE_KEY,
+    CONTEXT_USAGE_STATE_KEY,
+    capture_context_usage,
+)
 from .assistant_response import (
     project_candidate_assistant_response,
     replace_candidate_assistant_response,
@@ -81,6 +86,10 @@ from ...__version__ import __version__
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
+from ...agents.tool_failure import (
+    TOOL_GOVERNANCE_BLOCK_FIELD,
+    attach_tool_governance_message_metadata,
+)
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
@@ -652,7 +661,60 @@ def _approved_tool_call_from_record(record) -> dict[str, Any] | None:
     replay_metadata = _approval_replay_metadata(record)
     if replay_metadata is not None:
         approved_tool_call["_approval_replay"] = replay_metadata
-    return approved_tool_call
+    from .operation_group import restore_operation_group_argument
+
+    return restore_operation_group_argument(
+        approved_tool_call,
+        record.extra.get("operation_group"),
+    )
+
+
+def _build_denial_response_msg(pending: Any, text: str) -> Msg:
+    """Build the denial message, optionally marking the pending tool call.
+
+    When the pending record still carries the original tool call, the
+    message embeds a structured tool_result with error_type
+    "approval_rejected" so the Console can turn the never-executed
+    sub-step into "已拒绝" instead of an execution failure.  The text
+    block keeps the existing user-visible denial message.
+    """
+    blocks: list[Any] = []
+    governance_tool_call_id = ""
+    extra = getattr(pending, "extra", None)
+    if isinstance(extra, dict):
+        tool_call = extra.get("tool_call")
+        if isinstance(tool_call, dict) and tool_call.get("id"):
+            governance_tool_call_id = str(tool_call["id"])
+            result_block = {
+                "type": "tool_result",
+                "id": tool_call.get("id", ""),
+                "name": tool_call.get("name")
+                or getattr(pending, "tool_name", ""),
+                TOOL_GOVERNANCE_BLOCK_FIELD: "rejected",
+                "output": {
+                    "isError": True,
+                    "error_type": "approval_rejected",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "该工具调用已被拒绝，未执行。",
+                        },
+                    ],
+                },
+            }
+            operation_group = extra.get("operation_group")
+            if isinstance(operation_group, dict):
+                result_block["operation_group"] = operation_group
+            blocks.append(result_block)
+    blocks.append(TextBlock(type="text", text=text))
+    message = Msg(name="Friday", role="assistant", content=blocks)
+    if governance_tool_call_id:
+        attach_tool_governance_message_metadata(
+            message,
+            tool_call_id=governance_tool_call_id,
+            governance_status="rejected",
+        )
+    return message
 
 
 def _copy_list_extra(
@@ -1404,6 +1466,57 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
     await query_cleanup.cleanup_mcp_clients(clients)
 
 
+def _assistant_response_candidate(
+    index: int,
+    entry: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    if not isinstance(entry, (tuple, list)) or not entry:
+        return None, {"index": index, "reason": "invalid_memory_entry"}
+
+    msg = entry[0]
+    role = getattr(msg, "role", None)
+    content = getattr(msg, "content", None)
+    metadata = getattr(msg, "metadata", None)
+    summary: dict[str, Any] = {
+        "index": index,
+        "role": role,
+        "content_type": type(content).__name__,
+        "metadata_fields": [
+            key
+            for key in ("event_type", "message_type", "kind", "type")
+            if isinstance(metadata, dict) and key in metadata
+        ],
+    }
+    if isinstance(content, list):
+        summary["block_types"] = [
+            (
+                block.get("type")
+                if isinstance(block, dict)
+                else getattr(block, "type", None)
+            )
+            for block in content
+        ]
+    if (
+        role != "assistant"
+        or not hasattr(msg, "content")
+        or _is_live_assistant_event(msg)
+    ):
+        summary["reason"] = (
+            "role_or_missing_content"
+            if role != "assistant" or not hasattr(msg, "content")
+            else "live_assistant_event"
+        )
+        return None, summary
+
+    response = project_candidate_assistant_response(msg)
+    if response is not None:
+        summary["text_len"] = len(response)
+        summary["reason"] = "accepted"
+        return response, summary
+    summary["reason"] = "unsupported_content"
+    return None, summary
+
+
 def _extract_assistant_response(
     agent: SWEAgent,
     *,
@@ -1424,15 +1537,13 @@ def _extract_assistant_response(
         memory_total = len(memory) if isinstance(memory, list) else None
         candidates: list[dict[str, Any]] = []
         entries = (
-            reversed(list(enumerate(memory[start:], start)))
+            list(enumerate(memory[start:], start))
             if isinstance(memory, list)
-            else ()
+            else []
         )
-        for index, entry in entries:
-            response, summary = _inspect_assistant_memory_entry(index, entry)
+        for index, entry in reversed(entries):
+            response, summary = _assistant_response_candidate(index, entry)
             if response is not None:
-                summary["text_len"] = len(response)
-                summary["reason"] = "accepted"
                 logger.warning(
                     "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
                     "selected=%s candidates=%s",
@@ -1457,48 +1568,6 @@ def _extract_assistant_response(
         )
 
     return ""
-
-
-def _inspect_assistant_memory_entry(
-    index: int,
-    entry: Any,
-) -> tuple[str | None, dict[str, Any]]:
-    """Inspect one memory entry and return its response and diagnostics."""
-    if not isinstance(entry, (tuple, list)) or not entry:
-        return None, {"index": index, "reason": "invalid_memory_entry"}
-    msg = entry[0]
-    role = getattr(msg, "role", None)
-    content = getattr(msg, "content", None)
-    metadata = getattr(msg, "metadata", None)
-    summary: dict[str, Any] = {
-        "index": index,
-        "role": role,
-        "content_type": type(content).__name__,
-        "metadata_fields": [
-            key
-            for key in ("event_type", "message_type", "kind", "type")
-            if isinstance(metadata, dict) and key in metadata
-        ],
-    }
-    if isinstance(content, list):
-        summary["block_types"] = [
-            (
-                block.get("type")
-                if isinstance(block, dict)
-                else getattr(block, "type", None)
-            )
-            for block in content
-        ]
-    if role != "assistant" or not hasattr(msg, "content"):
-        summary["reason"] = "role_or_missing_content"
-        return None, summary
-    if _is_live_assistant_event(msg):
-        summary["reason"] = "live_assistant_event"
-        return None, summary
-    response = project_candidate_assistant_response(msg)
-    if response is None:
-        summary["reason"] = "unsupported_content"
-    return response, summary
 
 
 def _replace_assistant_response(
@@ -3007,20 +3076,12 @@ class AgentRunner(Runner):
                 ApprovalDecision.TIMEOUT,
             )
             return (
-                Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=[
-                        TextBlock(
-                            type="text",
-                            text=(
-                                f"⏰ Tool `{pending.tool_name}` approval "
-                                f"timed out ({int(elapsed)}s) — denied.\n"
-                                f"工具 `{pending.tool_name}` 审批超时"
-                                f"（{int(elapsed)}s），已拒绝执行。"
-                            ),
-                        ),
-                    ],
+                _build_denial_response_msg(
+                    pending,
+                    f"⏰ Tool `{pending.tool_name}` approval "
+                    f"timed out ({int(elapsed)}s) — denied.\n"
+                    f"工具 `{pending.tool_name}` 审批超时"
+                    f"（{int(elapsed)}s），已拒绝执行。",
                 ),
                 True,
                 None,
@@ -3086,18 +3147,10 @@ class AgentRunner(Runner):
             request,
         )
         return (
-            Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=(
-                            f"❌ Tool `{pending.tool_name}` denied.\n"
-                            f"工具 `{pending.tool_name}` 已拒绝执行。"
-                        ),
-                    ),
-                ],
+            _build_denial_response_msg(
+                pending,
+                f"❌ Tool `{pending.tool_name}` denied.\n"
+                f"工具 `{pending.tool_name}` 已拒绝执行。",
             ),
             True,
             None,
@@ -5958,11 +6011,30 @@ class AgentRunner(Runner):
             return
 
         current_agent_state = agent.state_dict()
-        stripped_count = 0
-        deduped_external_approvals = 0
+        stripped_count = _strip_internal_follow_up_messages_from_state(
+            current_agent_state,
+        )
+        deduped_external_approvals = (
+            _dedupe_external_approval_messages_from_state(
+                current_agent_state,
+            )
+        )
+        context_usage_snapshot: dict[str, Any] | None = None
+        context_usage_capture_failed = False
+        try:
+            context_usage_snapshot = (
+                await capture_context_usage(agent, current_agent_state)
+            ).model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - session persistence must continue
+            context_usage_capture_failed = True
+            logger.warning(
+                "Failed to capture context usage; preserving prior snapshot "
+                "(session_id=%s)",
+                session_id,
+                exc_info=True,
+            )
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
-            nonlocal stripped_count, deduped_external_approvals
             state_modules: dict[str, Any] = (
                 dict(existing_state)
                 if isinstance(existing_state, dict)
@@ -5977,6 +6049,17 @@ class AgentRunner(Runner):
                     )
                 )
             state_modules["agent"] = current_agent_state
+            if context_usage_snapshot is not None:
+                state_modules[CONTEXT_USAGE_STATE_KEY] = context_usage_snapshot
+                state_modules.pop(CONTEXT_USAGE_INVALID_STATE_KEY, None)
+            elif context_usage_capture_failed:
+                if isinstance(
+                    state_modules.get(CONTEXT_USAGE_STATE_KEY),
+                    dict,
+                ):
+                    state_modules[CONTEXT_USAGE_INVALID_STATE_KEY] = True
+                else:
+                    state_modules.pop(CONTEXT_USAGE_INVALID_STATE_KEY, None)
             if hook_overlay is not None:
                 state_modules["hook_overlay"] = hook_overlay.model_dump(
                     mode="json",
@@ -5984,14 +6067,6 @@ class AgentRunner(Runner):
                 )
             else:
                 state_modules.pop("hook_overlay", None)
-            stripped_count = _strip_internal_follow_up_messages_from_state(
-                state_modules["agent"],
-            )
-            deduped_external_approvals = (
-                _dedupe_external_approval_messages_from_state(
-                    state_modules["agent"],
-                )
-            )
             return state_modules
 
         if session_execution is not None:

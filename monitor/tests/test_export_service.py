@@ -3,6 +3,7 @@
 
 import pytest
 from datetime import datetime, timezone
+from io import BytesIO
 
 pytest.importorskip("openpyxl")
 
@@ -122,3 +123,37 @@ class TestExportService:
         # Verify it's a valid Excel file by checking the bytes
         # Excel files start with specific bytes (PK for ZIP-based format)
         assert result[:2] == b"PK"  # Excel uses ZIP container
+
+    def test_export_skill_usage_details_masks_names_and_status(
+        self,
+        export_service,
+    ):
+        result = export_service.export_skill_usage_details(
+            [
+                {
+                    "task_name": "任务",
+                    "tenant_id": "u1",
+                    "tenant_name": "经理",
+                    "bbk_id": "001",
+                    "task_status": "active",
+                    "execution_id": 7,
+                    "actual_time": datetime(2026, 9, 3, 10, 0, 0),
+                    "execution_status": "success",
+                    "async_status": "error",
+                    "is_read": 1,
+                    "custuid": "c1",
+                    "cust_nm": "张三丰",
+                    "clicked_plan": 1,
+                    "clicked_phone": 0,
+                    "clicked_insight": 1,
+                },
+            ],
+        )
+        from openpyxl import load_workbook
+
+        sheet = load_workbook(BytesIO(result), read_only=True).active
+        values = list(sheet.iter_rows(min_row=2, values_only=True))[0]
+        assert values[5] == 7
+        assert values[7] == "子任务执行失败"
+        assert values[10] == "张*丰"
+        assert values[11:14] == ("是", "否", "是")

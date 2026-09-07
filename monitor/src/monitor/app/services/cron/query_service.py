@@ -1893,6 +1893,87 @@ class QueryService:
             for row in rows
         ]
 
+    async def get_skill_usage_details_for_export(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        bbk_ids: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get execution/customer detail rows for the overview export.
+
+        Clicks follow the overview aggregation rule: task + customer clicks
+        are aggregated across the selected period and joined to each matching
+        execution row.  A left join keeps executions without recommendations.
+        """
+        db = get_db_connection()
+        start_time, end_time = self._parse_date_range(start_date, end_date)
+        bbk_filter_sql, bbk_filter_params = self._build_bbk_filter(bbk_ids)
+        source_filter_sql, source_filter_params = self._build_source_filter(
+            source_id,
+        )
+
+        click_source_sql = " AND c.source_id = %s" if source_id else ""
+        click_params: list[Any] = [start_time, end_time]
+        if source_id:
+            click_params.append(source_id)
+
+        sql = f"""
+            SELECT
+                e.id AS execution_id,
+                e.actual_time,
+                e.status AS execution_status,
+                e.async_status,
+                e.is_read,
+                j.name AS task_name,
+                j.tenant_id,
+                j.tenant_name,
+                j.bbk_id,
+                j.status AS task_status,
+                s.custuid,
+                s.cust_nm,
+                COALESCE(clicks.clicked_plan, 0) AS clicked_plan,
+                COALESCE(clicks.clicked_insight, 0) AS clicked_insight,
+                COALESCE(clicks.clicked_phone, 0) AS clicked_phone
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id = j.id
+            LEFT JOIN (
+                SELECT trace_id, custuid, MAX(cust_nm) AS cust_nm
+                FROM swe_cron_subtasks
+                WHERE custuid IS NOT NULL AND custuid != ''
+                GROUP BY trace_id, custuid
+            ) s ON s.trace_id = e.trace_id
+            LEFT JOIN (
+                SELECT
+                    c.cron_task_id,
+                    c.customer_id,
+                    MAX(CASE WHEN c.event_type = 'preview_view'
+                        AND c.template_type = 'sub' THEN 1 ELSE 0 END)
+                        AS clicked_plan,
+                    MAX(CASE WHEN c.button_type = 'insight'
+                        THEN 1 ELSE 0 END) AS clicked_insight,
+                    MAX(CASE WHEN c.button_type = 'phone'
+                        THEN 1 ELSE 0 END) AS clicked_phone
+                FROM swe_html_preview_click_events c
+                WHERE c.clicked_at >= %s AND c.clicked_at <= %s
+                  AND c.customer_id IS NOT NULL
+                  AND (c.event_type = 'button_click'
+                    OR (c.event_type = 'preview_view'
+                      AND c.template_type = 'sub'))
+                  {click_source_sql}
+                GROUP BY c.cron_task_id, c.customer_id
+            ) clicks ON clicks.cron_task_id = e.job_id
+                AND clicks.customer_id = s.custuid
+            WHERE e.actual_time >= %s AND e.actual_time <= %s
+              {bbk_filter_sql}
+              {source_filter_sql}
+            ORDER BY e.actual_time DESC, e.id DESC, s.custuid
+        """
+        params = click_params + [start_time, end_time]
+        params.extend(bbk_filter_params)
+        params.extend(source_filter_params)
+        return await db.fetch_all(sql, tuple(params))
+
     async def get_jobs_for_export(
         self,
         tenant_id: Optional[str] = None,
@@ -3486,7 +3567,7 @@ class QueryService:
         click_sql = f"""
             SELECT
                 COUNT(DISTINCT CASE
-                    WHEN c.button_type = 'plan' THEN c.cron_task_id
+                    WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN c.cron_task_id
                 END) AS report_count,
                 COUNT(DISTINCT CASE
                     WHEN c.button_type = 'insight' THEN c.cron_task_id
@@ -3498,7 +3579,7 @@ class QueryService:
             JOIN swe_cron_jobs j
               ON c.cron_task_id = j.id
             WHERE c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
+              AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
               AND c.cron_task_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
@@ -3749,17 +3830,18 @@ class QueryService:
         click_sql = f"""
             SELECT
                 bbk_id,
-                button_type,
+                CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END AS button_type,
                 COUNT(DISTINCT cron_task_id) AS task_count,
                 COUNT(*) AS total_clicks
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
-              AND event_type = 'button_click'
+              AND (event_type = 'button_click' AND button_type IN ('insight', 'phone')
+              OR (event_type = 'preview_view' AND template_type = 'sub'))
               AND cron_task_id IS NOT NULL
               AND bbk_id IS NOT NULL
               AND bbk_id != ''
               {source_where}
-            GROUP BY bbk_id, button_type
+            GROUP BY bbk_id, CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         params: list = [start_time, end_time]
         if source_id:
@@ -3821,14 +3903,15 @@ class QueryService:
         """
         source_where = " AND source_id = %s" if source_id else ""
         sql = f"""
-            SELECT button_type, COUNT(DISTINCT user_id) AS manager_count
+            SELECT CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END AS button_type,
+            COUNT(DISTINCT user_id) AS manager_count
             FROM swe_html_preview_click_events
             WHERE bbk_id = %s
               AND clicked_at >= %s AND clicked_at <= %s
-              AND event_type = 'button_click'
-              AND button_type IN ('plan', 'insight', 'phone')
+              AND (event_type = 'preview_view' AND template_type = 'sub'
+              OR (event_type = 'button_click' AND button_type IN ('insight', 'phone')))
               {source_where}
-            GROUP BY button_type
+            GROUP BY CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3856,18 +3939,19 @@ class QueryService:
         skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
-            SELECT c.button_type, COUNT(DISTINCT c.user_id) AS manager_count
+            SELECT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END AS button_type,
+            COUNT(DISTINCT c.user_id) AS manager_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
-              AND c.button_type IN ('plan', 'insight', 'phone')
+              AND (c.event_type = 'preview_view' AND c.template_type = 'sub'
+              OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND {skill_exists}
               {source_where}
-            GROUP BY c.button_type
+            GROUP BY CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3893,15 +3977,16 @@ class QueryService:
         """
         source_where = " AND source_id = %s" if source_id else ""
         sql = f"""
-            SELECT button_type, COUNT(DISTINCT customer_id) AS customer_count
+            SELECT CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END AS button_type,
+            COUNT(DISTINCT customer_id) AS customer_count
             FROM swe_html_preview_click_events
             WHERE bbk_id = %s
               AND clicked_at >= %s AND clicked_at <= %s
-              AND event_type = 'button_click'
-              AND button_type IN ('plan', 'insight', 'phone')
+              AND (event_type = 'preview_view' AND template_type = 'sub'
+              OR (event_type = 'button_click' AND button_type IN ('insight', 'phone')))
               AND customer_id IS NOT NULL
               {source_where}
-            GROUP BY button_type
+            GROUP BY CASE WHEN event_type = 'preview_view' AND template_type = 'sub' THEN 'plan' ELSE button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3929,19 +4014,20 @@ class QueryService:
         skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
-            SELECT c.button_type, COUNT(DISTINCT c.customer_id) AS customer_count
+            SELECT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END AS button_type,
+            COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
-              AND c.button_type IN ('plan', 'insight', 'phone')
+              AND (c.event_type = 'preview_view' AND c.template_type = 'sub'
+              OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
               AND c.customer_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND {skill_exists}
               {source_where}
-            GROUP BY c.button_type
+            GROUP BY CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -3985,7 +4071,8 @@ class QueryService:
             FROM swe_html_preview_click_events a
             LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
             WHERE a.customer_id IS NOT NULL
-              AND a.event_type = 'button_click'
+              AND (a.event_type = 'preview_view' AND a.template_type = 'sub'
+              OR (a.event_type = 'button_click' AND a.button_type IN ('insight', 'phone')))
               AND (
                 a.clicked_at >= %s AND a.clicked_at <= %s
                 OR b.clicked_at >= %s AND b.clicked_at <= %s
@@ -5152,19 +5239,19 @@ class QueryService:
         source_where = " AND c.source_id = %s" if source_id else ""
         skill_exists = self._statistics_skill_exists("j")
         sql = f"""
-            SELECT c.user_id, c.button_type,
+            SELECT c.user_id, CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END AS button_type,
                 COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
-              AND c.button_type IN ('plan', 'insight', 'phone')
+              AND (c.event_type = 'preview_view' AND c.template_type = 'sub'
+              OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
               AND c.customer_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND {skill_exists}
               {source_where}
-            GROUP BY c.user_id, c.button_type
+            GROUP BY c.user_id, CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 'plan' ELSE c.button_type END
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
@@ -5210,7 +5297,8 @@ class QueryService:
             LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
             WHERE a.bbk_id = %s
               AND a.customer_id IS NOT NULL
-              AND a.event_type = 'button_click'
+              AND (a.event_type = 'preview_view' AND a.template_type = 'sub'
+              OR (a.event_type = 'button_click' AND a.button_type IN ('insight', 'phone')))
               AND (
                 a.clicked_at >= %s AND a.clicked_at <= %s
                 OR b.clicked_at >= %s AND b.clicked_at <= %s
@@ -5385,7 +5473,7 @@ class QueryService:
                 j.tenant_id AS user_id,
                 MAX(j.tenant_name) AS user_name,
                 COUNT(DISTINCT CASE WHEN e.is_read = 1 THEN e.id END) AS read_count,
-                COUNT(DISTINCT CASE WHEN c.button_type = 'plan' THEN c.id END) AS plan_count,
+                COUNT(DISTINCT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN c.id END) AS plan_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'insight' THEN c.id END) AS insight_count,
                 COUNT(DISTINCT CASE WHEN c.button_type = 'phone' THEN c.id END) AS phone_count,
                 MAX(c.clicked_at) AS last_click_time
@@ -5395,7 +5483,7 @@ class QueryService:
             LEFT JOIN swe_html_preview_click_events c
                 ON c.cron_task_id = e.job_id
                 AND c.clicked_at >= %s AND c.clicked_at <= %s
-                AND c.event_type = 'button_click'
+                AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
                 {click_source_on}
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
@@ -5471,7 +5559,7 @@ class QueryService:
             SELECT
                 c.customer_id,
                 c.customer_name,
-                MAX(CASE WHEN c.button_type = 'plan' THEN 1 ELSE 0 END) AS clicked_plan,
+                MAX(CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 1 ELSE 0 END) AS clicked_plan,
                 MAX(CASE WHEN c.button_type = 'insight' THEN 1 ELSE 0 END) AS clicked_insight,
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
@@ -5482,7 +5570,7 @@ class QueryService:
               AND c.user_id = %s
               AND {skill_expr} = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND c.event_type = 'button_click'
+              AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
               {source_where}
             GROUP BY c.customer_id, c.customer_name
             ORDER BY click_time DESC
@@ -5699,7 +5787,7 @@ class QueryService:
             SELECT
                 c.customer_id,
                 c.customer_name,
-                MAX(CASE WHEN c.button_type = 'plan' THEN 1 ELSE 0 END) AS clicked_plan,
+                MAX(CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub' THEN 1 ELSE 0 END) AS clicked_plan,
                 MAX(CASE WHEN c.button_type = 'insight' THEN 1 ELSE 0 END) AS clicked_insight,
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
@@ -5710,7 +5798,7 @@ class QueryService:
               AND c.user_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.customer_id IS NOT NULL
-              AND c.event_type = 'button_click'
+              AND (c.event_type = 'button_click' OR (c.event_type = 'preview_view' AND c.template_type = 'sub'))
               {skill_filter}
               {source_where}
             GROUP BY c.customer_id, c.customer_name

@@ -8,6 +8,13 @@ const mocks = vi.hoisted(() => ({
   updateMessage: vi.fn(),
   getMessages: vi.fn(() => []),
   removeMessage: vi.fn(),
+  flushSync: vi.fn((callback: () => void) => callback()),
+}));
+
+vi.mock("react-dom", () => ({
+  default: {
+    flushSync: mocks.flushSync,
+  },
 }));
 
 vi.mock("../../Context/ChatAnywhereMessagesContext", () => ({
@@ -34,9 +41,10 @@ describe("useChatMessageHandler", () => {
     mocks.updateMessage.mockClear();
     mocks.getMessages.mockClear();
     mocks.removeMessage.mockClear();
+    mocks.flushSync.mockClear();
   });
 
-  it("stores a stable local timestamp when creating a live response message", () => {
+  it("stores a timestamp and synchronously mounts a live response", () => {
     const timestamp = Date.parse("2026-04-17T16:05:00+08:00");
     const dateNow = vi.spyOn(Date, "now").mockReturnValue(timestamp);
     const currentQARef = {
@@ -59,6 +67,7 @@ describe("useChatMessageHandler", () => {
     expect(mocks.updateMessage).toHaveBeenCalledWith(
       currentQARef.current.response,
     );
+    expect(mocks.flushSync).toHaveBeenCalledTimes(1);
 
     dateNow.mockRestore();
   });

@@ -39,6 +39,8 @@ class _DispatchStore:
         self.parent_intents: list[dict[str, Any]] = []
         self.capacity: list[dict[str, Any]] = []
         self.stale_recoveries: list[dict[str, Any]] = []
+        self.execution_reconciliations: list[dict[str, Any]] = []
+        self.execution_receipts: list[dict[str, Any]] = []
         self.scope_leases: list[dict[str, Any]] = []
         self.scope_lease_allowed = True
         self.recovered_running_count: int | None = None
@@ -89,9 +91,13 @@ class _DispatchStore:
         self.completed.append(kwargs)
         return True
 
-    async def complete_from_execution(self, **kwargs):
-        self.completed.append(kwargs)
+    async def accept_execution_feedback(self, **kwargs):
+        self.execution_receipts.append(kwargs)
         return True
+
+    async def reconcile_dispatched_executions(self, **kwargs):
+        self.execution_reconciliations.append(kwargs)
+        return 0
 
     async def fail_intent(self, **kwargs):
         self.failed.append(kwargs)
@@ -598,8 +604,9 @@ async def test_callback_failure_schedules_retry_instead_of_completing() -> (
 
 
 @pytest.mark.asyncio
-async def test_callback_unknown_outcome_stays_dispatched_without_retry(
-) -> None:
+async def test_callback_unknown_outcome_stays_dispatched_without_retry() -> (
+    None
+):
     store = _DispatchStore(
         [
             {
@@ -704,8 +711,9 @@ async def test_capacity_adjustment_is_interval_gated_and_separate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capacity_adjustment_rechecks_interval_after_acquiring_lease(
-) -> None:
+async def test_capacity_adjustment_rechecks_interval_after_acquiring_lease() -> (
+    None
+):
     store = _DispatchStore([])
     store.latest_capacity = {
         "effective_workers": 1,
@@ -773,6 +781,14 @@ async def test_capacity_loop_runs_while_dispatch_loop_is_blocked() -> None:
 def test_capacity_loop_default_check_interval_is_sixty_seconds() -> None:
     parameter = inspect.signature(CronSchedulingService.run_loop).parameters[
         "capacity_interval_seconds"
+    ]
+
+    assert parameter.default == 60
+
+
+def test_dispatch_loop_default_interval_is_sixty_seconds() -> None:
+    parameter = inspect.signature(CronSchedulingService.run_loop).parameters[
+        "interval_seconds"
     ]
 
     assert parameter.default == 60
@@ -1000,60 +1016,37 @@ async def test_dispatch_ready_recovers_stale_dispatched_before_capacity_gate() -
 
 
 @pytest.mark.asyncio
-async def test_execution_completion_marks_intent_and_dispatches_next() -> None:
-    store = _DispatchStore([])
-    callback = _CallbackClient()
-    service = CronSchedulingService(
-        dispatch_store=store,
-        callback_client=callback,
-        worker_id="scheduler-1",
-        effective_workers=1,
-    )
-
-    await service.handle_execution_recorded(
-        execution_id=42,
-        status="success",
-        meta={
-            "cron_dispatch": {
-                "intent_id": 7,
+async def test_dispatch_scan_runs_before_recovery_and_refills_finished_slot() -> (
+    None
+):
+    store = _DispatchStore(
+        [
+            {
+                "id": 8,
                 "batch_id": "batch-1",
-                "dispatch_attempt": 1,
+                "intent_role": "child",
+                "tenant_id": "tenant-b",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-2",
             },
-        },
-        completed_at=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+        ],
     )
+    store.feedback["running_count"] = 1
+    order = []
 
-    assert store.completed[0]["intent_id"] == 7
-    assert store.completed[0]["execution_id"] == 42
-    assert store.completed[0]["expected_attempt_count"] == 1
-    assert store.claims, "completion should immediately try to refill capacity"
+    async def reconcile(**kwargs):
+        order.append("reconcile")
+        store.execution_reconciliations.append(kwargs)
+        store.feedback["running_count"] = 0
+        return 1
 
+    async def recover(**_kwargs):
+        order.append("recover")
+        return 0
 
-@pytest.mark.asyncio
-async def test_execution_failure_keeps_error_message_for_retry_log() -> None:
-    store = _DispatchStore([])
-    service = CronSchedulingService(
-        dispatch_store=store,
-        callback_client=_CallbackClient(),
-        worker_id="scheduler-1",
-        effective_workers=1,
-    )
-
-    await service.handle_execution_recorded(
-        execution_id=43,
-        status="failed",
-        meta={"cron_dispatch": {"intent_id": 8, "batch_id": "batch-1"}},
-        error_message="provider timeout",
-        completed_at=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
-    )
-
-    assert store.completed[0]["intent_id"] == 8
-    assert store.completed[0]["error"] == "provider timeout"
-
-
-@pytest.mark.asyncio
-async def test_execution_failure_uses_configured_retry_delay() -> None:
-    store = _DispatchStore([])
+    store.reconcile_dispatched_executions = reconcile
+    store.recover_stale_dispatched_intents = recover
     service = CronSchedulingService(
         dispatch_store=store,
         callback_client=_CallbackClient(),
@@ -1062,14 +1055,15 @@ async def test_execution_failure_uses_configured_retry_delay() -> None:
         retry_delay_seconds=45,
     )
 
-    await service.handle_execution_recorded(
-        execution_id=44,
-        status="failed",
-        meta={"cron_dispatch": {"intent_id": 9, "batch_id": "batch-1"}},
-        completed_at=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+    dispatched = await service.dispatch_ready_once(
+        now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
     )
 
-    assert store.completed[0]["retry_delay_seconds"] == 45
+    assert order == ["reconcile", "recover"]
+    assert store.execution_reconciliations[0]["retry_delay_seconds"] == 45
+    assert store.execution_reconciliations[0]["source_ids"] == ["source-a"]
+    assert dispatched == 1
+    assert store.claims[0]["limit"] == 1
 
 
 @pytest.mark.asyncio

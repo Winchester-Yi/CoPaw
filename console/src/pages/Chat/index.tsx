@@ -5,15 +5,19 @@ import {
   IAgentScopeRuntimeWebUIOptions,
   type IAgentScopeRuntimeWebUISenderOptions,
   type IAgentScopeRuntimeWebUIRef,
+  type IChatInputProps,
   useChatAnywhereSessions,
   useChatAnywhereSessionsState,
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
 import ConversationCompactionBoundary from "./components/ConversationCompactionBoundary";
+import ContextUsageIndicator from "./components/ContextUsageIndicator";
+import { useContextUsageController } from "./components/ContextUsageIndicator/useContextUsageController";
 // ==================== 组件引入方式变更结束 ====================
 import {
   Children,
+  cloneElement,
   useCallback,
   useEffect,
   useMemo,
@@ -702,8 +706,10 @@ export default function ChatPage() {
   messageRef.current = message;
   const composerInputState = useChatAnywhereInput((value) => ({
     disabled: Boolean(value.disabled),
+    loading: Boolean(value.loading),
   }));
   const composerDisabled = Boolean(composerInputState.disabled);
+  const composerLoading = Boolean(composerInputState.loading);
   const [taskEditForm] = Form.useForm<CronJobSpecOutput>();
   const [editingTask, setEditingTask] = useState<CronJobSpecOutput | null>(
     null,
@@ -715,6 +721,15 @@ export default function ChatPage() {
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
+  const contextUsageChatId = chatId
+    ? sessionApi.getChatIdForSession(chatId)
+    : activeSessionId
+    ? sessionApi.getChatIdForSession(activeSessionId)
+    : null;
+  const contextUsage = useContextUsageController(
+    contextUsageChatId,
+    composerLoading,
+  );
 
   useEffect(() => {
     setSelectedContextReferences([]);
@@ -2181,6 +2196,7 @@ export default function ChatPage() {
     const senderConfig = i18nConfig.sender as
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
+    const contextUsageIndicator = <ContextUsageIndicator {...contextUsage} />;
     const senderPrefixNodes = Children.toArray([
       activePlanModeControl,
       activeGoalModeControl,
@@ -2361,6 +2377,7 @@ export default function ChatPage() {
               <>
                 {activePlanModeControl}
                 {activeGoalModeControl}
+                {contextUsageIndicator}
               </>
             }
             onSubmit={(data) => onSubmit(data)}
@@ -2384,7 +2401,14 @@ export default function ChatPage() {
         ),
         renderComposer: (defaultComposer) => (
           <ActivePlanInteractionComposer
-            defaultComposer={defaultComposer}
+            defaultComposer={cloneElement<IChatInputProps>(defaultComposer, {
+              actions: (defaultActions) => (
+                <div className={styles.composerActions}>
+                  {contextUsageIndicator}
+                  {defaultActions}
+                </div>
+              ),
+            })}
             onContinueModifying={handleContinueModifyingPlan}
             onPlanModeDecision={handlePlanModeDecision}
           />
@@ -2515,6 +2539,9 @@ export default function ChatPage() {
     expertsLoading,
     multimodalCaps,
     composerDisabled,
+    composerLoading,
+    contextUsageChatId,
+    contextUsage,
     pendingPlanRevision,
     persistPlanMode,
     planModeEnabled,
