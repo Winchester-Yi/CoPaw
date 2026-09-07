@@ -107,16 +107,15 @@ class ChatManager:
         Returns:
             List of chat specifications
         """
-        async with self._lock:
-            logger.debug(
-                f"list_chats: repo path={self._repo.path}, "
-                f"filters: user_id={user_id}, channel={channel}",
-            )
-            chats = await self._repo.filter_chats(
-                user_id=user_id,
-                channel=channel,
-            )
-            return self._repo.sort_chats_by_recency(chats)
+        logger.debug(
+            f"list_chats: repo path={self._repo.path}, "
+            f"filters: user_id={user_id}, channel={channel}",
+        )
+        chats = await self._repo.filter_chats(
+            user_id=user_id,
+            channel=channel,
+        )
+        return self._repo.sort_chats_by_recency(chats)
 
     async def list_chats_page(
         self,
@@ -127,22 +126,21 @@ class ChatManager:
         channel: Optional[str] = None,
     ) -> ChatPage:
         """List one filtered chat page in stable newest-first order."""
-        async with self._lock:
-            logger.debug(
-                "list_chats_page: repo path=%s, filters: user_id=%s, "
-                "channel=%s, page=%s, page_size=%s",
-                self._repo.path,
-                user_id,
-                channel,
-                page,
-                page_size,
-            )
-            return await self._repo.paginate_chats(
-                user_id=user_id,
-                channel=channel,
-                page=page,
-                page_size=page_size,
-            )
+        logger.debug(
+            "list_chats_page: repo path=%s, filters: user_id=%s, "
+            "channel=%s, page=%s, page_size=%s",
+            self._repo.path,
+            user_id,
+            channel,
+            page,
+            page_size,
+        )
+        return await self._repo.paginate_chats(
+            user_id=user_id,
+            channel=channel,
+            page=page,
+            page_size=page_size,
+        )
 
     async def list_chats_cursor(
         self,
@@ -153,13 +151,12 @@ class ChatManager:
         channel: Optional[str] = None,
     ) -> ChatPage:
         """List a live latest-update-ordered page using an opaque cursor."""
-        async with self._lock:
-            return await self._repo.paginate_chats_cursor(
-                user_id=user_id,
-                channel=channel,
-                page_size=page_size,
-                cursor=cursor,
-            )
+        return await self._repo.paginate_chats_cursor(
+            user_id=user_id,
+            channel=channel,
+            page_size=page_size,
+            cursor=cursor,
+        )
 
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:
         """Get chat spec by chat_id (UUID).
@@ -170,8 +167,7 @@ class ChatManager:
         Returns:
             Chat spec or None if not found
         """
-        async with self._lock:
-            return await self._repo.get_chat(chat_id)
+        return await self._repo.get_chat(chat_id)
 
     async def get_chat_by_session(
         self,
@@ -184,25 +180,24 @@ class ChatManager:
         The normal product invariant is unique by session, user, and channel.
         If legacy data has duplicates, return the most recently updated match.
         """
-        async with self._lock:
-            chats = await self._repo.filter_chats(
-                user_id=user_id,
-                channel=channel,
+        chats = await self._repo.filter_chats(
+            user_id=user_id,
+            channel=channel,
+        )
+        matching_chats = [
+            chat for chat in chats if chat.session_id == session_id
+        ]
+        if not matching_chats:
+            return None
+        if len(matching_chats) > 1:
+            logger.warning(
+                "Multiple chat records for session_id=%s "
+                "user_id=%s channel=%s; using most recently updated",
+                session_id,
+                user_id,
+                channel,
             )
-            matching_chats = [
-                chat for chat in chats if chat.session_id == session_id
-            ]
-            if not matching_chats:
-                return None
-            if len(matching_chats) > 1:
-                logger.warning(
-                    "Multiple chat records for session_id=%s "
-                    "user_id=%s channel=%s; using most recently updated",
-                    session_id,
-                    user_id,
-                    channel,
-                )
-            return max(matching_chats, key=lambda c: c.updated_at)
+        return max(matching_chats, key=lambda c: c.updated_at)
 
     async def get_or_create_chat(
         self,
@@ -474,12 +469,11 @@ class ChatManager:
         Returns:
             Number of matching chats
         """
-        async with self._lock:
-            chats = await self._repo.filter_chats(
-                user_id=user_id,
-                channel=channel,
-            )
-            return len(chats)
+        chats = await self._repo.filter_chats(
+            user_id=user_id,
+            channel=channel,
+        )
+        return len(chats)
 
     async def get_chat_id_by_session(
         self,
@@ -500,23 +494,22 @@ class ChatManager:
             JSON-backed repositories serve this from an in-memory session
             index; generic repositories retain the filter fallback.
         """
-        async with self._lock:
-            chat_id = await self._repo.get_chat_id_by_session(
-                session_id,
-                channel,
-            )
-            if chat_id is None:
-                logger.debug(
-                    f"No chat found for session={session_id[:30]} "
-                    f"channel={channel}",
-                )
-                return None
+        chat_id = await self._repo.get_chat_id_by_session(
+            session_id,
+            channel,
+        )
+        if chat_id is None:
             logger.debug(
-                f"Found chat_id={chat_id} "
-                f"for session={session_id[:30]} "
+                f"No chat found for session={session_id[:30]} "
                 f"channel={channel}",
             )
-            return chat_id
+            return None
+        logger.debug(
+            f"Found chat_id={chat_id} "
+            f"for session={session_id[:30]} "
+            f"channel={channel}",
+        )
+        return chat_id
 
 
 def _is_valid_chat_id(value: object) -> bool:

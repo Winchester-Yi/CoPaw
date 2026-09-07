@@ -252,6 +252,7 @@ describe("useChatRequest", () => {
       />,
     );
 
+    mocks.streamGate.resolve();
     await act(async () => {
       await hookApi.request([], undefined, createOwner());
     });
@@ -265,6 +266,69 @@ describe("useChatRequest", () => {
         }),
       },
     ]);
+    expect(onFinish).toHaveBeenCalledWith(createOwner());
+  });
+
+  it("finishes when the stream ends after terminal message frames", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks.splice(
+      0,
+      mocks.streamChunks.length,
+      {
+        data: JSON.stringify({
+          object: "response",
+          id: "response-1",
+          status: "in_progress",
+          created_at: 1,
+          output: [],
+        }),
+      },
+      {
+        data: JSON.stringify({
+          object: "message",
+          id: "message-1",
+          role: "assistant",
+          type: "message",
+          status: "completed",
+          content: [
+            {
+              object: "content",
+              type: "text",
+              text: "hello",
+              status: "completed",
+            },
+          ],
+        }),
+      },
+    );
+    const onFinish = vi.fn();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        onFinish={onFinish}
+      />,
+    );
+
+    mocks.streamGate.resolve();
+    await act(async () => {
+      await hookApi.request([], undefined, createOwner());
+    });
+
     expect(onFinish).toHaveBeenCalledWith(createOwner());
   });
 

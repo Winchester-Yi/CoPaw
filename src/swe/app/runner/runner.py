@@ -23,6 +23,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     AgentRequest,
     Event,
     Message,
+    RunStatus,
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
@@ -163,6 +164,7 @@ _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 _APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
+_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY = "defer_answer_turn_settlement"
 _SCENARIO_SNAPSHOT_REQUEST_META_KEYS = frozenset(
     {
         "scenario_preset_snapshot",
@@ -3570,22 +3572,42 @@ class AgentRunner(Runner):
             )
             return None
 
-        logger.debug(
-            f"Runner: Calling get_or_create_chat for "
-            f"session_id={session_id}, user_id={user_id}, "
-            f"channel={channel}, name={name}",
-        )
-        chat = await self._chat_manager.get_or_create_chat(
-            session_id,
-            user_id,
-            channel,
-            name=name,
-            meta={"agent_id": self.agent_id},
-        )
-        logger.debug(f"Runner: Got chat: {chat.id}")
         channel_meta = _without_request_scenario_snapshot(
             getattr(request, "channel_meta", None) or {},
         )
+        chat = None
+        requested_chat_id = channel_meta.get("chat_id")
+        if isinstance(requested_chat_id, str) and requested_chat_id:
+            candidate = await self._chat_manager.get_chat(requested_chat_id)
+            if (
+                candidate is not None
+                and candidate.session_id == session_id
+                and candidate.user_id == user_id
+                and candidate.channel == channel
+            ):
+                chat = candidate
+                merged_meta = {
+                    **(candidate.meta or {}),
+                    "agent_id": self.agent_id,
+                }
+                if merged_meta != (candidate.meta or {}):
+                    chat.meta = merged_meta
+                    chat.updated_at = datetime.now(timezone.utc)
+                    await self._chat_manager.update_chat(chat)
+        if chat is None:
+            logger.debug(
+                f"Runner: Calling get_or_create_chat for "
+                f"session_id={session_id}, user_id={user_id}, "
+                f"channel={channel}, name={name}",
+            )
+            chat = await self._chat_manager.get_or_create_chat(
+                session_id,
+                user_id,
+                channel,
+                name=name,
+                meta={"agent_id": self.agent_id},
+            )
+        logger.debug(f"Runner: Got chat: {chat.id}")
         scheduled_request = (
             getattr(request, "execution_origin", None) == "scheduled"
         )
@@ -5812,6 +5834,10 @@ class AgentRunner(Runner):
         task = asyncio.current_task()
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        defer_settlement = bool(
+            channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY),
+        )
         try:
             async for msg, last in self._stream_query_handler_frames(
                 msgs,
@@ -5820,23 +5846,20 @@ class AgentRunner(Runner):
             ):
                 yield msg, last
         except asyncio.CancelledError:
-            await self._settle_query_handler_outcome(
-                identity,
-                "cancelled",
-            )
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(identity, "cancelled")
             raise
         except Exception as exc:
-            await self._settle_query_handler_outcome(
-                identity,
-                "failed",
-                exc,
-            )
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(
+                    identity,
+                    "failed",
+                    exc,
+                )
             raise
         else:
-            await self._settle_query_handler_outcome(
-                identity,
-                "completed",
-            )
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(identity, "completed")
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
@@ -6278,28 +6301,76 @@ class AgentRunner(Runner):
         task_progress_enabled = is_chat_task_progress_enabled(
             get_current_source_system_config(),
         )
-        async for event in normalize_reasoning_boundary_stream(
-            super().stream_query(request, **kwargs),
-        ):
-            trace_id = getattr(request, "trace_id", None)
-            event = self._attach_trace_id_to_event(event, trace_id)
-            progress = None
-            if task_progress_enabled:
-                channel_meta = getattr(request, "channel_meta", None) or {}
-                chat_id = channel_meta.get("chat_id")
-                if not chat_id and self._chat_manager is not None:
-                    chat_id = await self._chat_manager.get_chat_id_by_session(
-                        getattr(request, "session_id", "") or "",
-                        getattr(request, "channel", DEFAULT_CHANNEL),
+        identity = self._answer_turn_identity(request)
+        terminal_status: str | None = None
+        channel_meta = getattr(request, "channel_meta", None)
+        marker_was_present = (
+            isinstance(channel_meta, dict)
+            and _DEFER_ANSWER_TURN_SETTLEMENT_META_KEY in channel_meta
+        )
+        previous_defer_marker = (
+            channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY)
+            if isinstance(channel_meta, dict)
+            else None
+        )
+        if isinstance(channel_meta, dict):
+            channel_meta[_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY] = True
+        try:
+            async for event in normalize_reasoning_boundary_stream(
+                super().stream_query(request, **kwargs),
+            ):
+                if getattr(event, "object", None) == "response":
+                    status = getattr(event, "status", None)
+                    if status == RunStatus.Completed:
+                        terminal_status = "completed"
+                    elif status == RunStatus.Failed:
+                        terminal_status = "failed"
+                    elif status == RunStatus.Canceled:
+                        terminal_status = "cancelled"
+
+                trace_id = getattr(request, "trace_id", None)
+                event = self._attach_trace_id_to_event(event, trace_id)
+                progress = None
+                if task_progress_enabled:
+                    channel_meta = getattr(request, "channel_meta", None) or {}
+                    chat_id = channel_meta.get("chat_id")
+                    if not chat_id and self._chat_manager is not None:
+                        chat_id = (
+                            await self._chat_manager.get_chat_id_by_session(
+                                getattr(request, "session_id", "") or "",
+                                getattr(request, "channel", DEFAULT_CHANNEL),
+                            )
+                        )
+                    if chat_id and self._task_tracker is not None:
+                        progress = await self._task_tracker.get_task_progress(
+                            chat_id,
+                        )
+                yield attach_task_progress(
+                    event,
+                    progress,
+                    enabled=task_progress_enabled,
+                )
+        except asyncio.CancelledError:
+            await self._settle_query_handler_outcome(identity, "cancelled")
+            raise
+        except Exception as exc:
+            await self._settle_query_handler_outcome(identity, "failed", exc)
+            raise
+        finally:
+            if isinstance(channel_meta, dict):
+                if marker_was_present:
+                    channel_meta[_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY] = (
+                        previous_defer_marker
                     )
-                if chat_id and self._task_tracker is not None:
-                    progress = await self._task_tracker.get_task_progress(
-                        chat_id,
+                else:
+                    channel_meta.pop(
+                        _DEFER_ANSWER_TURN_SETTLEMENT_META_KEY,
+                        None,
                     )
-            yield attach_task_progress(
-                event,
-                progress,
-                enabled=task_progress_enabled,
+        if terminal_status is not None:
+            await self._settle_query_handler_outcome(
+                identity,
+                terminal_status,
             )
 
     async def init_handler(self, *args, **kwargs):

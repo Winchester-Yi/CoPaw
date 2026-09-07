@@ -33,6 +33,32 @@ from .query_contracts import (
 logger = logging.getLogger(__name__)
 
 
+def _snapshot_stat_is_current(snapshot: Any) -> bool:
+    """Check snapshot freshness using metadata before content validation."""
+    from ...agents.skill_runtime_snapshot import ManifestStat
+    from ...agents.skills_manager import (
+        get_skill_freshness_token,
+        get_workspace_skill_manifest_path,
+    )
+
+    try:
+        value = get_workspace_skill_manifest_path(
+            snapshot.workspace_dir,
+        ).stat()
+    except OSError:
+        return False
+    if snapshot.manifest_stat != ManifestStat(
+        value.st_mtime_ns,
+        value.st_size,
+        value.st_ino,
+    ):
+        return False
+    return all(
+        get_skill_freshness_token(skill.directory) == skill.freshness_token
+        for skill in snapshot.skills.values()
+    )
+
+
 def _drop_invalid_workspace_skill_hooks(
     overlay: HookSessionOverlay,
     removed_skill_names: set[str],
@@ -356,7 +382,6 @@ async def build_query_runtime_inputs(
     if getattr(agent_config, "enable_workspace_skills", True):
         from ...agents.skill_runtime_snapshot import (
             get_workspace_skill_snapshot_async,
-            validate_workspace_skill_snapshot,
         )
 
         try:
@@ -364,9 +389,6 @@ async def build_query_runtime_inputs(
                 await get_workspace_skill_snapshot_async(
                     owner.workspace_dir or WORKING_DIR,
                 )
-            )
-            workspace_skill_snapshot = await validate_workspace_skill_snapshot(
-                workspace_skill_snapshot,
             )
         except Exception as exc:  # noqa: BLE001
             # A failed reconcile must not prevent ordinary queries from
@@ -452,9 +474,15 @@ async def finalize_query_runtime(
         )
 
         try:
-            workspace_skill_snapshot = await validate_workspace_skill_snapshot(
+            if not await asyncio.to_thread(
+                _snapshot_stat_is_current,
                 workspace_skill_snapshot,
-            )
+            ):
+                workspace_skill_snapshot = (
+                    await validate_workspace_skill_snapshot(
+                        workspace_skill_snapshot,
+                    )
+                )
         except Exception as exc:  # noqa: BLE001
             # A final freshness check can fail because the workspace is being
             # replaced or its permissions change.  Keep the ordinary query

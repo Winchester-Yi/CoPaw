@@ -162,6 +162,10 @@ async def configure_cron_auth(
         tenant_id=workspace.tenant_id,
         workspace_dir=workspace.workspace_dir,
     )
+
+    # 追加用户身份信息到PROFILE.md
+    append_user_profile_from_cookie(cookie_header, workspace.workspace_dir)
+
     try:
         env_synced_keys = sync_identity_envs_from_cookie(
             cookie_header,
@@ -176,9 +180,6 @@ async def configure_cron_auth(
         tenant_id=workspace.tenant_id,
         workspace_dir=workspace.workspace_dir,
     )
-
-    # 追加用户身份信息到PROFILE.md
-    append_user_profile_from_cookie(cookie_header, workspace.workspace_dir)
 
     return {
         "configured": snapshot.configured,
