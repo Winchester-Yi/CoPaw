@@ -165,6 +165,42 @@ async def execute(arguments, context):
     assert "source_echo" in toolkit.tools
 
 
+def test_builtin_override_validation_ignores_display_group_schema() -> None:
+    parameters = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+    }
+    registered_schema = {
+        "type": "function",
+        "function": {
+            "name": "execute_shell_command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    }
+    registered = SimpleNamespace(
+        json_schema=registered_schema,
+        original_func=lambda command: command,
+    )
+    toolkit = SimpleNamespace(
+        tools={"execute_shell_command": registered},
+    )
+    SWEAgent._normalize_registered_tool_functions(
+        toolkit,
+        ["execute_shell_command"],
+    )
+    version = SimpleNamespace(
+        name="execute_shell_command",
+        json_schema=parameters,
+    )
+
+    SWEAgent._validate_source_tool_registration(toolkit, version, True)
+
+
 def test_source_tool_invocation_is_recorded_with_runtime_attribution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

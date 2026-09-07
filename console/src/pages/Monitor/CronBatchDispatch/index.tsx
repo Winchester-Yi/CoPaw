@@ -45,6 +45,7 @@ import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
+const DETAIL_PAGE_SIZE = 50;
 
 type DateShortcutKey = "today" | "last24h" | "last7" | "custom";
 
@@ -126,19 +127,6 @@ function renderStatus(status: string) {
 
 function shortBatchId(batchId: string) {
   return batchId.startsWith("cron:") ? batchId.slice(5) : batchId;
-}
-
-function matchesQuery(
-  query: string,
-  values: Array<string | number | null | undefined>,
-) {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return true;
-  return values.some((value) =>
-    String(value ?? "")
-      .toLocaleLowerCase()
-      .includes(normalizedQuery),
-  );
 }
 
 function buildRange(shortcut: DateShortcutKey): [Dayjs, Dayjs] {
@@ -509,8 +497,11 @@ export default function CronBatchDispatchPage() {
   const [batchQuery, setBatchQuery] = useState("");
   const [debouncedBatchQuery, setDebouncedBatchQuery] = useState("");
   const [intentQuery, setIntentQuery] = useState("");
+  const [debouncedIntentQuery, setDebouncedIntentQuery] = useState("");
   const [intentRole, setIntentRole] = useState("all");
   const [intentStatus, setIntentStatus] = useState("all");
+  const [intentPage, setIntentPage] = useState(1);
+  const [eventPage, setEventPage] = useState(1);
   const [detailTab, setDetailTab] = useState("intents");
   const batchRequestId = useRef(0);
   const detailRequestId = useRef(0);
@@ -526,25 +517,6 @@ export default function CronBatchDispatchPage() {
 
   const selectedDetail =
     detail?.batch.batch_id === selectedBatchId ? detail : null;
-
-  const filteredIntents = useMemo(() => {
-    const intents = selectedDetail?.intents || [];
-    return intents.filter(
-      (intent) =>
-        matchesQuery(intentQuery, [
-          intent.id,
-          intent.tenant_id,
-          intent.job_id,
-          intent.parent_job_id,
-          intent.agent_id,
-          intent.provider_id,
-          intent.model_id,
-          intent.error_message,
-        ]) &&
-        (intentRole === "all" || intent.intent_role === intentRole) &&
-        (intentStatus === "all" || intent.status === intentStatus),
-    );
-  }, [selectedDetail?.intents, intentQuery, intentRole, intentStatus]);
 
   const fetchBatches = useCallback(async () => {
     const requestId = ++batchRequestId.current;
@@ -619,13 +591,40 @@ export default function CronBatchDispatchPage() {
       setDetailLoading(false);
       return;
     }
+    if (intentQuery !== debouncedIntentQuery) {
+      setDetailLoading(false);
+      return;
+    }
     setDetailLoading(true);
     try {
       const response = await monitorApi.getCronDispatchBatchDetail(
         selectedBatchId,
-        { intent_limit: "500", event_limit: "500" },
+        {
+          intent_page: String(intentPage),
+          intent_limit: String(DETAIL_PAGE_SIZE),
+          ...(debouncedIntentQuery.trim()
+            ? { intent_query: debouncedIntentQuery.trim() }
+            : {}),
+          ...(intentRole === "all" ? {} : { intent_role: intentRole }),
+          ...(intentStatus === "all" ? {} : { intent_status: intentStatus }),
+          event_page: String(eventPage),
+          event_limit: String(DETAIL_PAGE_SIZE),
+        },
       );
       if (requestId === detailRequestId.current) {
+        const lastIntentPage = Math.max(
+          1,
+          Math.ceil(response.intent_filtered_total / DETAIL_PAGE_SIZE),
+        );
+        const lastEventPage = Math.max(
+          1,
+          Math.ceil(response.event_total / DETAIL_PAGE_SIZE),
+        );
+        if (intentPage > lastIntentPage || eventPage > lastEventPage) {
+          setIntentPage(Math.min(intentPage, lastIntentPage));
+          setEventPage(Math.min(eventPage, lastEventPage));
+          return;
+        }
         setDetail(response);
       }
     } catch (error) {
@@ -638,7 +637,16 @@ export default function CronBatchDispatchPage() {
         setDetailLoading(false);
       }
     }
-  }, [canView, selectedBatchId]);
+  }, [
+    canView,
+    debouncedIntentQuery,
+    eventPage,
+    intentPage,
+    intentQuery,
+    intentRole,
+    intentStatus,
+    selectedBatchId,
+  ]);
 
   useEffect(() => {
     fetchBatches();
@@ -652,12 +660,26 @@ export default function CronBatchDispatchPage() {
   }, [batchQuery]);
 
   useEffect(() => {
+    if (intentQuery === debouncedIntentQuery) return;
+    const timer = window.setTimeout(() => {
+      setIntentPage(1);
+      setDebouncedIntentQuery(intentQuery);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [debouncedIntentQuery, intentQuery]);
+
+  useEffect(() => {
     fetchWorkers();
   }, [fetchWorkers]);
 
   useEffect(() => {
     fetchDetail();
   }, [fetchDetail]);
+
+  useEffect(() => {
+    setIntentPage(1);
+    setEventPage(1);
+  }, [selectedBatchId]);
 
   useEffect(() => {
     if (!batches.length) {
@@ -686,6 +708,23 @@ export default function CronBatchDispatchPage() {
     fetchBatches();
     fetchWorkers();
     fetchDetail();
+  };
+
+  const handleBatchSelect = (batchId: string) => {
+    if (batchId === selectedBatchId) return;
+    setIntentPage(1);
+    setEventPage(1);
+    setSelectedBatchId(batchId);
+  };
+
+  const handleIntentRoleChange = (value: string) => {
+    setIntentPage(1);
+    setIntentRole(value);
+  };
+
+  const handleIntentStatusChange = (value: string) => {
+    setIntentPage(1);
+    setIntentStatus(value);
   };
 
   const intentColumns: ColumnsType<CronDispatchIntentItem> = [
@@ -830,9 +869,7 @@ export default function CronBatchDispatchPage() {
               <h2>所有 Batch</h2>
               <span>按计划执行时间倒序展示</span>
             </div>
-            <strong>
-              共 {batchTotal} 个全局结果
-            </strong>
+            <strong>共 {batchTotal} 个全局结果</strong>
           </div>
           <Input
             allowClear
@@ -865,7 +902,7 @@ export default function CronBatchDispatchPage() {
                         ? styles.batchRowSelected
                         : ""
                     }`}
-                    onClick={() => setSelectedBatchId(batch.batch_id)}
+                    onClick={() => handleBatchSelect(batch.batch_id)}
                   >
                     <span className={styles.batchIdentity}>
                       <strong>
@@ -934,8 +971,7 @@ export default function CronBatchDispatchPage() {
                 <div className={styles.detailHead}>
                   <div>
                     <h2>
-                      {selectedDetail.batch.parent_job_name ||
-                        "未命名定时任务"}
+                      {selectedDetail.batch.parent_job_name || "未命名定时任务"}
                     </h2>
                     <p>
                       <Tooltip
@@ -997,7 +1033,7 @@ export default function CronBatchDispatchPage() {
                                 id="intent-role-filter"
                                 value={intentRole}
                                 options={INTENT_ROLE_OPTIONS}
-                                onChange={setIntentRole}
+                                onChange={handleIntentRoleChange}
                               />
                             </div>
                             <div className={styles.selectFilter}>
@@ -1008,37 +1044,64 @@ export default function CronBatchDispatchPage() {
                                 id="intent-status-filter"
                                 value={intentStatus}
                                 options={INTENT_STATUS_OPTIONS}
-                                onChange={setIntentStatus}
+                                onChange={handleIntentStatusChange}
                               />
                             </div>
                             <strong>
-                              {filteredIntents.length} /{" "}
-                              {selectedDetail.intents.length} 条
+                              {selectedDetail.intent_filtered_total} /{" "}
+                              {selectedDetail.intent_total} 条
                             </strong>
-                            {selectedDetail.intent_total >
-                            selectedDetail.intents.length ? (
-                              <span className={styles.truncatedNotice}>
-                                已加载前 {selectedDetail.intents.length} 条，共{" "}
-                                {selectedDetail.intent_total} 条
-                              </span>
-                            ) : null}
                           </div>
                           <Table
                             rowKey="id"
                             columns={intentColumns}
-                            dataSource={filteredIntents}
+                            dataSource={selectedDetail.intents}
                             size="small"
                             tableLayout="fixed"
                             scroll={{ x: 858, y: 292 }}
                             pagination={false}
                           />
+                          <nav
+                            aria-label="Intent 分页"
+                            className={styles.detailPagination}
+                          >
+                            <Pagination
+                              current={intentPage}
+                              pageSize={DETAIL_PAGE_SIZE}
+                              total={selectedDetail.intent_filtered_total}
+                              showSizeChanger={false}
+                              showLessItems
+                              size="small"
+                              onChange={setIntentPage}
+                              showTotal={(total) => `共 ${total} 条匹配结果`}
+                            />
+                          </nav>
                         </div>
                       ),
                     },
                     {
                       key: "events",
-                      label: `调度事件 (${selectedDetail.events.length})`,
-                      children: <EventList events={selectedDetail.events} />,
+                      label: `调度事件 (${selectedDetail.event_total})`,
+                      children: (
+                        <div className={styles.eventTab}>
+                          <EventList events={selectedDetail.events} />
+                          <nav
+                            aria-label="调度事件分页"
+                            className={styles.detailPagination}
+                          >
+                            <Pagination
+                              current={eventPage}
+                              pageSize={DETAIL_PAGE_SIZE}
+                              total={selectedDetail.event_total}
+                              showSizeChanger={false}
+                              showLessItems
+                              size="small"
+                              onChange={setEventPage}
+                              showTotal={(total) => `共 ${total} 条事件`}
+                            />
+                          </nav>
+                        </div>
+                      ),
                     },
                   ]}
                 />

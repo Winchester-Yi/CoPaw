@@ -71,6 +71,35 @@ async def test_start_or_attach_creates_one_identity_and_one_producer_per_chat():
 
 
 @pytest.mark.asyncio
+async def test_statuses_reads_multiple_chats_in_one_coordinator_operation():
+    coordinator, _adapters = _coordinator()
+
+    async def producer(_identity, _payload):
+        return None
+
+    first = await coordinator.start_or_attach(
+        "chat-1",
+        {},
+        producer,
+        msgid="msg-1",
+    )
+    second = await coordinator.start_or_attach(
+        "chat-2",
+        {},
+        producer,
+        msgid="msg-2",
+    )
+
+    statuses = await coordinator.statuses(["chat-1", "chat-2", "missing"])
+
+    assert statuses == {
+        first.identity.chat_id: TurnStatus.RUNNING,
+        second.identity.chat_id: TurnStatus.RUNNING,
+        "missing": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_attach_and_before_start_are_bound_to_active_turn_identity():
     coordinator, _adapters = _coordinator()
     before_start_calls = 0
@@ -246,7 +275,12 @@ async def test_runner_persists_terminal_outcome_from_admission_location():
         def __init__(self):
             self.state = {"turn_states": {}}
 
-        async def mutate_session_state(self, _session_id, callback, user_id=""):
+        async def mutate_session_state(
+            self,
+            _session_id,
+            callback,
+            user_id="",
+        ):
             self.state = callback(self.state)
 
     runner = AgentRunner(agent_id="agent-1")

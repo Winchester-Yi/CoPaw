@@ -408,6 +408,10 @@
 }
 
 .sectionHeading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 18px;
 }
 
@@ -420,6 +424,37 @@
   font-size: 13px;
   font-weight: 400;
   margin-left: 8px;
+}
+
+.exportButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  margin-left: auto;
+  padding: 0 14px;
+  border: 1px solid #3769fc;
+  border-radius: 8px;
+  background: #3769fc;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.exportButton:hover:not(:disabled) {
+  background: #2957dc;
+  border-color: #2957dc;
+}
+
+.exportButton:focus-visible {
+  outline: 2px solid #3769fc;
+  outline-offset: 2px;
+}
+
+.exportButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .anomalyLeft h2 span {

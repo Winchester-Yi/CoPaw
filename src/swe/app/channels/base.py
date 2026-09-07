@@ -415,6 +415,11 @@ class BaseChannel(ABC):
         if channel_meta is None:
             channel_meta = {}
             request.channel_meta = channel_meta
+        channel_meta["chat_id"] = chat.id
+        if isinstance(payload, dict):
+            payload_meta = payload.setdefault("meta", {})
+            if isinstance(payload_meta, dict):
+                payload_meta["chat_id"] = chat.id
         if "session_channel" not in channel_meta:
             channel_meta["session_channel"] = chat.channel
 

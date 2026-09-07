@@ -19,7 +19,6 @@ import {
 } from "../api/externalToken";
 import { getWPlusCookie } from "./cookie-utils";
 import { authApi } from "../api/modules/auth";
-import { envApi } from "../api/modules/env";
 import { buildAuthHeaders as buildCookieHeaders } from "../api/authHeaders";
 // import mmj from 'xxxx'
 
@@ -60,9 +59,6 @@ let pendingUserInfoRequest: Promise<boolean> | null = null;
 
 /** 正在执行初始化的用户，避免同一用户在接口返回前被重复初始化 */
 const pendingUserInitUserIds = new Set<string>();
-
-/** 当前正在同步 origin=Y 环境变量的任务 */
-let pendingOriginYEnvSync: Promise<void> | null = null;
 
 /**
  * 将值转换为布尔值，用于处理父窗口可能传递的字符串 "true"/"false"
@@ -484,46 +480,7 @@ async function fetchAndApplyCustomerInfoFromCookie(userId: string): Promise<void
     }
   } catch (error) {
     console.error("[IframeMessage] Customer info fetch error:", error);
-  } finally {
-    void syncOriginYEnvFromCurrentContext();
   }
-}
-
-/**
- * 将 origin=Y 场景下的用户上下文合并到后端环境变量。
- */
-function syncOriginYEnvFromCurrentContext(): Promise<void> {
-  if (pendingOriginYEnvSync) {
-    return pendingOriginYEnvSync;
-  }
-
-  pendingOriginYEnvSync = (async () => {
-    const store = useIframeStore.getState();
-    const headers = buildCookieHeaders();
-    const cookieValue = headers["x-header-cookie"] || document.cookie;
-    const token = store.token || getWPlusCookie("token") || "";
-
-    await envApi.patchEnvs({
-      values: {
-        token,
-        bbkOrgId: store.bbk ?? "",
-        brnOrgId: store.orgCode ?? "",
-        sapId: store.userId ?? "",
-        rtlPstId: store.positionId ?? "",
-        sourceId: "RMASSIST",
-        cookie: cookieValue,
-      },
-      delete: [],
-    });
-  })()
-    .catch((error) => {
-      console.error("[IframeMessage] Env sync error:", error);
-    })
-    .finally(() => {
-      pendingOriginYEnvSync = null;
-    });
-
-  return pendingOriginYEnvSync;
 }
 
 /**

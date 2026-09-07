@@ -636,3 +636,27 @@
   - 首次初始化
   - 从 default 模板复制 agent 配置
   - cached tenant 删除 `agent.json` 后再次 `ensure_bootstrap()` 自愈
+
+## Cron 结果索引出现同一 trace 的重复子任务
+
+### 症状
+
+- `swe_cron_subtasks` 在同一 `trace_id` 下存在多条成功的 `list` 子任务，或同一客户存在多条成功的 `plan` 子任务
+- `/monitor/subtasks/executions/sync-async-status` 写入 `swe_cron_result_index` 时产生重复结果
+
+### 典型原因
+
+- 重试或历史写入留下脏子任务；索引流程若直接消费全部成功子任务，会把重复数据继续写入结果索引
+
+### 第一落点
+
+- [monitor/src/monitor/app/services/subtask/query_service.py](/Users/shixiangyi/code/Swe/monitor/src/monitor/app/services/subtask/query_service.py)
+- 重点看成功子任务查询是否按 `trace_id + task_type`（`list`）及 `trace_id + custuid`（`plan`）去重，并优先保留最新子任务
+
+## 聊天附件与文字看起来像两条消息
+
+- 先检查聊天请求的 `input`：`AgentScopeRuntimeRequestBuilder.handle()` 将文字、图片、文件等内容放在同一条用户消息的 `content` 数组中，附件上传请求本身不是一次聊天发送。
+- 展示入口为 `console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card.tsx`；实时发送和历史会话的用户消息均使用该组件。
+- 多个内容卡片通过 `swe-request-grouped` 共用气泡背景；空文字不生成文字卡片，多张图片归入同一个 `Images` 卡片。不要为了修复视觉分离而重复发送或合并相邻的独立用户消息。
+- 回归检查：文字加文件、文字加多图、纯附件、纯文字以及历史加载后展示。
+- 附件限宽和换行由 `swe-request-card` 独立控制，不依赖 `swe-request-grouped`：纯多图合并后只有一个卡片，也必须在窄容器中换行。回归包含 320px 容器内仅发送 6 张图片。

@@ -15,6 +15,7 @@ from ...agents.memory.agent_md_manager import AgentMdManager
 from ...constant import WORKING_DIR
 from ...config.context import decode_scope_id
 from ...config.utils import get_tenant_secrets_dir
+from ...envs.store import load_envs, save_envs
 from ...utils.tools import (
     get_auth_token,
     get_user_info,
@@ -28,6 +29,12 @@ DEFAULT_AUTH_TOKEN_TTL = timedelta(hours=2)
 USER_INFO_REFRESH_MARGIN = timedelta(days=5)
 AUTH_TOKEN_REUSE_MIN_REMAINING = timedelta(minutes=30)
 ACCESS_TOKEN_COOKIE_NAME = "com.cmb.dw.rtl.sso.token"
+IDENTITY_ENV_COOKIE_NAMES = {
+    "bbkOrgId": ("com.cmb.dw.rtl.sso.vbbk", "vbbk"),
+    "brnOrgId": ("com.cmb.dw.rtl.sso.vorgcode", "vorgcode"),
+    "sapId": ("com.cmb.dw.rtl.sso.userid", "userid"),
+    "rtlPstId": ("com.cmb.dw.rtl.sso.positionID", "positionID"),
+}
 
 
 class CronAuthState(BaseModel):
@@ -117,6 +124,31 @@ def extract_access_token_from_cookie(cookie_header: str) -> str:
     raise ValueError(
         f"cron auth cookie missing {ACCESS_TOKEN_COOKIE_NAME}",
     )
+
+
+def sync_identity_envs_from_cookie(
+    cookie_header: str,
+    *,
+    tenant_id: str | None = None,
+) -> list[str]:
+    """Incrementally persist identity fields from a cron-auth cookie."""
+    cookies = dict(_iter_cookie_pairs(cookie_header))
+    updates: dict[str, str] = {}
+    for env_key, cookie_names in IDENTITY_ENV_COOKIE_NAMES.items():
+        for cookie_name in cookie_names:
+            value = cookies.get(cookie_name, "").strip()
+            if value:
+                updates[env_key] = value
+                break
+
+    if not updates:
+        return []
+
+    envs_path = get_tenant_secrets_dir(tenant_id) / "envs.json"
+    envs = load_envs(envs_path)
+    envs.update(updates)
+    save_envs(envs, envs_path)
+    return sorted(updates)
 
 
 def append_user_profile_from_cookie(

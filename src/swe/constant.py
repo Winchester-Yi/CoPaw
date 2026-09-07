@@ -349,7 +349,7 @@ MCP_MAX_TOTAL_TIMEOUT = EnvVarLoader.get_float(
 # runner yields a timeout notification and terminates the query.
 QUERY_TIMEOUT_SECONDS = EnvVarLoader.get_float(
     "SWE_QUERY_TIMEOUT_SECONDS",
-    1800.0,  # 30 minutes
+    3600.0,  # 60 minutes
     min_value=60.0,
 )
 

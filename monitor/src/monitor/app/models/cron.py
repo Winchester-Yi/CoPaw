@@ -778,6 +778,18 @@ class CronDispatchBatchStats(BaseModel):
     pending_intents: int = Field(default=0, description="未完成 Intent 数")
 
 
+class CronDispatchDetailQueryParams(BaseModel):
+    """Pagination and filtering for one batch-dispatch detail view."""
+
+    intent_page: int = Field(default=1, ge=1)
+    intent_limit: int = Field(default=100, ge=1, le=500)
+    intent_query: Optional[str] = Field(default=None, max_length=256)
+    intent_role: Optional[str] = Field(default=None, max_length=16)
+    intent_status: Optional[str] = Field(default=None, max_length=16)
+    event_page: int = Field(default=1, ge=1)
+    event_limit: int = Field(default=100, ge=1, le=500)
+
+
 class CronDispatchBatchItem(BaseModel):
     """One batch-dispatch batch row."""
 
@@ -896,7 +908,13 @@ class CronDispatchBatchDetailResponse(BaseModel):
     batch: CronDispatchBatchItem
     intents: List[CronDispatchIntentItem] = Field(default_factory=list)
     intent_total: int = Field(default=0, description="Intent 总数")
+    intent_filtered_total: int = Field(default=0, description="筛选后 Intent 数")
+    intent_page: int = Field(default=1, description="Intent 页码")
+    intent_page_size: int = Field(default=100, description="Intent 每页数量")
     events: List[CronDispatchEventItem] = Field(default_factory=list)
+    event_total: int = Field(default=0, description="事件总数")
+    event_page: int = Field(default=1, description="事件页码")
+    event_page_size: int = Field(default=100, description="事件每页数量")
 
 
 class CronDispatchPolicyItem(BaseModel):

@@ -6,7 +6,7 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import ValidationError
 
@@ -72,7 +72,8 @@ class SubAgentDefinitionCatalog:
             definition.name: definition for definition in skill_definitions
         }
         self._agent_owned_definitions = {
-            definition.name: definition for definition in agent_owned_definitions
+            definition.name: definition
+            for definition in agent_owned_definitions
         }
         self._builtin_definitions = {
             definition.name: definition for definition in builtin_definitions
@@ -87,7 +88,11 @@ class SubAgentDefinitionCatalog:
         if definition is not None:
             return definition if definition.enabled else None
         definition = self._builtin_definitions.get(name)
-        return definition if definition is not None and definition.enabled else None
+        return (
+            definition
+            if definition is not None and definition.enabled
+            else None
+        )
 
     def list_skill_definitions(self) -> list[SubAgentDefinition]:
         """List enabled Skill-owned definitions in catalog order."""
@@ -115,6 +120,7 @@ class SubAgentDefinitionCatalog:
             ],
             key=lambda definition: definition.name,
         )
+
 
 def _validate_skill_definition_ownership(
     definition: SubAgentDefinition,
@@ -156,7 +162,10 @@ def build_definition_catalog(
     duplicate_names = {
         definition.name
         for definition in agent_owned_definitions
-        if sum(item.name == definition.name for item in agent_owned_definitions) > 1
+        if sum(
+            item.name == definition.name for item in agent_owned_definitions
+        )
+        > 1
     }
     agent_owned_definitions = [
         definition
@@ -272,7 +281,9 @@ def _load_one(path: Path, skill_name: str) -> SubAgentDefinition:
     description = _string(payload.get("description"), "description")
     instruction = _string(payload.get("instruction"), "instruction")
     declared_skills = _string_list(payload.get("skills"), "skills")
-    declared_mcps = _string_list(payload["mcps"], "mcps") if "mcps" in payload else None
+    declared_mcps = (
+        _string_list(payload["mcps"], "mcps") if "mcps" in payload else None
+    )
     trigger_keywords = _string_list(
         payload.get("trigger_keywords"),
         "trigger_keywords",
@@ -304,13 +315,19 @@ def load_skill_owned_definitions(
     *,
     workspace_dir: Path,
     effective_skill_names: list[str],
+    skill_snapshot_dirs: Mapping[str, Path] | None = None,
 ) -> SkillDefinitionLoadResult:
     """Load valid agent packages from the effective Skill runtime view."""
     definitions: list[SubAgentDefinition] = []
     errors: list[SkillDefinitionLoadError] = []
     seen_local_names: dict[tuple[str, str], Path] = {}
     for skill_name in effective_skill_names:
-        skill_dir = resolve_effective_skill_dir(workspace_dir, skill_name)
+        if skill_snapshot_dirs is not None:
+            # A query snapshot is authoritative; do not replace it with a
+            # same-named directory that appeared in the mutable workspace.
+            skill_dir = skill_snapshot_dirs.get(skill_name)
+        else:
+            skill_dir = resolve_effective_skill_dir(workspace_dir, skill_name)
         if skill_dir is None or skill_dir.is_symlink():
             continue
         agents_dir = skill_dir / "agents"

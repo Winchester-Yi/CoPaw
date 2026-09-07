@@ -30,6 +30,7 @@ Quick start::
 
 from __future__ import annotations
 
+import asyncio
 from concurrent import futures
 import hashlib
 import logging
@@ -75,6 +76,7 @@ __all__ = [
     "install_skill_scan_history_recorder",
     "is_skill_whitelisted",
     "scan_skill_directory",
+    "scan_skill_directory_async",
 ]
 
 # ---------------------------------------------------------------------------
@@ -324,11 +326,28 @@ def _scan_with_slot_release(
     *,
     skill_name: str | None,
     slot: threading.BoundedSemaphore,
+    queued_at: float | None = None,
 ) -> ScanResult:
+    scan_started_at = time.monotonic()
     try:
         return scanner.scan_skill(resolved, skill_name=skill_name)
     finally:
-        slot.release()
+        try:
+            logger.debug(
+                "skill_scan_queue_ms=%.1f skill_scan_ms=%.1f skill_name=%s",
+                (
+                    max(
+                        0.0,
+                        (scan_started_at - queued_at) * 1000,
+                    )
+                    if queued_at is not None
+                    else 0.0
+                ),
+                (time.monotonic() - scan_started_at) * 1000,
+                skill_name or resolved.name,
+            )
+        finally:
+            slot.release()
 
 
 # ---------------------------------------------------------------------------
@@ -336,23 +355,27 @@ def _scan_with_slot_release(
 # ---------------------------------------------------------------------------
 
 _MAX_CACHE_ENTRIES = 64
-_scan_cache: dict[str, tuple[float, ScanResult]] = {}
+_scan_cache: dict[str, tuple[str, str, ScanResult]] = {}
 _cache_lock = threading.Lock()
 
 
-def _get_dir_mtime(skill_dir: Path) -> float:
-    """Return the latest mtime among the directory and its immediate files."""
+def _get_tree_stat_token(skill_dir: Path) -> str:
+    """Return a cheap recursive path/stat fingerprint for cache probing."""
+    digest = hashlib.blake2b(digest_size=16)
     try:
-        latest = skill_dir.stat().st_mtime
+        for path in sorted(skill_dir.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            digest.update(path.relative_to(skill_dir).as_posix().encode())
+            digest.update(str(stat.st_mtime_ns).encode())
+            digest.update(str(stat.st_size).encode())
     except OSError:
-        return 0.0
-    try:
-        for p in skill_dir.iterdir():
-            if p.is_file() and not p.is_symlink():
-                latest = max(latest, p.stat().st_mtime)
-    except OSError:
-        pass
-    return latest
+        return "missing"
+    return digest.hexdigest()
 
 
 def _get_cached_result(
@@ -364,13 +387,18 @@ def _get_cached_result(
         entry = _scan_cache.get(key)
     if entry is None:
         return None
-    cached_mtime, cached_result = entry
-    current_mtime = _get_dir_mtime(skill_dir)
-    if current_mtime == cached_mtime:
+    cached_stat, cached_hash, cached_result = entry
+    current_stat = _get_tree_stat_token(skill_dir)
+    if current_stat == cached_stat:
         logger.debug(
             "Returning cached scan result for '%s'",
             cached_result.skill_name,
         )
+        return cached_result
+    current_hash = compute_skill_content_hash(skill_dir)
+    if current_hash == cached_hash:
+        with _cache_lock:
+            _scan_cache[key] = (current_stat, cached_hash, cached_result)
         return cached_result
     return None
 
@@ -381,10 +409,11 @@ def _store_cached_result(
 ) -> None:
     """Store a scan result in the cache (LRU eviction)."""
     key = str(skill_dir)
-    mtime = _get_dir_mtime(skill_dir)
+    stat_token = _get_tree_stat_token(skill_dir)
+    content_hash = compute_skill_content_hash(skill_dir)
     with _cache_lock:
         _scan_cache.pop(key, None)
-        _scan_cache[key] = (mtime, result)
+        _scan_cache[key] = (stat_token, content_hash, result)
         while len(_scan_cache) > _MAX_CACHE_ENTRIES:
             oldest = next(iter(_scan_cache))
             del _scan_cache[oldest]
@@ -429,6 +458,8 @@ def scan_skill_directory(
     skill_name: str | None = None,
     block: bool | None = None,
     timeout: float | None = None,
+    _direct: bool = False,
+    _cache_result: bool = True,
     source_id: str = "",
     user_id: str = "",
     bbk_id: str = "",
@@ -479,9 +510,15 @@ def scan_skill_directory(
     cached = _get_cached_result(resolved)
     if cached is not None:
         result = cached
+        logger.debug(
+            "skill_scan_queue_ms=0.0 skill_scan_ms=0.0 "
+            "skill_scan_cache_hit=true skill_name=%s",
+            effective_name,
+        )
     else:
         scanner = _get_scanner()
         deadline = time.monotonic() + effective_timeout
+        queued_at = time.monotonic()
         executor, slot = _get_scan_executor()
         # Slot acquisition is released by _scan_with_slot_release.
         # pylint: disable-next=consider-using-with
@@ -493,36 +530,47 @@ def scan_skill_directory(
                 effective_timeout,
             )
             return None
-        try:
-            future = executor.submit(
-                _scan_with_slot_release,
+        if _direct:
+            result = _scan_with_slot_release(
                 scanner,
                 resolved,
                 skill_name=skill_name,
                 slot=slot,
+                queued_at=queued_at,
             )
-        except Exception:
-            slot.release()
-            raise
+        else:
+            try:
+                future = executor.submit(
+                    _scan_with_slot_release,
+                    scanner,
+                    resolved,
+                    skill_name=skill_name,
+                    slot=slot,
+                    queued_at=queued_at,
+                )
+            except Exception:
+                slot.release()
+                raise
 
-        future.add_done_callback(
-            lambda completed: (
-                slot.release() if completed.cancelled() else None
-            ),
-        )
-        remaining_timeout = max(0.0, deadline - time.monotonic())
-        try:
-            result = future.result(timeout=remaining_timeout)
-        except futures.TimeoutError:
-            logger.warning(
-                "Security scan of skill '%s' timed out after %.0fs",
-                effective_name,
-                effective_timeout,
+            future.add_done_callback(
+                lambda completed: (
+                    slot.release() if completed.cancelled() else None
+                ),
             )
-            future.cancel()
-            return None
+            remaining_timeout = max(0.0, deadline - time.monotonic())
+            try:
+                result = future.result(timeout=remaining_timeout)
+            except futures.TimeoutError:
+                logger.warning(
+                    "Security scan of skill '%s' timed out after %.0fs",
+                    effective_name,
+                    effective_timeout,
+                )
+                future.cancel()
+                return None
 
-        _store_cached_result(resolved, result)
+        if _cache_result:
+            _store_cached_result(resolved, result)
 
     if not result.is_safe:
         should_block = block if block is not None else (mode == "block")
@@ -553,3 +601,31 @@ def scan_skill_directory(
         )
 
     return result
+
+
+async def scan_skill_directory_async(
+    skill_dir: str | Path,
+    *,
+    skill_name: str | None = None,
+    block: bool | None = None,
+    timeout: float | None = None,
+) -> ScanResult | None:
+    """Await the scanner on its bounded executor without nested pools."""
+    loop = asyncio.get_running_loop()
+    executor, _slot = _get_scan_executor()
+    future = executor.submit(
+        scan_skill_directory,
+        skill_dir,
+        skill_name=skill_name,
+        block=block,
+        timeout=timeout,
+        _direct=True,
+    )
+    wrapped = asyncio.wrap_future(future, loop=loop)
+    try:
+        if timeout is None:
+            return await wrapped
+        return await asyncio.wait_for(wrapped, timeout=timeout)
+    except asyncio.CancelledError:
+        future.cancel()
+        raise

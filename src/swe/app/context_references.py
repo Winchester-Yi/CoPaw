@@ -464,7 +464,23 @@ class ContextReferenceDirectory:
         scope = (getattr(workspace, "tenant_id", None), workspace.agent_id)
 
         async def refresh_skills() -> list[SkillContextReference]:
-            return discover_skills(workspace_dir)
+            from .agents.skill_runtime_snapshot import (
+                get_workspace_skill_snapshot_async,
+            )
+
+            snapshot = await get_workspace_skill_snapshot_async(workspace_dir)
+            return [
+                SkillContextReference(
+                    id=f"skill:{name}",
+                    name=name,
+                    label=name,
+                    description=str(
+                        skill.metadata.get("description") or "",
+                    ),
+                )
+                for name, skill in snapshot.skills.items()
+                if "all" in skill.channels or "console" in skill.channels
+            ]
 
         async def refresh_mcp() -> list[MCPToolContextReference]:
             return await discover_mcp_tools(

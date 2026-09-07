@@ -113,6 +113,7 @@ PUBLIC_ROUTE_EXEMPT_PREFIXES = (
     "/assets/",
     "/static/",
     "/console/",
+    "/api/chat-shares/",
     "/api/assets/upload",
     "/api/template/search",
     "/api/assets/text/",

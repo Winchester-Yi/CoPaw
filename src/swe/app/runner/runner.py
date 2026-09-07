@@ -23,6 +23,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     AgentRequest,
     Event,
     Message,
+    RunStatus,
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
@@ -36,6 +37,11 @@ from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
+)
+from .context_usage import (
+    CONTEXT_USAGE_INVALID_STATE_KEY,
+    CONTEXT_USAGE_STATE_KEY,
+    capture_context_usage,
 )
 from .assistant_response import (
     project_candidate_assistant_response,
@@ -80,6 +86,10 @@ from ...__version__ import __version__
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
+from ...agents.tool_failure import (
+    TOOL_GOVERNANCE_BLOCK_FIELD,
+    attach_tool_governance_message_metadata,
+)
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
@@ -154,6 +164,7 @@ _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 _APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
+_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY = "defer_answer_turn_settlement"
 _SCENARIO_SNAPSHOT_REQUEST_META_KEYS = frozenset(
     {
         "scenario_preset_snapshot",
@@ -650,7 +661,60 @@ def _approved_tool_call_from_record(record) -> dict[str, Any] | None:
     replay_metadata = _approval_replay_metadata(record)
     if replay_metadata is not None:
         approved_tool_call["_approval_replay"] = replay_metadata
-    return approved_tool_call
+    from .operation_group import restore_operation_group_argument
+
+    return restore_operation_group_argument(
+        approved_tool_call,
+        record.extra.get("operation_group"),
+    )
+
+
+def _build_denial_response_msg(pending: Any, text: str) -> Msg:
+    """Build the denial message, optionally marking the pending tool call.
+
+    When the pending record still carries the original tool call, the
+    message embeds a structured tool_result with error_type
+    "approval_rejected" so the Console can turn the never-executed
+    sub-step into "已拒绝" instead of an execution failure.  The text
+    block keeps the existing user-visible denial message.
+    """
+    blocks: list[Any] = []
+    governance_tool_call_id = ""
+    extra = getattr(pending, "extra", None)
+    if isinstance(extra, dict):
+        tool_call = extra.get("tool_call")
+        if isinstance(tool_call, dict) and tool_call.get("id"):
+            governance_tool_call_id = str(tool_call["id"])
+            result_block = {
+                "type": "tool_result",
+                "id": tool_call.get("id", ""),
+                "name": tool_call.get("name")
+                or getattr(pending, "tool_name", ""),
+                TOOL_GOVERNANCE_BLOCK_FIELD: "rejected",
+                "output": {
+                    "isError": True,
+                    "error_type": "approval_rejected",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "该工具调用已被拒绝，未执行。",
+                        },
+                    ],
+                },
+            }
+            operation_group = extra.get("operation_group")
+            if isinstance(operation_group, dict):
+                result_block["operation_group"] = operation_group
+            blocks.append(result_block)
+    blocks.append(TextBlock(type="text", text=text))
+    message = Msg(name="Friday", role="assistant", content=blocks)
+    if governance_tool_call_id:
+        attach_tool_governance_message_metadata(
+            message,
+            tool_call_id=governance_tool_call_id,
+            governance_status="rejected",
+        )
+    return message
 
 
 def _copy_list_extra(
@@ -772,6 +836,9 @@ def _create_session_skill_detector(
     source_id: str,
     enabled_skills: list[str],
     skill_runtime_profiles: dict[str, Any] | None = None,
+    skill_metadata: dict[str, Any] | None = None,
+    skill_dirs: dict[str, Path] | None = None,
+    skill_signatures: dict[str, str] | None = None,
     get_hook_state: Callable[[], HookSessionState],
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
@@ -786,11 +853,28 @@ def _create_session_skill_detector(
     )
 
     async def _load_skill_hooks(skill_name: str) -> None:
-        skill_root = resolve_effective_skill_dir(workspace, skill_name)
+        skill_root = (skill_dirs or {}).get(skill_name)
+        if skill_root is None:
+            skill_root = resolve_effective_skill_dir(workspace, skill_name)
         if skill_root is None:
             return
+        expected_signature = (skill_signatures or {}).get(skill_name)
+        if expected_signature:
+            from ...agents.skills_manager import _build_signature
+
+            actual_signature = await asyncio.to_thread(
+                _build_signature,
+                skill_root,
+            )
+            if actual_signature != expected_signature:
+                logger.warning(
+                    "Skipping hooks for changed skill '%s'",
+                    skill_name,
+                )
+                return
         try:
-            next_state = load_skill_hooks_for_session(
+            next_state = await asyncio.to_thread(
+                load_skill_hooks_for_session,
                 skill_name=skill_name,
                 skill_root=skill_root,
                 workspace_dir=workspace,
@@ -816,7 +900,7 @@ def _create_session_skill_detector(
         skill_hook_loader=_load_skill_hooks,
         confirmed_skill_callback=confirmed_skill_callback,
     )
-    detector.set_enabled_skills(enabled_skills)
+    detector.set_enabled_skills(enabled_skills, skill_metadata)
     if skill_runtime_profiles:
         detector.set_skill_runtime_profiles(skill_runtime_profiles)
     return detector
@@ -1382,6 +1466,57 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
     await query_cleanup.cleanup_mcp_clients(clients)
 
 
+def _assistant_response_candidate(
+    index: int,
+    entry: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    if not isinstance(entry, (tuple, list)) or not entry:
+        return None, {"index": index, "reason": "invalid_memory_entry"}
+
+    msg = entry[0]
+    role = getattr(msg, "role", None)
+    content = getattr(msg, "content", None)
+    metadata = getattr(msg, "metadata", None)
+    summary: dict[str, Any] = {
+        "index": index,
+        "role": role,
+        "content_type": type(content).__name__,
+        "metadata_fields": [
+            key
+            for key in ("event_type", "message_type", "kind", "type")
+            if isinstance(metadata, dict) and key in metadata
+        ],
+    }
+    if isinstance(content, list):
+        summary["block_types"] = [
+            (
+                block.get("type")
+                if isinstance(block, dict)
+                else getattr(block, "type", None)
+            )
+            for block in content
+        ]
+    if (
+        role != "assistant"
+        or not hasattr(msg, "content")
+        or _is_live_assistant_event(msg)
+    ):
+        summary["reason"] = (
+            "role_or_missing_content"
+            if role != "assistant" or not hasattr(msg, "content")
+            else "live_assistant_event"
+        )
+        return None, summary
+
+    response = project_candidate_assistant_response(msg)
+    if response is not None:
+        summary["text_len"] = len(response)
+        summary["reason"] = "accepted"
+        return response, summary
+    summary["reason"] = "unsupported_content"
+    return None, summary
+
+
 def _extract_assistant_response(
     agent: SWEAgent,
     *,
@@ -1402,15 +1537,13 @@ def _extract_assistant_response(
         memory_total = len(memory) if isinstance(memory, list) else None
         candidates: list[dict[str, Any]] = []
         entries = (
-            reversed(list(enumerate(memory[start:], start)))
+            list(enumerate(memory[start:], start))
             if isinstance(memory, list)
-            else ()
+            else []
         )
-        for index, entry in entries:
-            response, summary = _inspect_assistant_memory_entry(index, entry)
+        for index, entry in reversed(entries):
+            response, summary = _assistant_response_candidate(index, entry)
             if response is not None:
-                summary["text_len"] = len(response)
-                summary["reason"] = "accepted"
                 logger.warning(
                     "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
                     "selected=%s candidates=%s",
@@ -1435,48 +1568,6 @@ def _extract_assistant_response(
         )
 
     return ""
-
-
-def _inspect_assistant_memory_entry(
-    index: int,
-    entry: Any,
-) -> tuple[str | None, dict[str, Any]]:
-    """Inspect one memory entry and return its response and diagnostics."""
-    if not isinstance(entry, (tuple, list)) or not entry:
-        return None, {"index": index, "reason": "invalid_memory_entry"}
-    msg = entry[0]
-    role = getattr(msg, "role", None)
-    content = getattr(msg, "content", None)
-    metadata = getattr(msg, "metadata", None)
-    summary: dict[str, Any] = {
-        "index": index,
-        "role": role,
-        "content_type": type(content).__name__,
-        "metadata_fields": [
-            key
-            for key in ("event_type", "message_type", "kind", "type")
-            if isinstance(metadata, dict) and key in metadata
-        ],
-    }
-    if isinstance(content, list):
-        summary["block_types"] = [
-            (
-                block.get("type")
-                if isinstance(block, dict)
-                else getattr(block, "type", None)
-            )
-            for block in content
-        ]
-    if role != "assistant" or not hasattr(msg, "content"):
-        summary["reason"] = "role_or_missing_content"
-        return None, summary
-    if _is_live_assistant_event(msg):
-        summary["reason"] = "live_assistant_event"
-        return None, summary
-    response = project_candidate_assistant_response(msg)
-    if response is None:
-        summary["reason"] = "unsupported_content"
-    return response, summary
 
 
 def _replace_assistant_response(
@@ -2985,20 +3076,12 @@ class AgentRunner(Runner):
                 ApprovalDecision.TIMEOUT,
             )
             return (
-                Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=[
-                        TextBlock(
-                            type="text",
-                            text=(
-                                f"⏰ Tool `{pending.tool_name}` approval "
-                                f"timed out ({int(elapsed)}s) — denied.\n"
-                                f"工具 `{pending.tool_name}` 审批超时"
-                                f"（{int(elapsed)}s），已拒绝执行。"
-                            ),
-                        ),
-                    ],
+                _build_denial_response_msg(
+                    pending,
+                    f"⏰ Tool `{pending.tool_name}` approval "
+                    f"timed out ({int(elapsed)}s) — denied.\n"
+                    f"工具 `{pending.tool_name}` 审批超时"
+                    f"（{int(elapsed)}s），已拒绝执行。",
                 ),
                 True,
                 None,
@@ -3064,18 +3147,10 @@ class AgentRunner(Runner):
             request,
         )
         return (
-            Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=(
-                            f"❌ Tool `{pending.tool_name}` denied.\n"
-                            f"工具 `{pending.tool_name}` 已拒绝执行。"
-                        ),
-                    ),
-                ],
+            _build_denial_response_msg(
+                pending,
+                f"❌ Tool `{pending.tool_name}` denied.\n"
+                f"工具 `{pending.tool_name}` 已拒绝执行。",
             ),
             True,
             None,
@@ -3497,24 +3572,55 @@ class AgentRunner(Runner):
             )
             return None
 
-        logger.debug(
-            f"Runner: Calling get_or_create_chat for "
-            f"session_id={session_id}, user_id={user_id}, "
-            f"channel={channel}, name={name}",
-        )
-        chat = await self._chat_manager.get_or_create_chat(
-            session_id,
-            user_id,
-            channel,
-            name=name,
-            meta={"agent_id": self.agent_id},
-        )
-        logger.debug(f"Runner: Got chat: {chat.id}")
         channel_meta = _without_request_scenario_snapshot(
             getattr(request, "channel_meta", None) or {},
         )
-        plan_mode_enabled = _resolve_plan_mode_enabled(channel_meta, chat)
-        requested_plan_mode = _requested_plan_mode_update(channel_meta)
+        chat = None
+        requested_chat_id = channel_meta.get("chat_id")
+        if isinstance(requested_chat_id, str) and requested_chat_id:
+            candidate = await self._chat_manager.get_chat(requested_chat_id)
+            if (
+                candidate is not None
+                and candidate.session_id == session_id
+                and candidate.user_id == user_id
+                and candidate.channel == channel
+            ):
+                chat = candidate
+                merged_meta = {
+                    **(candidate.meta or {}),
+                    "agent_id": self.agent_id,
+                }
+                if merged_meta != (candidate.meta or {}):
+                    chat.meta = merged_meta
+                    chat.updated_at = datetime.now(timezone.utc)
+                    await self._chat_manager.update_chat(chat)
+        if chat is None:
+            logger.debug(
+                f"Runner: Calling get_or_create_chat for "
+                f"session_id={session_id}, user_id={user_id}, "
+                f"channel={channel}, name={name}",
+            )
+            chat = await self._chat_manager.get_or_create_chat(
+                session_id,
+                user_id,
+                channel,
+                name=name,
+                meta={"agent_id": self.agent_id},
+            )
+        logger.debug(f"Runner: Got chat: {chat.id}")
+        scheduled_request = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
+        plan_mode_enabled = (
+            False
+            if scheduled_request
+            else _resolve_plan_mode_enabled(channel_meta, chat)
+        )
+        requested_plan_mode = (
+            None
+            if scheduled_request
+            else _requested_plan_mode_update(channel_meta)
+        )
         if requested_plan_mode is not None:
             chat.meta = {
                 **(getattr(chat, "meta", None) or {}),
@@ -3597,6 +3703,7 @@ class AgentRunner(Runner):
         auth_token: str | None,
         approved_tool_call: dict[str, Any] | None,
         current_user_text: str = "",
+        workspace_skill_snapshot: Any | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
         request_enable_subagents = getattr(request, "enable_subagents", False)
@@ -3626,6 +3733,7 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "execution_origin": getattr(request, "execution_origin", None),
             "_task_tracker": self._task_tracker,
             "cron_execution_key": getattr(
                 request,
@@ -3658,7 +3766,10 @@ class AgentRunner(Runner):
         request_context["goal_mode_enabled"] = goal_mode_enabled
         plan_mode_enabled = (
             False
-            if goal_request
+            if (
+                goal_request
+                or request_context.get("execution_origin") == "scheduled"
+            )
             else bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         )
         request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
@@ -3758,6 +3869,7 @@ class AgentRunner(Runner):
             memory_manager=self.memory_manager,
             request_context=request_context,
             workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
             task_tracker=self._task_tracker,
             source_tool_versions=source_tool_versions,
         )
@@ -4198,6 +4310,12 @@ class AgentRunner(Runner):
             )
 
         source_id_for_hooks = _request_source_id(request)
+        workspace_skill_snapshot = getattr(
+            runtime.agent,
+            "_workspace_skill_snapshot",
+            None,
+        )
+        snapshot_skills = getattr(workspace_skill_snapshot, "skills", {})
         runtime.session_skill_detector = _create_session_skill_detector(
             workspace_dir=Path(self.workspace_dir or WORKING_DIR),
             tenant_id=self.tenant_id,
@@ -4215,6 +4333,18 @@ class AgentRunner(Runner):
                 if hasattr(runtime.agent, "get_skill_runtime_profiles")
                 else {}
             ),
+            skill_metadata={
+                name: dict(skill.metadata)
+                for name, skill in snapshot_skills.items()
+            },
+            skill_dirs={
+                name: skill.directory
+                for name, skill in snapshot_skills.items()
+            },
+            skill_signatures={
+                name: skill.content_signature
+                for name, skill in snapshot_skills.items()
+            },
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
             confirmed_skill_callback=(_queue_confirmed_skill_snapshot_update),
@@ -5704,6 +5834,10 @@ class AgentRunner(Runner):
         task = asyncio.current_task()
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        defer_settlement = bool(
+            channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY),
+        )
         try:
             async for msg, last in self._stream_query_handler_frames(
                 msgs,
@@ -5712,23 +5846,20 @@ class AgentRunner(Runner):
             ):
                 yield msg, last
         except asyncio.CancelledError:
-            await self._settle_query_handler_outcome(
-                identity,
-                "cancelled",
-            )
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(identity, "cancelled")
             raise
         except Exception as exc:
-            await self._settle_query_handler_outcome(
-                identity,
-                "failed",
-                exc,
-            )
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(
+                    identity,
+                    "failed",
+                    exc,
+                )
             raise
         else:
-            await self._settle_query_handler_outcome(
-                identity,
-                "completed",
-            )
+            if not defer_settlement:
+                await self._settle_query_handler_outcome(identity, "completed")
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
@@ -5880,11 +6011,30 @@ class AgentRunner(Runner):
             return
 
         current_agent_state = agent.state_dict()
-        stripped_count = 0
-        deduped_external_approvals = 0
+        stripped_count = _strip_internal_follow_up_messages_from_state(
+            current_agent_state,
+        )
+        deduped_external_approvals = (
+            _dedupe_external_approval_messages_from_state(
+                current_agent_state,
+            )
+        )
+        context_usage_snapshot: dict[str, Any] | None = None
+        context_usage_capture_failed = False
+        try:
+            context_usage_snapshot = (
+                await capture_context_usage(agent, current_agent_state)
+            ).model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - session persistence must continue
+            context_usage_capture_failed = True
+            logger.warning(
+                "Failed to capture context usage; preserving prior snapshot "
+                "(session_id=%s)",
+                session_id,
+                exc_info=True,
+            )
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
-            nonlocal stripped_count, deduped_external_approvals
             state_modules: dict[str, Any] = (
                 dict(existing_state)
                 if isinstance(existing_state, dict)
@@ -5899,6 +6049,17 @@ class AgentRunner(Runner):
                     )
                 )
             state_modules["agent"] = current_agent_state
+            if context_usage_snapshot is not None:
+                state_modules[CONTEXT_USAGE_STATE_KEY] = context_usage_snapshot
+                state_modules.pop(CONTEXT_USAGE_INVALID_STATE_KEY, None)
+            elif context_usage_capture_failed:
+                if isinstance(
+                    state_modules.get(CONTEXT_USAGE_STATE_KEY),
+                    dict,
+                ):
+                    state_modules[CONTEXT_USAGE_INVALID_STATE_KEY] = True
+                else:
+                    state_modules.pop(CONTEXT_USAGE_INVALID_STATE_KEY, None)
             if hook_overlay is not None:
                 state_modules["hook_overlay"] = hook_overlay.model_dump(
                     mode="json",
@@ -5906,14 +6067,6 @@ class AgentRunner(Runner):
                 )
             else:
                 state_modules.pop("hook_overlay", None)
-            stripped_count = _strip_internal_follow_up_messages_from_state(
-                state_modules["agent"],
-            )
-            deduped_external_approvals = (
-                _dedupe_external_approval_messages_from_state(
-                    state_modules["agent"],
-                )
-            )
             return state_modules
 
         if session_execution is not None:
@@ -6148,28 +6301,76 @@ class AgentRunner(Runner):
         task_progress_enabled = is_chat_task_progress_enabled(
             get_current_source_system_config(),
         )
-        async for event in normalize_reasoning_boundary_stream(
-            super().stream_query(request, **kwargs),
-        ):
-            trace_id = getattr(request, "trace_id", None)
-            event = self._attach_trace_id_to_event(event, trace_id)
-            progress = None
-            if task_progress_enabled:
-                channel_meta = getattr(request, "channel_meta", None) or {}
-                chat_id = channel_meta.get("chat_id")
-                if not chat_id and self._chat_manager is not None:
-                    chat_id = await self._chat_manager.get_chat_id_by_session(
-                        getattr(request, "session_id", "") or "",
-                        getattr(request, "channel", DEFAULT_CHANNEL),
+        identity = self._answer_turn_identity(request)
+        terminal_status: str | None = None
+        channel_meta = getattr(request, "channel_meta", None)
+        marker_was_present = (
+            isinstance(channel_meta, dict)
+            and _DEFER_ANSWER_TURN_SETTLEMENT_META_KEY in channel_meta
+        )
+        previous_defer_marker = (
+            channel_meta.get(_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY)
+            if isinstance(channel_meta, dict)
+            else None
+        )
+        if isinstance(channel_meta, dict):
+            channel_meta[_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY] = True
+        try:
+            async for event in normalize_reasoning_boundary_stream(
+                super().stream_query(request, **kwargs),
+            ):
+                if getattr(event, "object", None) == "response":
+                    status = getattr(event, "status", None)
+                    if status == RunStatus.Completed:
+                        terminal_status = "completed"
+                    elif status == RunStatus.Failed:
+                        terminal_status = "failed"
+                    elif status == RunStatus.Canceled:
+                        terminal_status = "cancelled"
+
+                trace_id = getattr(request, "trace_id", None)
+                event = self._attach_trace_id_to_event(event, trace_id)
+                progress = None
+                if task_progress_enabled:
+                    channel_meta = getattr(request, "channel_meta", None) or {}
+                    chat_id = channel_meta.get("chat_id")
+                    if not chat_id and self._chat_manager is not None:
+                        chat_id = (
+                            await self._chat_manager.get_chat_id_by_session(
+                                getattr(request, "session_id", "") or "",
+                                getattr(request, "channel", DEFAULT_CHANNEL),
+                            )
+                        )
+                    if chat_id and self._task_tracker is not None:
+                        progress = await self._task_tracker.get_task_progress(
+                            chat_id,
+                        )
+                yield attach_task_progress(
+                    event,
+                    progress,
+                    enabled=task_progress_enabled,
+                )
+        except asyncio.CancelledError:
+            await self._settle_query_handler_outcome(identity, "cancelled")
+            raise
+        except Exception as exc:
+            await self._settle_query_handler_outcome(identity, "failed", exc)
+            raise
+        finally:
+            if isinstance(channel_meta, dict):
+                if marker_was_present:
+                    channel_meta[_DEFER_ANSWER_TURN_SETTLEMENT_META_KEY] = (
+                        previous_defer_marker
                     )
-                if chat_id and self._task_tracker is not None:
-                    progress = await self._task_tracker.get_task_progress(
-                        chat_id,
+                else:
+                    channel_meta.pop(
+                        _DEFER_ANSWER_TURN_SETTLEMENT_META_KEY,
+                        None,
                     )
-            yield attach_task_progress(
-                event,
-                progress,
-                enabled=task_progress_enabled,
+        if terminal_status is not None:
+            await self._settle_query_handler_outcome(
+                identity,
+                terminal_status,
             )
 
     async def init_handler(self, *args, **kwargs):

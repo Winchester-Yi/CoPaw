@@ -30,6 +30,7 @@ from swe.app.wplus_sop.models import (
     SessionProjection,
     SessionState,
     Stage,
+    StageStatus,
 )
 from swe.app.wplus_sop.runtime import WPlusChatRunBusyError
 from swe.app.wplus_sop.service import (
@@ -1435,6 +1436,9 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
             "confirm_stage",
             request_id=f"cmd-stage-{index}",
         )
+        refresh_start = starts[-1]
+        starts_before_refresh = len(starts)
+        assert refresh_start["target_state"] == "RefreshingCumulative"
         service.append_agent_event(
             kind="cumulative_refreshed",
             payload=_cumulative_refreshed_payload(
@@ -1443,6 +1447,40 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
             ),
             event_key=f"cumulative-{index}",
         )
+        assert len(starts) == starts_before_refresh
+        blocked_kind = "sop_result" if index == 2 else "question_batch"
+        blocked_payload = (
+            {"result": _final_result_payload(tmp_path)}
+            if index == 2
+            else _question_payload("stage-2", "before-handoff")
+        )
+        with pytest.raises(
+            WPlusCommandError,
+            match="Agent run must complete before the next step",
+        ):
+            service.append_agent_event(
+                kind=blocked_kind,
+                payload=blocked_payload,
+                event_key=f"blocked-before-handoff-{index}",
+            )
+
+        await refresh_start["on_complete"]()
+
+        assert len(starts) == starts_before_refresh + 1
+        continuation = starts[-1]
+        assert continuation["command"] == "continue_after_cumulative"
+        assert continuation["run_id"] != refresh_start["run_id"]
+        assert continuation["target_state"] == (
+            "FinalizingOutputs" if index == 2 else "GeneratingQuestions"
+        )
+        handoff_record = service.get_session(session_id)
+        completed_refresh = next(
+            run
+            for run in handoff_record.runs
+            if run.run_id == refresh_start["run_id"]
+        )
+        assert completed_refresh.status is RunStatus.COMPLETED
+        assert handoff_record.projection.current_run_id == continuation["run_id"]
 
     service.append_agent_event(
         kind="sop_result",
@@ -1471,17 +1509,13 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
         "submit_answers",
         "accept_trial",
         "confirm_stage",
+        "continue_after_cumulative",
         "submit_answers",
         "accept_trial",
         "confirm_stage",
+        "continue_after_cumulative",
     ]
-    assert starts[-1]["target_state"] == "RefreshingCumulative"
-    finalizing_payload = starts[-1]["payload"]
-    assert isinstance(finalizing_payload, dict)
-    assert [
-        snapshot["stage_id"]
-        for snapshot in finalizing_payload["confirmed_snapshots"]
-    ] == ["stage-1", "stage-2"]
+    assert starts[-1]["target_state"] == "FinalizingOutputs"
     assert await service.flush_chat_projection_outbox() > 0
     assert (
         service.workspace.chat_manager.chat.meta["wplus_sop_session"]["state"]
@@ -3372,6 +3406,44 @@ async def test_agent_completion_without_boundary_becomes_recoverable_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [
+        SessionState.GENERATING_STAGE_REPORT,
+        SessionState.REFRESHING_CUMULATIVE,
+    ],
+)
+async def test_incremental_generation_requires_boundary_before_completion(
+    tmp_path: Path,
+    state: SessionState,
+) -> None:
+    service = _service(tmp_path)
+    session_id = f"sop-incomplete-{state.value}"
+    _create_generation_run(
+        service,
+        session_id=session_id,
+        created_at=datetime.now(timezone.utc),
+        state=state,
+        status=RunStatus.RUNNING,
+    )
+    attempt = service.get_session(session_id).runs[0]
+
+    await service._on_agent_turn_complete(
+        sop_session_id=session_id,
+        run_id=attempt.run_id,
+        attempt_id=attempt.attempt_id,
+        command=attempt.command,
+    )
+
+    record = service.get_session(session_id)
+    assert record.projection.state is SessionState.RECOVERABLE_FAILURE
+    assert record.projection.resume_state is state
+    assert record.projection.last_error is not None
+    assert record.projection.last_error.failed_run_id == attempt.run_id
+    assert record.runs[0].status is RunStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_runtime_start_failure_can_retry_from_server_owned_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3873,6 +3945,67 @@ async def _advance_to_stage_report(
 
 
 @pytest.mark.asyncio
+async def test_cumulative_handoff_start_failure_is_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts: list[dict[str, Any]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        if kwargs["command"] == "continue_after_cumulative":
+            raise RuntimeError("continuation unavailable")
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "handoff-failure")
+    await _advance_to_stage_report(
+        service,
+        session_id,
+        "stage-1",
+        "handoff-failure",
+    )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="handoff-failure-report",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="handoff-failure-confirm",
+    )
+    refresh_start = starts[-1]
+    service.append_agent_event(
+        kind="cumulative_refreshed",
+        payload=_cumulative_refreshed_payload(service.get_session(session_id)),
+        event_key="handoff-failure-cumulative",
+    )
+
+    await refresh_start["on_complete"]()
+
+    record = service.get_session(session_id)
+    assert record.projection.state is SessionState.RECOVERABLE_FAILURE
+    assert record.projection.resume_state is SessionState.GENERATING_QUESTIONS
+    assert record.projection.last_error is not None
+    assert record.projection.last_error.failed_operation == (
+        "continue_after_cumulative"
+    )
+    refresh_run = next(
+        run for run in record.runs if run.run_id == refresh_start["run_id"]
+    )
+    continuation_run = next(
+        run
+        for run in record.runs
+        if run.command == "continue_after_cumulative"
+    )
+    assert refresh_run.status is RunStatus.COMPLETED
+    assert continuation_run.status is RunStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_confirm_stage_rejects_without_acceptable_report(
     tmp_path: Path,
 ) -> None:
@@ -3974,7 +4107,10 @@ async def test_serialize_session_exposes_stage_reports_and_cumulative_preview(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    starts: list[dict[str, Any]] = []
+
     async def fake_start(**kwargs):
+        starts.append(kwargs)
         return SimpleNamespace(run_id=kwargs["run_id"])
 
     monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
@@ -4007,6 +4143,9 @@ async def test_serialize_session_exposes_stage_reports_and_cumulative_preview(
             ),
             event_key=f"serialize-cumulative-{index}",
         )
+        refresh_start = starts[-1]
+        assert refresh_start["target_state"] == "RefreshingCumulative"
+        await refresh_start["on_complete"]()
 
     record = service.get_session(session_id)
     snapshot = serialize_session(record)
@@ -4149,6 +4288,55 @@ async def test_ae2_rerun_supersedes_report_versions_and_locks_latest(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("next_action", "expected_state"),
+    [
+        ("clarify", SessionState.GENERATING_QUESTIONS),
+        ("rerun", SessionState.GENERATING_TRIAL),
+    ],
+)
+async def test_stage_report_feedback_routes_to_clarification_or_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    next_action: str,
+    expected_state: SessionState,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, f"feedback-{next_action}")
+    await _advance_to_stage_report(
+        service,
+        session_id,
+        "stage-1",
+        f"feedback-{next_action}",
+    )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key=f"feedback-{next_action}-report",
+    )
+    record = service.get_session(session_id)
+
+    mutation = await _send(
+        service,
+        session_id,
+        "submit_trial_feedback",
+        {
+            "feedback": "根据阶段 SOP 补充规则后继续",
+            "rerun_of_run_id": record.projection.current_run_id,
+            "next_action": next_action,
+        },
+        request_id=f"feedback-{next_action}-command",
+    )
+
+    assert mutation.record.projection.state is expected_state
+    assert mutation.record.projection.current_stage_id == "stage-1"
+
+
+@pytest.mark.asyncio
 async def test_ae3_confirmed_stage_cannot_be_reopened_or_confirm_twice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4182,6 +4370,69 @@ async def test_ae3_confirmed_stage_cannot_be_reopened_or_confirm_twice(
             "confirm_stage",
             request_id="ae3-confirm-again",
         )
+
+
+@pytest.mark.asyncio
+async def test_confirmed_stage_answers_cannot_be_revised_from_next_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts: list[dict[str, Any]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "locked-revision")
+    await _advance_to_stage_report(
+        service,
+        session_id,
+        "stage-1",
+        "locked-revision",
+    )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="locked-revision-report",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="locked-revision-confirm",
+    )
+    service.append_agent_event(
+        kind="cumulative_refreshed",
+        payload=_cumulative_refreshed_payload(service.get_session(session_id)),
+        event_key="locked-revision-cumulative",
+    )
+    refresh_start = starts[-1]
+    assert refresh_start["target_state"] == "RefreshingCumulative"
+    await refresh_start["on_complete"]()
+    service.append_agent_event(
+        kind="question_batch",
+        payload=_question_payload("stage-2", "locked-revision-stage-2"),
+        event_key="locked-revision-stage-2-questions",
+    )
+
+    with pytest.raises(WPlusCommandError, match="current unconfirmed stage"):
+        await _send(
+            service,
+            session_id,
+            "revise_answer",
+            {
+                "revised_round": 1,
+                "answers": {"q-locked-revision": "no"},
+                "reason": "尝试修改已确认环节",
+            },
+            request_id="locked-revision-attempt",
+        )
+
+    projection = service.get_session(session_id).projection
+    assert projection.current_stage_id == "stage-2"
+    assert projection.stages[0].status is StageStatus.CONFIRMED
 
 
 @pytest.mark.asyncio

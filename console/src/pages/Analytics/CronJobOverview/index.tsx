@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronRight,
+  Download,
   Eye,
   FileText,
   Landmark,
@@ -1036,6 +1037,7 @@ export default function CronJobOverviewPage() {
   const [overviewData, setOverviewData] =
     useState<CronJobOverviewPageData>(emptyOverviewData);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [timeRange, setTimeRange] = useState<TimeRange>(
     getTimeRangeForDateRange(initialDateRange),
   );
@@ -1375,6 +1377,33 @@ export default function CronJobOverviewPage() {
     } finally {
       setLoading(false);
       setTaskBranchRankingLoading(false);
+    }
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const blob = await monitorApi.exportSkillUsageDetails({
+        start_date: dateRange[0].format("YYYY-MM-DD"),
+        end_date: dateRange[1].format("YYYY-MM-DD"),
+        bbk_ids: bbkIds.length > 0 ? bbkIds.join(",") : undefined,
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `定时任务客户经理技能明细_${dayjs().format(
+        "YYYYMMDD_HHmmss",
+      )}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "导出失败，请稍后重试";
+      Modal.error({ title: "导出失败", content: errorMessage });
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -1837,6 +1866,16 @@ export default function CronJobOverviewPage() {
       <h2 className={styles.sectionHeading}>
         分行综合排行
         <span className={styles.sectionHeadingHint}>（点击分行查看明细）</span>
+        <button
+          type="button"
+          className={styles.exportButton}
+          onClick={handleExport}
+          disabled={exporting}
+          aria-busy={exporting}
+        >
+          <Download size={14} aria-hidden="true" />
+          {exporting ? "导出中..." : "导出 Excel"}
+        </button>
       </h2>
       <TaskRankingTable
         data={taskBranchRankingRows}

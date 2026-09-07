@@ -61,6 +61,12 @@ def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+def _console_output_enabled() -> bool:
+    """Return whether terminal rendering is enabled for the console channel."""
+    value = os.getenv("SWE_CONSOLE_OUTPUT_ENABLED", "true")
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _event_to_sse_json(event: Any, request: Any) -> str:
     """序列化 SSE 事件，并为 response 事件补充当前请求的 trace_id。"""
     if hasattr(event, "model_dump_json"):
@@ -131,6 +137,7 @@ class ConsoleChannel(BaseChannel):
         )
         self.enabled = enabled
         self.bot_prefix = bot_prefix
+        self._output_enabled = _console_output_enabled()
         self._workspace_dir = (
             Path(workspace_dir).expanduser() if workspace_dir else None
         )
@@ -642,6 +649,8 @@ class ConsoleChannel(BaseChannel):
         piped or contains unsupported characters. This wrapper handles
         such cases gracefully.
         """
+        if not self._output_enabled:
+            return
         try:
             print(text)
         except OSError as e:

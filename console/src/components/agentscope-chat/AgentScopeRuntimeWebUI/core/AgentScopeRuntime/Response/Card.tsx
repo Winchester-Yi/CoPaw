@@ -9,6 +9,12 @@ import {
 import AgentScopeRuntimeResponseBuilder from "./Builder";
 import Message from "./Message";
 import Tool from "./Tool";
+import OperationGroup from "./OperationGroup";
+import {
+  groupOperationMessages,
+  isOperationGroupToolMessage,
+} from "./operationGrouping";
+import type { OperationGroupedItem } from "./operationGrouping";
 import Reasoning from "./Reasoning";
 import Error from "./Error";
 import { Bubble, Markdown } from "@/components/agentscope-chat";
@@ -134,7 +140,7 @@ function shouldCountAsProcessStep(message: IAgentScopeRuntimeMessage) {
   return (
     message.type === AgentScopeRuntimeMessageType.REASONING ||
     message.type === AgentScopeRuntimeMessageType.ERROR ||
-    isToolMessageType(message.type) ||
+    isOperationGroupToolMessage(message) ||
     Boolean(getRetryStatus(message))
   );
 }
@@ -250,6 +256,20 @@ function renderResponseItem(item: IAgentScopeRuntimeMessage) {
   }
 }
 
+function renderGroupedItem(item: OperationGroupedItem) {
+  return item.kind === "group" ? (
+    <OperationGroup key={item.key} entry={item} />
+  ) : (
+    renderResponseItem(item.message)
+  );
+}
+
+function messagesForGroupedItem(
+  item: OperationGroupedItem,
+): IAgentScopeRuntimeMessage[] {
+  return item.kind === "group" ? item.steps : [item.message];
+}
+
 export default function AgentScopeRuntimeResponseCard(props: {
   data: IAgentScopeRuntimeResponse;
   isLast?: boolean;
@@ -275,38 +295,50 @@ export default function AgentScopeRuntimeResponseCard(props: {
       : findLastVisibleAnswerMessageIndex(messages);
     const hasAnswer = Boolean(reasoningFallbackText || finalAnswerIndex >= 0);
 
+    // Operation groups are explicit (agent-declared) and always render as
+    // their own default-collapsed entries; they never fold into the
+    // process disclosure and never merge with messages outside the group.
+    const { items } = groupOperationMessages(messages);
+
     if (!canCollapseProcess || !hasAnswer) {
       return {
-        process: [] as IAgentScopeRuntimeMessage[],
-        direct: messages,
+        process: [] as OperationGroupedItem[],
+        direct: items,
         failedProcessCount: 0,
         processStepCount: 0,
         toolCallCount: 0,
       };
     }
 
-    const process: IAgentScopeRuntimeMessage[] = [];
-    const direct: IAgentScopeRuntimeMessage[] = [];
+    const process: OperationGroupedItem[] = [];
+    const direct: OperationGroupedItem[] = [];
 
-    messages.forEach((message) => {
+    items.forEach((item) => {
+      if (item.kind === "group") {
+        process.push(item);
+        return;
+      }
+      const message = item.message;
       if (finalAnswerIndex >= 0 && message === messages[finalAnswerIndex]) {
-        direct.push(message);
+        direct.push({ kind: "message", message });
         return;
       }
 
       if (shouldFoldIntoProcessDisclosure(message)) {
-        process.push(message);
+        process.push(item);
+      } else {
+        direct.push({ kind: "message", message });
       }
     });
 
+    const processMessages = process.flatMap(messagesForGroupedItem);
     return {
       process,
       direct,
-      failedProcessCount: process.filter(messageHasFailedProcess).length,
-      processStepCount: process.filter(shouldCountAsProcessStep).length,
-      toolCallCount: process.filter((message) =>
-        isToolMessageType(message.type),
-      ).length,
+      failedProcessCount: processMessages.filter(messageHasFailedProcess)
+        .length,
+      processStepCount: processMessages.filter(shouldCountAsProcessStep).length,
+      toolCallCount: processMessages.filter(isOperationGroupToolMessage).length,
     };
   }, [messages, props.data, reasoningFallbackText]);
   const durationText = useMemo(() => {
@@ -345,10 +377,10 @@ export default function AgentScopeRuntimeResponseCard(props: {
               : "completed"
           }
         >
-          {groupedMessages.process.map(renderResponseItem)}
+          {groupedMessages.process.map(renderGroupedItem)}
         </ProcessDisclosure>
       )}
-      {groupedMessages.direct.map(renderResponseItem)}
+      {groupedMessages.direct.map(renderGroupedItem)}
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
       {props.beforeActions}

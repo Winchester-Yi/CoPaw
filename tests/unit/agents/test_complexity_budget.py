@@ -12,6 +12,7 @@ from swe.agents.skills_manager import (
     _require_workspace_layout_v2,
 )
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.app.runner.runner import AgentRunner, _extract_assistant_response
 
 
 def _cyclomatic_complexity(func) -> int:
@@ -36,6 +37,9 @@ def test_targeted_agent_paths_stay_within_complexity_budget() -> None:
         _require_workspace_layout_v2,
         SkillPoolService.download_to_workspace,
         ToolGuardMixin._acting_impl,
+        ToolGuardMixin._selected_expert_follow_up,
+        _extract_assistant_response,
+        AgentRunner.query_handler,
     )
 
     assert all(_cyclomatic_complexity(target) <= 15 for target in targets)

@@ -11,6 +11,7 @@ import "dayjs/locale/zh-cn";
 dayjs.extend(relativeTime);
 dayjs.locale("zh-cn");
 import MainLayout from "./layouts/MainLayout";
+import ChatSharePage from "./pages/ChatShare";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 // ==================== 品牌主题 (Kun He) ====================
 import {
@@ -134,6 +135,7 @@ function AppInner() {
         <AntdApp>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/chat-share/:token" element={<ChatSharePage />} />
             <Route
               path="/*"
               element={

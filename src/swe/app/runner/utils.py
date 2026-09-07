@@ -26,9 +26,19 @@ from ...agents.utils.tool_summary import (
     generate_tool_call_summary,
     generate_tool_output_summary,
 )
+from ...agents.tool_failure import TOOL_GOVERNANCE_BLOCK_FIELD
 from ...config import load_config  # pylint: disable=no-name-in-module
 from .models import ChatMessage
-from .tool_status import apply_running_tool_status, apply_terminal_tool_status
+from .operation_group import (
+    OPERATION_GROUP_FIELD,
+    attach_operation_group,
+    normalize_operation_group,
+)
+from .tool_status import (
+    apply_governance_tool_status,
+    apply_running_tool_status,
+    apply_terminal_tool_status,
+)
 
 logger = logging.getLogger(__name__)
 _MISSING_SOURCE_ID_PLACEHOLDER = "(not provided)"
@@ -514,9 +524,10 @@ def agentscope_msg_to_message(
                 tool_name = str(block.get("name") or "")
 
                 # Generate user-friendly summary for tool call
+                attach_operation_group(call_data, arguments)
                 call_data["summary"] = generate_tool_call_summary(
                     tool_name=tool_name,
-                    arguments=arguments,
+                    arguments=call_data["arguments"],
                     server_label=block.get("server_label"),
                 )
                 apply_running_tool_status(call_data)
@@ -564,11 +575,23 @@ def agentscope_msg_to_message(
                 output_data["output_summary"] = generate_tool_output_summary(
                     tool_name=tool_name,
                     output=output,
+                    governance_status=block.get(
+                        TOOL_GOVERNANCE_BLOCK_FIELD,
+                    ),
                 )
                 apply_terminal_tool_status(
                     output_data,
                     raw_output=block.get("output"),
                 )
+                apply_governance_tool_status(
+                    output_data,
+                    block.get(TOOL_GOVERNANCE_BLOCK_FIELD),
+                )
+                operation_group = normalize_operation_group(
+                    block.get(OPERATION_GROUP_FIELD),
+                )
+                if operation_group is not None:
+                    output_data[OPERATION_GROUP_FIELD] = operation_group
 
                 data_content = DataContent(
                     delta=False,

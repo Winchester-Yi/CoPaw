@@ -26,6 +26,8 @@ from swe.app.subagents import (
     builtin_definition_provider,
 )
 from swe.app.subagents.models import AgentError, BudgetConfig, Metrics
+from swe.app.subagents.monitor import SubAgentMonitorService
+from swe.app.subagents.supervisor import BackgroundSubAgentScope
 from swe.config.config import AgentProfileConfig
 
 
@@ -71,6 +73,37 @@ class _Supervisor:
 
     def is_manageable(self, _scope, run_id: str) -> bool:
         return run_id == "subagent-running"
+
+
+@pytest.mark.asyncio
+async def test_monitor_records_scan_runs_filesystem_io_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls = []
+
+    async def run_worker(function, *args, **kwargs):
+        calls.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "swe.app.subagents.monitor.run_runtime_state_work",
+        run_worker,
+        raising=False,
+    )
+    service = SubAgentMonitorService(
+        supervisor=SimpleNamespace(),
+        scope=BackgroundSubAgentScope(
+            tenant_id="tenant-1",
+            agent_id="agent-1",
+            run_store_dir=tmp_path,
+        ),
+    )
+
+    assert (
+        await service._records_for_session("session-1") == []
+    )  # noqa: SLF001
+    assert len(calls) == 1
 
 
 def _client(

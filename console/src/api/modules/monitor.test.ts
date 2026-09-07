@@ -168,3 +168,34 @@ describe("monitorApi schedule distribution", () => {
     expect(url.searchParams.has("definition_revision")).toBe(false);
   });
 });
+
+describe("monitorApi cron batch detail", () => {
+  it("serializes independent Intent and event pagination filters", async () => {
+    requestMock.mockResolvedValue({});
+
+    await monitorApi.getCronDispatchBatchDetail("cron:batch/a", {
+      intent_page: "2",
+      intent_limit: "50",
+      intent_query: "job-a",
+      intent_role: "child",
+      intent_status: "pending",
+      event_page: "3",
+      event_limit: "50",
+    });
+
+    const path = requestMock.mock.calls[0][0] as string;
+    const url = new URL(path, "http://monitor.test");
+    expect(url.pathname).toBe(
+      "/monitor/cron/dispatch/batches/cron%3Abatch%2Fa",
+    );
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      intent_page: "2",
+      intent_limit: "50",
+      intent_query: "job-a",
+      intent_role: "child",
+      intent_status: "pending",
+      event_page: "3",
+      event_limit: "50",
+    });
+  });
+});

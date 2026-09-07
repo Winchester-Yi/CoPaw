@@ -303,7 +303,13 @@ export interface CronDispatchBatchDetailResponse {
   batch: CronDispatchBatchItem;
   intents: CronDispatchIntentItem[];
   intent_total: number;
+  intent_filtered_total: number;
+  intent_page: number;
+  intent_page_size: number;
   events: CronDispatchEventItem[];
+  event_total: number;
+  event_page: number;
+  event_page_size: number;
 }
 
 export interface CronDispatchPolicyItem {
@@ -966,7 +972,12 @@ export const monitorApi = {
   getCronDispatchBatchDetail: async (
     batchId: string,
     filters?: {
+      intent_page?: string;
       intent_limit?: string;
+      intent_query?: string;
+      intent_role?: string;
+      intent_status?: string;
+      event_page?: string;
       event_limit?: string;
     },
   ): Promise<CronDispatchBatchDetailResponse> => {
@@ -1245,6 +1256,41 @@ export const monitorApi = {
       });
     }
     const url = getApiUrl(`/monitor/cron/export?${params.toString()}`);
+    const headers = new Headers(buildAuthHeaders());
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      let errorMessage = `Export failed: ${response.status} ${response.statusText}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.detail) {
+          errorMessage = errorData.detail;
+        }
+      } catch {
+        // Ignore JSON parse error
+      }
+      throw new Error(errorMessage);
+    }
+    return response.blob();
+  },
+
+  // Export overview execution/customer detail to Excel
+  exportSkillUsageDetails: async (filters?: {
+    start_date?: string;
+    end_date?: string;
+    bbk_ids?: string;
+  }): Promise<Blob> => {
+    const params = new URLSearchParams();
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          params.append(key, value);
+        }
+      });
+    }
+    const query = params.toString();
+    const url = getApiUrl(
+      `/monitor/cron/export-detail${query ? `?${query}` : ""}`,
+    );
     const headers = new Headers(buildAuthHeaders());
     const response = await fetch(url, { headers });
     if (!response.ok) {

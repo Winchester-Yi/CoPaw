@@ -719,6 +719,24 @@ def _build_finalizing_command_contract(
     )
 
 
+def _build_cumulative_refresh_command_contract(
+    payload: dict[str, Any],
+) -> str:
+    return (
+        "\n本命令的同一个后台 Agent 回合只负责累计刷新。"
+        "先严格按 payload.confirmed_snapshots 的顺序生成累计 JSON、Markdown "
+        "和 HTML，只能包含这些已确认快照；按 wplus-sop-miner 的累计产物契约"
+        "校验三份文件，并逐个调用 copy_file_to_static。只能使用工具真实返回的"
+        "文件名、static URL 和 SHA-256 填写 preview.artifacts。随后调用 "
+        "emit_wplus_sop_event，提交且只提交一个 kind='cumulative_refreshed'；"
+        "payload.preview 必须包含与 confirmed_snapshots 完全一致的 stage_order "
+        "和 snapshots。若工具返回 ok=false，必须按返回的 allowed agent events "
+        "修正后重试。累计事件成功持久化后结束当前回合；不得在本回合生成下一"
+        "环节问题、执行预跑或生成最终结果。平台会在本回合完成后启动下一步的"
+        "独立 Agent 回合。"
+    )
+
+
 def _build_memory_write_command_contract(
     payload: dict[str, Any],
     *,
@@ -814,6 +832,8 @@ def _expected_event_sequence(
             "trial_execution_progress?",
             "trial_execution_completed|trial_execution_failed",
         ]
+    if target_state == "RefreshingCumulative":
+        return ["cumulative_refreshed"]
     if target_state == "FinalizingOutputs":
         if payload.get("final_result_persisted") is True:
             return ["memory_candidates"]
@@ -850,6 +870,9 @@ def build_wplus_command_text(
         "ExecutingTrial",
     }
     is_question_or_trial_turn = effective_target_state == "GeneratingQuestions"
+    is_cumulative_refresh_turn = (
+        effective_target_state == "RefreshingCumulative"
+    )
     is_finalizing_turn = effective_target_state == "FinalizingOutputs"
     is_memory_write_turn = effective_target_state == "WritingMemory"
     expected_sequence = _expected_event_sequence(
@@ -949,6 +972,10 @@ def build_wplus_command_text(
             run_id=run_id,
             attempt_id=attempt_id,
             requires_plan=effective_target_state == "GeneratingTrial",
+        )
+    elif is_cumulative_refresh_turn:
+        command_contract = _build_cumulative_refresh_command_contract(
+            payload,
         )
     elif is_finalizing_turn:
         command_contract = _build_finalizing_command_contract(

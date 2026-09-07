@@ -11,6 +11,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
 from ...agents.hook_runtime.models import HookConfig, HookSessionOverlay
 from ...agents.react_agent import SWEAgent
+from ...agents.skill_runtime_snapshot import WorkspaceSkillSnapshot
 
 
 @dataclass
@@ -43,6 +44,7 @@ class _QueryRuntimeInputs:
     auth_token: str | None
     passthrough_headers: dict[str, str]
     selected_skill_directives: list[Any] = field(default_factory=list)
+    workspace_skill_snapshot: WorkspaceSkillSnapshot | None = None
     session_execution: Any | None = None
 
 

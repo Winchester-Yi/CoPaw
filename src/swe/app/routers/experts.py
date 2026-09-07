@@ -15,6 +15,7 @@ from ...app.subagents import (
     AgentOwnedDefinitionRepository,
     builtin_definition_provider,
 )
+from ...runtime_workers import run_runtime_state_work
 
 router = APIRouter(prefix="/experts", tags=["experts"])
 
@@ -69,7 +70,9 @@ def _response(package: AgentOwnedDefinitionPackage) -> ExpertResponse:
         valid=package.valid,
         validation_error=package.validation_error,
         enabled=definition.enabled if definition is not None else False,
-        definition=(definition.model_dump(mode="json") if definition else None),
+        definition=(
+            definition.model_dump(mode="json") if definition else None
+        ),
         toml=package.toml,
     )
 
@@ -81,15 +84,18 @@ def _conflict(exc: ValueError) -> HTTPException:
 
 @router.get("", response_model=list[ExpertResponse])
 async def list_experts(request: Request) -> list[ExpertResponse]:
+    repository = await _repository(request)
     return [
-        _response(package) for package in (await _repository(request)).list()
+        _response(package)
+        for package in await run_runtime_state_work(repository.list)
     ]
 
 
 @router.get("/{definition_id}", response_model=ExpertResponse)
 async def get_expert(definition_id: str, request: Request) -> ExpertResponse:
     try:
-        package = (await _repository(request)).get(definition_id)
+        repository = await _repository(request)
+        package = await run_runtime_state_work(repository.get, definition_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if package is None:
@@ -103,8 +109,12 @@ async def preview_expert(
     request: Request,
 ) -> ExpertResponse:
     try:
+        repository = await _repository(request)
         return _response(
-            (await _repository(request)).preview(payload.model_dump()),
+            await run_runtime_state_work(
+                repository.preview,
+                payload.model_dump(),
+            ),
         )
     except ValueError as exc:
         raise _conflict(exc) from exc
@@ -116,8 +126,12 @@ async def create_expert(
     request: Request,
 ) -> ExpertResponse:
     try:
+        repository = await _repository(request)
         return _response(
-            (await _repository(request)).create(payload.model_dump()),
+            await run_runtime_state_work(
+                repository.create,
+                payload.model_dump(),
+            ),
         )
     except ValueError as exc:
         raise _conflict(exc) from exc
@@ -131,7 +145,9 @@ async def update_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> ExpertResponse:
     try:
-        package = (await _repository(request)).update(
+        repository = await _repository(request)
+        package = await run_runtime_state_work(
+            repository.update,
             definition_id,
             payload.model_dump(),
             expected_revision=if_match,
@@ -148,7 +164,9 @@ async def enable_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> ExpertResponse:
     try:
-        package = (await _repository(request)).enable(
+        repository = await _repository(request)
+        package = await run_runtime_state_work(
+            repository.enable,
             definition_id,
             expected_revision=if_match,
         )
@@ -164,7 +182,9 @@ async def disable_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> ExpertResponse:
     try:
-        package = (await _repository(request)).disable(
+        repository = await _repository(request)
+        package = await run_runtime_state_work(
+            repository.disable,
             definition_id,
             expected_revision=if_match,
         )
@@ -180,7 +200,9 @@ async def delete_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> None:
     try:
-        (await _repository(request)).delete(
+        repository = await _repository(request)
+        await run_runtime_state_work(
+            repository.delete,
             definition_id,
             expected_revision=if_match,
         )

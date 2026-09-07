@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 from swe.runtime_workers import run_runtime_state_work
 
 from .base import BaseChatRepository
+from ...channels.schema import DEFAULT_CHANNEL
 from ..models import ChatSpec, ChatsFile
 
 _LOAD_STABLE_READ_ATTEMPTS = 3
@@ -42,6 +44,8 @@ class _SnapshotState:
     signature: _FileSignature
     chats_file: ChatsFile
     chat_index: dict[str, ChatSpec]
+    session_index: dict[tuple[str, str], ChatSpec]
+    user_session_index: dict[tuple[str, str, str], ChatSpec]
 
 
 class JsonChatRepository(BaseChatRepository):
@@ -67,6 +71,9 @@ class JsonChatRepository(BaseChatRepository):
         self._snapshot_signature: _FileSignature | None = None
         self._snapshot: ChatsFile | None = None
         self._chat_index: dict[str, ChatSpec] = {}
+        self._session_index: dict[tuple[str, str], ChatSpec] = {}
+        self._user_session_index: dict[tuple[str, str, str], ChatSpec] = {}
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def path(self) -> Path:
@@ -115,11 +122,39 @@ class JsonChatRepository(BaseChatRepository):
         return signature, contents
 
     def _file_signature(self) -> _FileSignature | None:
-        state = self._read_file_state()
-        if state is None:
-            return None
-        signature, _ = state
-        return signature
+        try:
+            stat = self._path.stat()
+        except FileNotFoundError:
+            return _FileSignature(exists=False)
+        return _FileSignature(
+            exists=True,
+            mtime_ns=stat.st_mtime_ns,
+            ctime_ns=stat.st_ctime_ns,
+            size=stat.st_size,
+            inode=stat.st_ino,
+        )
+
+    @staticmethod
+    def _signature_matches(
+        left: _FileSignature | None,
+        right: _FileSignature | None,
+    ) -> bool:
+        """Compare file identity without reading its contents."""
+        if left is None or right is None:
+            return left is right
+        return (
+            left.exists,
+            left.mtime_ns,
+            left.ctime_ns,
+            left.size,
+            left.inode,
+        ) == (
+            right.exists,
+            right.mtime_ns,
+            right.ctime_ns,
+            right.size,
+            right.inode,
+        )
 
     def _load_sync(self) -> tuple[_FileSignature, ChatsFile]:
         for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
@@ -183,10 +218,23 @@ class JsonChatRepository(BaseChatRepository):
         chats_file: ChatsFile,
     ) -> _SnapshotState:
         snapshot = chats_file.model_copy(deep=True)
+        session_index: dict[tuple[str, str], ChatSpec] = {}
+        user_session_index: dict[tuple[str, str, str], ChatSpec] = {}
+        for chat in snapshot.chats:
+            key = (chat.channel, chat.session_id)
+            existing = session_index.get(key)
+            if existing is None or chat.updated_at > existing.updated_at:
+                session_index[key] = chat
+            user_key = (chat.channel, chat.session_id, chat.user_id)
+            existing = user_session_index.get(user_key)
+            if existing is None or chat.updated_at > existing.updated_at:
+                user_session_index[user_key] = chat
         return _SnapshotState(
             signature=signature,
             chats_file=snapshot,
             chat_index={chat.id: chat for chat in snapshot.chats},
+            session_index=session_index,
+            user_session_index=user_session_index,
         )
 
     def _load_and_prepare_snapshot_sync(
@@ -236,11 +284,15 @@ class JsonChatRepository(BaseChatRepository):
             self._snapshot_signature = None
             self._snapshot = None
             self._chat_index = {}
+            self._session_index = {}
+            self._user_session_index = {}
             return
 
         self._snapshot_signature = snapshot_state.signature
         self._snapshot = snapshot_state.chats_file
         self._chat_index = snapshot_state.chat_index
+        self._session_index = snapshot_state.session_index
+        self._user_session_index = snapshot_state.user_session_index
 
     async def load(self) -> ChatsFile:
         """Load chat specs from JSON file.
@@ -253,6 +305,62 @@ class JsonChatRepository(BaseChatRepository):
         )
         self._set_snapshot(snapshot_state)
         return chats_file
+
+    async def _ensure_snapshot(self) -> None:
+        signature = await run_runtime_state_work(self._file_signature)
+        if self._snapshot is not None and self._signature_matches(
+            self._snapshot_signature,
+            signature,
+        ):
+            return
+        async with self._refresh_lock:
+            signature = await run_runtime_state_work(self._file_signature)
+            if self._snapshot is None or not self._signature_matches(
+                self._snapshot_signature,
+                signature,
+            ):
+                await self.load()
+
+    @staticmethod
+    def _copy_filtered_chats_sync(
+        chats: tuple[ChatSpec, ...],
+        user_id: str | None,
+        channel: str | None,
+    ) -> list[ChatSpec]:
+        return [
+            chat.model_copy(deep=True)
+            for chat in chats
+            if (user_id is None or chat.user_id == user_id)
+            and (channel is None or chat.channel == channel)
+        ]
+
+    async def filter_chats(
+        self,
+        user_id: str | None = None,
+        channel: str | None = None,
+    ) -> list[ChatSpec]:
+        """Filter chats from the current immutable snapshot."""
+        await self._ensure_snapshot()
+        snapshot = self._snapshot
+        if snapshot is None:
+            return []
+        return await run_runtime_state_work(
+            self._copy_filtered_chats_sync,
+            tuple(snapshot.chats),
+            user_id,
+            channel,
+        )
+
+    async def get_chat_by_id(
+        self,
+        session_id: str,
+        user_id: str,
+        channel: str = DEFAULT_CHANNEL,
+    ) -> ChatSpec | None:
+        """Find a logical session from the current immutable snapshot."""
+        await self._ensure_snapshot()
+        chat = self._user_session_index.get((channel, session_id, user_id))
+        return await run_runtime_state_work(self._copy_chat_sync, chat)
 
     async def save(self, chats_file: ChatsFile) -> None:
         """Save chat specs to JSON file atomically.
@@ -352,9 +460,9 @@ class JsonChatRepository(BaseChatRepository):
     async def get_chat(self, chat_id: str) -> ChatSpec | None:
         """Get chat spec by chat_id (UUID), reusing a valid snapshot index."""
         signature = await run_runtime_state_work(self._file_signature)
-        if (
-            self._snapshot is not None
-            and self._snapshot_signature == signature
+        if self._snapshot is not None and self._signature_matches(
+            self._snapshot_signature,
+            signature,
         ):
             return await run_runtime_state_work(
                 self._copy_chat_sync,
@@ -372,3 +480,18 @@ class JsonChatRepository(BaseChatRepository):
             chats_file,
             chat_id,
         )
+
+    async def get_chat_id_by_session(
+        self,
+        session_id: str,
+        channel: str,
+    ) -> str | None:
+        """Return a session's latest chat using the snapshot index."""
+        signature = await run_runtime_state_work(self._file_signature)
+        if self._snapshot is None or not self._signature_matches(
+            self._snapshot_signature,
+            signature,
+        ):
+            await self.load()
+        chat = self._session_index.get((channel, session_id))
+        return chat.id if chat is not None else None

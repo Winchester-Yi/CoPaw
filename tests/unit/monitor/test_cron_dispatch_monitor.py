@@ -3,10 +3,16 @@ from datetime import datetime
 
 import pytest
 
-from monitor.app.models.cron import CronDispatchPolicyItem
+from monitor.app.models.cron import (
+    CronDispatchDetailQueryParams,
+    CronDispatchPolicyItem,
+)
 from monitor.app.services.cron import query_service as query_service_module
 from monitor.app.services.cron.query_service import QueryService
-from monitor.app.routers.cron import list_dispatch_batches
+from monitor.app.routers.cron import (
+    get_dispatch_batch_detail,
+    list_dispatch_batches,
+)
 
 
 class FakeDb:
@@ -309,6 +315,126 @@ async def test_get_dispatch_batch_detail_parses_events(monkeypatch):
     )
     assert "j.deleted_at" not in normalized_batch_sql
     assert "COALESCE(j.name, '') AS parent_job_name" in normalized_batch_sql
+
+
+@pytest.mark.asyncio
+async def test_get_dispatch_batch_detail_paginates_and_filters_all_rows(
+    monkeypatch,
+):
+    fake_db = FakeDb(
+        one_results=[
+            {"batch_id": "cron:batch-a"},
+            {"count": 650},
+            {"count": 120},
+            {"count": 725},
+        ],
+        all_results=[
+            [
+                {
+                    "id": 151,
+                    "batch_id": "cron:batch-a",
+                    "intent_role": "child",
+                    "status": "pending",
+                    "job_id": "Job_%",
+                },
+            ],
+            [
+                {
+                    "id": 51,
+                    "batch_id": "cron:batch-a",
+                    "event_type": "retry_scheduled",
+                },
+            ],
+        ],
+    )
+    monkeypatch.setattr(
+        query_service_module,
+        "get_db_connection",
+        lambda: fake_db,
+    )
+
+    result = await QueryService().get_dispatch_batch_detail(
+        source_id="RMASSIST",
+        batch_id="cron:batch-a",
+        params=CronDispatchDetailQueryParams(
+            intent_page=2,
+            intent_limit=50,
+            intent_query=" Job_% ",
+            intent_role="child",
+            intent_status="pending",
+            event_page=3,
+            event_limit=25,
+        ),
+    )
+
+    assert result is not None
+    assert result.intent_total == 650
+    assert result.intent_filtered_total == 120
+    assert result.intent_page == 2
+    assert result.intent_page_size == 50
+    assert result.event_total == 725
+    assert result.event_page == 3
+    assert result.event_page_size == 25
+
+    filtered_count_sql, filtered_count_params = fake_db.fetch_one_calls[2]
+    intent_page_sql, intent_page_params = fake_db.fetch_all_calls[0]
+    event_page_sql, event_page_params = fake_db.fetch_all_calls[1]
+    normalized_filtered_sql = " ".join(filtered_count_sql.split())
+    normalized_intent_sql = " ".join(intent_page_sql.split())
+
+    for sql in (normalized_filtered_sql, normalized_intent_sql):
+        assert "intent_role = %s" in sql
+        assert "status = %s" in sql
+        assert "LOWER(COALESCE(job_id, '')) LIKE %s ESCAPE '\\\\'" in sql
+    assert filtered_count_params[:4] == (
+        "RMASSIST",
+        "cron:batch-a",
+        "child",
+        "pending",
+    )
+    assert set(filtered_count_params[4:]) == {"%job\\_\\%%"}
+    assert intent_page_params[-2:] == (50, 50)
+    assert event_page_params == ("RMASSIST", "cron:batch-a", 25, 50)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_detail_route_forwards_pagination_and_filters():
+    class FakeRequest:
+        headers = {"X-Source-Id": "RMASSIST"}
+
+    class FakeService:
+        def __init__(self):
+            self.kwargs = None
+
+        async def get_dispatch_batch_detail(self, **kwargs):
+            self.kwargs = kwargs
+            return object()
+
+    service = FakeService()
+    await get_dispatch_batch_detail(
+        request=FakeRequest(),
+        batch_id="cron:batch-a",
+        intent_limit=50,
+        event_limit=25,
+        intent_page=2,
+        event_page=3,
+        intent_query="job-a",
+        intent_role="child",
+        intent_status="pending",
+        service=service,
+    )
+
+    assert service.kwargs["source_id"] == "RMASSIST"
+    assert service.kwargs["batch_id"] == "cron:batch-a"
+    assert service.kwargs["params"] == CronDispatchDetailQueryParams(
+        intent_page=2,
+        intent_limit=50,
+        intent_query="job-a",
+        intent_role="child",
+        intent_status="pending",
+        event_page=3,
+        event_limit=25,
+    )
 
 
 @pytest.mark.asyncio

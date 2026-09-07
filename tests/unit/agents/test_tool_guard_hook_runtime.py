@@ -29,6 +29,7 @@ from swe.agents.tool_guard_mixin import (
     PreToolUseTerminalStop,
     ToolGuardMixin,
 )
+from swe.agents.tool_failure import TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
 from swe.security.tool_guard.models import (
     GuardFinding,
     GuardSeverity,
@@ -405,11 +406,17 @@ async def test_tool_guard_pending_extra_includes_request_scope_ids(
         notify,
     )
 
+    from swe.app.runner.operation_group import OPERATION_GROUP_INTERNAL_FIELD
+
     await agent._acting_with_approval(
         {
             "id": "tool-1",
             "name": "execute_shell_command",
             "input": {"cmd": "echo hi"},
+            OPERATION_GROUP_INTERNAL_FIELD: {
+                "id": "inspect",
+                "title": "检查图片",
+            },
         },
         "execute_shell_command",
         ToolGuardResult(
@@ -423,6 +430,15 @@ async def test_tool_guard_pending_extra_includes_request_scope_ids(
     assert extra["agent_id"] == "agent-a"
     assert extra["tenant_id"] == "tenant-a"
     assert extra["source_id"] == "source-a"
+    assert extra["operation_group"] == {
+        "id": "inspect",
+        "title": "检查图片",
+    }
+    assert OPERATION_GROUP_INTERNAL_FIELD not in extra["tool_call"]
+    assert agent.printed[0].content[0]["_swe_tool_governance"] == "pending"
+    assert agent.printed[0].metadata[
+        TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+    ] == {"tool-1": "pending"}
     assert extra["chat_id"] == "chat-a"
     assert extra["msgid"] == "msg-a"
 
@@ -1310,6 +1326,10 @@ async def test_unsafe_guard_finding_auto_denies_without_approval_context(
     assert result is None
     agent._run_tool_call_with_hard_timeout.assert_not_awaited()
     assert "tool_guard_denied" in str(agent.printed[0].content)
+    assert agent.printed[0].content[0]["_swe_tool_governance"] == "blocked"
+    assert agent.printed[0].metadata[
+        TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+    ] == {"tool-1": "blocked"}
 
 
 @pytest.mark.asyncio
@@ -1511,8 +1531,6 @@ async def test_post_tool_hook_stop_preserves_success_then_raises(
     assert [
         call.args[0] for call in agent._emit_tool_hook.await_args_list
     ] == [HookEventName.PRE_TOOL_USE, HookEventName.POST_TOOL_USE]
-
-
 @pytest.mark.asyncio
 async def test_preapproved_guarded_tool_runs_post_hook_and_honors_stop(
     tmp_path,

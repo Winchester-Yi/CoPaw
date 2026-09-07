@@ -4,7 +4,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Generator,
+    MutableMapping,
+)
 from functools import wraps
 import inspect
 from typing import Any
@@ -18,6 +23,9 @@ except ImportError:  # pragma: no cover - optional dependency surface
     McpError = ()  # type: ignore[assignment]
 
 _DEFAULT_ERROR_DETAIL = "Tool error"
+TOOL_GOVERNANCE_BLOCK_FIELD = "_swe_tool_governance"
+TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD = "_swe_tool_governance_by_call_id"
+_TOOL_GOVERNANCE_STATUSES = frozenset({"pending", "rejected", "blocked"})
 _FALLBACK_ERROR_DETAILS = {
     "approval_required": "Tool execution requires approval.",
     "hook_denied": "Hook denied tool execution.",
@@ -100,9 +108,10 @@ def build_failed_tool_result_block(
     error_type: str,
     detail: str | None = None,
     content: list[dict[str, Any]] | None = None,
+    governance_status: str | None = None,
 ) -> dict[str, Any]:
     """Build a full canonical failed tool_result block."""
-    return {
+    block: dict[str, Any] = {
         "type": "tool_result",
         "id": tool_call_id,
         "name": tool_name,
@@ -112,6 +121,32 @@ def build_failed_tool_result_block(
             content=content,
         ),
     }
+    if governance_status:
+        block[TOOL_GOVERNANCE_BLOCK_FIELD] = governance_status
+    return block
+
+
+def attach_tool_governance_message_metadata(
+    message: Any,
+    *,
+    tool_call_id: str,
+    governance_status: str,
+) -> Any:
+    """Carry trusted governance through adapters that rebuild tool blocks."""
+    if not tool_call_id or governance_status not in _TOOL_GOVERNANCE_STATUSES:
+        return message
+    current = getattr(message, "metadata", None)
+    metadata = dict(current) if isinstance(current, MutableMapping) else {}
+    current_by_call = metadata.get(TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD)
+    by_call = (
+        dict(current_by_call)
+        if isinstance(current_by_call, MutableMapping)
+        else {}
+    )
+    by_call[tool_call_id] = governance_status
+    metadata[TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD] = by_call
+    message.metadata = metadata
+    return message
 
 
 def build_failed_tool_response(

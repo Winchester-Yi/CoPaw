@@ -7,6 +7,8 @@ import Cards from "./Cards";
 import Spin from "./Spin";
 import Avatar from "./Avatar";
 import AvatarStyle from "./style/avatar";
+import { Checkbox } from "antd";
+import { useChatShareSelection } from "@/pages/Chat/chatShareContext";
 
 export interface BubbleRef {
   /**
@@ -51,6 +53,18 @@ const Bubble: React.FC<BubbleProps> = (props) => {
     }[role] || "start";
   const { getPrefixCls } = useProviderContext();
   const prefixCls = getPrefixCls("bubble");
+  const shareSelection = useChatShareSelection();
+  const messageId = typeof id === "string" ? id : "";
+  const turnId = shareSelection.active
+    ? shareSelection.turnByMessageId[messageId]
+    : undefined;
+  const shareSelectable = Boolean(
+    turnId && shareSelection.selectableTurnIds.includes(turnId),
+  );
+  const shareChecked = Boolean(
+    turnId && shareSelection.selectedTurnIds.includes(turnId),
+  );
+  const canRenderShareCheckbox = role === "user" || role === "assistant";
 
   const mergedCls = classnames(
     prefixCls,
@@ -129,6 +143,15 @@ const Bubble: React.FC<BubbleProps> = (props) => {
       <Style />
       <AvatarStyle />
       <div style={style} className={mergedCls} id={id} data-role={role}>
+        {turnId && canRenderShareCheckbox ? (
+          <Checkbox
+            className="swe-bubble-share-checkbox"
+            aria-label={`选择分享轮次 ${turnId}`}
+            checked={shareChecked}
+            disabled={!shareSelectable}
+            onChange={() => shareSelection.toggleTurn(turnId)}
+          />
+        ) : null}
         {fullContent}
       </div>
     </>

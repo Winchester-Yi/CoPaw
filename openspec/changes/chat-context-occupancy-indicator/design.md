@@ -8,17 +8,17 @@ Swe already tracks cumulative token usage for billing/analytics, but that data i
 
 **Goals:**
 
-- Provide a backend-computed persisted context occupancy estimate for a scoped agent session.
+- Provide a backend-computed persisted context occupancy estimate captured from the scoped session's real Main Agent runtime.
 - Use `running.max_input_length` as the denominator.
 - Estimate effective persisted context after completed compaction, excluding unsent composer draft text.
-- Cache estimates and invalidate them deterministically when session state or relevant configuration changes.
-- Render a quiet circular indicator left of the Console Chat submit button.
+- Persist categorized estimates atomically with the cleaned session state.
+- Render a quiet context percentage control in the Console Chat composer action row.
+- Let users click or focus the control to inspect system context, active tool definitions, online conversation messages, and remaining capacity.
 - Refresh only on stable chat events: page entry, session switch, history reload, model/running-config changes, and stream completion.
 - Keep the indicator non-disruptive during loading and generation.
 
 **Non-Goals:**
 
-- No click-through detail panel.
 - No continuous polling.
 - No inclusion of unsent composer draft text.
 - No submission blocking based on occupancy status.
@@ -28,26 +28,26 @@ Swe already tracks cumulative token usage for billing/analytics, but that data i
 
 ## Decisions
 
-### Decision: Add a dedicated Agent context occupancy endpoint
+### Decision: Add an ownership-gated Chat context usage endpoint
 
-Add a read-only endpoint such as `GET /agent/context-occupancy?session_id=...`.
+Add `GET /chats/{chat_id}/context-usage` beside the existing Chat detail API.
 
 Rationale:
 
-- The value is scoped by tenant/source/agent/session and belongs to Agent runtime state.
-- Mixing this into `/agent/running-config` would only provide the denominator.
+- The Chat record already binds tenant/source/agent/user ownership to the persisted session.
+- Existing Chat authorization intentionally returns 404 for cross-owner reads.
 - Mixing this into chat history would force the frontend to reload messages just to refresh an auxiliary indicator.
 
 Alternative considered: compute in the frontend from chat messages. Rejected because frontend messages do not include system prompt, compressed summary, fixed runtime context, or compaction state accurately enough.
 
-### Decision: Estimate with runtime-equivalent context inputs
+### Decision: Sample the real runtime instead of rebuilding it during GET
 
-The backend should resolve the current workspace and Agent config with the same tenant/source/agent request path used by existing Agent routes. It should load the requested session state, reconstruct or inspect effective memory state, include system prompt and completed compressed summary, apply the same tool-result compaction view where needed, and count with `get_swe_token_counter(agent_config)`.
+After the Main Agent has loaded history and assembled its prompt, skills, MCP tools, and dynamic tool groups, the backend counts the final cleaned runtime context before committing the ordinary session state. The GET endpoint only returns the latest committed numeric snapshot.
 
 Rationale:
 
-- This keeps the estimate aligned with the runtime budget and token-counting configuration.
-- Counting only visible chat messages would under-report fixed context and over-report already-compacted raw history.
+- This counts the same system context, active tool schemas, and online messages the next model call would receive.
+- GET remains read-only and never invokes hooks, MCP discovery, model construction, or compaction.
 
 Alternative considered: use tracing `total_input_tokens` from the previous model call. Rejected because it measures completed calls, not the current persisted state that will feed the next turn.
 
@@ -63,39 +63,33 @@ Rationale:
 
 Alternative considered: infer model context windows from provider/model ids. Rejected as brittle and likely wrong for custom providers.
 
-### Decision: Cache by scoped session state and config fingerprint
+### Decision: Persist the snapshot with session state
 
-Cache entries should be keyed by:
-
-- tenant/source scope identity;
-- agent id;
-- session id;
-- session state version signal, preferably session state file mtime or equivalent content version;
-- fingerprint of relevant running configuration, including `max_input_length`, `context_compact`, `tool_result_compact`, and token-counting settings.
+The final snapshot is written to a server-owned top-level session-state key in the same atomic mutation as the cleaned Agent state. It contains numeric counts, configured thresholds, sampling time, and schema version, but no prompt text, messages, or tool schemas.
 
 Rationale:
 
-- The user explicitly wants caching.
-- A deterministic key avoids TTL-only staleness.
-- Session saves and config changes naturally produce different keys.
+- Session persistence is the deterministic cache and version boundary.
+- The snapshot cannot drift from the Agent state committed in the same transaction.
+- A running turn may return the previous committed snapshot with `stale=true` rather than blocking on the active session lock.
 
-Alternative considered: fixed TTL cache. Rejected as the main strategy because it can keep stale context risk visible after a stream completes or config changes. A TTL may still be used as a secondary memory bound.
+Alternative considered: an in-process estimate cache computed by GET. Rejected because it would still require reconstructing request-specific runtime state and would not be authoritative across multiple instances.
 
-### Decision: Return display-ready status but keep raw values
+### Decision: Return categorized raw values and runtime-aligned status
 
-The endpoint should return raw `used_tokens`, `max_input_length`, `ratio`, `estimated`, and a display status. Status thresholds are `normal < 70%`, `warning >= 70%`, `danger >= 90%`, and `overflow >= 100%`.
+The endpoint returns availability, used/capacity/remaining values, ratio, estimation/staleness flags, configured context thresholds, and three categories: system context, active tool definitions, and online conversation messages. Status follows the configured governance, active-compaction, emergency, and overflow boundaries.
 
 Rationale:
 
-- Returning status centralizes threshold semantics for tests and future clients.
-- Returning raw values keeps the frontend simple without hiding exact estimate data.
+- Returning status and thresholds keeps frontend clients aligned with the active Agent configuration.
+- Returning category counts makes the estimate inspectable without exposing sensitive prompt or message content.
 - The threshold is visual only and must not affect submission.
 
 Alternative considered: frontend-only status calculation. Acceptable, but backend status makes API tests clearer and prevents multiple clients from drifting.
 
-### Decision: Render through composer action-row extension points
+### Decision: Render through the existing composer prefix extension
 
-For the standard bottom composer, inject the indicator via the existing sender action/prefix area or a narrow extension near the submit button. If existing `sender.prefix` only places controls on the left side of the action row, add a more precise `actions` render hook or adjacent action slot so the indicator can sit immediately left of submit without disturbing quick-menu placement.
+For the standard bottom composer, inject the control through the existing `sender.prefix` action-row area. The new-chat welcome composer reuses its existing `prefixItems` extension and shows an unavailable state until a real Chat snapshot exists.
 
 For the welcome composer, add a narrow prop or equivalent action-row extension so the same indicator can be placed next to its submit button.
 
@@ -107,9 +101,9 @@ Rationale:
 
 Alternative considered: place the indicator in the chat header. Rejected because the user asked for placement beside the submit button and because the metric is submit-context related.
 
-### Decision: Keep refreshes quiet
+### Decision: Keep refreshes quiet and details explicit
 
-The frontend keeps the last rendered value during refresh, shows no spinner or updating label, and only shows a grey empty ring when no value has ever been loaded or when the current session has no usable value. During generation, the previous value remains visible and a single refresh happens after completion.
+The frontend keeps the last rendered value during refresh, shows no global toast, and uses an unavailable placeholder when no snapshot exists. The trigger always exposes a compact percentage state; click or keyboard focus opens a popover with a progress bar, approximate totals, remaining capacity, three categories, and a non-color-only status label.
 
 Rationale:
 
@@ -123,18 +117,16 @@ Alternative considered: show a spinner during refresh. Rejected as visually nois
 
 - [Risk] Token estimate may differ from provider-side accounting. → Mitigation: mark tooltip copy as approximate and use the configured runtime token counter.
 - [Risk] Counting effective context may accidentally mutate memory if it reuses compaction helpers directly. → Mitigation: implement estimation as read-only inspection or clone state before applying display-time compaction views.
-- [Risk] Cache key may miss a relevant config field. → Mitigation: fingerprint the full relevant running subtrees instead of only `max_input_length`.
-- [Risk] Multi-instance deployments may have per-process in-memory caches. → Mitigation: cache is an optimization only; deterministic invalidation keys keep correctness within each process and stale cross-process values are bounded by session/config version keys.
+- [Risk] Snapshot capture fails during cleanup. → Mitigation: never block session persistence; preserve the previous committed snapshot and mark it stale until a later successful turn.
 - [Risk] The exact "immediately left of submit" slot may require a small composer API change. → Mitigation: prefer the narrowest action-row extension and add component tests to lock placement.
-- [Risk] Estimation could be expensive for very large sessions. → Mitigation: cache results and avoid refresh on typing or polling.
+- [Risk] Estimation could be expensive for very large sessions. → Mitigation: sample once during the existing save path and avoid refresh on typing or polling.
 
 ## Migration Plan
 
-1. Add backend response model and endpoint for context occupancy.
-2. Implement read-only effective context estimation and status classification.
-3. Add scoped cache with deterministic invalidation key and bounded memory behavior.
+1. Add runtime snapshot model, categorized estimator, and atomic persistence.
+2. Add ownership-safe read-only Chat endpoint and stale-state classification.
 4. Add frontend API client/types.
-5. Add circular indicator component with tooltip and unavailable state.
+5. Add compact percentage control with click/focus detail popover and unavailable state.
 6. Wire indicator into standard and welcome Console Chat composers immediately left of submit.
 7. Trigger refresh on page entry, session switch, history reload, model/running-config changes, and stream completion.
 8. Add backend and frontend tests.
@@ -142,4 +134,4 @@ Alternative considered: show a spinner during refresh. Rejected as visually nois
 
 ## Open Questions
 
-None. The grilling session resolved denominator, numerator scope, refresh timing, cache requirement, loading behavior, and tooltip behavior.
+None. The grilling session resolved denominator, categorized numerator scope, real-runtime sampling, atomic snapshot persistence, refresh timing, loading behavior, and popover behavior.

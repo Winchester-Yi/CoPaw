@@ -15,6 +15,7 @@ from ..crons.auth_state import (
     get_auth_snapshot,
     save_user_info_from_access_token,
     append_user_profile_from_cookie,
+    sync_identity_envs_from_cookie,
 )
 from ..auth import (
     authenticate,
@@ -161,13 +162,24 @@ async def configure_cron_auth(
         tenant_id=workspace.tenant_id,
         workspace_dir=workspace.workspace_dir,
     )
+
+    # 追加用户身份信息到PROFILE.md
+    append_user_profile_from_cookie(cookie_header, workspace.workspace_dir)
+
+    try:
+        env_synced_keys = sync_identity_envs_from_cookie(
+            cookie_header,
+            tenant_id=workspace.tenant_id,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to sync identity envs: {exc}",
+        ) from exc
     snapshot = get_auth_snapshot(
         tenant_id=workspace.tenant_id,
         workspace_dir=workspace.workspace_dir,
     )
-
-    # 追加用户身份信息到PROFILE.md
-    append_user_profile_from_cookie(cookie_header, workspace.workspace_dir)
 
     return {
         "configured": snapshot.configured,
@@ -175,6 +187,7 @@ async def configure_cron_auth(
         "user_info_expires_at": snapshot.user_info_expires_at,
         "auth_token_expires_at": snapshot.auth_token_expires_at,
         "has_auth_token": snapshot.has_auth_token,
+        "env_synced_keys": env_synced_keys,
     }
 
 

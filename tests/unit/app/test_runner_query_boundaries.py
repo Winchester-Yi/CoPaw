@@ -17,6 +17,8 @@ from swe.agents.hook_runtime.models import (
     HookEventName,
     HookMatcherGroupConfig,
     CommandHookHandlerConfig,
+    HookOverlayEntry,
+    LoadedSkillHookSource,
     HookSessionOverlay,
     MergedHookResult,
 )
@@ -27,6 +29,11 @@ from swe.app.runner.runner import (
     _QueryRuntimeInputs,
 )
 from swe.app.runner.query_contracts import _RuntimeStartResult
+from swe.app.runner.query_runtime import _drop_invalid_workspace_skill_hooks
+from swe.agents.skill_runtime_snapshot import (
+    ManifestStat,
+    WorkspaceSkillSnapshot,
+)
 
 
 def _request(**overrides):
@@ -51,6 +58,126 @@ def _agent_config() -> SimpleNamespace:
 
 def _blocked_msg(text: str) -> Msg:
     return Msg(name="Friday", role="assistant", content=text)
+
+
+def test_final_snapshot_validation_removes_invalid_skill_hooks() -> None:
+    source = LoadedSkillHookSource(
+        source_id="skill:stale",
+        skill_name="stale",
+        skill_root="/workspace/skills/stale",
+        source_path="/workspace/skills/stale/hooks/hooks.json",
+        hook_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.POST_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        id="skill:stale:post",
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="skill:stale:handler",
+                                command="echo ok",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+    overlay = HookSessionOverlay(
+        loaded_skill_sources=[source],
+        entries=[
+            HookOverlayEntry(hook_id="skill:stale:handler"),
+            HookOverlayEntry(hook_id="tenant:always", enabled=True),
+        ],
+    )
+
+    filtered = _drop_invalid_workspace_skill_hooks(overlay, {"stale"})
+
+    assert filtered.loaded_skill_sources == []
+    assert [entry.hook_id for entry in filtered.entries] == ["tenant:always"]
+
+
+@pytest.mark.asyncio
+async def test_final_snapshot_validation_failure_keeps_query_without_skills(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A transient final-check error must not abort an ordinary query."""
+    from swe.app.runner import query_runtime
+
+    snapshot = WorkspaceSkillSnapshot(
+        workspace_dir=tmp_path,
+        generation=1,
+        manifest_stat=ManifestStat(1, 1, 1),
+        skills={"stale": SimpleNamespace()},
+    )
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="",
+        selected_context_directives=["use stale"],
+        selected_skill_directives=[
+            SimpleNamespace(name="stale", render=lambda: "use stale"),
+        ],
+        auth_token=None,
+        passthrough_headers={},
+        workspace_skill_snapshot=snapshot,
+    )
+
+    async def fail_validation(_snapshot):
+        raise PermissionError("workspace temporarily unreadable")
+
+    monkeypatch.setattr(
+        "swe.agents.skill_runtime_snapshot.validate_workspace_skill_snapshot",
+        fail_validation,
+    )
+    captured: dict[str, Any] = {}
+
+    class _Agent:
+        async def register_mcp_clients(self):
+            return None
+
+        def set_console_output_enabled(self, *, enabled):
+            del enabled
+
+    owner = SimpleNamespace(
+        workspace_dir=tmp_path,
+        tenant_id=None,
+        agent_id="test-agent",
+    )
+
+    def create_agent(**kwargs):
+        captured.update(kwargs)
+        return _Agent()
+
+    owner._create_agent_for_query = create_agent
+    owner._attach_session_skill_detector = lambda **_kwargs: None
+    runtime = await query_runtime.finalize_query_runtime(
+        owner,
+        request=_request(),
+        query="hello",
+        msgs=[],
+        preflight=_QueryPreflight(),
+        inputs=inputs,
+        resources=SimpleNamespace(
+            chat=None,
+            turn_id="turn-1",
+            env_context="",
+        ),
+        mcp_clients=[],
+        get_last_user_text=lambda _msgs: "",
+        debug_log=lambda *_args: None,
+    )
+
+    assert runtime.agent is not None
+    assert captured["workspace_skill_snapshot"].skills == {}
+    assert inputs.selected_skill_directives == []
+    assert inputs.selected_context_directives == []
 
 
 @pytest.mark.asyncio
@@ -170,7 +297,9 @@ async def test_query_attempt_and_turn_lifecycle_facades_delegate(
 
     assert [
         (msg.get_text_content(), last) for msg, last in attempt_events
-    ] == [("attempt facade", True)]
+    ] == [
+        ("attempt facade", True),
+    ]
     assert [(msg.get_text_content(), last) for msg, last in turn_events] == [
         ("turn facade", True),
     ]

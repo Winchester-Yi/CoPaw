@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import httpx
@@ -45,7 +46,11 @@ async def initialize_scenario_snapshot(
         source_id,
         scenario_id,
     )
-    skill_names = _resolve_local_skill_names(workspace_dir, bindings)
+    skill_names = await asyncio.to_thread(
+        _resolve_local_skill_names,
+        workspace_dir,
+        bindings,
+    )
     resources: list[dict[str, Any]] = [
         _resource_snapshot(binding, skill_names, agent_config)
         for binding in bindings

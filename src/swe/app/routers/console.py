@@ -1466,6 +1466,7 @@ class _SuppressionContext:
         "proposal_id",
         "token",
         "entry_text",
+        "chat_id",
     )
 
     def __init__(
@@ -1476,12 +1477,14 @@ class _SuppressionContext:
         proposal_id: str,
         token: str,
         entry_text: str,
+        chat_id: str | None = None,
     ) -> None:
         self.suppress_implicit = suppress_implicit
         self.service = service
         self.proposal_id = proposal_id
         self.token = token
         self.entry_text = entry_text
+        self.chat_id = chat_id
 
 
 def _inject_request_metadata(
@@ -1791,6 +1794,8 @@ async def _try_wplus_entry_intercept(
         suppress_entry=suppress_implicit,
     )
     if not classification.should_offer:
+        if chat is not None:
+            native_payload["meta"]["chat_id"] = chat.id
         return None, (
             _SuppressionContext(
                 suppress_implicit=suppress_implicit,
@@ -1798,6 +1803,7 @@ async def _try_wplus_entry_intercept(
                 proposal_id=suppression_proposal_id,
                 token=suppression_token,
                 entry_text=entry_text,
+                chat_id=chat.id if chat is not None else None,
             )
             if suppress_implicit
             else None
@@ -1864,7 +1870,7 @@ async def _try_wplus_entry_intercept(
             "chat_id": chat.id,
             "session_id": chat.session_id,
             "title": "进入 W+ SOP 工作台",
-            "message": "CoPaw 将替你完成逐环节澄清、系统预跑和反馈重跑。",
+            "message": "Claw 将替你完成逐环节澄清、系统预跑和反馈重跑。",
         }
         yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -2342,6 +2348,30 @@ async def post_console_chat_stop(
     }
 
 
+def _save_console_upload_sync(
+    data: bytes,
+    *,
+    media_dir: Path,
+    workspace_dir: Path | None,
+    stored_name: str,
+) -> Path:
+    """Persist an uploaded attachment outside the event-loop thread."""
+    media_dir.mkdir(parents=True, exist_ok=True)
+    path = (media_dir / stored_name).resolve()
+    path.write_bytes(data)
+    if workspace_dir is None:
+        return path
+
+    workspace_media_dir = (workspace_dir / "media").resolve()
+    workspace_media_dir.relative_to(workspace_dir)
+    if workspace_media_dir == media_dir.resolve():
+        return path
+    workspace_media_dir.mkdir(parents=True, exist_ok=True)
+    context_path = workspace_media_dir / stored_name
+    context_path.write_bytes(data)
+    return context_path
+
+
 @router.post("/upload", response_model=dict, summary="Upload file for chat")
 async def post_console_upload(
     request: Request,
@@ -2363,7 +2393,6 @@ async def post_console_upload(
             detail="Channel Console not found",
         )
     media_dir = console_channel.media_dir
-    media_dir.mkdir(parents=True, exist_ok=True)
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -2373,22 +2402,23 @@ async def post_console_upload(
         )
     safe_name = _safe_filename(file.filename or "file")
     stored_name = f"{uuid.uuid4().hex}_{safe_name}"
-
-    path = (media_dir / stored_name).resolve()
-    path.write_bytes(data)
-    context_path = path
     workspace_dir_value = getattr(workspace, "workspace_dir", None)
-    if workspace_dir_value:
-        try:
-            workspace_dir = Path(workspace_dir_value).resolve()
-            workspace_media_dir = (workspace_dir / "media").resolve()
-            workspace_media_dir.relative_to(workspace_dir)
-            if workspace_media_dir != media_dir.resolve():
-                workspace_media_dir.mkdir(parents=True, exist_ok=True)
-                context_path = workspace_media_dir / stored_name
-                context_path.write_bytes(data)
-        except (OSError, ValueError):
-            context_path = path
+    workspace_dir = (
+        Path(workspace_dir_value).resolve() if workspace_dir_value else None
+    )
+    try:
+        context_path = await run_file_manager_mutation(
+            _save_console_upload_sync,
+            data,
+            media_dir=media_dir,
+            workspace_dir=workspace_dir,
+            stored_name=stored_name,
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist uploaded file",
+        ) from exc
     return {
         "url": context_path,
         "file_name": safe_name,

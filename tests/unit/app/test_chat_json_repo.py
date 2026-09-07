@@ -156,6 +156,31 @@ async def test_chat_repo_load_uses_runtime_state_worker(
 
 
 @pytest.mark.asyncio
+async def test_chat_repo_session_lookup_uses_indexed_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    older = ChatSpec(session_id="session-1", user_id="u1", channel="console")
+    newer = ChatSpec(session_id="session-1", user_id="u2", channel="console")
+    newer.updated_at = older.updated_at.replace(
+        microsecond=older.updated_at.microsecond + 1,
+    )
+    _write_chats(path, [older, newer])
+    repo = JsonChatRepository(path)
+    await repo.load()
+
+    async def fail_filter(*args, **kwargs):
+        raise AssertionError("indexed lookup must not scan via filter_chats")
+
+    monkeypatch.setattr(repo, "filter_chats", fail_filter)
+
+    assert (
+        await repo.get_chat_id_by_session("session-1", "console") == newer.id
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_repo_save_uses_runtime_state_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -270,6 +295,72 @@ async def test_chat_repo_get_chat_reuses_valid_snapshot(
     assert loaded is not None
     assert loaded.session_id == "s1"
     assert calls == ["_file_signature", "_copy_chat_sync"]
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_snapshot_hit_does_not_read_chat_file_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[chat]))
+
+    original_read_bytes = Path.read_bytes
+
+    def fail_read_bytes(self: Path) -> bytes:
+        if self == path:
+            raise AssertionError("snapshot hit must not read file contents")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    loaded = await repo.get_chat(chat.id)
+
+    assert loaded is not None
+    assert loaded.id == chat.id
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_filter_snapshot_hit_does_not_read_chat_file_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[chat]))
+    original_read_bytes = Path.read_bytes
+
+    def fail_read_bytes(self: Path) -> bytes:
+        if self == path:
+            raise AssertionError("snapshot hit must not read file contents")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+    loaded = await repo.filter_chats(user_id="u1", channel="console")
+    assert [item.id for item in loaded] == [chat.id]
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_session_snapshot_hit_does_not_read_chat_file_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "chats.json"
+    chat = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    repo = JsonChatRepository(path)
+    await repo.save(ChatsFile(version=1, chats=[chat]))
+    original_read_bytes = Path.read_bytes
+
+    def fail_read_bytes(self: Path) -> bytes:
+        if self == path:
+            raise AssertionError("snapshot hit must not read file contents")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+    assert await repo.get_chat_id_by_session("s1", "console") == chat.id
 
 
 @pytest.mark.asyncio
@@ -436,7 +527,7 @@ async def test_chat_repo_get_chat_invalidates_snapshot_after_same_size_rewrite_w
 
 
 @pytest.mark.asyncio
-async def test_chat_repo_get_chat_reload_when_signature_read_races_with_rewrite(
+async def test_chat_repo_load_retries_when_read_races_with_rewrite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -469,6 +560,7 @@ async def test_chat_repo_get_chat_reload_when_signature_read_races_with_rewrite(
 
     monkeypatch.setattr(Path, "read_bytes", swapping_read_bytes)
 
+    await repo.load()
     assert await repo.get_chat(old_chat.id) is None
     loaded_new = await repo.get_chat(new_chat.id)
 

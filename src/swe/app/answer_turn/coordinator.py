@@ -195,6 +195,21 @@ class AnswerTurnCoordinator:
                 return None
             return state.status
 
+    async def statuses(
+        self,
+        chat_ids: list[str],
+    ) -> dict[str, TurnStatus | None]:
+        """Return current statuses for several chats in one read operation."""
+        async with self._global_lock:
+            return {
+                chat_id: (
+                    state.status
+                    if (state := self._turns.get(chat_id))
+                    else None
+                )
+                for chat_id in chat_ids
+            }
+
     async def current_identity(
         self,
         chat_id: str,

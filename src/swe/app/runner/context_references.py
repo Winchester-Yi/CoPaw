@@ -144,6 +144,7 @@ def _skill_directives_by_name(
     workspace_dir: Path,
     channel: str,
     normalized: Iterable[tuple[ContextReferenceType, dict[str, object]]],
+    snapshot: Any | None = None,
 ) -> dict[str, SkillUseDirective]:
     skill_names = [
         raw["name"]
@@ -156,6 +157,7 @@ def _skill_directives_by_name(
         workspace_dir=workspace_dir,
         channel=channel,
         selected_skill_names=skill_names,
+        snapshot=snapshot,
     )
     return {directive.name: directive for directive in skill_directives}
 
@@ -224,6 +226,7 @@ async def build_context_reference_directives(
     channel: str,
     agent_config: Any,
     references: Iterable[object],
+    snapshot: Any | None = None,
 ) -> list[ContextReferenceDirective]:
     """Revalidate structured client references and build trusted directives."""
     normalized = _normalize_context_references(references)
@@ -231,6 +234,7 @@ async def build_context_reference_directives(
         workspace_dir=workspace_dir,
         channel=channel,
         normalized=normalized,
+        snapshot=snapshot,
     )
     mcp_by_id = await _requested_mcp_tools_by_id(
         normalized=normalized,

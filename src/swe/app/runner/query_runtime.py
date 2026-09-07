@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from types import MappingProxyType
 from typing import Any
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -29,6 +31,67 @@ from .query_contracts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _snapshot_stat_is_current(snapshot: Any) -> bool:
+    """Check snapshot freshness using metadata before content validation."""
+    from ...agents.skill_runtime_snapshot import ManifestStat
+    from ...agents.skills_manager import (
+        get_skill_freshness_token,
+        get_workspace_skill_manifest_path,
+    )
+
+    try:
+        value = get_workspace_skill_manifest_path(
+            snapshot.workspace_dir,
+        ).stat()
+    except OSError:
+        return False
+    if snapshot.manifest_stat != ManifestStat(
+        value.st_mtime_ns,
+        value.st_size,
+        value.st_ino,
+    ):
+        return False
+    return all(
+        get_skill_freshness_token(skill.directory) == skill.freshness_token
+        for skill in snapshot.skills.values()
+    )
+
+
+def _drop_invalid_workspace_skill_hooks(
+    overlay: HookSessionOverlay,
+    removed_skill_names: set[str],
+) -> HookSessionOverlay:
+    """Remove hooks loaded for skills rejected by final snapshot validation.
+
+    Selected skill hooks are loaded before Agent construction.  A skill can
+    change in the small window before the final snapshot check, so retaining
+    its already-loaded hook source would let an invalidated skill continue to
+    affect this query.
+    """
+    if not removed_skill_names:
+        return overlay
+
+    loaded_sources = [
+        source
+        for source in overlay.loaded_skill_sources
+        if source.skill_name not in removed_skill_names
+    ]
+    valid_handler_ids: set[str] = set()
+    for source in loaded_sources:
+        valid_handler_ids.update(source.handler_ids())
+    entries = [
+        entry
+        for entry in overlay.entries
+        if not entry.hook_id.startswith("skill:")
+        or entry.hook_id in valid_handler_ids
+    ]
+    return HookSessionOverlay(
+        loaded_skill_sources=loaded_sources,
+        entries=entries,
+        once_executed=dict(overlay.once_executed),
+    )
 
 
 def build_runtime_mcp_clients(
@@ -90,6 +153,7 @@ async def select_runtime_context_directives(
         channel=inputs.channel,
         agent_config=inputs.agent_config,
         references=request_context_references(request),
+        snapshot=inputs.workspace_skill_snapshot,
     )
     reference_skill_names = {
         directive.name
@@ -107,10 +171,12 @@ async def select_runtime_context_directives(
             ]
             if name not in reference_skill_names
         ],
+        snapshot=inputs.workspace_skill_snapshot,
     )
     if scenario_snapshot is not None and chat is not None:
         selected_directives.extend(
-            scenario_snapshot_skill_directives(
+            await asyncio.to_thread(
+                scenario_snapshot_skill_directives,
                 scenario_snapshot,
                 workspace_dir=workspace_dir,
                 chat_id=chat.id,
@@ -125,6 +191,21 @@ async def select_runtime_context_directives(
     inputs.selected_context_directives = [
         directive.render() for directive in all_directives
     ]
+    logger.debug(
+        "runtime_skill_snapshot_generation=%d selected_skill_count=%d "
+        "reference_skill_count=%d",
+        getattr(inputs.workspace_skill_snapshot, "generation", 0),
+        sum(
+            1
+            for directive in selected_directives
+            if isinstance(directive, SkillUseDirective)
+        ),
+        sum(
+            1
+            for directive in reference_directives
+            if isinstance(directive, SkillUseDirective)
+        ),
+    )
     return scenario_snapshot
 
 
@@ -158,6 +239,33 @@ async def complete_runtime_activation(
         env_context=env_context,
     )
     if block_response is None:
+        workspace_skill_snapshot = inputs.workspace_skill_snapshot
+        if workspace_skill_snapshot is not None:
+            from ...agents.skill_runtime_snapshot import (
+                validate_workspace_skill_snapshot,
+            )
+
+            validated_snapshot = await validate_workspace_skill_snapshot(
+                workspace_skill_snapshot,
+            )
+            valid_skill_names = set(validated_snapshot.skills)
+            removed_directive_renders = {
+                directive.render()
+                for directive in inputs.selected_skill_directives
+                if getattr(directive, "name", None) not in valid_skill_names
+            }
+            if removed_directive_renders:
+                inputs.selected_skill_directives = [
+                    directive
+                    for directive in inputs.selected_skill_directives
+                    if getattr(directive, "name", None) in valid_skill_names
+                ]
+                inputs.selected_context_directives = [
+                    rendered
+                    for rendered in inputs.selected_context_directives
+                    if rendered not in removed_directive_renders
+                ]
+            inputs.workspace_skill_snapshot = validated_snapshot
         inputs.hook_overlay = await load_selected_hooks(inputs=inputs)
         return resources, None
     return resources, _RuntimeStartResult(
@@ -180,7 +288,22 @@ async def load_selected_skill_hooks(
     state: HookSessionState = inputs.hook_overlay
     for directive in inputs.selected_skill_directives:
         try:
-            state = load_skill_hooks_for_session(
+            content_signature = getattr(directive, "content_signature", None)
+            if content_signature:
+                from ...agents.skills_manager import _build_signature
+
+                current_signature = await asyncio.to_thread(
+                    _build_signature,
+                    directive.path.parent,
+                )
+                if current_signature != content_signature:
+                    logger.warning(
+                        "Skipping hooks for changed skill '%s'",
+                        directive.name,
+                    )
+                    continue
+            state = await asyncio.to_thread(
+                load_skill_hooks_for_session,
                 skill_name=directive.name,
                 skill_root=directive.path.parent,
                 workspace_dir=workspace_dir,
@@ -255,6 +378,36 @@ async def build_query_runtime_inputs(
             tenant_id=owner.tenant_id,
         )
     )
+    workspace_skill_snapshot = None
+    if getattr(agent_config, "enable_workspace_skills", True):
+        from ...agents.skill_runtime_snapshot import (
+            get_workspace_skill_snapshot_async,
+        )
+
+        try:
+            workspace_skill_snapshot = (
+                await get_workspace_skill_snapshot_async(
+                    owner.workspace_dir or WORKING_DIR,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A failed reconcile must not prevent ordinary queries from
+            # running; the Agent receives no workspace skills for this turn.
+            logger.warning(
+                "Workspace skill snapshot unavailable; loading no workspace skills: %s",
+                exc,
+            )
+            from ...agents.skill_runtime_snapshot import (
+                ManifestStat,
+                WorkspaceSkillSnapshot,
+            )
+
+            workspace_skill_snapshot = WorkspaceSkillSnapshot(
+                workspace_dir=(owner.workspace_dir or WORKING_DIR),
+                generation=0,
+                manifest_stat=ManifestStat(0, 0, 0),
+                skills=MappingProxyType({}),
+            )
     passthrough_headers = dict[str, str](
         current_passthrough_headers() or {},
     )
@@ -287,6 +440,7 @@ async def build_query_runtime_inputs(
         ),
         selected_context_directives=[],
         selected_skill_directives=[],
+        workspace_skill_snapshot=workspace_skill_snapshot,
         auth_token=getattr(request, "auth_token", None),
         passthrough_headers=passthrough_headers,
         session_execution=session_execution,
@@ -308,6 +462,69 @@ async def finalize_query_runtime(
 ) -> _QueryRuntime:
     """Create and initialize the Agent for one assembled query runtime."""
     agent_build_started_at = time.perf_counter()
+    # Close the small admission window between query preparation and Agent
+    # registration. This recheck runs off-loop and keeps registration bound
+    # to content that still matches the launch snapshot.
+    workspace_skill_snapshot = inputs.workspace_skill_snapshot
+    if workspace_skill_snapshot is not None:
+        from ...agents.skill_runtime_snapshot import (
+            ManifestStat,
+            WorkspaceSkillSnapshot,
+            validate_workspace_skill_snapshot,
+        )
+
+        try:
+            if not await asyncio.to_thread(
+                _snapshot_stat_is_current,
+                workspace_skill_snapshot,
+            ):
+                workspace_skill_snapshot = (
+                    await validate_workspace_skill_snapshot(
+                        workspace_skill_snapshot,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A final freshness check can fail because the workspace is being
+            # replaced or its permissions change.  Keep the ordinary query
+            # alive, but fail closed for every Workspace Skill we cannot
+            # confirm.  This mirrors admission-time snapshot failure policy.
+            logger.warning(
+                "Final Workspace Skill snapshot validation failed; "
+                "continuing without Workspace Skills: %s",
+                exc,
+            )
+            workspace_skill_snapshot = WorkspaceSkillSnapshot(
+                workspace_dir=workspace_skill_snapshot.workspace_dir,
+                generation=0,
+                manifest_stat=ManifestStat(0, 0, 0),
+                skills=MappingProxyType({}),
+            )
+        valid_skill_names = set(workspace_skill_snapshot.skills)
+        removed_skill_names = {
+            getattr(directive, "name", "")
+            for directive in inputs.selected_skill_directives
+            if getattr(directive, "name", None) not in valid_skill_names
+        }
+        removed_directive_renders = {
+            directive.render()
+            for directive in inputs.selected_skill_directives
+            if getattr(directive, "name", None) in removed_skill_names
+        }
+        if removed_directive_renders:
+            inputs.selected_skill_directives = [
+                directive
+                for directive in inputs.selected_skill_directives
+                if getattr(directive, "name", None) in valid_skill_names
+            ]
+            inputs.selected_context_directives = [
+                rendered
+                for rendered in inputs.selected_context_directives
+                if rendered not in removed_directive_renders
+            ]
+            inputs.hook_overlay = _drop_invalid_workspace_skill_hooks(
+                inputs.hook_overlay,
+                removed_skill_names,
+            )
     agent = owner._create_agent_for_query(
         agent_config=inputs.agent_config,
         env_context=resources.env_context,
@@ -322,6 +539,7 @@ async def finalize_query_runtime(
         auth_token=inputs.auth_token,
         approved_tool_call=preflight.approved_tool_call,
         current_user_text=query or get_last_user_text(msgs) or "",
+        workspace_skill_snapshot=workspace_skill_snapshot,
     )
     await agent.register_mcp_clients()
     agent.set_console_output_enabled(enabled=False)

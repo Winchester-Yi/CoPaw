@@ -28,6 +28,7 @@ from ..models.cron import (
     CronOverviewStatsResponse,
     CronDispatchBatchDetailResponse,
     CronDispatchBatchesResponse,
+    CronDispatchDetailQueryParams,
     CronDispatchWorkersResponse,
     CronBranchRankingResponse,
     CronBranchTaskRankingResponse,
@@ -193,6 +194,23 @@ async def get_dispatch_batch_detail(
         le=500,
         description="事件数量",
     ),
+    intent_page: int = Query(default=1, ge=1, description="Intent 页码"),
+    event_page: int = Query(default=1, ge=1, description="事件页码"),
+    intent_query: str | None = Query(
+        default=None,
+        max_length=256,
+        description="Intent 全局筛选",
+    ),
+    intent_role: str | None = Query(
+        default=None,
+        max_length=16,
+        description="Intent 角色",
+    ),
+    intent_status: str | None = Query(
+        default=None,
+        max_length=16,
+        description="Intent 状态",
+    ),
     service: QueryService = Depends(get_query_service),
 ) -> CronDispatchBatchDetailResponse:
     """查询单个批调度 batch 的 intent 和事件明细。"""
@@ -200,8 +218,15 @@ async def get_dispatch_batch_detail(
     detail = await service.get_dispatch_batch_detail(
         source_id=actual_source_id,
         batch_id=batch_id,
-        intent_limit=intent_limit,
-        event_limit=event_limit,
+        params=CronDispatchDetailQueryParams(
+            intent_page=intent_page,
+            intent_limit=intent_limit,
+            intent_query=intent_query,
+            intent_role=intent_role,
+            intent_status=intent_status,
+            event_page=event_page,
+            event_limit=event_limit,
+        ),
     )
     if not detail:
         raise HTTPException(status_code=404, detail="Batch not found")
@@ -674,6 +699,40 @@ async def export_data(
         )
     except Exception as e:
         logger.error("Failed to export data: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/export-detail")
+async def export_skill_usage_detail(
+    request: Request,
+    start_date: str | None = Query(default=None, description="开始日期"),
+    end_date: str | None = Query(default=None, description="结束日期"),
+    bbk_ids: str | None = Query(default=None, description="分行号筛选"),
+    query_service: QueryService = Depends(get_query_service),
+    export_service: ExportService = Depends(get_export_service),
+) -> StreamingResponse:
+    """Export overview execution/customer detail rows to Excel."""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        rows = await query_service.get_skill_usage_details_for_export(
+            start_date=start_date,
+            end_date=end_date,
+            bbk_ids=bbk_ids,
+            source_id=actual_source_id,
+        )
+        excel_bytes = export_service.export_skill_usage_details(rows)
+        filename = quote("定时任务客户经理技能明细.xlsx")
+        return StreamingResponse(
+            BytesIO(excel_bytes),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            },
+        )
+    except Exception as e:
+        logger.error("Failed to export cron overview detail: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

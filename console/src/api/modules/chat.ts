@@ -12,11 +12,15 @@ import type {
   ChatHistory,
   ChatArchivePage,
   ChatDeleteResponse,
+  ChatShareCreateResponse,
+  ChatShareSnapshot,
+  ChatShareOptions,
   Session,
   SubAgentRunCancelResponse,
   SubAgentRunSnapshot,
   GoalSnapshot,
 } from "../types";
+import type { ContextUsageSnapshot } from "../types/contextUsage";
 
 /** Response from POST /console/upload. url = filename only; agent_id from header. */
 export interface ChatUploadResponse {
@@ -265,6 +269,25 @@ export const chatApi = {
 
   getChat: (chatId: string) =>
     request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
+
+  createChatShare: (chatId: string, turnIds: string[]) =>
+    request<ChatShareCreateResponse>(
+      `/chats/${encodeURIComponent(chatId)}/share`,
+      { method: "POST", body: JSON.stringify({ turn_ids: turnIds }) },
+    ),
+
+  getChatShareOptions: (chatId: string) =>
+    request<ChatShareOptions>(
+      `/chats/${encodeURIComponent(chatId)}/share-options`,
+    ),
+
+  getChatShare: (token: string) =>
+    request<ChatShareSnapshot>(`/chat-shares/${encodeURIComponent(token)}`),
+
+  getContextUsage: (chatId: string) =>
+    request<ContextUsageSnapshot>(
+      `/chats/${encodeURIComponent(chatId)}/context-usage`,
+    ),
 
   getChatHistory: (chatId: string, before?: string | null, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });

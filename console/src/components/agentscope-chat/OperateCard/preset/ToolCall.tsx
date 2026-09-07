@@ -4,7 +4,9 @@ import {
   SparkCopyLine,
   SparkErrorCircleFill,
   SparkLoadingLine,
+  SparkLockFill,
   SparkStopCircleLine,
+  SparkTimeLine,
   SparkToolLine,
   SparkTrueLine,
   SparkWarningCircleFill,
@@ -267,6 +269,34 @@ export default function (props: IToolCallProps) {
           >
             <SparkWarningCircleFill />
             已拒绝
+          </span>
+        );
+        break;
+      case "pending":
+        statusBadge = (
+          <span
+            style={{
+              ...badgeStyle,
+              color: "#d48806",
+              border: "1px solid #d48806",
+            }}
+          >
+            <SparkTimeLine />
+            待审批
+          </span>
+        );
+        break;
+      case "blocked":
+        statusBadge = (
+          <span
+            style={{
+              ...badgeStyle,
+              color: "#fa8c16",
+              border: "1px solid #fa8c16",
+            }}
+          >
+            <SparkLockFill />
+            已拦截
           </span>
         );
         break;

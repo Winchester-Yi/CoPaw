@@ -15,6 +15,7 @@ from ...agents.skills_manager import (
     resolve_effective_skill_dir,
     resolve_effective_skills,
 )
+from ...agents.skill_runtime_snapshot import WorkspaceSkillSnapshot
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class SkillUseDirective:
     name: str
     description: str
     path: Path
+    content_signature: str | None = None
 
     def render(self) -> str:
         return f"""<SKILL-USE>
@@ -44,9 +46,19 @@ def build_skill_use_directives(
     workspace_dir: Path,
     channel: str,
     selected_skill_names: Iterable[object],
+    snapshot: WorkspaceSkillSnapshot | None = None,
 ) -> list[SkillUseDirective]:
     """Resolve selected names to readable effective skills."""
-    effective_names = set(resolve_effective_skills(workspace_dir, channel))
+    if snapshot is None:
+        effective_names = set(resolve_effective_skills(workspace_dir, channel))
+    else:
+        effective_names = set(
+            resolve_effective_skills(
+                workspace_dir,
+                channel,
+                _snapshot=snapshot,
+            ),
+        )
     directives: list[SkillUseDirective] = []
     seen: set[str] = set()
 
@@ -58,6 +70,21 @@ def build_skill_use_directives(
             continue
         seen.add(name)
         if name not in effective_names:
+            continue
+        if snapshot is not None:
+            runtime_skill = snapshot.skills.get(name)
+            if runtime_skill is None:
+                continue
+            directives.append(
+                SkillUseDirective(
+                    name=name,
+                    description=str(
+                        runtime_skill.metadata.get("description") or "",
+                    ),
+                    path=runtime_skill.directory / "SKILL.md",
+                    content_signature=runtime_skill.content_signature,
+                ),
+            )
             continue
         skill_dir = resolve_effective_skill_dir(workspace_dir, name)
         skill_path = skill_dir / "SKILL.md" if skill_dir is not None else None

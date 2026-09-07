@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 import json
@@ -28,6 +29,7 @@ class _DispatchStore:
         self.rows = list(rows)
         self.claims: list[dict[str, Any]] = []
         self.dispatched: list[dict[str, Any]] = []
+        self.unknown_dispatches: list[dict[str, Any]] = []
         self.completed: list[dict[str, Any]] = []
         self.failed: list[dict[str, Any]] = []
         self.child_batches: list[dict[str, Any]] = []
@@ -37,6 +39,8 @@ class _DispatchStore:
         self.parent_intents: list[dict[str, Any]] = []
         self.capacity: list[dict[str, Any]] = []
         self.stale_recoveries: list[dict[str, Any]] = []
+        self.execution_reconciliations: list[dict[str, Any]] = []
+        self.execution_receipts: list[dict[str, Any]] = []
         self.scope_leases: list[dict[str, Any]] = []
         self.scope_lease_allowed = True
         self.recovered_running_count: int | None = None
@@ -61,6 +65,7 @@ class _DispatchStore:
             "effective_workers": 1,
             "created_at": datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
         }
+        self.latest_capacity_reads = 0
         self.feedback = {
             "pending_count": 0,
             "claimed_count": 0,
@@ -78,13 +83,21 @@ class _DispatchStore:
         self.dispatched.append(kwargs)
         return True
 
+    async def mark_intent_dispatch_unknown(self, **kwargs):
+        self.unknown_dispatches.append(kwargs)
+        return True
+
     async def complete_intent(self, **kwargs):
         self.completed.append(kwargs)
         return True
 
-    async def complete_from_execution(self, **kwargs):
-        self.completed.append(kwargs)
+    async def accept_execution_feedback(self, **kwargs):
+        self.execution_receipts.append(kwargs)
         return True
+
+    async def reconcile_dispatched_executions(self, **kwargs):
+        self.execution_reconciliations.append(kwargs)
+        return 0
 
     async def fail_intent(self, **kwargs):
         self.failed.append(kwargs)
@@ -115,6 +128,7 @@ class _DispatchStore:
         return self.strategy
 
     async def get_latest_worker_capacity(self, **kwargs):
+        self.latest_capacity_reads += 1
         return self.latest_capacity
 
     async def acquire_scope_lease(self, **kwargs):
@@ -140,12 +154,20 @@ class _DispatchStore:
 
 
 class _CallbackClient:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        error: Exception | None = None,
+    ) -> None:
         self.fail = fail
+        self.error = error
         self.requests: list[dict[str, Any]] = []
 
     async def dispatch_job(self, **kwargs):
         self.requests.append(kwargs)
+        if self.error is not None:
+            raise self.error
         if self.fail:
             raise RuntimeError("callback failed")
 
@@ -217,6 +239,110 @@ async def test_swe_callback_client_forwards_passthrough_headers(
     assert requests[0]["url"] == "http://swe.local/api/internal/cron/callback"
     assert requests[0]["json"]["scopeId"] == "tenant-a-source-a"
     assert requests[0]["json"]["fromId"] == "tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_swe_callback_client_classifies_read_timeout_as_unknown(
+    monkeypatch,
+) -> None:
+    class _AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            raise service_module.httpx.ReadTimeout("")
+
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", _AsyncClient)
+    client = SweCronCallbackClient(base_url="http://swe.local")
+
+    unknown_error = service_module.SweCronCallbackOutcomeUnknownError
+    with pytest.raises(unknown_error) as exc_info:
+        await client.dispatch_job(
+            tenant_id="tenant-a",
+            source_id="source-a",
+            agent_id="default",
+            job_id="child-1",
+            dispatch_intent_id=7,
+            dispatch_batch_id="batch-1",
+            dispatch_attempt=1,
+        )
+
+    assert exc_info.value.error_type == "ReadTimeout"
+    assert exc_info.value.error_message
+
+
+@pytest.mark.asyncio
+async def test_swe_callback_client_keeps_connect_failure_retryable(
+    monkeypatch,
+) -> None:
+    class _AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            raise service_module.httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", _AsyncClient)
+    client = SweCronCallbackClient(base_url="http://swe.local")
+
+    with pytest.raises(service_module.httpx.ConnectError):
+        await client.dispatch_job(
+            tenant_id="tenant-a",
+            source_id="source-a",
+            agent_id="default",
+            job_id="child-1",
+            dispatch_intent_id=7,
+            dispatch_batch_id="batch-1",
+            dispatch_attempt=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_swe_callback_client_keeps_http_rejection_retryable(
+    monkeypatch,
+) -> None:
+    class _Response:
+        status_code = 503
+        text = "unavailable"
+
+    class _AsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return _Response()
+
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", _AsyncClient)
+    client = SweCronCallbackClient(base_url="http://swe.local")
+
+    with pytest.raises(RuntimeError, match="status=503"):
+        await client.dispatch_job(
+            tenant_id="tenant-a",
+            source_id="source-a",
+            agent_id="default",
+            job_id="child-1",
+            dispatch_intent_id=7,
+            dispatch_batch_id="batch-1",
+            dispatch_attempt=1,
+        )
 
 
 def test_scheduler_app_lifespan_wires_scheduler_loop() -> None:
@@ -478,6 +604,52 @@ async def test_callback_failure_schedules_retry_instead_of_completing() -> (
 
 
 @pytest.mark.asyncio
+async def test_callback_unknown_outcome_stays_dispatched_without_retry() -> (
+    None
+):
+    store = _DispatchStore(
+        [
+            {
+                "id": 3,
+                "batch_id": "batch-1",
+                "intent_role": "child",
+                "tenant_id": "tenant-b",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-1",
+            },
+        ],
+    )
+    transport_error = service_module.httpx.ReadTimeout("")
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(
+            error=service_module.SweCronCallbackOutcomeUnknownError(
+                transport_error,
+            ),
+        ),
+        worker_id="scheduler-1",
+        effective_workers=1,
+    )
+
+    dispatched = await service.dispatch_ready_once(
+        now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert dispatched == 1
+    assert store.failed == []
+    assert store.dispatched == []
+    assert store.unknown_dispatches[0]["intent_id"] == 3
+    assert store.unknown_dispatches[0]["details"]["callback_outcome"] == (
+        "unknown"
+    )
+    assert store.unknown_dispatches[0]["details"]["error_type"] == (
+        "ReadTimeout"
+    )
+    assert store.unknown_dispatches[0]["details"]["error"]
+
+
+@pytest.mark.asyncio
 async def test_capacity_adjustment_is_interval_gated_and_separate() -> None:
     store = _DispatchStore([])
     store.strategy = WorkerStrategy(
@@ -529,12 +701,150 @@ async def test_capacity_adjustment_is_interval_gated_and_separate() -> None:
 
     assert adjusted is True
     assert skipped is False
+    assert len(store.scope_leases) == 1
     assert store.scope_leases[0]["worker_id"] == "scheduler-1"
     assert service.effective_workers == 2
     assert store.capacity[0]["effective_workers"] == 2
     assert store.capacity[0]["decision_reason"] == "stable_success"
     assert callback.requests == []
     assert store.claims == []
+
+
+@pytest.mark.asyncio
+async def test_capacity_adjustment_rechecks_interval_after_acquiring_lease() -> (
+    None
+):
+    store = _DispatchStore([])
+    store.latest_capacity = {
+        "effective_workers": 1,
+        "created_at": datetime(2026, 7, 1, 0, 50, tzinfo=timezone.utc),
+    }
+    now = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc)
+
+    async def acquire_scope_lease(**kwargs):
+        store.scope_leases.append(kwargs)
+        store.latest_capacity = {
+            "effective_workers": 2,
+            "created_at": now - timedelta(seconds=1),
+        }
+        return True
+
+    store.acquire_scope_lease = acquire_scope_lease
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+        worker_id="scheduler-2",
+    )
+
+    adjusted = await service.adjust_worker_capacity_if_due(now_utc=now)
+
+    assert adjusted is False
+    assert len(store.scope_leases) == 1
+    assert store.latest_capacity_reads == 2
+    assert store.capacity == []
+
+
+@pytest.mark.asyncio
+async def test_capacity_loop_runs_while_dispatch_loop_is_blocked() -> None:
+    service = CronSchedulingService(
+        dispatch_store=_DispatchStore([]),
+        callback_client=_CallbackClient(),
+    )
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    capacity_checked = asyncio.Event()
+    stop_event = asyncio.Event()
+
+    async def blocked_dispatch(**_kwargs):
+        dispatch_started.set()
+        await release_dispatch.wait()
+        return 0
+
+    async def check_capacity(**_kwargs):
+        capacity_checked.set()
+        stop_event.set()
+        return False
+
+    service.dispatch_ready_once = blocked_dispatch
+    service.adjust_worker_capacity_if_due = check_capacity
+    loop_task = asyncio.create_task(service.run_loop(stop_event=stop_event))
+
+    try:
+        await asyncio.wait_for(dispatch_started.wait(), timeout=1)
+        await asyncio.wait_for(capacity_checked.wait(), timeout=1)
+    finally:
+        release_dispatch.set()
+        stop_event.set()
+        await asyncio.wait_for(loop_task, timeout=1)
+
+
+def test_capacity_loop_default_check_interval_is_sixty_seconds() -> None:
+    parameter = inspect.signature(CronSchedulingService.run_loop).parameters[
+        "capacity_interval_seconds"
+    ]
+
+    assert parameter.default == 60
+
+
+def test_dispatch_loop_default_interval_is_sixty_seconds() -> None:
+    parameter = inspect.signature(CronSchedulingService.run_loop).parameters[
+        "interval_seconds"
+    ]
+
+    assert parameter.default == 60
+
+
+@pytest.mark.asyncio
+async def test_dispatch_loop_failure_does_not_stop_capacity_loop() -> None:
+    service = CronSchedulingService(
+        dispatch_store=_DispatchStore([]),
+        callback_client=_CallbackClient(),
+    )
+    capacity_checked = asyncio.Event()
+    stop_event = asyncio.Event()
+
+    async def failed_dispatch(**_kwargs):
+        raise RuntimeError("dispatch unavailable")
+
+    async def check_capacity(**_kwargs):
+        capacity_checked.set()
+        stop_event.set()
+        return False
+
+    service.dispatch_ready_once = failed_dispatch
+    service.adjust_worker_capacity_if_due = check_capacity
+
+    await asyncio.wait_for(service.run_loop(stop_event=stop_event), timeout=1)
+
+    assert capacity_checked.is_set()
+
+
+@pytest.mark.asyncio
+async def test_capacity_loop_failure_does_not_stop_dispatch_loop() -> None:
+    service = CronSchedulingService(
+        dispatch_store=_DispatchStore([]),
+        callback_client=_CallbackClient(),
+    )
+    capacity_started = asyncio.Event()
+    dispatch_checked = asyncio.Event()
+    stop_event = asyncio.Event()
+
+    async def check_dispatch(**_kwargs):
+        await capacity_started.wait()
+        dispatch_checked.set()
+        stop_event.set()
+        return 0
+
+    async def failed_capacity(**_kwargs):
+        capacity_started.set()
+        raise RuntimeError("capacity unavailable")
+
+    service.dispatch_ready_once = check_dispatch
+    service.adjust_worker_capacity_if_due = failed_capacity
+
+    await asyncio.wait_for(service.run_loop(stop_event=stop_event), timeout=1)
+
+    assert dispatch_checked.is_set()
 
 
 @pytest.mark.asyncio
@@ -706,60 +1016,37 @@ async def test_dispatch_ready_recovers_stale_dispatched_before_capacity_gate() -
 
 
 @pytest.mark.asyncio
-async def test_execution_completion_marks_intent_and_dispatches_next() -> None:
-    store = _DispatchStore([])
-    callback = _CallbackClient()
-    service = CronSchedulingService(
-        dispatch_store=store,
-        callback_client=callback,
-        worker_id="scheduler-1",
-        effective_workers=1,
-    )
-
-    await service.handle_execution_recorded(
-        execution_id=42,
-        status="success",
-        meta={
-            "cron_dispatch": {
-                "intent_id": 7,
+async def test_dispatch_scan_runs_before_recovery_and_refills_finished_slot() -> (
+    None
+):
+    store = _DispatchStore(
+        [
+            {
+                "id": 8,
                 "batch_id": "batch-1",
-                "dispatch_attempt": 1,
+                "intent_role": "child",
+                "tenant_id": "tenant-b",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "child-2",
             },
-        },
-        completed_at=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+        ],
     )
+    store.feedback["running_count"] = 1
+    order = []
 
-    assert store.completed[0]["intent_id"] == 7
-    assert store.completed[0]["execution_id"] == 42
-    assert store.completed[0]["expected_attempt_count"] == 1
-    assert store.claims, "completion should immediately try to refill capacity"
+    async def reconcile(**kwargs):
+        order.append("reconcile")
+        store.execution_reconciliations.append(kwargs)
+        store.feedback["running_count"] = 0
+        return 1
 
+    async def recover(**_kwargs):
+        order.append("recover")
+        return 0
 
-@pytest.mark.asyncio
-async def test_execution_failure_keeps_error_message_for_retry_log() -> None:
-    store = _DispatchStore([])
-    service = CronSchedulingService(
-        dispatch_store=store,
-        callback_client=_CallbackClient(),
-        worker_id="scheduler-1",
-        effective_workers=1,
-    )
-
-    await service.handle_execution_recorded(
-        execution_id=43,
-        status="failed",
-        meta={"cron_dispatch": {"intent_id": 8, "batch_id": "batch-1"}},
-        error_message="provider timeout",
-        completed_at=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
-    )
-
-    assert store.completed[0]["intent_id"] == 8
-    assert store.completed[0]["error"] == "provider timeout"
-
-
-@pytest.mark.asyncio
-async def test_execution_failure_uses_configured_retry_delay() -> None:
-    store = _DispatchStore([])
+    store.reconcile_dispatched_executions = reconcile
+    store.recover_stale_dispatched_intents = recover
     service = CronSchedulingService(
         dispatch_store=store,
         callback_client=_CallbackClient(),
@@ -768,14 +1055,15 @@ async def test_execution_failure_uses_configured_retry_delay() -> None:
         retry_delay_seconds=45,
     )
 
-    await service.handle_execution_recorded(
-        execution_id=44,
-        status="failed",
-        meta={"cron_dispatch": {"intent_id": 9, "batch_id": "batch-1"}},
-        completed_at=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
+    dispatched = await service.dispatch_ready_once(
+        now_utc=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
     )
 
-    assert store.completed[0]["retry_delay_seconds"] == 45
+    assert order == ["reconcile", "recover"]
+    assert store.execution_reconciliations[0]["retry_delay_seconds"] == 45
+    assert store.execution_reconciliations[0]["source_ids"] == ["source-a"]
+    assert dispatched == 1
+    assert store.claims[0]["limit"] == 1
 
 
 @pytest.mark.asyncio

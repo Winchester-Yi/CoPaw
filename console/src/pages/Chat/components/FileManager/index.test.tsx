@@ -52,6 +52,12 @@ vi.mock("@/components/agentscope-chat/Markdown", () => ({
   default: () => <div>Markdown</div>,
 }));
 
+vi.mock("@/components/agentscope-chat/FilePreviewModal", () => ({
+  default: (props: { fileName: string }) => (
+    <div data-testid="session-file-preview">{props.fileName}</div>
+  ),
+}));
+
 const rootPage = {
   root: "working" as const,
   path: "",
@@ -125,7 +131,7 @@ describe("FileManager", () => {
     readFile.mockReset();
   });
 
-  it("opens the reference-style overlay with shortcut toolbar and three column roles", async () => {
+  it("opens a right-side drawer with shortcut toolbar and three column roles", async () => {
     render(
       <App>
         <FileManager />
@@ -137,6 +143,9 @@ describe("FileManager", () => {
     expect(
       await screen.findByRole("dialog", { name: "文件管理器" }),
     ).toBeInTheDocument();
+    expect(document.documentElement).toHaveClass(
+      "copaw-file-manager-drawer-open",
+    );
     const shortcuts = screen.getByRole("navigation", {
       name: "文件目录快捷方式",
     });
@@ -161,6 +170,57 @@ describe("FileManager", () => {
     expect(screen.getByLabelText("文件列表第 1 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 2 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 3 栏")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭文件管理器" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "文件管理器" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(document.documentElement).not.toHaveClass(
+      "copaw-file-manager-drawer-open",
+    );
+  });
+
+  it("opens a registered session file in the same file workspace", async () => {
+    render(
+      <App>
+        <FileManager />
+      </App>,
+    );
+
+    window.dispatchEvent(
+      new CustomEvent("copaw:chat-workspace-file", {
+        detail: {
+          action: "open",
+          fileName: "投资简报.html",
+          fileUrl: "/files/report.html",
+          enableClickTracking: true,
+        },
+      }),
+    );
+
+    expect(
+      await screen.findByRole("dialog", { name: "文件管理器" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "当前会话文件 1" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByLabelText("当前会话文件")).not.toBeInTheDocument();
+    expect(screen.getByTestId("session-file-preview")).toHaveTextContent(
+      "投资简报.html",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "展开会话文件列表" }),
+    );
+    expect(screen.getByLabelText("当前会话文件")).toHaveTextContent(
+      "投资简报.html",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "收起会话文件列表" }),
+    );
+    expect(screen.queryByLabelText("当前会话文件")).not.toBeInTheDocument();
   });
 
   it("permanently deletes a directory after confirmation without opening it", async () => {
@@ -365,9 +425,7 @@ describe("FileManager", () => {
     await act(async () => {
       recovery.resolve({
         ...rootPage,
-        items: [
-          { ...rootPage.items[0], name: "stale.txt", path: "stale.txt" },
-        ],
+        items: [{ ...rootPage.items[0], name: "stale.txt", path: "stale.txt" }],
       });
       await recovery.promise;
     });
@@ -614,47 +672,6 @@ describe("FileManager", () => {
         { name: "chapter.md" },
       ),
     ).toBeInTheDocument();
-  });
-
-  it("uses the full chat shell width instead of only the message area", async () => {
-    const chatShell = document.createElement("div");
-    chatShell.dataset.chatShell = "";
-    vi.spyOn(chatShell, "getBoundingClientRect").mockReturnValue({
-      left: 80,
-      top: 0,
-      right: 980,
-      bottom: 800,
-      width: 900,
-      height: 800,
-      x: 80,
-      y: 0,
-      toJSON: () => ({}),
-    });
-    const chatArea = document.createElement("div");
-    chatArea.dataset.chatMessagesArea = "";
-    vi.spyOn(chatArea, "getBoundingClientRect").mockReturnValue({
-      left: 240,
-      top: 0,
-      right: 880,
-      bottom: 800,
-      width: 640,
-      height: 800,
-      x: 240,
-      y: 0,
-      toJSON: () => ({}),
-    });
-    chatShell.append(chatArea);
-    document.body.append(chatShell);
-
-    render(<FileManager />);
-    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
-
-    expect(
-      await screen.findByRole("dialog", { name: "文件管理器" }),
-    ).toHaveStyle({
-      width: "900px",
-      left: "80px",
-    });
   });
 
   it("explains why uploads are unavailable in conversation and recycle roots", async () => {

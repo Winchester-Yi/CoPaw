@@ -31,7 +31,9 @@ def _mock_client(method: str, response: _Response):
     return mock_client, mock_http
 
 
-def test_env_list_masks_values_and_passes_scope_headers():
+def test_env_list_masks_values_and_passes_runtime_scope_headers(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     mock_client, mock_http = _mock_client(
         "get",
         _Response(
@@ -47,10 +49,6 @@ def test_env_list_masks_values_and_passes_scope_headers():
             env_cmd.env_group,
             [
                 "list",
-                "--tenant-id",
-                "tenant-a",
-                "--source-id",
-                "source-a",
             ],
         )
 
@@ -65,7 +63,9 @@ def test_env_list_masks_values_and_passes_scope_headers():
     }
 
 
-def test_env_list_show_values_prints_explicit_values():
+def test_env_list_show_values_prints_explicit_values(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     mock_client, _ = _mock_client(
         "get",
         _Response([{"key": "API_TOKEN", "value": "secret"}]),
@@ -77,10 +77,6 @@ def test_env_list_show_values_prints_explicit_values():
             [
                 "list",
                 "--show-values",
-                "--tenant-id",
-                "tenant-a",
-                "--source-id",
-                "source-a",
             ],
         )
 
@@ -89,7 +85,9 @@ def test_env_list_show_values_prints_explicit_values():
     assert "secret" in result.output
 
 
-def test_env_set_sends_patch_without_echoing_value():
+def test_env_set_sends_patch_without_echoing_value(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     mock_client, mock_http = _mock_client("patch", _Response([]))
 
     with patch.object(env_cmd, "client", mock_client, create=True):
@@ -99,10 +97,6 @@ def test_env_set_sends_patch_without_echoing_value():
                 "set",
                 "API_TOKEN",
                 "secret",
-                "--tenant-id",
-                "tenant-a",
-                "--source-id",
-                "source-a",
             ],
         )
 
@@ -117,7 +111,9 @@ def test_env_set_sends_patch_without_echoing_value():
     }
 
 
-def test_env_delete_sends_encoded_key_and_scope_headers():
+def test_env_delete_sends_encoded_key_and_scope_headers(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     mock_client, mock_http = _mock_client("delete", _Response([]))
 
     with patch.object(env_cmd, "client", mock_client, create=True):
@@ -126,10 +122,6 @@ def test_env_delete_sends_encoded_key_and_scope_headers():
             [
                 "delete",
                 "OLD_KEY",
-                "--tenant-id",
-                "tenant-a",
-                "--source-id",
-                "source-a",
             ],
         )
 
@@ -143,20 +135,33 @@ def test_env_delete_sends_encoded_key_and_scope_headers():
     }
 
 
-def test_env_commands_require_tenant_and_source():
+def test_env_commands_reject_external_scope_options(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     runner = CliRunner()
 
     for args in (
-        ["list"],
-        ["set", "KEY", "value"],
-        ["delete", "KEY"],
+        ["list", "--tenant-id", "external"],
+        ["set", "KEY", "value", "--source-id", "external"],
+        ["delete", "KEY", "--tenant-id", "external"],
     ):
         result = runner.invoke(env_cmd.env_group, args)
         assert result.exit_code == 2
-        assert "Missing option" in result.output
+        assert "no such option" in result.output.lower()
 
 
-def test_env_list_uses_root_cli_host_and_port():
+def test_env_commands_require_runtime_scope_claims(monkeypatch):
+    monkeypatch.delenv("SWE_TENANT_ID", raising=False)
+    monkeypatch.delenv("SWE_SOURCE_ID", raising=False)
+    result = CliRunner().invoke(env_cmd.env_group, ["list"])
+
+    assert result.exit_code == 1
+    assert "SWE_TENANT_ID" in result.output
+
+
+def test_env_list_uses_root_cli_host_and_port(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     mock_client, _ = _mock_client("get", _Response([]))
 
     with patch.object(env_cmd, "client", mock_client, create=True):
@@ -169,10 +174,6 @@ def test_env_list_uses_root_cli_host_and_port():
                 "8099",
                 "env",
                 "list",
-                "--tenant-id",
-                "tenant-a",
-                "--source-id",
-                "source-a",
             ],
         )
 
@@ -180,7 +181,9 @@ def test_env_list_uses_root_cli_host_and_port():
     mock_client.assert_called_once_with("http://127.0.0.1:8099")
 
 
-def test_env_delete_api_error_returns_nonzero_exit_code():
+def test_env_delete_api_error_returns_nonzero_exit_code(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "source-a")
     mock_client, _ = _mock_client(
         "delete",
         _Response({"detail": "Env var 'MISSING' not found"}, 404),
@@ -192,10 +195,6 @@ def test_env_delete_api_error_returns_nonzero_exit_code():
             [
                 "delete",
                 "MISSING",
-                "--tenant-id",
-                "tenant-a",
-                "--source-id",
-                "source-a",
             ],
         )
 

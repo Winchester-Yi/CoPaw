@@ -1,6 +1,6 @@
 import { createContext, useContext, type ReactNode } from "react";
 
-export type FilePreviewPresentation = "modal" | "drawer";
+export type FilePreviewPresentation = "modal" | "drawer" | "workspace";
 
 const FilePreviewPresentationContext =
   createContext<FilePreviewPresentation>("modal");

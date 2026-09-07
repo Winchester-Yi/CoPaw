@@ -1,3 +1,9 @@
+.composerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Disabled input overlay */
 .chatDisabledOverlay {
   position: relative;
@@ -87,6 +93,11 @@
   :global(.dark-mode) & {
     scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
   }
+}
+
+/* Sharing is a read-only selection state; the composer is restored on exit. */
+:global(.swe-chat-share-active) :global([class*="-chat-anywhere-input-wrapper"]) {
+  display: none !important;
 }
 
 .suggestionLabel {

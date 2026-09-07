@@ -796,9 +796,10 @@ class StageReport(StrictModel):
     """One stage's three-format report for a successful trial run.
 
     report_no counts successful pre-runs within the current session
-    revision; a revision invalidates downstream reports and restarts the
-    count (design decision D3). superseded_by points at the newer report_no
-    that replaced this version; None marks the latest.
+    revision. Revisions are limited to the current unconfirmed stage and
+    restart the count; confirmed reports remain read-only. superseded_by
+    points at the newer report_no that replaced this version; None marks
+    the latest.
     """
 
     stage_id: str

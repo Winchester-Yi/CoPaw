@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from swe.app.routers.dream_logs import (
     ARCHIVE_INDEX_FILE,
     _dual_write_workspace_governance_records,
+    _scan_orphan_files,
     router,
 )
 from swe.config.context import encode_scope_id
@@ -182,6 +183,40 @@ def _workspace(tmp_path: Path, tenant_id: str, source_id: str) -> Path:
     )
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def test_orphan_scan_skips_hidden_and_root_keep_directories(tmp_path: Path) -> None:
+    """隐藏目录和根目录保留目录不应进入过期文件候选。"""
+    workspace = tmp_path / "workspace"
+    (workspace / "allowed").mkdir(parents=True)
+    (workspace / "allowed" / "keep.txt").write_text("keep", encoding="utf-8")
+    (workspace / ".cache").mkdir()
+    (workspace / ".cache" / "hidden.txt").write_text("hidden", encoding="utf-8")
+    (workspace / "dialog").mkdir()
+    (workspace / "dialog" / "root.txt").write_text("dialog", encoding="utf-8")
+
+    paths = {item.path for item in _scan_orphan_files(workspace)}
+
+    assert paths == {"allowed/keep.txt"}
+
+
+def test_delete_orphan_file_rejects_dialog_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """直接调用删除接口也不能绕过 dialog 目录过滤。"""
+    client, _ = _client(tmp_path, monkeypatch)
+    workspace = _workspace(tmp_path, "manager", "source-a")
+    target = workspace / "dialog" / "expired.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("expired", encoding="utf-8")
+
+    response = client.delete(
+        "/dream-logs/orphan-files/dialog/expired.txt",
+    )
+
+    assert response.status_code == 403
+    assert target.is_file()
 
 
 def test_rollback_updates_database_record(tmp_path, monkeypatch) -> None:

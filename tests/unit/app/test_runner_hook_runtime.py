@@ -440,6 +440,46 @@ async def test_create_session_skill_detector_loads_http_skill_hooks_without_appr
 
 
 @pytest.mark.asyncio
+async def test_session_detector_skips_hooks_changed_after_snapshot(
+    tmp_path,
+) -> None:
+    from swe.agents.skills_manager import _build_signature
+
+    skill_root = tmp_path / "skills" / "xlsx"
+    (skill_root / "hooks").mkdir(parents=True)
+    hooks_path = skill_root / "hooks" / "hooks.json"
+    hooks_path.write_text('{"enabled": true, "events": {}}', encoding="utf-8")
+    signature = _build_signature(skill_root)
+    state = HookSessionState()
+
+    detector = _create_session_skill_detector(
+        workspace_dir=tmp_path,
+        tenant_id="tenant-a",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        enabled_skills=["xlsx"],
+        skill_metadata={"xlsx": {"description": "spreadsheet"}},
+        skill_dirs={"xlsx": skill_root},
+        skill_signatures={"xlsx": signature},
+        get_hook_state=lambda: state,
+        set_hook_state=lambda new_state: None,
+        approved_http_urls=set(),
+    )
+    hooks_path.write_text('{"enabled": false, "events": {}}', encoding="utf-8")
+
+    await detector.start_skill(
+        "xlsx",
+        trigger_tool="user_message",
+        trigger_reason="declared",
+        load_hooks=True,
+    )
+
+    assert not state.loaded_skill_sources
+
+
+@pytest.mark.asyncio
 async def test_attach_session_skill_detector_reuses_trace_detector_and_tracing(
     tmp_path,
 ) -> None:

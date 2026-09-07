@@ -24,6 +24,7 @@ from .models import (
     EntryDetectionMode,
     EntryProposalStatus,
     EventKind,
+    LifecycleProgressPayload,
     MemoryCandidatesPayload,
     MemoryCandidateStatus,
     MemoryWriteCompletedPayload,
@@ -80,6 +81,38 @@ _OUTBOX_LOCKS_GUARD = threading.Lock()
 _OUTBOX_LOCKS: dict[str, asyncio.Lock] = {}
 _CHAT_IDLE_WAIT_TIMEOUT_SECONDS = 10.0
 _CHAT_IDLE_POLL_SECONDS = 0.05
+_CUMULATIVE_CONTINUATION_COMMAND = "continue_after_cumulative"
+
+
+def _cumulative_handoff_pending(record: SessionRecord) -> bool:
+    """Return whether the current run crossed cumulative output only."""
+
+    projection = record.projection
+    if projection.state not in {
+        SessionState.GENERATING_QUESTIONS,
+        SessionState.FINALIZING_OUTPUTS,
+    }:
+        return False
+    attempt = next(
+        (
+            item
+            for item in record.runs
+            if item.run_id == projection.current_run_id
+            and item.status in {RunStatus.CLAIMED, RunStatus.RUNNING}
+        ),
+        None,
+    )
+    if attempt is None:
+        return False
+    receipt = record.command_receipts.get(attempt.command_request_id)
+    claimed_version = receipt.resulting_state_version if receipt else None
+    if claimed_version is None:
+        return False
+    return any(
+        event.kind is EventKind.CUMULATIVE_REFRESHED
+        and event.state_version > claimed_version
+        for event in record.events
+    )
 
 
 class _CommandResult:
@@ -1510,6 +1543,91 @@ class WPlusSopService:
             raise WPlusOwnershipError(proposal_id)
         return proposal
 
+    async def _start_cumulative_continuation(
+        self,
+        *,
+        sop_session_id: str,
+        completed_run_id: str,
+        completed_attempt_id: str,
+    ) -> None:
+        """Atomically settle cumulative work and claim its next Agent run."""
+
+        await self._wait_for_owning_chat_idle()
+        record = self._owned_record(sop_session_id)
+        projection = record.projection
+        if (
+            projection.current_run_id != completed_run_id
+            or not _cumulative_handoff_pending(record)
+        ):
+            return
+        target_state = projection.state
+        identity_seed = (
+            f"{sop_session_id}|{completed_attempt_id}|cumulative-continuation"
+        )
+        run_id = f"run_{uuid5(NAMESPACE_URL, identity_seed + '|run').hex}"
+        attempt_id = (
+            f"attempt_{uuid5(NAMESPACE_URL, identity_seed + '|attempt').hex}"
+        )
+        command_request_id = f"cmd_cumulative_{completed_attempt_id}"
+        result = _CommandResult(
+            target_state=target_state,
+            kind=EventKind.LIFECYCLE_PROGRESS,
+            typed_payload=LifecycleProgressPayload(
+                phase="agent_turn_handoff",
+                message="上一 Agent 回合已完成，启动下一步。",
+                run_id=run_id,
+            ),
+            starts_run=True,
+        )
+        self._augment_command_runtime_payload(projection, result)
+        event = self._event(
+            record,
+            EventKind.LIFECYCLE_PROGRESS,
+            result.typed_payload.model_dump(mode="json"),
+            event_id=f"evt_cumulative_{completed_attempt_id}",
+        )
+        receipt = CommandReceipt(
+            command_request_id=command_request_id,
+            command=_CUMULATIVE_CONTINUATION_COMMAND,
+            sop_session_id=sop_session_id,
+            resulting_state_version=event.state_version,
+            starts_run=True,
+            run_id=run_id,
+            attempt_id=attempt_id,
+        )
+        attempt = RunAttempt(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            command_request_id=command_request_id,
+            command=_CUMULATIVE_CONTINUATION_COMMAND,
+            status=RunStatus.CLAIMED,
+        )
+        mutation = self.store.commit_event(
+            sop_session_id,
+            expected_state_version=projection.state_version,
+            event=event,
+            next_state=target_state,
+            outbox_item=self._outbox(event),
+            command_receipt=receipt,
+            run_attempt=attempt,
+            run_completion=(
+                completed_run_id,
+                completed_attempt_id,
+                RunStatus.COMPLETED,
+            ),
+        )
+        if mutation.duplicate:
+            return
+        await self._start_command_run(
+            sop_session_id=sop_session_id,
+            command=_CUMULATIVE_CONTINUATION_COMMAND,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            target_state=target_state,
+            runtime_payload=result.runtime_payload,
+            mutation=mutation,
+        )
+
     async def _on_agent_turn_complete(
         self,
         *,
@@ -1595,14 +1713,13 @@ class WPlusSopService:
                         else RunStatus.COMPLETED
                     ),
                 )
-            elif projection.state in {
-                SessionState.GENERATING_STAGE_PROPOSAL,
-                SessionState.GENERATING_QUESTIONS,
-                SessionState.GENERATING_TRIAL,
-                SessionState.EXECUTING_TRIAL,
-                SessionState.FINALIZING_OUTPUTS,
-                SessionState.WRITING_MEMORY,
-            }:
+            elif _cumulative_handoff_pending(record):
+                await self._start_cumulative_continuation(
+                    sop_session_id=sop_session_id,
+                    completed_run_id=run_id,
+                    completed_attempt_id=attempt_id,
+                )
+            elif projection.state in _ORPHAN_RECOVERY_STATES:
                 self._record_runtime_failure(
                     sop_session_id=sop_session_id,
                     summary=(
@@ -2236,8 +2353,16 @@ class WPlusSopService:
         )
         if not feedback or not rerun_of:
             raise WPlusCommandError("feedback and prior run are required")
+        next_action = str(payload.get("next_action") or "rerun").strip()
+        if next_action not in {"clarify", "rerun"}:
+            raise WPlusCommandError("Unsupported trial feedback next_action")
+        target_state = (
+            SessionState.GENERATING_QUESTIONS
+            if next_action == "clarify"
+            else SessionState.GENERATING_TRIAL
+        )
         return _CommandResult(
-            target_state=SessionState.GENERATING_TRIAL,
+            target_state=target_state,
             kind=EventKind.TRIAL_FEEDBACK_ACCEPTED,
             typed_payload=TrialFeedbackAcceptedPayload(
                 feedback=feedback,
@@ -2248,7 +2373,7 @@ class WPlusSopService:
                 "trial_feedback": [*projection.trial_feedback, feedback],
                 "trial_result_lists": [],
             },
-            rerun_of=rerun_of,
+            rerun_of=rerun_of if next_action == "rerun" else None,
             starts_run=True,
         )
 
@@ -2371,6 +2496,22 @@ class WPlusSopService:
         if revised_round < 1 or revised_round > len(projection.answers):
             raise WPlusCommandError("Invalid revised_round")
         previous = projection.answers[revised_round - 1]
+        current_stage = next(
+            (
+                stage
+                for stage in projection.stages
+                if stage.stage_id == projection.current_stage_id
+            ),
+            None,
+        )
+        if (
+            previous.stage_id != projection.current_stage_id
+            or current_stage is None
+            or current_stage.status is StageStatus.CONFIRMED
+        ):
+            raise WPlusCommandError(
+                "Answers can only be revised for the current unconfirmed stage",
+            )
         raw_answers = payload.get("answers")
         if not isinstance(raw_answers, dict):
             raise WPlusCommandError("answers must be an object")
@@ -2770,10 +2911,14 @@ class WPlusSopService:
                 "current_stage_id",
                 projection.current_stage_id,
             )
+            confirmed_snapshots = result.changes.get(
+                "confirmed_snapshots",
+                projection.confirmed_snapshots,
+            )
             result.runtime_payload["current_stage_id"] = current_stage_id
             result.runtime_payload["confirmed_snapshots"] = [
                 snapshot.model_dump(mode="json")
-                for snapshot in result.changes.get("confirmed_snapshots", [])
+                for snapshot in confirmed_snapshots
             ]
             return
         if result.target_state is SessionState.WRITING_MEMORY:
@@ -3082,6 +3227,10 @@ class WPlusSopService:
         )
         if idem_result is not None:
             return idem_result
+        if _cumulative_handoff_pending(record):
+            raise WPlusCommandError(
+                "Agent run must complete before the next step",
+            )
 
         _validate_agent_event_state(event_kind, effective_state, state)
 

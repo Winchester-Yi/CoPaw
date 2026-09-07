@@ -42,7 +42,7 @@ export type ActionsRender = (
     components: {
       SendButton: React.ComponentType<ButtonProps>;
       ClearButton: React.ComponentType<ButtonProps>;
-      LoadingButton: React.ComponentType<ButtonProps>;
+      LoadingButton: typeof LoadingButton;
     };
   },
 ) => React.ReactNode;
@@ -189,6 +189,8 @@ export interface SenderProps
    * @descriptionEn Prefix UI
    */
   prefix?: React.ReactNode | React.ReactNode[];
+  /** Custom content or renderer for the send/stop action area. */
+  actions?: React.ReactNode | ActionsRender;
   /**
    * @description 头部 UI
    * @descriptionEn Header UI
@@ -293,7 +295,6 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onChange,
     onFocus,
     onBlur,
-    // @ts-ignore
     actions,
     onKeyPress,
     onKeyDown,

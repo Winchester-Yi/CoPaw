@@ -52,11 +52,13 @@ const mocks = vi.hoisted(() => {
     })),
     currentSessionId: "chat-1",
     inputDisabled: true,
+    inputLoading: false,
     pathname: "/chat/chat-1",
     search: "",
     getChatIdForSession: vi.fn((sessionId: string) => sessionId),
     getLogicalSessionId: vi.fn((sessionId: string) => sessionId),
     getRealIdForSession: vi.fn((sessionId: string) => sessionId),
+    getContextUsage: vi.fn(async () => ({ available: false })),
     navigationSessionId: null as string | null,
     navigationTaskId: null as string | null,
     navigate: vi.fn(),
@@ -170,7 +172,7 @@ vi.mock("@/components/agentscope-chat", () => {
     ) =>
       selector({
         disabled: mocks.inputDisabled,
-        loading: false,
+        loading: mocks.inputLoading,
         setLoading: mocks.setLoading,
         getLoading: mocks.getLoading,
       }),
@@ -333,6 +335,7 @@ vi.mock("../../api/modules/chat", () => ({
     cancelSubAgentRun: vi.fn(async () => undefined),
     filePreviewUrl: vi.fn((filename: string) => `/preview/${filename}`),
     getRecentGoal: vi.fn(async () => null),
+    getContextUsage: mocks.getContextUsage,
     stopChat: vi.fn(async () => undefined),
     updateChat: mocks.updateChat,
     uploadFile: vi.fn(),
@@ -642,6 +645,7 @@ describe("ChatPage plan mode wiring", () => {
     mocks.showContentOnly = false;
     mocks.isOriginY = false;
     mocks.inputDisabled = true;
+    mocks.inputLoading = false;
     mocks.pathname = "/chat/chat-1";
     mocks.search = "";
     mocks.currentSessionId = "chat-1";
@@ -654,6 +658,8 @@ describe("ChatPage plan mode wiring", () => {
     mocks.getRealIdForSession.mockImplementation(
       (sessionId: string) => sessionId,
     );
+    mocks.getContextUsage.mockReset();
+    mocks.getContextUsage.mockResolvedValue({ available: false });
     mocks.sessions = [
       {
         id: "chat-1",
@@ -703,6 +709,55 @@ describe("ChatPage plan mode wiring", () => {
     expect(screen.getByTestId("chat-sender-before-ui")).not.toContainElement(
       monitor,
     );
+  });
+
+  it("resolves the backend chat id and renders context usage in both composer prefixes", async () => {
+    mocks.pathname = "/chat/temp-1";
+    mocks.currentSessionId = "temp-1";
+    mocks.getChatIdForSession.mockImplementation((sessionId: string) =>
+      sessionId === "temp-1" ? "backend-chat-1" : sessionId,
+    );
+
+    render(<ChatPage />);
+
+    expect(screen.getByTestId("chat-sender-prefix")).toContainElement(
+      screen.getAllByRole("button", { name: /上下文占用/ })[1],
+    );
+    expect(screen.getByTestId("chat-welcome")).toContainElement(
+      screen.getAllByRole("button", { name: /上下文占用/ })[0],
+    );
+    await waitFor(() => {
+      expect(mocks.getContextUsage).toHaveBeenCalledWith("backend-chat-1");
+      expect(mocks.getContextUsage).toHaveBeenCalledTimes(1);
+    });
+
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "backend-chat-1" },
+      }),
+    );
+    await waitFor(() => {
+      expect(mocks.getContextUsage).toHaveBeenCalledTimes(2);
+    });
+
+    window.dispatchEvent(new CustomEvent("model-switched"));
+    await waitFor(() => {
+      expect(mocks.getContextUsage).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it("does not show the previous active chat usage while a route chat is unresolved", async () => {
+    mocks.pathname = "/chat/1780458341751000";
+    mocks.currentSessionId = "chat-1";
+    mocks.getChatIdForSession.mockImplementation((sessionId: string) =>
+      sessionId === "chat-1" ? "backend-chat-1" : null,
+    );
+
+    render(<ChatPage />);
+
+    screen.getAllByRole("button", { name: /上下文占用.*暂无数据/ });
+    await act(async () => Promise.resolve());
+    expect(mocks.getContextUsage).not.toHaveBeenCalled();
   });
 
   it("keeps the subagent monitor mounted in content-only mode", () => {

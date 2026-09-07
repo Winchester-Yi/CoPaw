@@ -689,6 +689,43 @@ def test_finalizing_outputs_has_an_explicit_terminal_event_sequence(
     assert "不得伪造 approved" in text
 
 
+@pytest.mark.parametrize(
+    "is_final_stage",
+    [False, True],
+)
+def test_cumulative_refresh_ends_before_the_next_agent_turn(
+    is_final_stage: bool,
+) -> None:
+    text = build_wplus_command_text(
+        command="confirm_stage",
+        sop_session_id="sop-1",
+        run_id="run-2",
+        attempt_id="attempt-2",
+        payload={
+            "current_stage_id": "stage-2",
+            "confirmed_snapshots": [
+                {
+                    "stage_id": "stage-1",
+                    "report_no": 1,
+                    "revision": 1,
+                    "artifact_sha256": "0" * 64,
+                },
+            ],
+            "is_final_stage": is_final_stage,
+        },
+        target_state="RefreshingCumulative",
+    )
+    body = json.loads(text.splitlines()[1])
+
+    assert body["expected_event_sequence"] == ["cumulative_refreshed"]
+    assert "同一个后台 Agent 回合" in text
+    assert "cumulative_refreshed" in text
+    assert "累计事件成功持久化后结束当前回合" in text
+    assert "不得在本回合生成下一环节问题、执行预跑或生成最终结果" in text
+    assert "sop_result" not in body["expected_event_sequence"]
+    assert "memory_candidates" not in body["expected_event_sequence"]
+
+
 def test_approved_memory_command_runs_bound_store_script_in_agent_turn() -> (
     None
 ):

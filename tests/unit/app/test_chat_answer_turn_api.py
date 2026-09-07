@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from agentscope.message import Msg
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -14,6 +16,11 @@ from src.swe.app.runner.api import (
     router,
 )
 from src.swe.app.runner.manager import ChatManager
+from src.swe.app.runner.context_usage import (
+    CONTEXT_USAGE_INVALID_STATE_KEY,
+    CONTEXT_USAGE_STATE_KEY,
+    ContextUsageSnapshot,
+)
 from src.swe.app.runner.models import ChatSpec, ChatsFile
 from src.swe.app.runner.repo import BaseChatRepository
 
@@ -111,12 +118,32 @@ class _FakeTaskTracker:
         return "idle"
 
 
+class _BatchCoordinator:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def statuses(self, chat_ids: list[str]) -> dict[str, object]:
+        self.calls.append(chat_ids)
+        from src.swe.app.answer_turn.models import TurnStatus
+
+        return {
+            chat_id: TurnStatus.RUNNING if chat_id == "chat-1" else None
+            for chat_id in chat_ids
+        }
+
+    async def status(self, _chat_id: str):
+        raise AssertionError("list endpoint must use batch statuses")
+
+
 def _client(
     monkeypatch,
     *,
     include_user_identity: bool = True,
     chats: list[ChatSpec] | None = None,
-    session: _FakeSession | None = None,
+    session: object | None = None,
+    coordinator: object | None = None,
+    request_source_id: str | None = None,
+    request_agent_id: str | None = None,
 ) -> TestClient:
     from src.swe.app.runner import api as chat_api_module
 
@@ -140,6 +167,8 @@ def _client(
     workspace = SimpleNamespace(
         chat_manager=manager,
         task_tracker=_FakeTaskTracker(),
+        answer_turn_coordinator=coordinator,
+        agent_id="test-agent",
         runner=SimpleNamespace(session=session),
     )
 
@@ -150,6 +179,10 @@ def _client(
         @app.middleware("http")
         async def _user_state(request: Request, call_next):
             request.state.user_id = "user-1"
+            if request_source_id is not None:
+                request.state.source_id = request_source_id
+            if request_agent_id is not None:
+                request.state.agent_id = request_agent_id
             return await call_next(request)
 
     app.include_router(router)
@@ -167,6 +200,59 @@ def _client(
     app.dependency_overrides[get_chat_manager] = _get_chat_manager
     app.dependency_overrides[get_session] = _get_session
     return TestClient(app)
+
+
+def test_chat_list_uses_one_batch_status_lookup(monkeypatch) -> None:
+    coordinator = _BatchCoordinator()
+    response = _client(monkeypatch, coordinator=coordinator).get("/chats")
+
+    assert response.status_code == 200
+    assert response.json()[0]["status"] == "running"
+    assert coordinator.calls == [["chat-1"]]
+
+
+def _context_snapshot() -> dict:
+    return ContextUsageSnapshot(
+        used_tokens=27,
+        max_tokens=100,
+        remaining_tokens=73,
+        usage_ratio=0.27,
+        system_context_tokens=10,
+        tool_definition_tokens=2,
+        conversation_tokens=15,
+        governance_threshold_ratio=0.65,
+        active_threshold_ratio=0.8,
+        emergency_threshold_ratio=0.9,
+        status="normal",
+        as_of=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    ).model_dump(mode="json")
+
+
+class _ContextSnapshotSession:
+    def __init__(self, state: dict) -> None:
+        self.state = state
+        self.persisted_reads = 0
+
+    async def get_session_state_dict(self, *_args, **_kwargs) -> dict:
+        raise AssertionError("context usage must not acquire execution state")
+
+    async def get_persisted_session_state_dict(
+        self,
+        session_id: str,
+        user_id: str,
+    ) -> dict:
+        assert (session_id, user_id) == ("session-1", "user-1")
+        self.persisted_reads += 1
+        return self.state
+
+
+class _Coordinator:
+    def __init__(self, status: str | None) -> None:
+        self._status = status
+
+    async def status(self, chat_id: str):
+        assert chat_id == "chat-1"
+        return self._status
 
 
 def test_answer_turn_returns_anchor_question_and_following_messages(
@@ -213,6 +299,184 @@ def test_chat_detail_reads_persisted_snapshot_without_waiting_for_execution(
     ).get("/chats/chat-1")
 
     assert response.status_code == 200
+
+
+def test_context_usage_returns_committed_numeric_snapshot(monkeypatch) -> None:
+    session = _ContextSnapshotSession(
+        {CONTEXT_USAGE_STATE_KEY: _context_snapshot()},
+    )
+
+    response = _client(monkeypatch, session=session).get(
+        "/chats/chat-1/context-usage",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "available": True,
+        "stale": False,
+        **_context_snapshot(),
+    }
+    assert session.persisted_reads == 1
+    assert set(payload) == {
+        "available",
+        "stale",
+        "schema_version",
+        "used_tokens",
+        "max_tokens",
+        "remaining_tokens",
+        "usage_ratio",
+        "system_context_tokens",
+        "tool_definition_tokens",
+        "conversation_tokens",
+        "governance_threshold_ratio",
+        "active_threshold_ratio",
+        "emergency_threshold_ratio",
+        "status",
+        "estimated",
+        "as_of",
+    }
+
+
+def test_context_usage_returns_unavailable_without_runtime_construction(
+    monkeypatch,
+) -> None:
+    session = _ContextSnapshotSession({"agent": {"memory": {}}})
+
+    response = _client(monkeypatch, session=session).get(
+        "/chats/chat-1/context-usage",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"available": False}
+    assert session.persisted_reads == 1
+
+
+@pytest.mark.parametrize("status", ["running", "stopping"])
+def test_context_usage_marks_active_turn_snapshot_stale(
+    monkeypatch,
+    status: str,
+) -> None:
+    session = _ContextSnapshotSession(
+        {CONTEXT_USAGE_STATE_KEY: _context_snapshot()},
+    )
+
+    response = _client(
+        monkeypatch,
+        session=session,
+        coordinator=_Coordinator(status),
+    ).get("/chats/chat-1/context-usage")
+
+    assert response.status_code == 200
+    assert response.json()["stale"] is True
+
+
+def test_context_usage_marks_failed_capture_snapshot_stale_while_idle(
+    monkeypatch,
+) -> None:
+    session = _ContextSnapshotSession(
+        {
+            CONTEXT_USAGE_STATE_KEY: _context_snapshot(),
+            CONTEXT_USAGE_INVALID_STATE_KEY: True,
+        },
+    )
+
+    response = _client(
+        monkeypatch,
+        session=session,
+        coordinator=_Coordinator("idle"),
+    ).get("/chats/chat-1/context-usage")
+
+    assert response.status_code == 200
+    assert response.json()["stale"] is True
+
+
+def test_context_usage_treats_future_snapshot_as_unavailable(
+    monkeypatch,
+) -> None:
+    snapshot = {**_context_snapshot(), "schema_version": 2}
+    session = _ContextSnapshotSession({CONTEXT_USAGE_STATE_KEY: snapshot})
+
+    response = _client(monkeypatch, session=session).get(
+        "/chats/chat-1/context-usage",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"available": False}
+
+
+def test_context_usage_hides_malformed_snapshot_values_from_logs(
+    monkeypatch,
+    caplog,
+) -> None:
+    snapshot = {
+        **_context_snapshot(),
+        "used_tokens": "not-a-number",
+        "private_prompt": "must-not-be-logged",
+    }
+    session = _ContextSnapshotSession({CONTEXT_USAGE_STATE_KEY: snapshot})
+
+    response = _client(monkeypatch, session=session).get(
+        "/chats/chat-1/context-usage",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"available": False}
+    assert "must-not-be-logged" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("chat", "client_kwargs"),
+    [
+        (
+            ChatSpec(
+                id="chat-1",
+                session_id="session-1",
+                user_id="other-user",
+                channel="console",
+            ),
+            {},
+        ),
+        (
+            ChatSpec(
+                id="chat-1",
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                meta={"source_id": "source-a"},
+            ),
+            {"request_source_id": "source-b"},
+        ),
+        (
+            ChatSpec(
+                id="chat-1",
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                meta={"agent_id": "agent-a"},
+            ),
+            {"request_agent_id": "agent-b"},
+        ),
+    ],
+)
+def test_context_usage_reuses_chat_ownership_404(
+    monkeypatch,
+    chat: ChatSpec,
+    client_kwargs: dict,
+) -> None:
+    session = _ContextSnapshotSession(
+        {CONTEXT_USAGE_STATE_KEY: _context_snapshot()},
+    )
+
+    response = _client(
+        monkeypatch,
+        chats=[chat],
+        session=session,
+        **client_kwargs,
+    ).get("/chats/chat-1/context-usage")
+
+    assert response.status_code == 404
+    assert session.persisted_reads == 0
 
 
 def test_answer_turn_returns_404_when_msgid_is_not_user_message(

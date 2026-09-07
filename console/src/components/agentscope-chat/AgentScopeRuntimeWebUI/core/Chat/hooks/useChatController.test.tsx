@@ -231,6 +231,30 @@ describe("useChatController", () => {
     );
   });
 
+  it("clears loading when completion arrives after the response was removed", async () => {
+    render(<Harness />);
+    latestCurrentQARef!.current.activeRequestOwner = {
+      requestId: "request-a",
+      kind: "submit",
+      sessionId: "chat-b",
+      logicalSessionId: "logical:chat-b",
+      chatId: "chat:chat-b",
+    };
+
+    await act(async () => {
+      latestRequestOptions!.onFinish({
+        requestId: "request-a",
+        kind: "submit",
+        sessionId: "chat-b",
+        logicalSessionId: "logical:chat-b",
+        chatId: "chat:chat-b",
+      });
+    });
+
+    expect(mocks.setLoading).toHaveBeenCalledWith(false);
+    expect(latestCurrentQARef!.current.activeRequestOwner).toBeUndefined();
+  });
+
   it("marks the owning session as generating before waiting for the first frame", async () => {
     let releaseSleep: (() => void) | undefined;
     mocks.sleep.mockImplementationOnce(

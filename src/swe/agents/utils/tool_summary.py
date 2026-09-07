@@ -292,11 +292,30 @@ def _generate_rule_based_call_summary(
     return _build_call_action_hint(tool_name, server_label, arguments)
 
 
+_GOVERNANCE_OUTPUT_SUMMARY = {
+    "pending": "操作等待审批",
+    "rejected": "操作已拒绝",
+    "blocked": "操作已拦截",
+}
+
+
+def _resolve_output_governance(value: Any) -> str | None:
+    """返回可信内部标记携带的工具治理状态。"""
+    if isinstance(value, str) and value in _GOVERNANCE_OUTPUT_SUMMARY:
+        return value
+    return None
+
+
 def _generate_rule_based_output_summary(
     tool_name: str,
     output: str | Dict[str, Any] | None,
+    governance_status: Any = None,
 ) -> str:
     """Generate a rule-based summary for tool output."""
+    governance = _resolve_output_governance(governance_status)
+    if governance is not None:
+        return _GOVERNANCE_OUTPUT_SUMMARY[governance]
+
     display_name = get_tool_display_name(tool_name)
     if tool_name in _SHELL_COMMAND_TOOLS:
         parsed = (
@@ -582,6 +601,11 @@ def generate_tool_call_summary(
 def generate_tool_output_summary(
     tool_name: str,
     output: str | Dict[str, Any] | None,
+    governance_status: Any = None,
 ) -> str:
     """Generate user-friendly summary for tool output."""
-    return _generate_rule_based_output_summary(tool_name, output)
+    return _generate_rule_based_output_summary(
+        tool_name,
+        output,
+        governance_status,
+    )

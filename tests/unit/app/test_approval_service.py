@@ -9,13 +9,18 @@ import logging
 import pytest
 
 from swe.app.approvals.service import ApprovalService
-from swe.app.runner.runner import AgentRunner
+from swe.app.runner.runner import (
+    AgentRunner,
+    _approved_tool_call_from_record,
+    _build_denial_response_msg,
+)
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
     SourceSystemConfig,
 )
 from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.context import tenant_context
+from swe.agents.tool_failure import TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
 from swe.security.tool_guard.approval import ApprovalDecision
 
 
@@ -50,6 +55,55 @@ class _ChannelManager:
         return None
 
 
+def test_approved_replay_restores_operation_group_argument() -> None:
+    from swe.app.runner.operation_group import OPERATION_GROUP_ARG_KEY
+
+    record = SimpleNamespace(
+        extra={
+            "tool_call": {
+                "id": "tool-1",
+                "name": "execute_shell_command",
+                "input": {"command": "echo ok"},
+            },
+            "operation_group": {"id": "inspect", "title": "检查图片"},
+        },
+    )
+
+    restored = _approved_tool_call_from_record(record)
+
+    assert restored is not None
+    assert restored["input"][OPERATION_GROUP_ARG_KEY] == {
+        "id": "inspect",
+        "name": "检查图片",
+    }
+
+
+def test_denial_response_carries_trusted_governance_and_group() -> None:
+    pending = SimpleNamespace(
+        tool_name="execute_shell_command",
+        extra={
+            "tool_call": {
+                "id": "tool-1",
+                "name": "execute_shell_command",
+                "input": {"command": "echo ok"},
+            },
+            "operation_group": {"id": "inspect", "title": "检查图片"},
+        },
+    )
+
+    response = _build_denial_response_msg(pending, "denied")
+    result = response.content[0]
+
+    assert result["_swe_tool_governance"] == "rejected"
+    assert result["operation_group"] == {
+        "id": "inspect",
+        "title": "检查图片",
+    }
+    assert response.metadata[TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD] == {
+        "tool-1": "rejected",
+    }
+
+
 @pytest.mark.asyncio
 async def test_resolved_goal_approval_wakes_its_goal(monkeypatch) -> None:
     service = ApprovalService()
@@ -73,6 +127,38 @@ async def test_resolved_goal_approval_wakes_its_goal(monkeypatch) -> None:
         )
 
     assert goal_service.calls == [("goal-1", "Tool approval approved")]
+
+
+@pytest.mark.asyncio
+async def test_get_requests_batches_scope_filtered_records() -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        visible = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="read_file",
+            result=_result(),
+        )
+    with tenant_context(tenant_id="tenant-b", source_id="source-b"):
+        hidden = await service.create_pending(
+            session_id="session-2",
+            user_id="user-2",
+            channel="console",
+            tool_name="read_file",
+            result=_result(),
+        )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        records = await service.get_requests(
+            [
+                visible.request_id,
+                visible.request_id,
+                hidden.request_id,
+                "missing",
+            ],
+        )
+
+    assert records == {visible.request_id: visible}
 
 
 @pytest.mark.asyncio
@@ -167,21 +253,16 @@ async def test_approval_lookup_logs_in_memory_request_ids(caplog) -> None:
                 logger="swe.app.approvals.service",
             ):
                 found = await service.get_request(pending.request_id)
+                diagnostic = await service.debug_request_lookup(
+                    pending.request_id,
+                )
         finally:
             approval_logger.removeHandler(caplog.handler)
 
     assert found is pending
-    assert any(
-        "Approval lookup state:" in record.message
-        and f"pending_request_ids=['{pending.request_id}']" in record.message
-        and (
-            f"completed_request_ids=['{completed.request_id}']"
-            in record.message
-        )
-        and record.pending_request_ids == [pending.request_id]
-        and record.completed_request_ids == [completed.request_id]
-        for record in caplog.records
-    )
+    assert diagnostic["pending"]["request_id"] == pending.request_id
+    assert diagnostic["pending_count"] == 1
+    assert diagnostic["completed_count"] == 1
 
 
 @pytest.mark.asyncio

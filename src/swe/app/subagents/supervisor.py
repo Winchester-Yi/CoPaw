@@ -13,7 +13,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -179,6 +179,8 @@ class BackgroundSubAgentSupervisor:
         runtime_policy: PermissionPolicy | None = None,
         request_context: dict[str, Any] | None = None,
         effective_skill_names: list[str] | None = None,
+        skill_snapshot_signatures: dict[str, str] | None = None,
+        skill_snapshot_dirs: Mapping[str, Path] | None = None,
         definition: SubAgentDefinition | None = None,
         start_request: SubAgentStartRequest | None = None,
         definition_match: DefinitionMatchMetadata | None = None,
@@ -204,6 +206,7 @@ class BackgroundSubAgentSupervisor:
         effective_budget = _effective_budget(definition.budget, spec.budget)
         nickname = assign_subagent_nickname(definition.nickname)
         run_id = f"subagent-{uuid4().hex[:12]}"
+        parent_skill_snapshot_dirs = skill_snapshot_dirs
         try:
             session_dependency_view = resolve_community_expert_dependency_view(
                 workspace_dir=workspace_dir,
@@ -215,10 +218,11 @@ class BackgroundSubAgentSupervisor:
             )
             if session_dependency_view is not None:
                 (
-                    skill_snapshot_dirs,
+                    snapshotted_skill_paths,
                     private_mcp_snapshot_path,
                     diagnostics,
-                ) = capture_community_expert_session_dependencies(
+                ) = await asyncio.to_thread(
+                    capture_community_expert_session_dependencies,
                     run_store_dir=scope.run_store_dir,
                     run_id=run_id,
                     dependency_view_root=session_dependency_view,
@@ -226,15 +230,20 @@ class BackgroundSubAgentSupervisor:
                     parent_agent_config=parent_agent_config,
                 )
             else:
-                skill_snapshot_dirs, private_mcp_snapshot_path, diagnostics = (
-                    capture_launch_dependencies(
-                        run_store_dir=scope.run_store_dir,
-                        run_id=run_id,
-                        workspace_dir=workspace_dir,
-                        parent_agent_config=parent_agent_config,
-                        definition=definition,
-                        effective_skill_names=effective_skill_names or [],
-                    )
+                (
+                    snapshotted_skill_paths,
+                    private_mcp_snapshot_path,
+                    diagnostics,
+                ) = await asyncio.to_thread(
+                    capture_launch_dependencies,
+                    run_store_dir=scope.run_store_dir,
+                    run_id=run_id,
+                    workspace_dir=workspace_dir,
+                    parent_agent_config=parent_agent_config,
+                    definition=definition,
+                    effective_skill_names=effective_skill_names or [],
+                    skill_snapshot_signatures=skill_snapshot_signatures,
+                    skill_snapshot_dirs=parent_skill_snapshot_dirs,
                 )
         except OSError as exc:
             record = await store.create(
@@ -329,7 +338,7 @@ class BackgroundSubAgentSupervisor:
             request_context=worker_context,
             stderr_log_path=str(stderr_log_path),
             launch_snapshot=SubAgentLaunchSnapshot(
-                skill_snapshot_dirs=skill_snapshot_dirs,
+                skill_snapshot_dirs=snapshotted_skill_paths,
                 private_mcp_snapshot_path=private_mcp_snapshot_path,
                 private_model_snapshot_path=private_model_snapshot_path,
             ),

@@ -100,6 +100,11 @@ def app_cmd(
     else:
         os.environ.pop("SWE_RELOAD_MODE", None)
 
+    # Keep the service process quiet by default. Set this explicitly to
+    # ``true`` when terminal rendering is desired (for example, during local
+    # interactive debugging).
+    os.environ.setdefault("SWE_CONSOLE_OUTPUT_ENABLED", "false")
+
     setup_logger(log_level)
     if log_level in ("debug", "trace"):
         from .main import log_init_timings
@@ -120,4 +125,5 @@ def app_cmd(
         reload=reload,
         workers=1,
         log_level=log_level,
+        access_log=False,
     )

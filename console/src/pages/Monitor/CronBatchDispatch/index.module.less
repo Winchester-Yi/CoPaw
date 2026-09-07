@@ -433,18 +433,16 @@
   min-height: 0;
 }
 
+.eventTab {
+  min-height: 0;
+}
+
 .intentFilters {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) 112px 112px auto auto;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
-}
-
-.truncatedNotice {
-  color: #b54708;
-  font-size: 11px;
-  white-space: nowrap;
 }
 
 .intentFilters > strong {
@@ -508,12 +506,20 @@
 }
 
 .eventList {
-  height: 423px;
+  height: 380px;
   display: flex;
   flex-direction: column;
   gap: 7px;
   padding-right: 4px;
   overflow-y: auto;
+}
+
+.detailPagination {
+  min-height: 36px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding-top: 8px;
 }
 
 .eventItem {
