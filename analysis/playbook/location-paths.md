@@ -1,5 +1,29 @@
 # 定位路径
 
+## 批调度暂停／恢复与关闭任务跳过
+
+- 独立状态与旧任务归属：`scheduler/src/scheduler/app/services/cron/batch_run_state.py`。先排除普通任务和批子任务，只对批父任务初始化；状态存储在控制表，不跟随父任务后续 enabled 变化。
+- 入队和交接：`batch_admission.py` 原子建批；`dispatch_gate.py` 检查 control、token 和自身任务状态。暂停退回未交接领取，已关闭任务结算为 skipped，不作为模型失败样本。
+- API：SWE `/api/cron/jobs/{id}/batch-dispatch/run-state`，Scheduler 内部 `/api/scheduler/cron/dispatch/parents/{id}/run-state`。恢复时只修复该父任务的物理批定时器。Console 控件为 `BatchRunStateControl.tsx`。
+- 迁移 CLI：`python -m scheduler.migrate_batch_run_state` 默认只读预览，显式 `--apply` 才写入。部署、回滚及真实 MySQL 并发验收见 `docs/deploy/cron-dispatch-run-state-upgrade.md`；不能新旧 Scheduler 混跑。
+
+## Worker 调整记录截断 / 模型变化折线
+
+- Monitor 查询入口仍为 `/api/monitor/cron/dispatch/workers`。`capacity_events_next_cursor` 非空时继续携带 `capacity_cursor` 请求相同 source/时间范围；第一页有策略和当前容量，续页仅取历史。
+- 分页 SQL 在 `monitor/src/monitor/app/services/cron/capacity_history.py`：每页 100 条、created_at/id keyset、固定 max(id)；不要把单页条数误认为历史总量限制。
+- Console `CronBatchDispatch/workerHistory.ts` 拉取完整分页链并按 provider/model 构造阶梯线；`WorkerHistoryChart.tsx` 渲染图表。加载失败不展示不完整历史，切换范围使旧请求失效。
+
+## 批调度优先名单 / 人工重试
+
+- 模型限流分类包含网关错误码 `LAILGW0429`（访问请求过多）和 `LAILGW0433`（输出 Token 每分钟上限），兼容 `rate-limited` 连字符文案；Python 分类与 SQL 失败统计共用 `FAILURE_RULES`。这类错误仍按原有失败/重试反馈参与 worker 调整，与鉴权过期排除规则不同。
+
+- 配置与代理入口：`src/swe/app/crons/batch_operations.py`；保存仅作用于广播源任务，等待 Monitor 定义同步确认，失败时保留本地配置并提示重试保存。
+- Scheduler 操作：`scheduler/src/scheduler/app/services/cron/batch_operations.py`；失败分类统计覆盖全部当前失败 intent，预览与每次入队最多 200 个，以 id/attempt 防重，人工重试事件和状态更新同事务。
+- 排序依据：`batch_priority.py` 与 intent payload 的 `dispatch_priority`；排序策略快照在 batch 的 `callback_metadata.batch_dispatch_priority`，重复 callback 不覆写。
+- 容量边界：`capacity_claim.py`；scope 行锁保护实际领取和容量写入，已有 claimed/acknowledged/dispatched 均占用名额。
+- Console：`Control/CronJobs/components/BatchPriorityEditor.tsx`、`Monitor/CronBatchDispatch/FailurePanel.tsx`。失败批次只展示结果数，补跑整个 intent，需按错误类型确认配置修复或旧执行停止。
+- 验证：Scheduler 单测、`test_cron_batch_operations.py`、Monitor dispatch 查询测试及上述前端组件测试；SQLite 测试验证状态和 SQL 逻辑，不能替代部署 MySQL 多实例锁验证。
+
 ## NAS session lock release gate
 
 在生产等价 StorageClass 上运行以下检查；`/mnt/sessions` 必须是所有 Runner Pod 共享的同一 NAS 挂载：

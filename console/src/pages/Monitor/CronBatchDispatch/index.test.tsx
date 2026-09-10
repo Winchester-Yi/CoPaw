@@ -14,6 +14,9 @@ import type {
   CronDispatchWorkersResponse,
 } from "../../../api/modules/monitor";
 import CronBatchDispatchPage from "./index";
+vi.mock("echarts-for-react", () => ({
+  default: () => <div aria-label="测试图表容器" />,
+}));
 
 const monitorApiMock = vi.hoisted(() => ({
   getCronDispatchBatches: vi.fn(),
@@ -485,7 +488,11 @@ describe("CronBatchDispatchPage", () => {
     render(<CronBatchDispatchPage />);
     expect(await screen.findByText("展示定时任务名")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByTitle("2"));
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Batch 分页" })).getByTitle(
+        "2",
+      ),
+    );
     await waitFor(() => {
       expect(monitorApiMock.getCronDispatchBatches).toHaveBeenLastCalledWith(
         1,
@@ -563,8 +570,12 @@ describe("CronBatchDispatchPage", () => {
 
     expect(await screen.findByLabelText("查看调整记录 13")).toBeInTheDocument();
     expect(screen.getByText("1 / 3")).toBeInTheDocument();
-    expect(previous).toBeDisabled();
-    expect(next).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "上一条调整记录" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "下一条调整记录" }),
+    ).toBeEnabled();
     expect(screen.queryByText("worker-older")).not.toBeInTheDocument();
   }, 30_000);
 
@@ -590,7 +601,11 @@ describe("CronBatchDispatchPage", () => {
       );
     });
 
-    fireEvent.click(screen.getByTitle("2"));
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Batch 分页" })).getByTitle(
+        "2",
+      ),
+    );
     await waitFor(() => {
       expect(monitorApiMock.getCronDispatchBatches).toHaveBeenLastCalledWith(
         2,
@@ -945,5 +960,64 @@ describe("CronBatchDispatchPage", () => {
       screen.getByText("仅管理员可访问批调度监控页面"),
     ).toBeInTheDocument();
     expect(monitorApiMock.getCronDispatchBatches).not.toHaveBeenCalled();
+  });
+
+  it("loads later history pages and can display records beyond the eighth", async () => {
+    const base =
+      (await monitorApiMock.getCronDispatchWorkers()) as CronDispatchWorkersResponse;
+    monitorApiMock.getCronDispatchWorkers.mockClear();
+    const records = Array.from({ length: 12 }, (_, index) => ({
+      ...base.capacity_events[0],
+      id: 200 + index,
+    }));
+    monitorApiMock.getCronDispatchWorkers
+      .mockResolvedValueOnce({
+        ...base,
+        capacity_events: records.slice(0, 8),
+        capacity_events_next_cursor: "page-2",
+      })
+      .mockResolvedValueOnce({
+        ...base,
+        capacity_events: records.slice(8),
+        capacity_events_next_cursor: null,
+      });
+    render(<CronBatchDispatchPage />);
+    expect(
+      await screen.findByText("区间内调整记录（12 条）"),
+    ).toBeInTheDocument();
+    expect(monitorApiMock.getCronDispatchWorkers).toHaveBeenLastCalledWith(
+      expect.objectContaining({ capacity_cursor: "page-2" }),
+    );
+    const jumpInput = within(screen.getByLabelText("跳转调整记录")).getByRole(
+      "textbox",
+    );
+    fireEvent.change(jumpInput, { target: { value: "9" } });
+    fireEvent.keyUp(jumpInput, { key: "Enter", keyCode: 13 });
+    expect(screen.getByLabelText("查看调整记录 208")).toBeInTheDocument();
+    expect(screen.getByText("9 / 12")).toBeInTheDocument();
+  }, 30_000);
+
+  it("shows outcome counts without a progress bar for a failed batch", async () => {
+    render(<CronBatchDispatchPage />);
+    const label = await screen.findByText("另一个定时任务");
+    const row = label.closest("button")!;
+    expect(within(row).getByText("成功 2 个")).toBeInTheDocument();
+    expect(within(row).getByText("失败 3 个")).toBeInTheDocument();
+    expect(row.querySelector(".ant-progress")).toBeNull();
+  });
+
+  it("shows paused dispatch separately and includes skipped tasks in terminal progress", async () => {
+    const response = await monitorApiMock.getCronDispatchBatches();
+    monitorApiMock.getCronDispatchBatches.mockResolvedValue({
+      ...response,
+      items: [
+        { ...response.items[0], skipped_count: 3, dispatch_paused: true },
+      ],
+    });
+    render(<CronBatchDispatchPage />);
+    const row = (await screen.findByText("展示定时任务名")).closest("button")!;
+    expect(within(row).getByText("后续调度已暂停")).toBeInTheDocument();
+    expect(within(row).getByText("跳过／取消 3 个")).toBeInTheDocument();
+    expect(within(row).getByText("16/20")).toBeInTheDocument();
   });
 });

@@ -43,6 +43,10 @@ import {
 import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
+import WorkerHistoryChart from "./WorkerHistoryChart";
+import { loadWorkerHistory } from "./workerHistory";
+import FailurePanel from "./FailurePanel";
+import { getBbkDisplayName } from "../../../constants/bbk";
 
 const { RangePicker } = DatePicker;
 const DETAIL_PAGE_SIZE = 50;
@@ -74,10 +78,12 @@ const INTENT_STATUS_OPTIONS = [
   { label: "全部状态", value: "all" },
   { label: "等待中", value: "pending" },
   { label: "已领取", value: "claimed" },
+  { label: "交接中", value: "acknowledged" },
   { label: "已分发", value: "dispatched" },
   { label: "已完成", value: "completed" },
   { label: "失败", value: "failed" },
   { label: "已取消", value: "cancelled" },
+  { label: "已跳过", value: "skipped" },
 ];
 
 const statusColor: Record<string, string> = {
@@ -87,6 +93,7 @@ const statusColor: Record<string, string> = {
   completed: "success",
   failed: "error",
   cancelled: "warning",
+  skipped: "default",
   claimed: "processing",
   acknowledged: "geekblue",
   dispatched: "blue",
@@ -99,8 +106,9 @@ const statusLabel: Record<string, string> = {
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
+  skipped: "已跳过",
   claimed: "已领取",
-  acknowledged: "已确认",
+  acknowledged: "交接中",
   dispatched: "已分发",
 };
 
@@ -353,8 +361,9 @@ function CapacityEventHistory({
 }: {
   items: CronDispatchCapacityItem[];
 }) {
-  const visibleItems = items.slice(0, 8);
-  const eventKey = visibleItems.map((item) => item.id).join(":");
+  const visibleItems = items;
+  const eventKey = `${visibleItems.length}:${visibleItems[0]
+    ?.id}:${visibleItems[visibleItems.length - 1]?.id}`;
   const [navigation, setNavigation] = useState({ eventKey: "", index: 0 });
 
   const safeActiveIndex =
@@ -368,7 +377,7 @@ function CapacityEventHistory({
       <div className={styles.subSectionTitle}>
         <div className={styles.subSectionTitleLabel}>
           <TimerReset size={16} />
-          <span>最近调整记录</span>
+          <span>区间内调整记录（{visibleItems.length} 条）</span>
         </div>
         {activeItem ? (
           <div
@@ -420,6 +429,18 @@ function CapacityEventHistory({
           />
         )}
       </div>
+      {visibleItems.length > 1 && (
+        <Pagination
+          aria-label="跳转调整记录"
+          current={safeActiveIndex + 1}
+          pageSize={1}
+          total={visibleItems.length}
+          showSizeChanger={false}
+          showQuickJumper
+          size="small"
+          onChange={(page) => setNavigation({ eventKey, index: page - 1 })}
+        />
+      )}
     </>
   );
 }
@@ -494,6 +515,8 @@ export default function CronBatchDispatchPage() {
   const [batchLoading, setBatchLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [workerLoading, setWorkerLoading] = useState(false);
+  const [workerLoadedCount, setWorkerLoadedCount] = useState(0);
+  const [workerError, setWorkerError] = useState("");
   const [batchQuery, setBatchQuery] = useState("");
   const [debouncedBatchQuery, setDebouncedBatchQuery] = useState("");
   const [intentQuery, setIntentQuery] = useState("");
@@ -514,9 +537,19 @@ export default function CronBatchDispatchPage() {
     }),
     [debouncedBatchQuery, dateRange, status],
   );
+  const workerQueryKey = JSON.stringify([
+    sourceId,
+    filters.start_time,
+    filters.end_time,
+  ]);
+  const workerQueryRef = useRef(workerQueryKey);
+  workerQueryRef.current = workerQueryKey;
 
   const selectedDetail =
-    detail?.batch.batch_id === selectedBatchId ? detail : null;
+    detail?.batch.batch_id === selectedBatchId &&
+    detail.batch.source_id === sourceId
+      ? detail
+      : null;
 
   const fetchBatches = useCallback(async () => {
     const requestId = ++batchRequestId.current;
@@ -564,25 +597,44 @@ export default function CronBatchDispatchPage() {
     const requestId = ++workerRequestId.current;
     if (!canView) return;
     setWorkerLoading(true);
+    setWorkerLoadedCount(0);
+    setWorkerError("");
+    setWorkers(null);
     try {
-      const response = await monitorApi.getCronDispatchWorkers({
-        start_time: filters.start_time,
-        end_time: filters.end_time,
-      });
+      const response = await loadWorkerHistory(
+        (capacity_cursor) =>
+          monitorApi.getCronDispatchWorkers({
+            start_time: filters.start_time,
+            end_time: filters.end_time,
+            ...(capacity_cursor ? { capacity_cursor } : {}),
+          }),
+        () =>
+          requestId === workerRequestId.current &&
+          workerQueryRef.current === workerQueryKey,
+        setWorkerLoadedCount,
+      );
       if (requestId === workerRequestId.current) {
         setWorkers(response);
       }
     } catch (error) {
-      if (requestId !== workerRequestId.current) return;
+      if (
+        requestId !== workerRequestId.current ||
+        workerQueryRef.current !== workerQueryKey
+      )
+        return;
       console.error("Failed to fetch cron dispatch workers:", error);
       message.error("批调度 worker 加载失败");
+      setWorkerError("调整历史未能完整加载，请点击刷新重试。");
       setWorkers(null);
     } finally {
-      if (requestId === workerRequestId.current) {
+      if (
+        requestId === workerRequestId.current &&
+        workerQueryRef.current === workerQueryKey
+      ) {
         setWorkerLoading(false);
       }
     }
-  }, [canView, filters.end_time, filters.start_time]);
+  }, [canView, filters.end_time, filters.start_time, workerQueryKey]);
 
   const fetchDetail = useCallback(async () => {
     const requestId = ++detailRequestId.current;
@@ -670,6 +722,9 @@ export default function CronBatchDispatchPage() {
 
   useEffect(() => {
     fetchWorkers();
+    return () => {
+      workerRequestId.current += 1;
+    };
   }, [fetchWorkers]);
 
   useEffect(() => {
@@ -728,6 +783,39 @@ export default function CronBatchDispatchPage() {
   };
 
   const intentColumns: ColumnsType<CronDispatchIntentItem> = [
+    {
+      title: "批内顺位",
+      dataIndex: "dispatch_order",
+      width: 84,
+      render: (value: number) => value + 1,
+    },
+    {
+      title: "优先依据",
+      key: "priority",
+      width: 180,
+      render: (_, record) => {
+        const p = record.priority;
+        const label =
+          p?.basis === "user"
+            ? `用户优先 · 第${p.user_rank}位`
+            : p?.basis === "branch"
+            ? `分行优先 · ${getBbkDisplayName(p.branch_id)} · 第${
+                p.branch_rank
+              }位`
+            : "默认排序";
+        return (
+          <Tooltip
+            title={`用户顺位：${p?.user_rank ?? "未设置"}；分行顺位：${
+              p?.branch_rank ?? "未设置"
+            }；分行：${p?.branch_id || "未知"}；热度：${
+              record.viewer_heat_score
+            }`}
+          >
+            <Tag>{label}</Tag>
+          </Tooltip>
+        );
+      },
+    },
     { title: "Intent", dataIndex: "id", width: 76 },
     { title: "角色", dataIndex: "intent_role", width: 72 },
     {
@@ -892,7 +980,9 @@ export default function CronBatchDispatchPage() {
             <div className={styles.batchList}>
               {batches.map((batch) => {
                 const total = Math.max(batch.total_count, 1);
-                const finished = batch.completed_count + batch.failed_count;
+                const skipped = batch.skipped_count ?? 0;
+                const finished =
+                  batch.completed_count + batch.failed_count + skipped;
                 return (
                   <button
                     type="button"
@@ -922,18 +1012,35 @@ export default function CronBatchDispatchPage() {
                     </span>
                     <span className={styles.batchProgress}>
                       {renderStatus(batch.status)}
-                      <strong>
-                        {finished}/{batch.total_count}
-                      </strong>
-                      <Progress
-                        percent={Math.min(
-                          100,
-                          Math.round((finished / total) * 100),
-                        )}
-                        showInfo={false}
-                        size="small"
-                        status={batch.failed_count > 0 ? "exception" : "normal"}
-                      />
+                      {batch.dispatch_paused && finished < batch.total_count ? (
+                        <Tag color="warning">后续调度已暂停</Tag>
+                      ) : null}
+                      {skipped > 0 ? (
+                        <strong>跳过／取消 {skipped} 个</strong>
+                      ) : null}
+                      {batch.status === "failed" ? (
+                        <strong className={styles.batchOutcome}>
+                          <span>成功 {batch.completed_count} 个</span>
+                          <span>失败 {batch.failed_count} 个</span>
+                        </strong>
+                      ) : (
+                        <>
+                          <strong>
+                            {finished}/{batch.total_count}
+                          </strong>
+                          <Progress
+                            percent={Math.min(
+                              100,
+                              Math.round((finished / total) * 100),
+                            )}
+                            showInfo={false}
+                            size="small"
+                            status={
+                              batch.failed_count > 0 ? "exception" : "normal"
+                            }
+                          />
+                        </>
+                      )}
                     </span>
                   </button>
                 );
@@ -950,7 +1057,11 @@ export default function CronBatchDispatchPage() {
               ) : null}
             </div>
           </Spin>
-          <div className={styles.batchPagination}>
+          <div
+            role="navigation"
+            aria-label="Batch 分页"
+            className={styles.batchPagination}
+          >
             <Pagination
               current={page}
               pageSize={4}
@@ -1010,6 +1121,17 @@ export default function CronBatchDispatchPage() {
                   destroyOnHidden
                   className={styles.detailTabs}
                   items={[
+                    {
+                      key: "failures",
+                      label: "失败类型与重试",
+                      children: (
+                        <FailurePanel
+                          key={`${sourceId}:${selectedBatchId}`}
+                          batchId={selectedBatchId}
+                          onQueued={handleRefresh}
+                        />
+                      ),
+                    },
                     {
                       key: "intents",
                       label: `Intent (${selectedDetail.intent_total})`,
@@ -1147,7 +1269,7 @@ export default function CronBatchDispatchPage() {
           <div className={styles.panelHeader}>
             <div>
               <h2>Worker 变动</h2>
-              <span>最近 capacity 快照与当前有效 worker</span>
+              <span>当前有效 worker 与所选时间范围的完整调整记录</span>
             </div>
             <Clock3 size={18} />
           </div>
@@ -1164,7 +1286,18 @@ export default function CronBatchDispatchPage() {
                 description="暂无 capacity"
               />
             )}
-            <CapacityEventHistory items={capacityEvents} />
+            {workerLoading ? (
+              <p aria-live="polite">
+                正在加载调整历史，已读取 {workerLoadedCount} 条…
+              </p>
+            ) : workerError ? (
+              <Alert type="error" showIcon message={workerError} />
+            ) : (
+              <>
+                <WorkerHistoryChart items={capacityEvents} />
+                <CapacityEventHistory items={capacityEvents} />
+              </>
+            )}
           </Spin>
         </article>
       </section>

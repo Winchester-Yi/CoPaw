@@ -45,6 +45,8 @@ import {
   type SkillSelectOption,
 } from "./helpers";
 import styles from "./index.module.less";
+import BatchPriorityEditor from "./components/BatchPriorityEditor";
+import BatchRunStateControl from "./components/BatchRunStateControl";
 
 type CronJob = CronJobSpecOutput;
 type BroadcastDispatchMode = "normal" | "batch";
@@ -105,6 +107,7 @@ function CronJobsPage() {
   const [childrenManagementJob, setChildrenManagementJob] =
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
+  const [priorityDirty, setPriorityDirty] = useState(false);
   const [broadcastRefreshing, setBroadcastRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [skillOptions, setSkillOptions] = useState<SkillSelectOption[]>([]);
@@ -486,6 +489,7 @@ function CronJobsPage() {
             (selectedBroadcastTenantIds.length === 0 &&
               !hasBroadcastDispatchModeChange) ||
             broadcasting ||
+            priorityDirty ||
             hasVisibleBroadcastTask,
         }}
         width={640}
@@ -542,6 +546,25 @@ function CronJobsPage() {
               onSelectionInfoChange={setSelectedBroadcastTargets}
               hint="选择需要接收该定时任务的租户"
               excludeTenantId={currentTenantId}
+            />
+            {broadcastDispatchMode === "batch" && (
+              <BatchPriorityEditor
+                key={broadcastingJob.id}
+                jobId={broadcastingJob.id}
+                initial={broadcastingJob.meta?.batch_dispatch_priority}
+                onSaved={fetchJobs}
+                onDirtyChange={setPriorityDirty}
+                disabled={broadcasting || hasVisibleBroadcastTask}
+              />
+            )}
+            <BatchRunStateControl
+              key={`run-state-${broadcastingJob.id}`}
+              job={broadcastingJob}
+              disabled={
+                broadcasting ||
+                hasVisibleBroadcastTask ||
+                hasBroadcastDispatchModeChange
+              }
             />
             {broadcastTask && (
               <div className={styles.broadcastTaskProgress}>

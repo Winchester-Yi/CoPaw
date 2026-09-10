@@ -449,7 +449,9 @@ async def _run_job_callback(
     run_kwargs = {"is_manual": False, "source_id": source_id}
     if dispatch_meta:
         run_kwargs["dispatch_meta"] = dispatch_meta
-    await mgr.run_job(job_id, **run_kwargs)
+    result = await mgr.run_job(job_id, **run_kwargs)
+    if result is False:
+        return {"status": "ok", "skipped": "job_disabled", "job_id": job_id}
     return None
 
 

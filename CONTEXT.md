@@ -1033,6 +1033,15 @@ _Avoid_: one-shot plan flag, global plan switch
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
 
+**Scheduled Job Enablement**:
+The permission for a particular **Scheduled Job** to execute. Disabling a broadcast source job, manually or through unread-result protection, does not itself pause batch dispatch for its other recipients.
+
+**Batch Dispatch Mode**:
+The choice to dispatch a broadcast source job and its recipients through the **Cron Scheduling Service** instead of their ordinary timers. This choice is distinct from **Batch Dispatch Run State**.
+
+**Batch Dispatch Run State**:
+The independently controlled running or paused state of batch dispatch for one broadcast source job. It is distinct from both that job's **Scheduled Job Enablement** and the execution status of any individual **Dispatch Batch**.
+
 **Scheduled Firing Count**:
 The number of planned firing occurrences produced by enabled, active **Scheduled Job** definitions within a selected time range. One Scheduled Job contributes once for every matching cron occurrence. A **Scheduled Firing Count** describes planned schedule density only; it does not prove that runs are queued, delayed, executing, or backlogged.
 _Avoid_: backlog count, running task count, execution count
@@ -1098,7 +1107,13 @@ A bounded priority signal for a user or tenant, derived from recent **Scheduled 
 _Avoid_: total read count, user importance, notification priority
 
 **Batch Dispatch Order**:
-The stable child-intent order computed for a **Dispatch Batch** after viewer heat, due time, retry penalty, and deterministic tie-breakers are applied. Waiting does not reshuffle the order; later claims continue from this ordered queue.
+The stable intent order within a **Dispatch Batch**, with explicitly ranked users preceding ranked primary branches, followed by viewer heat and deterministic tie-breakers. Waiting and manual retry do not reshuffle this order, and it does not impose priority across batches.
+
+**Batch Priority Policy**:
+The ordered user and primary-branch preference lists belonging to a broadcast source **Scheduled Job**. A **Dispatch Batch** retains the preferences that applied when it was created; preferences never add recipients.
+
+**Manual Intent Retry**:
+An administrator-authorized additional execution of one failed **Scheduled Run Intent**, including its Agent and subtasks. It preserves earlier attempts and waits for shared dispatch capacity; each authorization grants only one additional attempt.
 _Avoid_: fairness aging, dynamic reprioritization, starvation compensation
 
 **Scheduled Run Boundary**:

@@ -1135,10 +1135,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     f"for {spec.id}",
                 )
 
-        if spec.enabled:
-            await self._scheduler_adapter.resume_job(batch_ext_id)
-        else:
-            await self._scheduler_adapter.pause_job(batch_ext_id)
+        # This is a batch wakeup timer, not the parent's own execution switch.
+        # Scheduler's durable run state gates new batches and queued work.
+        await self._scheduler_adapter.resume_job(batch_ext_id)
 
         meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
         meta[BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY] = batch_ext_id
@@ -1222,7 +1221,13 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 0,
             ),
         )
-        return await self._persist_job_definition(updated)
+        saved = await self._persist_job_definition(updated)
+        from .batch_run_state_client import initialize_run_state
+
+        await initialize_run_state(
+            saved, self._monitor_sync_client, self._agent_id or "default"
+        )
+        return saved
 
     async def disable_batch_dispatch_for_parent(
         self,
@@ -1791,7 +1796,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
             # Resume on external scheduler
             ext_id = self._states.get(job_id, CronJobState()).external_job_id
             if ext_id and self._scheduler_adapter:
-                await self._scheduler_adapter.resume_job(ext_id)
+                if is_batch_dispatch_parent(
+                    job
+                ) or is_batch_dispatch_managed_broadcast_child(job):
+                    await self._scheduler_adapter.pause_job(ext_id)
+                else:
+                    await self._scheduler_adapter.resume_job(ext_id)
             elif not ext_id:
                 logger.warning(
                     "resume_job: no external_job_id for %s, skipping external sync",
@@ -1815,7 +1825,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         is_manual: bool = True,
         source_id: str | None = None,
         dispatch_meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool | None:
         """Trigger a job to run in the background (fire-and-forget).
 
         This is called either by:
@@ -1831,7 +1841,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             raise KeyError(f"Job not found: {job_id}")
         if not job.enabled:
             logger.debug("Job %s is disabled, skipping run", job_id)
-            return
+            return False
         job = await self._ensure_persisted_task_binding(job)
         dispatch_meta = dict(dispatch_meta or {})
         persisted_headers = (job.dispatch.meta or {}).get(

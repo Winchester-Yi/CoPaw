@@ -31,6 +31,22 @@ class FakeDb:
         return self.all_results.pop(0) if self.all_results else []
 
 
+def test_priority_projection_does_not_expose_callback_payload():
+    import json
+    service = QueryService()
+    item = service._map_dispatch_intent({
+        "id": 7, "priority": json.dumps({
+            "basis": "user", "user_rank": 1,
+            "branch_rank": 2, "branch_id": "110",
+        }),
+        "payload": {"passthrough_headers": {"secret": "not-public"}},
+    })
+    assert item.priority.user_rank == 1
+    assert item.priority.branch_id == "110"
+    assert "payload" not in item.model_dump()
+    assert service._map_dispatch_intent({"id": 8}).priority is None
+
+
 @pytest.mark.asyncio
 async def test_get_dispatch_batches_filters_by_current_source(monkeypatch):
     fake_db = FakeDb(
@@ -606,7 +622,7 @@ async def test_get_dispatch_workers_filters_explicit_capacity_event_query(
 
     event_sql, event_params = fake_db.fetch_all_calls[2]
     normalized_sql = " ".join(event_sql.split())
-    assert event_params == ("RMASSIST", start_time, end_time)
+    assert event_params == ("RMASSIST", start_time, end_time, 0, 101)
     assert "SELECT *" not in normalized_sql.upper()
     assert "created_at >= %s" in normalized_sql
     assert "created_at <= %s" in normalized_sql

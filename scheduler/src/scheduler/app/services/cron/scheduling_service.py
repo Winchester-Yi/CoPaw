@@ -184,7 +184,7 @@ class SweCronCallbackClient:
         from_id: str = "",
         swe_server_domain: str = "",
         passthrough_headers: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> str | None:
         base_url = (swe_server_domain or self._base_url).rstrip("/")
         if not base_url:
             raise RuntimeError("SWE callback base URL is not configured")
@@ -245,6 +245,20 @@ class SweCronCallbackClient:
                 "SWE cron callback failed: "
                 f"status={response.status_code} body={response.text[:512]}",
             )
+        try:
+            body = response.json()
+        except (ValueError, AttributeError):
+            body = {}
+        skipped = body.get("skipped") if isinstance(body, dict) else None
+        if skipped == "job_disabled":
+            return skipped
+        if skipped:
+            raise SweCronCallbackOutcomeUnknownError(
+                httpx.RemoteProtocolError(
+                    "Unrecognized SWE callback skip outcome"
+                ),
+            )
+        return None
 
 
 class CronSchedulingService:
@@ -326,7 +340,11 @@ class CronSchedulingService:
             context.params,
             context.passthrough_headers,
         )
-        await self._dispatch_store.upsert_dispatch_batch(
+        callback_metadata["batch_dispatch_priority"] = context.parent_meta.get(
+            "batch_dispatch_priority",
+            {},
+        )
+        batch_data = dict(
             batch_id=batch_id,
             parent_job_id=context.job_id,
             parent_external_job_id=str(
@@ -361,15 +379,20 @@ class CronSchedulingService:
                 context.parent.get("source_id") or context.source_id or "",
             ),
         )
-        intent_ids = (
-            await self._dispatch_store.enqueue_batch_execution_intents(
-                batch_id=batch_id,
-                parent_job_id=context.job_id,
-                jobs=jobs,
-                due_at=context.now,
-                scheduled_fire_at=context.scheduled_fire_at,
-            )
+        admission = await self._dispatch_store.create_batch_with_intents(
+            batch=batch_data,
+            jobs=jobs,
+            due_at=context.now,
+            scheduled_fire_at=context.scheduled_fire_at,
         )
+        if admission.get("skipped"):
+            return {
+                "parent_job_id": context.job_id,
+                "skipped": admission["skipped"],
+                "enqueued_intents": 0,
+                "dispatched_intents": 0,
+            }
+        intent_ids = admission["intent_ids"]
         await self._dispatch_store.update_batch_counts(
             batch_id=batch_id,
             updated_at=context.now,
@@ -447,6 +470,12 @@ class CronSchedulingService:
                 lock_owner=self._worker_id,
                 now_utc=now,
                 limit=available_slots,
+                capacity={
+                    "effective_workers": effective_workers,
+                    "strategy_id": strategy.strategy_id,
+                    "min_workers": strategy.min_workers,
+                    "max_workers": strategy.max_workers,
+                },
                 dispatched_stale_seconds=strategy.stale_execution_seconds,
                 source_ids=scope_source_ids,
                 provider_id=scope.provider_id,
@@ -555,33 +584,59 @@ class CronSchedulingService:
 
     async def _dispatch_one(self, row: Any, now_utc: datetime) -> bool:
         try:
+            outcome = await self._dispatch_store.prepare_handoff(
+                row, self._worker_id, now_utc
+            )
+        except Exception:
+            logger.warning(
+                "Dispatch gate unavailable; claim will be recovered without model penalty",
+                exc_info=True,
+            )
+            return False
+        if outcome != "ready":
+            return False
+        try:
             role = _row_get(row, "intent_role")
             if role not in {"parent", "child"}:
-                raise RuntimeError(f"unsupported dispatch intent role: {role}")
-            await self._dispatch_execution_intent(row, now_utc)
-            return True
-        except Exception as exc:  # pylint: disable=broad-except
-            intent_id = int(_row_get(row, "id") or 0)
-            batch_id = str(_row_get(row, "batch_id") or "")
-            failed = await self._dispatch_store.fail_intent(
-                intent_id=intent_id,
-                worker_id=self._worker_id,
-                error=str(exc),
-                failed_at=now_utc,
-                retry_delay_seconds=self._retry_delay_seconds,
-            )
-            if failed and batch_id:
-                await self._dispatch_store.update_batch_counts(
-                    batch_id=batch_id,
-                    updated_at=now_utc,
+                return await self._record_callback_rejection(
+                    row,
+                    now_utc,
+                    RuntimeError(f"unsupported dispatch intent role: {role}"),
                 )
+            return await self._dispatch_execution_intent(row, now_utc)
+        except Exception:  # An acknowledged callback may already be running.
+            logger.warning(
+                "Callback settlement unavailable; preserving handoff occupancy",
+                exc_info=True,
+            )
             return False
+
+    async def _record_callback_rejection(self, row, now_utc, exc) -> bool:
+        intent_id = int(_row_get(row, "id") or 0)
+        batch_id = str(_row_get(row, "batch_id") or "")
+        failed = await self._dispatch_store.fail_intent(
+            intent_id=intent_id,
+            worker_id=self._worker_id,
+            error=str(exc),
+            failed_at=now_utc,
+            retry_delay_seconds=self._retry_delay_seconds,
+            **(
+                {"claim_token": _row_get(row, "claim_token")}
+                if _row_get(row, "claim_token")
+                else {}
+            ),
+        )
+        if failed and batch_id:
+            await self._dispatch_store.update_batch_counts(
+                batch_id=batch_id, updated_at=now_utc
+            )
+        return False
 
     async def _dispatch_execution_intent(
         self,
         row: Any,
         now_utc: datetime,
-    ) -> None:
+    ) -> bool:
         payload = _row_payload(row)
         callback_kwargs = _build_execution_callback_kwargs(row, payload)
         passthrough_headers = _extract_b3_passthrough_headers(
@@ -590,7 +645,9 @@ class CronSchedulingService:
         if passthrough_headers:
             callback_kwargs["passthrough_headers"] = passthrough_headers
         try:
-            await self._callback_client.dispatch_job(**callback_kwargs)
+            skipped = await self._callback_client.dispatch_job(
+                **callback_kwargs
+            )
         except SweCronCallbackOutcomeUnknownError as exc:
             details = _dispatch_mark_details(callback_kwargs)
             details.update(
@@ -605,6 +662,11 @@ class CronSchedulingService:
                 worker_id=self._worker_id,
                 observed_at=now_utc,
                 details=details,
+                **(
+                    {"claim_token": _row_get(row, "claim_token")}
+                    if _row_get(row, "claim_token")
+                    else {}
+                ),
             )
             logger.warning(
                 "scheduler_swe_callback_outcome_unknown batch_id=%s "
@@ -615,13 +677,26 @@ class CronSchedulingService:
                 callback_kwargs["dispatch_attempt"],
                 exc.error_type,
             )
-            return
+            return True
+        except Exception as exc:
+            return await self._record_callback_rejection(row, now_utc, exc)
+        if skipped == "job_disabled":
+            await self._dispatch_store.settle_callback_skip(
+                row, self._worker_id, now_utc
+            )
+            return False
         await self._dispatch_store.mark_intent_dispatched(
             intent_id=int(callback_kwargs["dispatch_intent_id"]),
             worker_id=self._worker_id,
             dispatched_at=now_utc,
             details=_dispatch_mark_details(callback_kwargs),
+            **(
+                {"claim_token": _row_get(row, "claim_token")}
+                if _row_get(row, "claim_token")
+                else {}
+            ),
         )
+        return True
 
     async def handle_execution_recorded(
         self,
@@ -1141,8 +1216,7 @@ async def _fetch_parent_job_for_callback(
     db = get_db_connection()
     clauses = [
         "id = %s",
-        "enabled = 1",
-        "status = 'active'",
+        "status IN ('active', 'paused')",
         "deleted_at IS NULL",
     ]
     params: list[Any] = [job_id]
@@ -1154,7 +1228,7 @@ async def _fetch_parent_job_for_callback(
         params.append(source_id)
     row = await db.fetch_one(
         f"""
-        SELECT id, tenant_id, source_id, cron_expr, timezone, meta
+        SELECT id, tenant_id, source_id, cron_expr, timezone, meta, enabled, status, deleted_at
         FROM swe_cron_jobs
         WHERE {' AND '.join(clauses)}
         LIMIT 1

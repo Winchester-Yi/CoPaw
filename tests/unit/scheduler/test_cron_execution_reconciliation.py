@@ -61,7 +61,7 @@ class _SqliteDb:
                 status TEXT, attempt_count INTEGER, max_attempts INTEGER,
                 due_at TEXT, locked_at TEXT, lock_owner TEXT,
                 completed_at TEXT, updated_at TEXT, error_message TEXT,
-                dispatch_order INTEGER
+                dispatch_order INTEGER, claim_token TEXT DEFAULT ''
             );
             CREATE TABLE swe_cron_executions (
                 id INTEGER PRIMARY KEY, job_id TEXT, tenant_id TEXT,
@@ -638,11 +638,25 @@ async def test_page_limit_does_not_expose_unprocessed_results_to_recovery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["dispatched", "claimed", "acknowledged"])
 async def test_claim_fallback_does_not_reexecute_a_current_terminal_result(
     persisted_store,
+    status,
 ):
     db, store = persisted_store
-    db.add_intent()
+    db.connection.executescript("""
+        CREATE TABLE swe_cron_dispatch_batches (
+            batch_id TEXT, source_id TEXT, tenant_id TEXT, parent_job_id TEXT
+        );
+        CREATE TABLE swe_cron_dispatch_controls (
+            source_id TEXT,tenant_id TEXT,parent_job_id TEXT,paused INTEGER,
+            version INTEGER, resumed_at TEXT, updated_by TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO swe_cron_dispatch_batches VALUES ('batch-1','source-a','tenant-1','parent');
+        INSERT INTO swe_cron_dispatch_controls
+            (source_id,tenant_id,parent_job_id,paused) VALUES ('source-a','tenant-1','parent',0);
+    """)
+    db.add_intent(status=status)
     db.add_execution(async_status="success")
     cursor = db.cursor()
     scope = {"scope_filter_clause": "", "scope_filter_params": ()}
@@ -682,22 +696,10 @@ async def test_exhausted_claim_fallback_waits_for_reconciliation(
     db, store = persisted_store
     db.add_intent(attempt_count=3)
     db.add_execution(dispatch_attempt=3, async_status="success")
-    cursor = db.cursor()
-    kwargs = {
-        "dispatched_stale_before": NOW - timedelta(seconds=7800),
-        "scope_filter_clause": "",
-        "scope_filter_params": (),
-    }
-    assert await store._fetch_exhausted_dispatched_rows(cursor, **kwargs) == []
+    assert await store.recover_stale_dispatched_intents(now_utc=NOW) == 0
 
     db.connection.execute("UPDATE swe_cron_executions SET async_status=NULL")
-    rows = await store._fetch_exhausted_dispatched_rows(cursor, **kwargs)
-    assert len(rows) == 1
-    await store._mark_exhausted_dispatched_rows_failed(
-        cursor,
-        exhausted_rows=rows,
-        normalized_now=NOW,
-    )
+    assert await store.recover_stale_dispatched_intents(now_utc=NOW) == 1
     assert db.intent()["status"] == "failed"
     assert db.intent()["error_message"] == "获取子任务状态超时"
 
@@ -729,3 +731,21 @@ async def test_scanner_does_not_reopen_a_cancelled_or_already_requeued_attempt(
     assert await store.reconcile_dispatched_executions(now_utc=NOW) == 0
     assert db.intent()["status"] == "pending"
     store._record_event_best_effort.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_releases_capacity_before_the_gate(persisted_store):
+    db, store = persisted_store
+    db.add_intent(status="claimed", locked_at=NOW - timedelta(minutes=11))
+    assert await store.recover_stale_dispatched_intents(now_utc=NOW) == 1
+    assert db.intent()["status"] == "pending"
+    assert db.intent()["locked_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_result_of_a_lost_claim_is_settled(persisted_store):
+    db, store = persisted_store
+    db.add_intent(status="claimed")
+    db.add_execution(async_status="success")
+    assert await store.reconcile_dispatched_executions(now_utc=NOW) == 1
+    assert db.intent()["status"] == "completed"

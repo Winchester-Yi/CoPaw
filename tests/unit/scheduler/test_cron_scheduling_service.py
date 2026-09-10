@@ -25,6 +25,23 @@ from scheduler.app.services.cron.scheduling_service import (
 
 
 class _DispatchStore:
+
+    async def prepare_handoff(self, row, worker_id, now_utc):
+        return "ready"
+
+    async def create_batch_with_intents(
+        self, *, batch, jobs, due_at, scheduled_fire_at
+    ):
+        await self.upsert_dispatch_batch(**batch)
+        ids = await self.enqueue_batch_execution_intents(
+            batch_id=batch["batch_id"],
+            parent_job_id=batch["parent_job_id"],
+            jobs=jobs,
+            due_at=due_at,
+            scheduled_fire_at=scheduled_fire_at,
+        )
+        return {"intent_ids": ids}
+
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = list(rows)
         self.claims: list[dict[str, Any]] = []

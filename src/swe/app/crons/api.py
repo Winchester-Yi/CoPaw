@@ -97,6 +97,7 @@ PRESERVED_CHILD_META_KEYS = (
     "external_job_id",
 )
 BATCH_DISPATCH_META_KEYS = (
+    "batch_dispatch_priority",
     BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
     BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
     BATCH_DISPATCH_OFFSET_WINDOW_HOURS_META_KEY,
@@ -382,6 +383,11 @@ def _preserve_batch_dispatch_meta_on_save(
     existing_meta = dict(existing.meta or {}) if existing is not None else {}
     for key in BATCH_DISPATCH_META_KEYS:
         meta.pop(key, None)
+
+    if "batch_dispatch_priority" in existing_meta:
+        meta["batch_dispatch_priority"] = existing_meta[
+            "batch_dispatch_priority"
+        ]
 
     existing_batch_ext_id = existing_meta.get(
         BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
@@ -1569,6 +1575,7 @@ def _build_broadcast_job(
     meta = dict(source_job.meta or {})
     for key in (
         *PRESERVED_CHILD_META_KEYS,
+        "batch_dispatch_priority",
         "external_job_id",
         BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY,
         BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY,
