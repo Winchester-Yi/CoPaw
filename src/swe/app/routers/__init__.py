@@ -14,6 +14,7 @@ _ROUTER_MODULES = (
     (".config", "router"),
     (".console", "router"),
     ("..crons.api", "router"),
+    (".external_jobs", "router"),
     (".local_models", "router"),
     (".mcp", "router"),
     (".messages", "router"),

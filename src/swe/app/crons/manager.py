@@ -44,6 +44,7 @@ from .auth_state import prefetch_auth_token
 from .cron_utils import compute_next_run_at, compute_next_run_times
 from .executor import CronExecutor
 from .models import CronJobSpec, CronJobState, CronTaskView, JobsFile
+from .task_view import MANUAL_PAUSE_REASON, build_cron_task_view
 from .repo.base import BaseJobRepository
 from .scheduler_adapter import SchedulerAdapter, NoopSchedulerAdapter
 from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
@@ -58,7 +59,6 @@ HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
 TASK_SESSION_CLEANUP_TASK_TYPE = "cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
-MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
@@ -1900,36 +1900,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         spec: CronJobSpec,
         user_id: Optional[str],
     ) -> CronTaskView:
-        meta = spec.meta or {}
-        state = self.get_state(spec.id)
-        creator_user_id = meta.get("creator_user_id")
-        visible_in_my_tasks = bool(
-            spec.task_type in {"agent", "text"}
-            and creator_user_id
-            and creator_user_id == user_id,
-        )
-        pause_reason = meta.get("pause_reason")
-        if visible_in_my_tasks and not pause_reason and not spec.enabled:
-            pause_reason = MANUAL_PAUSE_REASON
-        return CronTaskView(
-            visible_in_my_tasks=visible_in_my_tasks,
-            chat_id=meta.get("task_chat_id"),
-            session_id=meta.get("task_session_id"),
-            has_scheduled_result=bool(
-                meta.get("task_has_scheduled_result", False),
-            ),
-            latest_scheduled_preview=str(
-                meta.get("task_last_scheduled_preview", "") or "",
-            ),
-            unread_execution_count=int(
-                meta.get("task_unread_execution_count", 0) or 0,
-            ),
-            last_scheduled_run_at=meta.get("task_last_scheduled_run_at"),
-            is_running=state.last_status == "running",
-            is_paused=bool(pause_reason),
-            pause_reason=pause_reason,
-            auto_paused_at=meta.get("auto_paused_at"),
-        )
+        return build_cron_task_view(spec, self.get_state(spec.id), user_id)
 
     # ----- callbacks -----
 
