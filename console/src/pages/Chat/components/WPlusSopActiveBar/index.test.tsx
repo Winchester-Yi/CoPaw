@@ -36,6 +36,53 @@ describe("WPlusSopActiveBar", () => {
     cleanup();
   });
 
+  it("keeps ordinary Chat unlocked when active-session returns null", async () => {
+    apiMock.getActiveSession.mockResolvedValue(null);
+    const onLocksChatInputChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <WPlusSopActiveBar
+          chatId="chat-1"
+          onLocksChatInputChange={onLocksChatInputChange}
+        />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(apiMock.getActiveSession).toHaveBeenCalled());
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(onLocksChatInputChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("clears the active bar and unlocks Chat when a refresh returns null", async () => {
+    apiMock.getActiveSession.mockResolvedValueOnce({
+      session_id: "sop-1",
+      title: "客户经营 SOP",
+      state: "GeneratingStageProposal",
+      state_version: 1,
+    });
+    apiMock.getActiveSession.mockResolvedValue(null);
+    const onLocksChatInputChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <WPlusSopActiveBar
+          chatId="chat-1"
+          onLocksChatInputChange={onLocksChatInputChange}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText("这个 Chat 正在进行 W+ SOP"),
+    ).toBeInTheDocument();
+    expect(onLocksChatInputChange).toHaveBeenLastCalledWith(true);
+    fireEvent.focus(window);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+      expect(onLocksChatInputChange).toHaveBeenLastCalledWith(false);
+    });
+  });
+
   it("restores a terminal workspace card from Chat metadata", async () => {
     render(
       <MemoryRouter initialEntries={["/chat/chat-1"]}>

@@ -133,7 +133,7 @@ export const wplusSopApi = {
   getActiveSession: (
     chatId: string,
     signal?: AbortSignal,
-  ): Promise<WPlusSopSession> =>
+  ): Promise<WPlusSopSession | null> =>
     request(`/wplus-sop/chats/${encodeURIComponent(chatId)}/active-session`, {
       signal,
     }),

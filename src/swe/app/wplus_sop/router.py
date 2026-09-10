@@ -425,11 +425,11 @@ async def download_wplus_sop_cumulative_artifact(
 async def get_active_wplus_sop_session(
     chat_id: str,
     request: Request,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     service = await _service_for_chat(request, chat_id)
     record = service.get_active_session()
     if record is None:
-        raise HTTPException(status_code=404, detail="W+ SOP Session not found")
+        return None
     await service.flush_chat_projection_outbox()
     return await _session_snapshot(service, record)
 

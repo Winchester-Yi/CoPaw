@@ -1,5 +1,11 @@
 # 定位路径
 
+## W+ SOP active-session 空结果
+
+- 接口：`src/swe/app/wplus_sop/router.py` 的 `get_active_wplus_sop_session`。Chat 存在且归属匹配、但没有活动 SOP 时返回 `200` 和 JSON `null`；Chat 不存在或身份、归属校验失败仍返回 `404`。
+- 调用：`console/src/pages/Chat/components/WPlusSopActiveBar/index.tsx` 在挂载、Chat 切换、窗口 focus 和页面恢复可见时刷新。有待确认入口时跳过查询，有 SOP session ID 时查询具体会话，否则用 Chat ID 查询 active-session。
+- 前端空快照清除活动状态；比较快照版本前必须判空，避免从已有活动会话刷新为 `null` 时崩溃。测试见 `tests/unit/app/wplus_sop/test_router.py` 和状态栏 `index.test.tsx`。
+
 ## 批调度暂停／恢复与关闭任务跳过
 
 - 独立状态与旧任务归属：`scheduler/src/scheduler/app/services/cron/batch_run_state.py`。先排除普通任务和批子任务，只对批父任务初始化；状态存储在控制表，不跟随父任务后续 enabled 变化。
