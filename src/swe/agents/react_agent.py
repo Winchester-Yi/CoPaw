@@ -62,6 +62,7 @@ from .tools import (
     create_memory_search_tool,
     create_recover_evidence_tool,
     copy_file_to_static,
+    create_publish_annotated_html_tool,
     update_task_progress,
     emit_wplus_sop_event,
     ask_plan_clarification,
@@ -240,6 +241,21 @@ def _add_main_agent_tools(
     workspace_dir: Path | None,
     plan_mode_enabled: bool,
 ) -> None:
+    annotation_context = request_context.get(
+        "_document_annotation_context",
+    )
+    if isinstance(annotation_context, dict):
+        source_path = annotation_context.get("source_path")
+        expected_ids = annotation_context.get("expected_annotation_ids")
+        if isinstance(source_path, str) and isinstance(expected_ids, list):
+            tool_functions["publish_annotated_html"] = (
+                create_publish_annotated_html_tool(
+                    source_path=Path(source_path),
+                    expected_annotation_ids=tuple(
+                        item for item in expected_ids if isinstance(item, str)
+                    ),
+                )
+            )
     if request_context.get("goal_id"):
         from ..app.goals.turn_tool import (
             create_submit_goal_turn_resolution_tool,

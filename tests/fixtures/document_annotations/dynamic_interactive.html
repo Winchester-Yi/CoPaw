@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Dynamic report</title></head>
+  <body>
+    <main id="app"></main>
+    <button id="counter" type="button">0</button>
+    <script>
+      const app = document.querySelector('#app');
+      const render = () => {
+        app.innerHTML = '<span data-status="active">Running</span>';
+      };
+      render();
+      setInterval(render, 1000);
+      document.querySelector('#counter').addEventListener('click', (event) => {
+        event.currentTarget.textContent = String(Number(event.currentTarget.textContent) + 1);
+      });
+    </script>
+  </body>
+</html>

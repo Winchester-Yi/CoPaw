@@ -9,9 +9,10 @@ from swe.app.runner.api import (
     _archive_metadata,
     _archive_page,
     _archive_store,
+    _filter_archived_turn_messages,
     get_chat_history_page,
 )
-from swe.app.runner.models import ChatSpec
+from swe.app.runner.models import ChatMessage, ChatSpec
 
 
 def _message(index: int) -> Msg:
@@ -109,3 +110,39 @@ async def test_workspace_without_archive_root_preserves_empty_legacy_metadata() 
         "has_more": False,
         "boundaries": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_archived_turn_anchor_is_not_readded_to_current_history(
+    tmp_path,
+) -> None:
+    workspace = SimpleNamespace(workspace_dir=tmp_path)
+    chat_id = str(uuid.uuid4())
+    store = _archive_store(workspace)
+    assert store is not None
+    archived = _message(1)
+    await store.commit(chat_id, [archived])
+    archived_anchor = ChatMessage.model_validate(
+        {
+            "id": archived.id,
+            "role": "user",
+            "type": "message",
+            "content": [{"type": "text", "text": archived.content}],
+        },
+    )
+    current = ChatMessage.model_validate(
+        {
+            "id": "current-user",
+            "role": "user",
+            "type": "message",
+            "content": [{"type": "text", "text": "current"}],
+        },
+    )
+
+    result = await _filter_archived_turn_messages(
+        workspace,
+        chat_id,
+        [archived_anchor, current],
+    )
+
+    assert [message.id for message in result] == ["current-user"]

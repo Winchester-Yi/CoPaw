@@ -52,6 +52,11 @@ from ..context_references import (
     ContextReferencesResponse,
     context_reference_directory,
 )
+from ..document_annotations import (
+    DocumentAnnotationValidationError,
+    build_document_annotation_directive,
+    validate_document_annotation_request,
+)
 from ..file_manager import (
     FileManagerConflictError,
     FileManagerDirectoryListing,
@@ -822,6 +827,45 @@ async def _append_uploaded_attachment_references(
         ]
 
 
+async def _append_document_annotation_context(
+    request_data: Union[AgentRequest, dict],
+    native_payload: dict[str, Any],
+    workspace: Any,
+) -> None:
+    """Validate optional annotation data and add server-owned turn context."""
+    if isinstance(request_data, AgentRequest):
+        raw_bundle = getattr(request_data, "document_annotations", None)
+    else:
+        raw_bundle = request_data.get("document_annotations")
+    if raw_bundle is None:
+        return
+
+    workspace_dir = getattr(workspace, "workspace_dir", None)
+    if not workspace_dir:
+        raise DocumentAnnotationValidationError(
+            "annotation workspace is not configured",
+        )
+    context = validate_document_annotation_request(
+        raw_bundle,
+        content_parts=native_payload.get("content_parts", []),
+        workspace_dir=Path(workspace_dir),
+    )
+    meta = native_payload.setdefault("meta", {})
+    existing_injections = meta.get("system_prompt_injections") or []
+    if not isinstance(existing_injections, list):
+        raise DocumentAnnotationValidationError(
+            "system_prompt_injections must be a list",
+        )
+    meta["system_prompt_injections"] = [
+        *existing_injections,
+        build_document_annotation_directive(context),
+    ]
+    meta["_document_annotation_context"] = {
+        "source_path": str(context.source_path),
+        "expected_annotation_ids": list(context.expected_annotation_ids),
+    }
+
+
 def _extract_wplus_user_scope(
     request_data: Union[AgentRequest, dict],
 ) -> object | None:
@@ -1408,6 +1452,14 @@ async def post_console_chat(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     await _append_uploaded_attachment_references(native_payload, workspace)
+    try:
+        await _append_document_annotation_context(
+            request_data,
+            native_payload,
+            workspace,
+        )
+    except DocumentAnnotationValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     _inject_request_metadata(request, native_payload)
     identity = _resolve_console_identity(request, native_payload, workspace)

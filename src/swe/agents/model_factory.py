@@ -1018,6 +1018,78 @@ def _wrap_model_with_tracing(
     return wrapped
 
 
+def _resolve_model_slot_and_provider(
+    tenant_id: Optional[str],
+    model_slot_override: Any | None,
+    model_provider_override: Any | None,
+) -> tuple[Any, Any]:
+    """Resolve a model slot and provider, preserving frozen overrides."""
+    manager = None
+    if model_slot_override is not None and model_provider_override is not None:
+        model_slot = model_slot_override
+        provider = model_provider_override
+    else:
+        ProviderManager.ensure_tenant_provider_storage(tenant_id)
+        manager = ProviderManager.get_instance(tenant_id)
+        model_slot = model_slot_override or _get_model_slot(manager)
+
+    if not model_slot or not model_slot.provider_id or not model_slot.model:
+        raise ValueError(
+            "No tenant model configuration found. "
+            "Please configure a model for this tenant using the admin panel "
+            "or ensure provider configuration is properly set. "
+            "Multi-tenant isolation requires explicit model config.",
+        )
+    if model_provider_override is None and manager is not None:
+        provider = manager.get_provider(model_slot.provider_id)
+    if provider is None:
+        raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
+    return model_slot, provider
+
+
+def _create_model_from_provider(
+    provider: Any,
+    model_slot: Any,
+) -> tuple[Any, ChatModelBase]:
+    """Create a chat model from one resolved provider and model slot."""
+    model_config = provider.get_model_config(model_slot.model)
+    model = provider.get_chat_model_instance(
+        model_slot.model,
+        generation_kwargs=provider.build_generation_kwargs(model_config),
+    )
+    return model_config, model
+
+
+def _create_model_with_fallback(
+    model_slot: Any,
+    provider: Any,
+    fallback_model_slot: Any | None,
+    fallback_model_provider: Any | None,
+) -> tuple[Any, ChatModelBase, Any, Any]:
+    """Create the selected model, using the frozen fallback when needed."""
+    try:
+        model_config, model = _create_model_from_provider(provider, model_slot)
+        return model_config, model, model_slot, provider
+    except Exception:
+        if (
+            fallback_model_slot is None
+            or fallback_model_provider is None
+            or not fallback_model_slot.provider_id
+            or not fallback_model_slot.model
+        ):
+            raise
+        model_config, model = _create_model_from_provider(
+            fallback_model_provider,
+            fallback_model_slot,
+        )
+        return (
+            model_config,
+            model,
+            fallback_model_slot,
+            fallback_model_provider,
+        )
+
+
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
     trace_context: Optional[dict[str, Any]] = None,
@@ -1051,78 +1123,27 @@ def create_model_and_formatter(
     resolved_agent_id = _get_agent_id(agent_id, tenant_id)
 
     try:
-        # Try to get model from tenant-aware ProviderManager
-        # This is the primary and only supported path for active model resolution
-        model_slot = None
         retry_config, rate_limit_config = _get_model_runtime_configs(
             resolved_agent_id,
             tenant_id,
         )
-
-        # Snapshot workers supply both a frozen slot and provider. Avoid the
-        # tenant manager so later provider changes cannot affect that run.
-        manager = None
-        if (
-            model_slot_override is not None
-            and model_provider_override is not None
-        ):
-            model_slot = model_slot_override
-        else:
-            ProviderManager.ensure_tenant_provider_storage(tenant_id)
-            manager = ProviderManager.get_instance(tenant_id)
-            model_slot = model_slot_override or _get_model_slot(manager)
-        if (
-            not model_slot
-            or not model_slot.provider_id
-            or not model_slot.model
-        ):
-            raise ValueError(
-                "No tenant model configuration found. "
-                "Please configure a model for this tenant using the admin panel "
-                "or ensure provider configuration is properly set. "
-                "Multi-tenant isolation requires explicit model config.",
-            )
-
-        # Get provider and create model instance
-        provider = model_provider_override
-        if provider is None and manager is not None:
-            provider = manager.get_provider(model_slot.provider_id)
-        if provider is None:
-            raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
-
-        try:
-            model_config = provider.get_model_config(model_slot.model)
-            model = provider.get_chat_model_instance(
-                model_slot.model,
-                generation_kwargs=provider.build_generation_kwargs(
-                    model_config,
-                ),
-            )
-            provider_id = model_slot.provider_id
-            resolved_slot = model_slot
-            resolved_provider = provider
-        except Exception:
-            if (
-                fallback_model_slot is None
-                or fallback_model_provider is None
-                or not fallback_model_slot.provider_id
-                or not fallback_model_slot.model
-            ):
-                raise
-            model_config = fallback_model_provider.get_model_config(
-                fallback_model_slot.model,
-            )
-            model = fallback_model_provider.get_chat_model_instance(
-                fallback_model_slot.model,
-                generation_kwargs=(
-                    fallback_model_provider.build_generation_kwargs(
-                        model_config,
-                    )
-                ),
-            )
-            provider_id = fallback_model_slot.provider_id
-            resolved_slot = fallback_model_slot
-            resolved_provider = fallback_model_provider
+        model_slot, provider = _resolve_model_slot_and_provider(
+            tenant_id,
+            model_slot_override,
+            model_provider_override,
+        )
+        (
+            model_config,
+            model,
+            resolved_slot,
+            resolved_provider,
+        ) = _create_model_with_fallback(
+            model_slot,
+            provider,
+            fallback_model_slot,
+            fallback_model_provider,
+        )
+        provider_id = resolved_slot.provider_id
 
         if on_model_config_resolved is not None:
             on_model_config_resolved(model_config)

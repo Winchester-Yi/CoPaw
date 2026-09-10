@@ -740,10 +740,10 @@ class ConsoleChannel(BaseChannel):
         to_handle: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Send a text message — prints to stdout and pushes to frontend."""
         if not self.enabled:
-            return
+            return False
         ts = _ts()
         prefix = (meta or {}).get("bot_prefix", self.bot_prefix) or ""
         self._safe_print(
@@ -752,23 +752,38 @@ class ConsoleChannel(BaseChannel):
         )
         sid = (meta or {}).get("session_id")
         if sid and text.strip():
-            await push_store_append(sid, text.strip())
+            await push_store_append(
+                sid,
+                text.strip(),
+                delivery_key=str((meta or {}).get("cron_delivery_key") or ""),
+            )
+        return True
 
     async def send_content_parts(
         self,
         to_handle: str,
         parts: List[OutgoingContentPart],
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send content parts — prints to stdout and pushes to frontend store.
         """
+        if not self.enabled:
+            return False
         self._print_parts(parts)
+        body = self._parts_to_text(parts, meta)
+        if not body.strip():
+            return False
         sid = (meta or {}).get("session_id")
         if sid:
-            body = self._parts_to_text(parts, meta)
-            if body.strip():
-                await push_store_append(sid, body.strip())
+            await push_store_append(
+                sid,
+                body.strip(),
+                delivery_key=str(
+                    (meta or {}).get("cron_delivery_key") or "",
+                ),
+            )
+        return True
 
     # ── lifecycle ───────────────────────────────────────────────────
 

@@ -93,7 +93,7 @@ async def save_state_during_cleanup(
     fallback_user_id: str = "",
     fallback_skip_history: bool = False,
     fallback_session_execution: Any = None,
-) -> None:
+) -> bool:
     """Persist session state during query cleanup within the configured limit."""
     logger.info(
         "_save_state_during_cleanup: runtime=%s session_state_loaded=%s",
@@ -101,11 +101,11 @@ async def save_state_during_cleanup(
         session_state_loaded,
     )
     if not session_state_loaded:
-        return
+        return False
     if runtime is None:
         if fallback_agent is None:
-            return
-        await asyncio.wait_for(
+            return False
+        saved = await asyncio.wait_for(
             owner.save_job_session_state(
                 fallback_agent,
                 fallback_session_id,
@@ -115,7 +115,7 @@ async def save_state_during_cleanup(
             ),
             timeout=cleanup_timeout,
         )
-        return
+        return bool(saved)
     hook_overlay = None
     if hook_config_enabled(
         runtime.tenant_hooks,
@@ -127,7 +127,7 @@ async def save_state_during_cleanup(
     session_execution = getattr(runtime, "session_execution", None)
     if session_execution is not None:
         save_kwargs["session_execution"] = session_execution
-    await asyncio.wait_for(
+    saved = await asyncio.wait_for(
         owner.save_job_session_state(
             runtime.agent,
             runtime.session_id,
@@ -137,6 +137,7 @@ async def save_state_during_cleanup(
         ),
         timeout=cleanup_timeout,
     )
+    return bool(saved)
 
 
 async def update_chat_during_cleanup(
@@ -231,7 +232,7 @@ class QueryCleanupOwner(Protocol):
         *,
         runtime: _QueryRuntime | None,
         session_state_loaded: bool,
-    ) -> None: ...
+    ) -> bool: ...
 
     async def _update_chat_during_cleanup(
         self,

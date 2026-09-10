@@ -116,6 +116,22 @@ def test_console_channel_from_config_ignores_disabled_config(tmp_path):
     assert channel.enabled is True
 
 
+async def test_console_channel_does_not_confirm_parts_when_disabled(tmp_path):
+    channel = ConsoleChannel(
+        process=Mock(),
+        enabled=False,
+        bot_prefix="",
+        media_dir=str(tmp_path),
+    )
+
+    delivered = await channel.send_content_parts(
+        "user-1",
+        [TextContent(type=ContentType.TEXT, text="output")],
+    )
+
+    assert delivered is False
+
+
 def test_console_channel_copies_b3_trace_id_from_meta_to_request(tmp_path):
     channel = ConsoleChannel(
         process=Mock(),

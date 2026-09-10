@@ -23,7 +23,11 @@ from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ...tracing.models import TraceStatus
 from ...tracing.agent_trace_sdk import global_tracer
 from ..agent_context import set_current_agent_id
-from .query_contracts import _QueryPreflight, _QueryRuntime
+from .query_contracts import (
+    QueryPersistenceResult,
+    _QueryPreflight,
+    _QueryRuntime,
+)
 from .retry_classifier import is_query_retryable
 
 logger = logging.getLogger(__name__)
@@ -92,7 +96,13 @@ class QueryAttemptOwner(Protocol):
 
     async def _cleanup_query_resources(self, **kwargs: Any) -> None: ...
 
-    async def _save_state_during_cleanup(self, **kwargs: Any) -> None: ...
+    async def _save_state_during_cleanup(self, **kwargs: Any) -> bool: ...
+
+    def _record_query_persistence_result(
+        self,
+        request: AgentRequest,
+        result: QueryPersistenceResult,
+    ) -> None: ...
 
     async def _cleanup_blocked_runtime_start(
         self,
@@ -614,6 +624,145 @@ def _cleanup_state_from_attempt(
     return cleanup_runtime, cleanup_state_loaded, runtime_start
 
 
+async def _commit_cleanup_state(
+    owner: QueryAttemptOwner,
+    *,
+    cleanup_runtime: Any,
+    cleanup_state_loaded: bool,
+    retry_state: Any,
+    request: AgentRequest,
+    session_id: str,
+    session_execution: Any,
+) -> tuple[bool, bool, bool]:
+    """Commit cleanup state and identify idempotent Cron replays."""
+    fallback_agent = (
+        retry_state.prev_agent if cleanup_runtime is None else None
+    )
+    commit_attempted = True
+    save_result = await owner._save_state_during_cleanup(
+        runtime=cleanup_runtime,
+        session_state_loaded=cleanup_state_loaded,
+        fallback_agent=fallback_agent,
+        fallback_session_id=session_id,
+        fallback_user_id=str(getattr(request, "user_id", "") or ""),
+        fallback_skip_history=bool(
+            getattr(request, "skip_history", False),
+        ),
+        fallback_session_execution=session_execution,
+    )
+    committed = (
+        bool(save_result)
+        if save_result is not None
+        else bool(cleanup_state_loaded)
+    )
+    idempotent_replay = False
+    if not committed:
+        commit_attempted = False
+        idempotent_replay = _has_persisted_cron_task_run(
+            getattr(session_execution, "state", None),
+            execution_key=str(
+                getattr(request, "cron_execution_key", "") or "",
+            ),
+        )
+        committed = idempotent_replay
+    if (
+        cleanup_runtime is None
+        and fallback_agent is None
+        and session_execution.has_uncommitted_state
+    ):
+        await session_execution.commit_state(session_execution.state)
+        commit_attempted = True
+        committed = True
+    return commit_attempted, committed, idempotent_replay
+
+
+def _cron_persistence_details(
+    state: Any,
+    *,
+    persistence_key: str,
+    execution_key: str,
+) -> tuple[int, list[dict[str, Any]], bool, bool]:
+    """Collect Cron delivery metadata from one persisted state snapshot."""
+    return (
+        _count_persisted_assistant_messages(
+            state,
+            persistence_key=persistence_key,
+            execution_key=execution_key,
+        ),
+        _get_persisted_cron_assistant_content(
+            state,
+            persistence_key=persistence_key,
+            execution_key=execution_key,
+        ),
+        _is_cron_output_delivery_replay_supported(
+            state,
+            persistence_key=persistence_key,
+            execution_key=execution_key,
+        ),
+        _is_cron_output_delivery_completed(
+            state,
+            persistence_key=persistence_key,
+            execution_key=execution_key,
+        ),
+    )
+
+
+async def _close_after_persistence_failure(session_execution: Any) -> None:
+    """Best-effort close without masking the original persistence exception."""
+    try:
+        await session_execution.close()
+    except Exception:
+        logger.warning(
+            "Failed to close session execution after persistence failure",
+            exc_info=True,
+        )
+
+
+async def _close_after_persistence_success(session_execution: Any) -> None:
+    """Close a committed transaction without changing its result."""
+    try:
+        await session_execution.close()
+    except Exception:
+        logger.warning(
+            "Failed to close session execution after confirmed persistence",
+            exc_info=True,
+        )
+
+
+def _record_persistence_result(
+    owner: QueryAttemptOwner,
+    request: AgentRequest,
+    result: QueryPersistenceResult,
+    cleanup_runtime: Any = None,
+) -> None:
+    """Publish a persistence result and update the active runtime."""
+    if cleanup_runtime is not None:
+        cleanup_runtime.persistence_result = result
+    recorder = getattr(owner, "_record_query_persistence_result", None)
+    if callable(recorder):
+        recorder(request, result)
+
+
+def _build_persistence_failure_result(
+    owner: QueryAttemptOwner,
+    request: AgentRequest,
+    session_id: str,
+    cleanup_runtime: Any,
+    commit_attempted: bool,
+    exc: BaseException,
+) -> None:
+    """Record a failed cleanup while preserving the original exception."""
+    result = QueryPersistenceResult(
+        session_id=str(session_id),
+        user_id=str(getattr(request, "user_id", "") or ""),
+        assistant_message_count=0,
+        commit_attempted=commit_attempted,
+        committed=False,
+        commit_error=str(exc) or type(exc).__name__,
+    )
+    _record_persistence_result(owner, request, result, cleanup_runtime)
+
+
 async def _save_and_close_session_execution(
     owner: QueryAttemptOwner,
     *,
@@ -624,33 +773,261 @@ async def _save_and_close_session_execution(
     session_id: str,
     session_execution: Any,
 ) -> None:
-    fallback_agent = (
-        retry_state.prev_agent if cleanup_runtime is None else None
-    )
-    try:
-        await owner._save_state_during_cleanup(
-            runtime=cleanup_runtime,
-            session_state_loaded=cleanup_state_loaded,
-            fallback_agent=fallback_agent,
-            fallback_session_id=session_id,
-            fallback_user_id=str(getattr(request, "user_id", "") or ""),
-            fallback_skip_history=bool(
-                getattr(request, "skip_history", False),
-            ),
-            fallback_session_execution=session_execution,
-        )
-        if (
-            cleanup_runtime is None
-            and fallback_agent is None
-            and session_execution.has_uncommitted_state
-        ):
-            await session_execution.commit_state(session_execution.state)
-    finally:
-        if cleanup_runtime is not None:
-            cleanup_runtime.session_state_commit_attempted = True
-        await session_execution.close()
+    commit_attempted = False
+    committed = False
+    idempotent_replay = False
+    commit_error: str | None = None
+    assistant_message_count = 0
+    persisted_assistant_content: list[dict[str, Any]] = []
+    output_delivery_replay_supported = False
+    output_delivery_completed = False
     if cleanup_runtime is not None:
-        cleanup_runtime.session_state_committed = True
+        cleanup_runtime.session_state_commit_attempted = True
+    try:
+        commit_attempted = True
+        (
+            commit_attempted,
+            committed,
+            idempotent_replay,
+        ) = await _commit_cleanup_state(
+            owner,
+            cleanup_runtime=cleanup_runtime,
+            cleanup_state_loaded=cleanup_state_loaded,
+            retry_state=retry_state,
+            request=request,
+            session_id=session_id,
+            session_execution=session_execution,
+        )
+        if committed:
+            (
+                assistant_message_count,
+                persisted_assistant_content,
+                output_delivery_replay_supported,
+                output_delivery_completed,
+            ) = _cron_persistence_details(
+                session_execution.state,
+                persistence_key=str(
+                    getattr(request, "cron_persistence_key", "") or "",
+                ),
+                execution_key=str(
+                    getattr(request, "cron_execution_key", "") or "",
+                ),
+            )
+    except BaseException as exc:
+        _build_persistence_failure_result(
+            owner,
+            request,
+            session_id,
+            cleanup_runtime,
+            commit_attempted,
+            exc,
+        )
+        await _close_after_persistence_failure(session_execution)
+        raise
+    result = QueryPersistenceResult(
+        session_id=str(session_id),
+        user_id=str(getattr(request, "user_id", "") or ""),
+        assistant_message_count=assistant_message_count,
+        commit_attempted=commit_attempted,
+        committed=committed,
+        commit_error=(
+            commit_error
+            or (None if committed else "session_state_not_persisted")
+        ),
+        idempotent_replay=idempotent_replay,
+        persisted_assistant_content=persisted_assistant_content,
+        output_delivery_replay_supported=output_delivery_replay_supported,
+        output_delivery_completed=output_delivery_completed,
+    )
+    if cleanup_runtime is not None:
+        cleanup_runtime.session_state_committed = committed
+    if committed:
+        await _close_after_persistence_success(session_execution)
+    _record_persistence_result(owner, request, result, cleanup_runtime)
+
+
+def _count_persisted_assistant_messages(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> int:
+    """Count assistant messages committed by this query only."""
+    entries = _get_persisted_memory_entries(state)
+    if entries is None:
+        return 0
+    if persistence_key or execution_key:
+        entries = _get_cron_memory_window(
+            state,
+            entries,
+            persistence_key=persistence_key,
+            execution_key=execution_key,
+        )
+        if entries is None:
+            return 0
+    return sum(
+        _get_memory_entry_role(entry) == "assistant" for entry in entries
+    )
+
+
+def _get_persisted_cron_assistant_content(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> list[dict[str, Any]]:
+    """Return the final persisted assistant content for this Cron run."""
+    entries = _get_persisted_memory_entries(state)
+    if entries is None:
+        return []
+    entries = _get_cron_memory_window(
+        state,
+        entries,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    if entries is None:
+        return []
+    for entry in reversed(entries):
+        message = _get_memory_entry_message(entry)
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        return [block for block in content if isinstance(block, dict)]
+    return []
+
+
+def _get_persisted_memory_entries(state: Any) -> list[Any] | None:
+    """Return the persisted Agent memory content when its shape is valid."""
+    if not isinstance(state, dict):
+        return None
+    agent = state.get("agent")
+    if not isinstance(agent, dict):
+        return None
+    memory = agent.get("memory")
+    if not isinstance(memory, dict):
+        return None
+    entries = memory.get("content")
+    return entries if isinstance(entries, list) else None
+
+
+def _get_cron_memory_window(
+    state: Any,
+    entries: list[Any],
+    *,
+    persistence_key: str,
+    execution_key: str,
+) -> list[Any] | None:
+    """Return the memory slice recorded for one Cron task run."""
+    task_run = _get_persisted_cron_task_run(
+        state,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    if task_run is None:
+        return None
+    memory_start = task_run.get("memory_start")
+    memory_end = task_run.get("memory_end")
+    if not isinstance(memory_start, int) or not isinstance(memory_end, int):
+        return None
+    if memory_start < 0 or memory_end < memory_start:
+        return None
+    if memory_end > len(entries):
+        return None
+    return entries[memory_start:memory_end]
+
+
+def _get_memory_entry_message(entry: Any) -> Any:
+    """Normalize tuple/list memory entries to their message payload."""
+    if isinstance(entry, (tuple, list)) and entry:
+        return entry[0]
+    return entry
+
+
+def _get_memory_entry_role(entry: Any) -> str | None:
+    """Return a memory entry role for dict and object message formats."""
+    message = _get_memory_entry_message(entry)
+    if isinstance(message, dict):
+        return message.get("role")
+    return getattr(message, "role", None)
+
+
+def _is_cron_output_delivery_completed(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> bool:
+    """Return the durable output-delivery receipt for this scheduled query."""
+    task_run = _get_persisted_cron_task_run(
+        state,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    return bool(task_run and task_run.get("output_delivery_completed"))
+
+
+def _is_cron_output_delivery_replay_supported(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> bool:
+    """Only task runs created with a durable delivery record may replay it."""
+    task_run = _get_persisted_cron_task_run(
+        state,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    return bool(task_run and task_run.get("cron_delivery_version") == 1)
+
+
+def _get_persisted_cron_task_run(
+    state: Any,
+    *,
+    persistence_key: str,
+    execution_key: str,
+) -> dict[str, Any] | None:
+    """Find this query's task-run record without matching another Cron run."""
+    if not isinstance(state, dict):
+        return None
+    task_runs = state.get("task_runs")
+    if not isinstance(task_runs, list):
+        return None
+    return next(
+        (
+            run
+            for run in reversed(task_runs)
+            if isinstance(run, dict)
+            and (
+                run.get("persistence_key") == persistence_key
+                or (
+                    execution_key and run.get("execution_key") == execution_key
+                )
+            )
+        ),
+        None,
+    )
+
+
+def _has_persisted_cron_task_run(
+    state: Any,
+    *,
+    execution_key: str,
+) -> bool:
+    """Return whether this scheduled request already committed its task run."""
+    if not execution_key or not isinstance(state, dict):
+        return False
+    task_runs = state.get("task_runs")
+    return bool(
+        isinstance(task_runs, list)
+        and any(
+            isinstance(run, dict) and run.get("execution_key") == execution_key
+            for run in task_runs
+        ),
+    )
 
 
 async def stream_query_after_preflight(

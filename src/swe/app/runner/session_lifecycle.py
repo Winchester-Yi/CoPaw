@@ -221,7 +221,7 @@ class SessionLifecycleOwner(Protocol):
         user_id: str | None,
         hook_overlay: Any = None,
         session_execution: Any = None,
-    ) -> None: ...
+    ) -> bool: ...
 
     async def _save_regular_session_state(
         self,
@@ -322,25 +322,23 @@ async def save_job_session_state(
     user_id: str | None,
     hook_overlay: Any = None,
     session_execution: Any = None,
-) -> None:
+) -> bool:
     """Persist cron or regular session state through runner-owned writers."""
     if skip_history:
         if session_execution is None:
-            await owner._save_cron_session_state(
+            return await owner._save_cron_session_state(
                 agent,
                 session_id,
                 user_id,
                 hook_overlay,
             )
-            return
-        await owner._save_cron_session_state(
+        return await owner._save_cron_session_state(
             agent,
             session_id,
             user_id,
             hook_overlay,
             session_execution=session_execution,
         )
-        return
     if session_execution is None:
         await owner._save_regular_session_state(
             agent,
@@ -348,7 +346,7 @@ async def save_job_session_state(
             user_id,
             hook_overlay,
         )
-        return
+        return True
     await owner._save_regular_session_state(
         agent,
         session_id,
@@ -356,6 +354,7 @@ async def save_job_session_state(
         hook_overlay,
         session_execution=session_execution,
     )
+    return True
 
 
 async def _runtime_skill_snapshot(

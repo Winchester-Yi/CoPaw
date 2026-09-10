@@ -20,6 +20,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
 )
 
+import swe.app.channels.zhaohu.channel as zhaohu_channel_module
 from swe.app.channels.zhaohu.channel import ZhaohuChannel
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,121 @@ def _make_completed_event(text: str) -> MagicMock:
     # Mock _message_to_content_parts behavior
     event.content = [TextContent(type=ContentType.TEXT, text=text)]
     return event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enabled": False},
+        {"push_url": ""},
+        {"sys_id": ""},
+        {"robot_open_id": ""},
+    ],
+)
+async def test_send_rejects_unavailable_delivery_configuration(
+    overrides,
+) -> None:
+    channel = _make_channel(**overrides)
+
+    with pytest.raises(RuntimeError, match="zhaohu delivery unavailable"):
+        await channel.send(
+            "user-1",
+            "scheduled output",
+            {"cron_delivery_key": "cron:execution-1:output"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_cron_send_keeps_unavailable_configuration_as_noop() -> None:
+    channel = _make_channel(push_url="")
+
+    await channel.send("user-1", "ordinary output")
+
+
+@pytest.mark.asyncio
+async def test_send_event_reports_unrenderable_message_as_unconfirmed() -> (
+    None
+):
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel._message_to_content_parts = MagicMock(return_value=[])
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_event_reports_blank_text_as_unconfirmed() -> None:
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel._message_to_content_parts = MagicMock(
+        return_value=[TextContent(type=ContentType.TEXT, text="   ")],
+    )
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_event_requires_explicit_channel_delivery_ack() -> None:
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel.send_content_parts = AsyncMock(return_value=None)
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_non_successful_push_response(monkeypatch) -> None:
+    class _Response:
+        content = b'{"returnCode":"FAIL"}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"returnCode": "FAIL"}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, *_args, **_kwargs) -> _Response:
+            return _Response()
+
+    monkeypatch.setattr(
+        zhaohu_channel_module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _Client(),
+    )
+    channel = _make_channel()
+
+    with pytest.raises(RuntimeError, match="returnCode=FAIL"):
+        await channel.send(
+            "user-1",
+            "scheduled output",
+            {"cron_delivery_key": "cron:execution-1:output"},
+        )
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,16 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Button, Drawer, message, Modal, Tooltip, Spin, Tabs } from "antd";
+import {
+  Button,
+  Drawer,
+  Input,
+  message,
+  Modal,
+  Tooltip,
+  Spin,
+  Tabs,
+} from "antd";
 import { ArrowLeftOutlined, FullscreenOutlined } from "@ant-design/icons";
 import { SparkFalseLine, SparkDownloadLine } from "@agentscope-ai/icons";
 import { IconButton } from "@agentscope-ai/design";
@@ -31,6 +40,8 @@ import {
 import { useIframeStore } from "@/stores/iframeStore";
 import type { FilePreviewPresentation } from "../FilePreviewPresentationContext";
 import styles from "./index.module.less";
+import { useHtmlAnnotations } from "../HtmlAnnotations/context";
+import { useHtmlAnnotationController } from "../HtmlAnnotations/useHtmlAnnotationController";
 
 let splitPreviewCount = 0;
 
@@ -65,6 +76,7 @@ export interface FilePreviewModalProps {
   presentation?: FilePreviewPresentation;
   nestedPreviewMode?: "stack" | "replace";
   onBack?: () => void;
+  enableAnnotations?: boolean;
 }
 
 function FilePreviewModal(props: FilePreviewModalProps) {
@@ -85,6 +97,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     presentation = "modal",
     nestedPreviewMode = "stack",
     onBack,
+    enableAnnotations = false,
   } = props;
   const iframeState = useIframeStore((state) => state);
   const { userId, bbk } = iframeState;
@@ -96,13 +109,16 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const [error, setError] = useState<string | null>(null);
   const [nestedPreview, setNestedPreview] =
     useState<NestedHtmlPreviewRequest | null>(null);
+  const [iframeLoadKey, setIframeLoadKey] = useState(0);
   const [dynamicRenderLoading, setDynamicRenderLoading] = useState(false);
   const [isFileGenerating, setIsFileGenerating] = useState(false);
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const previewLoadGenerationRef = useRef(0);
   // 存储动态渲染的 HTML 内容（直接渲染到 div 时使用）
   const [renderedHtmlContent, setRenderedHtmlContent] = useState<string | null>(
     null,
   );
+  const [canonicalHtml, setCanonicalHtml] = useState<string | null>(null);
   const [templateResult, setTemplateResult] = useState<RecordDataResponse>();
   // 客户多模板状态
   const [clawFilePlanList, setClawFilePlanList] = useState<ClawFilePlanItem[]>(
@@ -178,7 +194,9 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   // 获取动态渲染数据的函数（带轮询逻辑）
   // 对于静态模板（templateFlag === 'no_query'），跳过数据获取，直接渲染模板内容
   const fetchDynamicRenderData = useCallback(
-    async (resultId: string, templateId: string) => {
+    async (resultId: string, templateId: string, loadGeneration: number) => {
+      if (previewLoadGenerationRef.current !== loadGeneration) return;
+
       try {
         const templateIdNum = parseInt(templateId, 10);
 
@@ -186,8 +204,10 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         // 直接渲染模板内容，模板内容加载不受数据获取逻辑阻塞
         if (isStaticTemplate(templateIdNum)) {
           const renderedHtml = await renderStaticTemplate(templateIdNum);
+          if (previewLoadGenerationRef.current !== loadGeneration) return;
           if (renderedHtml) {
             setRenderedHtmlContent(renderedHtml);
+            setCanonicalHtml(enableAnnotations ? renderedHtml : null);
           } else {
             setError("静态模板渲染失败");
           }
@@ -196,6 +216,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
 
         // 非静态模板：需要先获取数据再渲染
         const res = await dynamicRenderApi.getRecordData(resultId, templateId);
+        if (previewLoadGenerationRef.current !== loadGeneration) return;
         // 如果返回码不是 200，说明文件正在生成中
         if (res.code !== "200") {
           setIsFileGenerating(true);
@@ -208,7 +229,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             clearTimeout(pollingTimerRef.current);
           }
           pollingTimerRef.current = setTimeout(() => {
-            fetchDynamicRenderData(resultId, templateId);
+            fetchDynamicRenderData(resultId, templateId, loadGeneration);
           }, 10000);
           return;
         }
@@ -221,6 +242,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const { TRACE_ID, CRON_JOB_ID, custUid, custName, ...data } =
           res.data as RecordDataResponse;
         const renderedHtml = await renderTemplate(templateIdNum, res.data);
+        if (previewLoadGenerationRef.current !== loadGeneration) return;
         if (renderedHtml) {
           setTemplateResult({
             TRACE_ID,
@@ -230,16 +252,20 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             ...data,
           });
           setRenderedHtmlContent(renderedHtml);
+          setCanonicalHtml(enableAnnotations ? renderedHtml : null);
         } else {
           setError("模板渲染失败");
         }
       } catch (err) {
+        if (previewLoadGenerationRef.current !== loadGeneration) return;
         console.error("获取数据失败:", err);
         setError("数据加载失败");
         setIsFileGenerating(false);
       } finally {
-        setLoading(false);
-        setDynamicRenderLoading(false);
+        if (previewLoadGenerationRef.current === loadGeneration) {
+          setLoading(false);
+          setDynamicRenderLoading(false);
+        }
       }
     },
     [
@@ -247,6 +273,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       renderStaticTemplate,
       isStaticTemplate,
       isTemplateListLoaded,
+      enableAnnotations,
     ],
   );
 
@@ -300,9 +327,18 @@ function FilePreviewModal(props: FilePreviewModalProps) {
 
   // fetch 文件数据并创建 Blob URL 或动态渲染
   useEffect(() => {
+    const loadGeneration = ++previewLoadGenerationRef.current;
+    let cancelled = false;
+    const invalidateLoad = () => {
+      cancelled = true;
+      if (previewLoadGenerationRef.current === loadGeneration) {
+        previewLoadGenerationRef.current += 1;
+      }
+    };
+
     // When custUid is present, wait for claw plan to initialize first
     if (custUid && !clawPlanInitializedRef.current) {
-      return;
+      return invalidateLoad;
     }
 
     if (open && fileType === "previewable" && fileUrl) {
@@ -310,6 +346,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       setError(null);
       setBlobUrl(null);
       setMarkdownContent(null);
+      setCanonicalHtml(null);
       setIsFileGenerating(false);
 
       // 清理之前的轮询定时器
@@ -326,11 +363,15 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           setError("缺少必要的参数");
           setLoading(false);
           setDynamicRenderLoading(false);
-          return;
+          return invalidateLoad;
         }
-        fetchDynamicRenderData(effectiveResultId, effectiveTemplateId);
+        fetchDynamicRenderData(
+          effectiveResultId,
+          effectiveTemplateId,
+          loadGeneration,
+        );
 
-        return;
+        return invalidateLoad;
       }
 
       // 原有逻辑：直接加载文件
@@ -339,27 +380,40 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           if (!res.ok) throw new Error("加载失败");
 
           if (isMarkdownFile) {
-            setMarkdownContent(await res.text());
+            const content = await res.text();
+            if (!cancelled) setMarkdownContent(content);
             return;
           }
 
           const blob = await res.blob();
+          const canonicalContent =
+            enableAnnotations && isHtmlPreview ? await blob.text() : null;
+          if (cancelled) return;
+          if (canonicalContent !== null) {
+            setCanonicalHtml(canonicalContent);
+          }
           const contentType = getContentType(fileName);
           const newBlob = new Blob([blob], { type: contentType });
           const url = URL.createObjectURL(newBlob);
           setBlobUrl(url);
         })
         .catch(() => {
-          setError("文件暂时无法预览");
+          if (!cancelled) setError("文件暂时无法预览");
         })
         .finally(() => {
-          setLoading(false);
+          if (!cancelled) setLoading(false);
         });
     }
+
+    return invalidateLoad;
   }, [
     open,
     fileType,
+    fileUrl,
     fileName,
+    custUid,
+    enableAnnotations,
+    isHtmlPreview,
     isMarkdownFile,
     isDynamicRender,
     renderTemplate,
@@ -381,6 +435,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   useEffect(() => {
     return () => {
       setRenderedHtmlContent(null);
+      setCanonicalHtml(null);
     };
   }, []);
 
@@ -563,10 +618,25 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   }, []);
 
   const handleIframeLoad = useCallback(() => {
+    setIframeLoadKey((key) => key + 1);
     reattachTrackersRef.current?.();
   }, []);
 
-  const shouldRecordEvents = !trackingContext.disableEventRecording;
+  const annotationContext = useHtmlAnnotations();
+  const annotationEligible =
+    enableAnnotations &&
+    isHtmlPreview &&
+    annotationContext.composerAvailable &&
+    Boolean(canonicalHtml);
+  const annotationController = useHtmlAnnotationController({
+    iframeRef,
+    enabled: annotationEligible,
+    canonicalHtml,
+    sourceKey: fileUrl,
+    fileName,
+    loadKey: iframeLoadKey,
+  });
+  const recordingEnabled = !trackingContext.disableEventRecording;
 
   const metaData = useMemo(
     () => ({
@@ -604,32 +674,35 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       iframeRef,
       {
         metaData,
-        load: htmlPreviewEventsApi.recordClick,
-        click:
-          isHtmlPreview && enableClickTracking
-            ? {
-              reporter: shouldRecordEvents
+        load: recordingEnabled ? htmlPreviewEventsApi.recordClick : null,
+        click: annotationController.annotationMode
+          ? null
+          : isHtmlPreview && enableClickTracking
+          ? {
+              reporter: recordingEnabled
                 ? htmlPreviewEventsApi.recordClick
                 : () => undefined,
               listSnapshotReporter:
-                shouldRecordEvents && enableListSnapshotTracking
+                recordingEnabled && enableListSnapshotTracking
                   ? htmlPreviewEventsApi.recordListSnapshot
                   : undefined,
               onOpenNestedPreview: setNestedPreview,
               getTemplateName: (templateId: number) => {
                 return templateList.current.find(
-                  (t) => t.templateId === templateId
+                  (t) => t.templateId === templateId,
                 )?.templateName;
               },
             }
-            : null,
-        exposure: isHtmlPreview
+          : null,
+        exposure:
+          isHtmlPreview && recordingEnabled
             ? {
                 reporter: htmlPreviewEventsApi.recordClick,
-            }
+              }
             : null,
       },
       [isHtmlPreview, enableClickTracking, enableListSnapshotTracking],
+      annotationController.annotationMode,
     );
   const reattachTrackersRef = useRef(reattachTrackers);
   reattachTrackersRef.current = reattachTrackers;
@@ -699,7 +772,10 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       }
       if (renderedHtmlContent) {
         return (
-          <div style={{ width: "100%", height: previewHeight }}>
+          <div
+            className={styles.annotatablePreview}
+            style={{ width: "100%", height: previewHeight }}
+          >
             <iframe
               ref={iframeRef}
               srcDoc={renderedHtmlContent}
@@ -707,12 +783,45 @@ function FilePreviewModal(props: FilePreviewModalProps) {
               title="File Preview"
               onLoad={handleIframeLoad}
             />
+            {annotationEligible && annotationController.annotationMode && (
+              <div className={styles.annotationOverlay}>
+                {annotationController.hoverRect && (
+                  <span
+                    className={styles.annotationHover}
+                    style={annotationController.hoverRect}
+                    aria-hidden="true"
+                  />
+                )}
+                {annotationController.annotations.map((annotation, index) =>
+                  annotation.rect ? (
+                    <button
+                      key={annotation.id}
+                      type="button"
+                      className={styles.annotationMarker}
+                      style={{
+                        left: annotation.rect.left,
+                        top: annotation.rect.top,
+                      }}
+                      aria-label={`编辑批注 ${index + 1}`}
+                      onClick={() =>
+                        annotationController.editAnnotation(annotation)
+                      }
+                    >
+                      {index + 1}
+                    </button>
+                  ) : null,
+                )}
+              </div>
+            )}
           </div>
         );
       }
       if (blobUrl) {
         return (
-          <div style={{ width: "100%", height: previewHeight }}>
+          <div
+            className={styles.annotatablePreview}
+            style={{ width: "100%", height: previewHeight }}
+          >
             <iframe
               ref={iframeRef}
               src={blobUrl}
@@ -720,6 +829,36 @@ function FilePreviewModal(props: FilePreviewModalProps) {
               title="File Preview"
               onLoad={handleIframeLoad}
             />
+            {annotationEligible && annotationController.annotationMode && (
+              <div className={styles.annotationOverlay}>
+                {annotationController.hoverRect && (
+                  <span
+                    className={styles.annotationHover}
+                    style={annotationController.hoverRect}
+                    aria-hidden="true"
+                  />
+                )}
+                {annotationController.annotations.map((annotation, index) =>
+                  annotation.rect ? (
+                    <button
+                      key={annotation.id}
+                      type="button"
+                      className={styles.annotationMarker}
+                      style={{
+                        left: annotation.rect.left,
+                        top: annotation.rect.top,
+                      }}
+                      aria-label={`编辑批注 ${index + 1}`}
+                      onClick={() =>
+                        annotationController.editAnnotation(annotation)
+                      }
+                    >
+                      {index + 1}
+                    </button>
+                  ) : null,
+                )}
+              </div>
+            )}
           </div>
         );
       }
@@ -775,6 +914,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     color,
     handleDownload,
     handleIframeLoad,
+    annotationController,
+    annotationEligible,
   ]);
 
   const headerActions = useMemo(() => {
@@ -849,6 +990,115 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     </>
   );
 
+  const annotationAction = annotationEligible ? (
+    <Button
+      size="small"
+      type={annotationController.annotationMode ? "primary" : "default"}
+      aria-label={annotationController.annotationMode ? "完成批注" : "添加批注"}
+      onClick={() => {
+        if (annotationController.annotationMode) {
+          if (annotationController.completeAnnotations()) {
+            message.success("批注已加入聊天输入框");
+          } else {
+            message.error("请先至少添加一条批注");
+          }
+          return;
+        }
+        annotationController.setAnnotationMode(true);
+      }}
+    >
+      {annotationController.annotationMode
+        ? `完成批注 (${annotationController.annotations.length})`
+        : "添加批注"}
+    </Button>
+  ) : null;
+
+  const annotationPanel = (
+    <>
+      {annotationEligible && annotationController.sourceConflict && (
+        <div className={styles.annotationWarning} role="alert">
+          页面源码已更新，原批注草稿已清除，请基于新页面重新批注。
+        </div>
+      )}
+      {annotationEligible && annotationController.annotationMode && (
+        <div
+          className={styles.annotationPanel}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              annotationController.exitAnnotationMode();
+            }
+          }}
+        >
+          <div className={styles.annotationInstruction}>
+            选择页面元素并描述修改；批注不会改变当前页面。
+          </div>
+          {annotationController.unsupportedReason && (
+            <div className={styles.annotationWarning} role="alert">
+              {annotationController.unsupportedReason}
+            </div>
+          )}
+          {annotationController.annotations.map((annotation, index) => (
+            <div className={styles.annotationListItem} key={annotation.id}>
+              <button
+                type="button"
+                onClick={() => annotationController.editAnnotation(annotation)}
+              >
+                {index + 1}. {annotation.comment}
+              </button>
+              <button
+                type="button"
+                aria-label={`删除批注 ${index + 1}`}
+                onClick={() =>
+                  annotationController.deleteAnnotation(annotation.id)
+                }
+              >
+                删除
+              </button>
+            </div>
+          ))}
+          {annotationController.pendingTarget && (
+            <div className={styles.annotationEditor}>
+              <Input.TextArea
+                autoFocus
+                value={annotationController.comment}
+                maxLength={2048}
+                placeholder="描述这里需要怎样修改"
+                aria-label="批注内容"
+                onChange={(event) =>
+                  annotationController.setComment(event.target.value)
+                }
+                onPressEnter={(event) => {
+                  if (!event.shiftKey) {
+                    event.preventDefault();
+                    annotationController.saveComment();
+                  }
+                }}
+              />
+              <div className={styles.annotationEditorActions}>
+                <Button
+                  size="small"
+                  onClick={annotationController.cancelComment}
+                >
+                  取消
+                </Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  disabled={!annotationController.comment.trim()}
+                  onClick={annotationController.saveComment}
+                >
+                  保存批注
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+
   const templateTabs =
     custUid && !clawPlanLoading && clawFilePlanList.length > 0 ? (
       <div className={styles.tabsWrapper}>
@@ -888,6 +1138,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       rootResultId={effectiveResultId}
       presentation={presentation}
       nestedPreviewMode={nestedPreviewMode}
+      enableAnnotations={enableAnnotations}
       onBack={
         nestedPreviewMode === "replace"
           ? () => setNestedPreview(null)
@@ -918,11 +1169,13 @@ function FilePreviewModal(props: FilePreviewModalProps) {
               {fileName}
             </div>
             <div className={styles.headerActions}>
+              {annotationAction}
               {headerActions[headerActions.length - 1]}
             </div>
           </header>
           {templateTabs}
           <div className={styles.previewContent}>{previewBody}</div>
+          {annotationPanel}
         </div>
       ) : presentation === "drawer" ? (
         <Drawer
@@ -946,6 +1199,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           extra={
             <div className={styles.headerActions}>
               {headerActions}
+              {annotationAction}
               <Tooltip title="关闭预览">
                 <IconButton
                   size="small"
@@ -969,6 +1223,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         >
           {templateTabs}
           <div className={styles.previewContent}>{previewBody}</div>
+          {annotationPanel}
         </Drawer>
       ) : (
         <Modal

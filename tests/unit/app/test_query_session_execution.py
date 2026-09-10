@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock
@@ -12,10 +13,17 @@ from unittest.mock import AsyncMock
 import pytest
 from agentscope.message import Msg
 
-from swe.app.runner.query_attempt import stream_query_after_preflight
-from swe.app.runner.query_contracts import _QueryPreflight
+from swe.app.runner.query_attempt import (
+    _save_and_close_session_execution,
+    stream_query_after_preflight,
+)
+from swe.app.runner.query_contracts import (
+    QueryPersistenceResult,
+    _QueryPreflight,
+)
 from swe.app.answer_turn.models import TurnIdentity, TurnStatus
 from swe.app.runner.runner import AgentRunner
+from swe.app.runner.session import SafeJSONSession
 
 
 class _RecordingExecution:
@@ -89,6 +97,604 @@ class _SnapshotAgent:
 
     def state_dict(self) -> dict[str, list[str]]:
         return {"memory_entries": list(self.memory_entries)}
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_reports_commit_result_and_assistant_count() -> (
+    None
+):
+    """会话清理应向调用方报告提交结果与 assistant 数量。"""
+    session = _RecordingSession()
+    execution = _RecordingExecution(session)
+    assistant = SimpleNamespace(role="assistant")
+    user = SimpleNamespace(role="user")
+    runtime = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        session_execution=execution,
+        agent=SimpleNamespace(
+            memory=SimpleNamespace(content=[(user, True), (assistant, True)]),
+        ),
+        session_state_commit_attempted=False,
+        session_state_committed=False,
+    )
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **kwargs: Any) -> bool:
+            await kwargs["runtime"].session_execution.commit_state(
+                {"agent": {"memory": {"content": [{"role": "assistant"}]}}},
+            )
+            return True
+
+    request = SimpleNamespace(user_id="user-1")
+    await _save_and_close_session_execution(
+        Owner(),
+        cleanup_runtime=runtime,
+        cleanup_state_loaded=True,
+        retry_state=SimpleNamespace(prev_agent=None),
+        request=request,
+        session_id="session-1",
+        session_execution=execution,
+    )
+
+    assert runtime.persistence_result == QueryPersistenceResult(
+        session_id="session-1",
+        user_id="user-1",
+        assistant_message_count=1,
+        commit_attempted=True,
+        committed=True,
+        commit_error=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_does_not_report_commit_when_cleanup_is_noop() -> (
+    None
+):
+    """A skipped state save must not be reported as a committed session."""
+    recorded: list[QueryPersistenceResult] = []
+
+    class Owner:
+        async def _save_state_during_cleanup(
+            self,
+            **_kwargs: Any,
+        ) -> bool | None:
+            return None
+
+        def _record_query_persistence_result(
+            self,
+            _request: Any,
+            result: QueryPersistenceResult,
+        ) -> None:
+            recorded.append(result)
+
+    execution = SimpleNamespace(
+        has_uncommitted_state=False,
+        close=AsyncMock(),
+    )
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(
+            memory=SimpleNamespace(
+                content=[(SimpleNamespace(role="assistant"), True)],
+            ),
+        ),
+        session_state_commit_attempted=False,
+        session_state_committed=False,
+    )
+
+    await _save_and_close_session_execution(
+        Owner(),
+        cleanup_runtime=runtime,
+        cleanup_state_loaded=False,
+        retry_state=SimpleNamespace(prev_agent=None),
+        request=SimpleNamespace(user_id="user-1"),
+        session_id="session-1",
+        session_execution=execution,
+    )
+
+    assert recorded == [
+        QueryPersistenceResult(
+            session_id="session-1",
+            user_id="user-1",
+            assistant_message_count=0,
+            commit_attempted=False,
+            committed=False,
+            commit_error="session_state_not_persisted",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_real_json_session_cleanup_commits_assistant_state(
+    tmp_path: Path,
+) -> None:
+    """真实 SafeJSONSession 提交后，cleanup 回执必须确认已落盘。"""
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    recorded: list[QueryPersistenceResult] = []
+    assistant = SimpleNamespace(role="assistant")
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **kwargs: Any) -> bool:
+            await kwargs["runtime"].session_execution.commit_state(
+                {
+                    "agent": {
+                        "memory": {"content": [{"role": "assistant"}]},
+                    },
+                },
+            )
+            return True
+
+        def _record_query_persistence_result(
+            self,
+            _request: Any,
+            result: QueryPersistenceResult,
+        ) -> None:
+            recorded.append(result)
+
+    request = SimpleNamespace(user_id="user-1", skip_history=False)
+    async with session.execution("session-1", "user-1") as execution:
+        runtime = SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            session_execution=execution,
+            agent=SimpleNamespace(
+                memory=SimpleNamespace(content=[(assistant, True)]),
+            ),
+            session_state_commit_attempted=False,
+            session_state_committed=False,
+        )
+        await _save_and_close_session_execution(
+            Owner(),
+            cleanup_runtime=runtime,
+            cleanup_state_loaded=True,
+            retry_state=SimpleNamespace(prev_agent=None),
+            request=request,
+            session_id="session-1",
+            session_execution=execution,
+        )
+
+    assert recorded == [
+        QueryPersistenceResult(
+            session_id="session-1",
+            user_id="user-1",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        ),
+    ]
+    assert (await session.get_session_state_dict("session-1", "user-1"))[
+        "agent"
+    ]["memory"]["content"] == [{"role": "assistant"}]
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_counts_only_this_cron_persistence_receipt() -> (
+    None
+):
+    """An assistant from an older run cannot satisfy this run's receipt."""
+    recorded: list[QueryPersistenceResult] = []
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **_kwargs: Any) -> bool:
+            return True
+
+        def _record_query_persistence_result(
+            self,
+            _request: Any,
+            result: QueryPersistenceResult,
+        ) -> None:
+            recorded.append(result)
+
+    execution = SimpleNamespace(
+        state={
+            "agent": {"memory": {"content": [{"role": "assistant"}]}},
+            "task_runs": [
+                {
+                    "persistence_key": "older-receipt",
+                    "memory_start": 0,
+                    "memory_end": 1,
+                },
+            ],
+        },
+        close=AsyncMock(),
+    )
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(memory=SimpleNamespace(content=[])),
+        session_state_commit_attempted=False,
+        session_state_committed=False,
+    )
+
+    await _save_and_close_session_execution(
+        Owner(),
+        cleanup_runtime=runtime,
+        cleanup_state_loaded=True,
+        retry_state=SimpleNamespace(prev_agent=None),
+        request=SimpleNamespace(
+            user_id="user-1",
+            cron_persistence_key="current-receipt",
+        ),
+        session_id="session-1",
+        session_execution=execution,
+    )
+
+    assert recorded[0].committed is True
+    assert recorded[0].assistant_message_count == 0
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_records_commit_failure_when_close_also_fails() -> (
+    None
+):
+    """关闭 session 失败不能吞掉已知的提交失败回执。"""
+    recorded: list[QueryPersistenceResult] = []
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **_kwargs: Any) -> None:
+            raise RuntimeError("commit failed")
+
+        def _record_query_persistence_result(
+            self,
+            _request: Any,
+            result: QueryPersistenceResult,
+        ) -> None:
+            recorded.append(result)
+
+    async def _close() -> None:
+        raise RuntimeError("close failed")
+
+    execution = SimpleNamespace(close=_close)
+    request = SimpleNamespace(user_id="user-1", skip_history=False)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await _save_and_close_session_execution(
+            Owner(),
+            cleanup_runtime=None,
+            cleanup_state_loaded=False,
+            retry_state=SimpleNamespace(prev_agent=None),
+            request=request,
+            session_id="session-1",
+            session_execution=execution,
+        )
+
+    assert recorded == [
+        QueryPersistenceResult(
+            session_id="session-1",
+            user_id="user-1",
+            assistant_message_count=0,
+            commit_attempted=True,
+            committed=False,
+            commit_error="commit failed",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_propagates_keyboard_interrupt_from_close() -> (
+    None
+):
+    """Cancellation-like BaseException from close must not be swallowed."""
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **_kwargs: Any) -> None:
+            raise RuntimeError("commit failed")
+
+    async def _close() -> None:
+        raise KeyboardInterrupt
+
+    execution = SimpleNamespace(close=_close)
+
+    with pytest.raises(KeyboardInterrupt):
+        await _save_and_close_session_execution(
+            Owner(),
+            cleanup_runtime=None,
+            cleanup_state_loaded=False,
+            retry_state=SimpleNamespace(prev_agent=None),
+            request=SimpleNamespace(user_id="user-1"),
+            session_id="session-1",
+            session_execution=execution,
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_ignores_close_failure_after_commit() -> None:
+    """A close failure cannot turn an already committed query into an error."""
+    recorded: list[QueryPersistenceResult] = []
+    lifecycle: list[str] = []
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **_kwargs: Any) -> bool:
+            return True
+
+        def _record_query_persistence_result(
+            self,
+            _request: Any,
+            result: QueryPersistenceResult,
+        ) -> None:
+            lifecycle.append("record")
+            recorded.append(result)
+
+    async def _close() -> None:
+        lifecycle.append("close")
+        raise RuntimeError("close failed")
+
+    execution = SimpleNamespace(
+        state={"agent": {"memory": {"content": []}}},
+        close=_close,
+    )
+
+    await _save_and_close_session_execution(
+        Owner(),
+        cleanup_runtime=None,
+        cleanup_state_loaded=True,
+        retry_state=SimpleNamespace(prev_agent=SimpleNamespace()),
+        request=SimpleNamespace(user_id="user-1"),
+        session_id="session-1",
+        session_execution=execution,
+    )
+
+    assert recorded == [
+        QueryPersistenceResult(
+            session_id="session-1",
+            user_id="user-1",
+            assistant_message_count=0,
+            commit_attempted=True,
+            committed=True,
+        ),
+    ]
+    assert lifecycle == ["close", "record"]
+
+
+@pytest.mark.asyncio
+async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() -> (
+    None
+):
+    """A scheduler replay consumes its existing persisted assistant result."""
+    recorded: list[QueryPersistenceResult] = []
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **_kwargs: Any) -> bool:
+            return False
+
+        def _record_query_persistence_result(
+            self,
+            _request: Any,
+            result: QueryPersistenceResult,
+        ) -> None:
+            recorded.append(result)
+
+    execution = SimpleNamespace(
+        state={
+            "agent": {
+                "memory": {
+                    "content": [
+                        {"role": "user", "content": "input"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "persisted output"},
+                            ],
+                        },
+                    ],
+                },
+            },
+            "task_runs": [
+                {
+                    "execution_key": "execution-1",
+                    "memory_start": 0,
+                    "memory_end": 2,
+                    "cron_delivery_version": 1,
+                    "output_delivery_completed": True,
+                },
+            ],
+        },
+        close=AsyncMock(),
+    )
+
+    await _save_and_close_session_execution(
+        Owner(),
+        cleanup_runtime=None,
+        cleanup_state_loaded=True,
+        retry_state=SimpleNamespace(prev_agent=SimpleNamespace()),
+        request=SimpleNamespace(
+            user_id="user-1",
+            cron_execution_key="execution-1",
+            cron_persistence_key="replay-receipt",
+        ),
+        session_id="session-1",
+        session_execution=execution,
+    )
+
+    assert recorded == [
+        QueryPersistenceResult(
+            session_id="session-1",
+            user_id="user-1",
+            assistant_message_count=1,
+            commit_attempted=False,
+            committed=True,
+            idempotent_replay=True,
+            persisted_assistant_content=[
+                {"type": "text", "text": "persisted output"},
+            ],
+            output_delivery_replay_supported=True,
+            output_delivery_completed=True,
+        ),
+    ]
+    execution.close.assert_awaited_once()
+
+
+def test_agent_runner_returns_persistence_result_for_scheduled_query() -> None:
+    """Cron 仅能读取自身 query 的提交结果，不能读取其他任务状态。"""
+    runner = AgentRunner()
+    result = QueryPersistenceResult(
+        session_id="session-1",
+        user_id="user-1",
+        assistant_message_count=1,
+        commit_attempted=True,
+        committed=True,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        execution_origin="scheduled",
+        cron_execution_key="job-1:fire-1",
+        cron_persistence_key="receipt-1",
+    )
+
+    runner._record_query_persistence_result(request, result)
+
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+            execution_key="receipt-1",
+        )
+        == result
+    )
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+            execution_key="receipt-1",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_persists_cron_output_delivery_receipt(
+    tmp_path: Path,
+) -> None:
+    """Final output delivery is recorded in the persisted task-run state."""
+    runner = AgentRunner()
+    runner.session = SafeJSONSession(str(tmp_path))
+    async with runner.session.execution(
+        "session-1",
+        user_id="user-1",
+    ) as execution:
+        state = execution.state
+        state["task_runs"] = [
+            {
+                "execution_key": "execution-1",
+                "persistence_key": "receipt-1",
+                "output_delivery_completed": False,
+            },
+        ]
+        await execution.commit_state(state)
+
+    await runner.mark_cron_output_delivery_completed(
+        session_id="session-1",
+        user_id="user-1",
+        execution_key="execution-1",
+        persistence_key="receipt-1",
+    )
+
+    state = await runner.session.get_session_state_dict(
+        "session-1",
+        user_id="user-1",
+    )
+    assert state["task_runs"][0]["output_delivery_completed"] is True
+
+
+def test_agent_runner_discards_expired_persistence_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unconsumed Cron receipts expire instead of retaining session state."""
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "swe.app.runner.runner.time.monotonic",
+        lambda: now["value"],
+    )
+    runner = AgentRunner()
+    result = QueryPersistenceResult(
+        session_id="session-1",
+        user_id="user-1",
+        assistant_message_count=1,
+        commit_attempted=True,
+        committed=True,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        execution_origin="scheduled",
+        cron_persistence_key="receipt-1",
+    )
+
+    runner._record_query_persistence_result(request, result)
+    now["value"] = 161.0
+
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+            execution_key="receipt-1",
+        )
+        is None
+    )
+    assert runner._cron_persistence_results == {}
+
+
+def test_agent_runner_bounds_unconsumed_persistence_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An idle Runner cannot retain an unbounded number of late receipts."""
+    monkeypatch.setattr(
+        "swe.app.runner.runner.CRON_PERSISTENCE_RESULT_MAX_ENTRIES",
+        2,
+    )
+    runner = AgentRunner()
+    result = QueryPersistenceResult(
+        session_id="session-1",
+        user_id="user-1",
+        assistant_message_count=1,
+        commit_attempted=True,
+        committed=True,
+    )
+
+    for index in range(3):
+        runner._record_query_persistence_result(
+            SimpleNamespace(
+                session_id="session-1",
+                user_id="user-1",
+                execution_origin="scheduled",
+                cron_persistence_key=f"receipt-{index}",
+            ),
+            result,
+        )
+
+    assert set(runner._cron_persistence_results) == {
+        ("session-1", "user-1", "receipt-1"),
+        ("session-1", "user-1", "receipt-2"),
+    }
+
+
+def test_agent_runner_does_not_cache_regular_query_persistence_result() -> (
+    None
+):
+    """普通查询没有 Cron 消费者，不能把 cleanup 回执留在 Runner 中。"""
+    runner = AgentRunner()
+    result = QueryPersistenceResult(
+        session_id="session-1",
+        user_id="user-1",
+        assistant_message_count=1,
+        commit_attempted=True,
+        committed=True,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        execution_origin="interactive",
+        cron_execution_key="",
+    )
+
+    runner._record_query_persistence_result(request, result)
+
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+        )
+        is None
+    )
 
 
 class _RetryableError(RuntimeError):

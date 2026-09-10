@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Interactive report</title>
+    <style>.cards { display: grid; grid-template-columns: 1fr; }</style>
+  </head>
+  <body>
+    <h1 id="report-title">Sales report</h1>
+    <button id="toggle" type="button">Toggle details</button>
+    <section id="details" hidden>Preserved details</section>
+    <script>
+      document.querySelector('#toggle').addEventListener('click', () => {
+        document.querySelector('#details').toggleAttribute('hidden');
+      });
+    </script>
+  </body>
+</html>

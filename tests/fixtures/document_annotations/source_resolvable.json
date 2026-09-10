@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source": {
+    "attachment_url": "/files/preview/__SOURCE_PATH__",
+    "file_name": "report.annotation-source.html",
+    "sha256": "__SHA256__"
+  },
+  "output": {
+    "mode": "new_file",
+    "format": "html",
+    "preserve_original": true,
+    "suggested_name": "report-revised.html"
+  },
+  "annotations": [
+    {
+      "id": "ann-001",
+      "comment": "将标题改为本月销售概览",
+      "target": {
+        "runtime_generated": false,
+        "tag_name": "h1",
+        "stable_attributes": {"id": "sales-title"},
+        "selector": "main > h1#sales-title",
+        "text_quote": {"exact": "销售概览", "prefix": "", "suffix": ""},
+        "rendered_html": "<h1 id=\"sales-title\">销售概览</h1>"
+      }
+    },
+    {
+      "id": "ann-002",
+      "comment": "卡片改为两列布局",
+      "target": {
+        "runtime_generated": false,
+        "tag_name": "section",
+        "selector": "main > section.cards",
+        "rendered_html": "<section class=\"cards\">...</section>",
+        "computed_style": {"display": "grid", "grid-template-columns": "1fr"}
+      }
+    }
+  ]
+}

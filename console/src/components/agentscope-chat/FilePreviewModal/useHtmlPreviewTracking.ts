@@ -68,12 +68,14 @@ function attachAllTrackers(
 export function useIframeHtmlPreviewTracking(
   iframeRef: React.RefObject<HTMLIFrameElement | null>,
   options: UseHtmlPreviewTrackingOptions,
-  deps: unknown[] = []
+  deps: unknown[] = [],
+  interactionKey?: unknown,
 ) {
   const cleanupClickRef = useRef<(() => void) | null>(null);
   const cleanupExposureRef = useRef<(() => void) | null>(null);
   // const loadFlagRef = useRef(false);
   const optionsRef = useRef(options);
+  const interactionEffectMountedRef = useRef(false);
   optionsRef.current = options;
 
   const doAttach = () => {
@@ -105,6 +107,32 @@ export function useIframeHtmlPreviewTracking(
       cleanupExposureRef.current = null;
     };
   }, deps);
+
+  useEffect(() => {
+    if (!interactionEffectMountedRef.current) {
+      interactionEffectMountedRef.current = true;
+      return;
+    }
+    cleanupClickRef.current?.();
+    cleanupClickRef.current = null;
+    const iframe = iframeRef.current;
+    const clickOptions = optionsRef.current.click;
+    if (iframe && clickOptions) {
+      try {
+        cleanupClickRef.current = attachHtmlPreviewClickTracker({
+          iframe,
+          ...clickOptions,
+          metadata: optionsRef.current.metaData,
+        });
+      } catch (err) {
+        console.warn("Failed to attach HTML preview click tracker:", err);
+      }
+    }
+    return () => {
+      cleanupClickRef.current?.();
+      cleanupClickRef.current = null;
+    };
+  }, [iframeRef, interactionKey]);
 
   // 返回 reattach 函数，由外部 handleIframeLoad 调用
   const cleanup = () => {

@@ -1360,7 +1360,7 @@ A **Skill Runtime View** member that a user explicitly selects for a single chat
 _Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
 
 **Explicit Skill Selection Activation**:
-The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the turn's **Query Skill Snapshot** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists them for the rest of the session; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
+The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the turn's **Query Skill Snapshot** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists their activation for the rest of the session subject to the **Session Skill Hook Revision Boundary**; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
 _Avoid_: plain-text skill mention, filename match, automatic semantic inference, confirmed skill use
 
 **Skill Runtime Identifier**:
@@ -1390,6 +1390,10 @@ _Avoid_: extension match, text substring, arbitrary workspace path, hook bootstr
 **Session Skill Hook Order**:
 The deterministic hook order for a session with explicitly selected skills: tenant Hooks, then Agent Profile Hooks, then one deduplicated Hook source for each selected skill in its first-selection order. Later selections append only previously unloaded skills; normal Hook result merging resolves conflicts.
 _Avoid_: arbitrary hook order, repeat-selection duplication, last-selected-first execution
+
+**Session Skill Hook Revision Boundary**:
+The boundary at which a modified, disabled, or removed Skill `hooks.json` configuration supersedes the configuration previously loaded by an existing session. One Hook event uses the configuration snapshot obtained when its dispatch begins, while a Handler already executing remains allowed to finish. A cached file-version marker determines whether the configuration must be read and validated again. Handler-script content changes do not themselves revise the configuration. An unreadable, invalid, or disabled current configuration withdraws that Skill's Hooks for later event dispatches rather than retaining a prior configuration. A Skill whose configuration is restored to a valid enabled state resumes its Hooks at a later event dispatch without requiring another Skill selection. A changed Handler does not retain its prior one-time execution record, while an unchanged Handler does. Session state converges lazily when each activated Skill next reaches a Hook event rather than through a bulk session rewrite.
+_Avoid_: handler interruption, mid-dispatch revision, session-end-only activation, per-event full configuration read, script-content revision, stale Hook source, invalid-config fallback, reselection to restore, bulk session rewrite, stale one-time record
 
 **Unavailable Skill Selection**:
 A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.

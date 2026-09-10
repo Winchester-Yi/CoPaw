@@ -39,6 +39,7 @@ _DEFAULT_NET = "DMZ"
 _DEFAULT_TIMEOUT = 15.0
 _APPROVAL_TEXT_LIMIT = 800
 _APPROVAL_INPUT_LIMIT = 600
+_DELIVERY_UNAVAILABLE_MESSAGE = "zhaohu delivery unavailable"
 
 # Message dedup: keep processed IDs for 5 minutes
 _DEDUP_TTL_SECONDS = 300
@@ -98,6 +99,11 @@ def _clean_payload(obj: Any) -> Any:
             out.append(cleaned)
         return out
     return obj
+
+
+def _raise_cron_delivery_failure(meta: Optional[dict], detail: str) -> None:
+    if isinstance(meta, dict) and meta.get("cron_delivery_key"):
+        raise RuntimeError(f"{_DELIVERY_UNAVAILABLE_MESSAGE}: {detail}")
 
 
 def _build_approval_result_text(
@@ -2379,27 +2385,44 @@ class ZhaohuChannel(BaseChannel):
         to_handle: str,
         text: str,
         meta: Optional[dict] = None,
-    ) -> None:
+    ) -> bool:
         """POST a Zhaohu push payload to the configured endpoint."""
+        if not self._validate_send_configuration(to_handle, meta):
+            return False
+        payload = await self._build_push_payload(to_handle, text, meta or {})
+        data = await self._post_push_payload(payload)
+        return self._handle_push_response(to_handle, data, meta)
+
+    def _validate_send_configuration(
+        self,
+        to_handle: str,
+        meta: Optional[dict],
+    ) -> bool:
         if not self.enabled:
-            return
+            logger.warning("zhaohu send skipped: channel disabled")
+            _raise_cron_delivery_failure(meta, "disabled")
+            return False
         if not self.push_url:
             logger.warning(
                 "zhaohu send skipped: push_url not configured for %s",
                 to_handle,
             )
-            return
+            _raise_cron_delivery_failure(meta, "push_url not configured")
+            return False
         if (
-            not self.sys_id
-            or not self.robot_open_id
-            or not to_handle
-            or to_handle.strip() == ""
+            self.sys_id
+            and self.robot_open_id
+            and to_handle
+            and to_handle.strip()
         ):
-            logger.warning(
-                "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
-            )
-            return
-        payload = await self._build_push_payload(to_handle, text, meta or {})
+            return True
+        logger.warning(
+            "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
+        )
+        _raise_cron_delivery_failure(meta, "identity not configured")
+        return False
+
+    async def _post_push_payload(self, payload: dict) -> dict:
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
         context = ssl.create_default_context()
@@ -2414,18 +2437,38 @@ class ZhaohuChannel(BaseChannel):
                 data = response.json() if response.content else {}
             except ValueError:
                 data = {}
+        return data
+
+    def _handle_push_response(
+        self,
+        to_handle: str,
+        data: dict,
+        meta: Optional[dict],
+    ) -> bool:
         body = data.get("body") or []
         exp_msg_ids = [
             str(item.get("expMsgId"))
             for item in body
             if isinstance(item, dict) and item.get("expMsgId")
         ]
+        return_code = str(data.get("returnCode") or "")
+        if return_code != "SUC0000":
+            detail = f"returnCode={return_code or '(empty)'}"
+            if isinstance(meta, dict) and meta.get("cron_delivery_key"):
+                raise RuntimeError(f"zhaohu delivery failed: {detail}")
+            logger.warning(
+                "zhaohu push failed: to=%s %s",
+                to_handle,
+                detail,
+            )
+            return False
         logger.info(
             "zhaohu push ok: to=%s returnCode=%s expMsgIds=%s",
             to_handle,
-            str(data.get("returnCode") or "(empty)"),
+            return_code,
             exp_msg_ids,
         )
+        return True
 
     async def _build_push_payload(
         self,
@@ -2522,7 +2565,9 @@ class ZhaohuChannel(BaseChannel):
             },
             "msgCtlInfo": {
                 "configId": meta.get("config_id") or "",
-                "batchId": meta.get("batch_id") or "",
+                "batchId": (
+                    meta.get("cron_delivery_key") or meta.get("batch_id") or ""
+                ),
             },
             "msgContent": {
                 "summary": notification_summary,

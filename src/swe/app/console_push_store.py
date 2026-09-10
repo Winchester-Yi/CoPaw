@@ -155,6 +155,7 @@ async def append(
     *,
     sticky: bool = False,
     tenant_id: Optional[str] = None,
+    delivery_key: str = "",
 ) -> None:
     """Append a message (bounded: oldest dropped if over _MAX_MESSAGES).
 
@@ -171,6 +172,13 @@ async def append(
         store_key = _resolve_store_key(tenant_id)
         msg_list = _get_tenant_store(store_key)
 
+        if delivery_key and any(
+            message.get("session_id") == session_id
+            and message.get("delivery_key") == delivery_key
+            for message in msg_list
+        ):
+            return
+
         msg_list.append(
             {
                 "id": str(uuid.uuid4()),
@@ -179,6 +187,7 @@ async def append(
                 "ts": time.time(),
                 "session_id": session_id,
                 "tenant_id": store_key,
+                "delivery_key": delivery_key,
             },
         )
 

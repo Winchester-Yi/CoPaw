@@ -83,7 +83,7 @@ describe("Sender skill mentions", () => {
     expect(input).toHaveTextContent("@br");
   });
 
-  it("keeps dictation immediately before send and hides the character counter", () => {
+  it("temporarily hides dictation and hides the character counter", () => {
     render(
       <Sender
         allowSpeech
@@ -98,16 +98,13 @@ describe("Sender skill mentions", () => {
     );
 
     const actionGroup = document.querySelector(".sender-actions-list");
-    const microphone = screen.getByRole("button", { name: "语音输入" });
     const send = screen.getByRole("button", { name: "发送消息" });
 
-    expect(actionGroup).toContainElement(microphone);
     expect(actionGroup).toContainElement(send);
     expect(actionGroup).not.toHaveTextContent("0/10000");
     expect(
-      microphone.compareDocumentPosition(send) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+      screen.queryByRole("button", { name: "语音输入" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses the shared accessible menu and shows its no-match state", () => {

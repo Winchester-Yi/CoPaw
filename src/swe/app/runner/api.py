@@ -279,6 +279,43 @@ async def _messages_from_memory_state(
     )
 
 
+async def _filter_archived_turn_messages(
+    workspace: Any,
+    chat_id: str,
+    messages: list[ChatMessage],
+) -> list[ChatMessage]:
+    """Do not re-add user anchors already present in the compaction archive."""
+    if not messages:
+        return messages
+    store = _archive_store(workspace)
+    if store is None:
+        return messages
+
+    candidate_ids = {
+        _message_original_id(message)
+        for message in messages
+        if _message_original_id(message)
+    }
+    archived_ids: set[str] = set()
+    cursor: str | None = None
+    while candidate_ids - archived_ids:
+        page = await store.read_page(chat_id, before=cursor, limit=50)
+        archived_ids.update(
+            message.id
+            for message in page.messages
+            if isinstance(message.id, str) and message.id in candidate_ids
+        )
+        if not page.has_more or not page.next_cursor:
+            break
+        cursor = page.next_cursor
+
+    return [
+        message
+        for message in messages
+        if _message_original_id(message) not in archived_ids
+    ]
+
+
 def _turn_state_to_message(
     turn_id: object,
     turn_state: object,
@@ -813,13 +850,19 @@ async def _build_chat_history(
         for message in messages
         if _message_original_id(message)
     }
+    turn_state_messages = _turn_state_messages_from_state(
+        state,
+        session_id=chat_spec.session_id,
+        chat_id=chat_spec.id,
+    )
+    turn_state_messages = await _filter_archived_turn_messages(
+        workspace,
+        chat_spec.id,
+        turn_state_messages,
+    )
     messages.extend(
         message
-        for message in _turn_state_messages_from_state(
-            state,
-            session_id=chat_spec.session_id,
-            chat_id=chat_spec.id,
-        )
+        for message in turn_state_messages
         if _message_original_id(message) not in known_ids
     )
     messages.sort(key=_message_sort_key)

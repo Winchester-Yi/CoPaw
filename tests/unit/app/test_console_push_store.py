@@ -29,6 +29,31 @@ store_spec.loader.exec_module(console_push_store)
 class TestTenantPushStoreIsolation:
     """Tests for tenant isolation in push store."""
 
+    def test_delivery_key_deduplicates_replayed_message(self):
+        append = console_push_store.append
+        clear_tenant = console_push_store.clear_tenant
+        take = console_push_store.take
+
+        async def scenario():
+            await clear_tenant("tenant-a")
+            await append(
+                "session-a",
+                "first delivery",
+                tenant_id="tenant-a",
+                delivery_key="cron:execution-1:output",
+            )
+            await append(
+                "session-a",
+                "replayed delivery",
+                tenant_id="tenant-a",
+                delivery_key="cron:execution-1:output",
+            )
+            return await take("session-a", tenant_id="tenant-a")
+
+        taken = asyncio.run(scenario())
+
+        assert [message["text"] for message in taken] == ["first delivery"]
+
     def test_messages_do_not_leak_across_sessions_within_same_tenant(self):
         append = console_push_store.append
         clear_tenant = console_push_store.clear_tenant

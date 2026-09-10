@@ -147,7 +147,7 @@ class CustomChannel(BaseChannel):
 
     async def send(self, to_handle: str, text: str, meta=None):
         # Implement: send text to the channel (e.g. HTTP API).
-        pass
+        return False
 '''
 
 

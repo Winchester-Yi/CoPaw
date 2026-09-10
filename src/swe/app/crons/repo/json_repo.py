@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 from .base import BaseJobRepository
 from ..models import CronJobSpec, JobsFile
+from ...runner.session_lock import AsyncSessionFileLock, get_session_lock_path
+
+_T = TypeVar("_T")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,55 @@ class JsonJobRepository(BaseJobRepository):
         """在线程池中序列化、写入临时文件并替换 jobs.json。"""
         signature = await asyncio.to_thread(self._save_sync, jobs_file)
         self._set_snapshot(signature, jobs_file)
+
+    async def mutate_jobs_file(
+        self,
+        mutator: Callable[[JobsFile], tuple[bool, _T]],
+    ) -> tuple[bool, _T]:
+        """Atomically reload, mutate, and save jobs across worker processes."""
+        lock_path = get_session_lock_path(str(self._path))
+        async with AsyncSessionFileLock(lock_path):
+            signature, jobs_file = await asyncio.to_thread(self._load_sync)
+            changed, result = mutator(jobs_file)
+            if changed:
+                signature = await self._save_locked(jobs_file)
+            self._set_snapshot(signature, jobs_file)
+            return changed, result
+
+    async def _save_locked(self, jobs_file: JobsFile) -> _FileSignature:
+        """Keep the file lock until a started background write has ended."""
+        save_task = asyncio.create_task(
+            asyncio.to_thread(self._save_sync, jobs_file),
+        )
+        try:
+            return await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            write_error = await self._wait_for_thread_write(save_task)
+            if write_error is not None:
+                logger.error(
+                    "cancelled cron jobs write failed: path=%s error=%r",
+                    self._path,
+                    write_error,
+                )
+            raise
+
+    @staticmethod
+    async def _wait_for_thread_write(
+        save_task: asyncio.Task[_FileSignature],
+    ) -> Exception | None:
+        """Wait through repeated cancellation until the thread stops writing."""
+        while not save_task.done():
+            try:
+                await asyncio.shield(save_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception as exc:  # pragma: no cover - result below
+                return exc
+        try:
+            save_task.result()
+        except Exception as exc:  # pragma: no cover - caller cancellation wins
+            return exc
+        return None
 
     async def get_job(self, job_id: str) -> Optional[CronJobSpec]:
         """优先复用未失效快照中的 job 索引。"""

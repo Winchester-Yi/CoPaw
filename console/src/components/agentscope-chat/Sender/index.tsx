@@ -13,9 +13,9 @@ import { ActionButtonContext } from "./components/ActionButton";
 import ClearButton from "./components/ClearButton";
 import LoadingButton from "./components/LoadingButton";
 import SendButton from "./components/SendButton";
-import DictationControl from "../DictationControl";
+// import DictationControl from "../DictationControl";
 import dictationStyles from "../DictationControl/index.module.less";
-import { appendChatInputText } from "../chatInputDraft";
+// import { appendChatInputText } from "../chatInputDraft";
 import Style from "./style";
 import ModeSelect from "./ModeSelect";
 import type {
@@ -308,7 +308,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     // @ts-ignore
     onPaste,
     // @ts-ignore
-    allowSpeech,
+    // allowSpeech,
     // @ts-ignore
     onPasteFile,
     // @ts-ignore
@@ -317,7 +317,8 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
   } = props;
 
   const [focus, setFocus] = useState(false);
-  const [speechRecording, setSpeechRecording] = useState(false);
+  // const [speechRecording, setSpeechRecording] = useState(false);
+  const speechRecording = false;
   const autoSize = React.useMemo(() => ({ maxRows: 5, minRows: 2 }), []);
 
   const { direction, getPrefixCls } = useProviderContext();
@@ -540,22 +541,23 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     );
   }, [props.prefix]);
 
-  const dictationControl = allowSpeech ? (
-    <DictationControl
-      disabled={!!disabled || !!readOnly || !!loading}
-      onActiveChange={setSpeechRecording}
-      onTranscript={(text) => {
-        const next = appendChatInputText(innerValue, text);
-        triggerValueChange(
-          props.maxLength ? next.slice(0, props.maxLength) : next,
-        );
-        (tokenEditorRef.current || inputRef.current)?.focus();
-      }}
-    />
-  ) : null;
+  // 临时屏蔽语音输入 UI，保留控件实现以便后续重新开放。
+  // const dictationControl = allowSpeech ? (
+  //   <DictationControl
+  //     disabled={!!disabled || !!readOnly || !!loading}
+  //     onActiveChange={setSpeechRecording}
+  //     onTranscript={(text) => {
+  //       const next = appendChatInputText(innerValue, text);
+  //       triggerValueChange(
+  //         props.maxLength ? next.slice(0, props.maxLength) : next,
+  //       );
+  //       (tokenEditorRef.current || inputRef.current)?.focus();
+  //     }}
+  //   />
+  // ) : null;
   const defaultActionNode = (
     <>
-      {dictationControl}
+      {/* {dictationControl} */}
       <Flex className={`${actionListCls}-presets`}>
         {loading ? (
           <LoadingButton loading={loading} disabled={!!disabled} />
@@ -578,7 +580,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
   } else if (actions) {
     actionNode = (
       <>
-        {dictationControl}
+        {/* {dictationControl} */}
         {actions}
       </>
     );

@@ -27,7 +27,7 @@ import {
 } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, useRef, type CSSProperties } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   monitorApi,
@@ -1039,6 +1039,7 @@ export default function CronJobOverviewPage() {
   const initialDateRange = getInitialDateRange(searchParams);
   const [overviewData, setOverviewData] =
     useState<CronJobOverviewPageData>(emptyOverviewData);
+  const [loading, setLoading] = useState<boolean>(false);
   const overviewRequestSeqRef = useRef(0);
   const taskRankingRequestSeqRef = useRef(0);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -2151,11 +2152,12 @@ export default function CronJobOverviewPage() {
         </button>
       </h2>
       <RankingTable
-        tableRef={branchTableRef}
         data={overviewData.branchRankingRows}
         loading={branchDimensionLoading}
         onRowClick={handleSelectBranch}
         selectedBranchId={selectedBranch?.bbk_id ?? null}
+        sortConfig={branchSort}
+        onSortChange={setBranchSort}
       />
 
       {/* 分行维度下钻 */}

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 from ..models import CronJobSpec, JobsFile
+
+_T = TypeVar("_T")
 
 
 class BaseJobRepository(ABC):
@@ -19,6 +21,17 @@ class BaseJobRepository(ABC):
     async def save(self, jobs_file: JobsFile) -> None:
         """Persist all jobs to storage (should be atomic if possible)."""
         raise NotImplementedError
+
+    async def mutate_jobs_file(
+        self,
+        mutator: Callable[[JobsFile], tuple[bool, _T]],
+    ) -> tuple[bool, _T]:
+        """Load, modify, and save jobs using the repository's consistency model."""
+        jobs_file = await self.load()
+        changed, result = mutator(jobs_file)
+        if changed:
+            await self.save(jobs_file)
+        return changed, result
 
     # ---- Optional but commonly needed convenience ops ----
 

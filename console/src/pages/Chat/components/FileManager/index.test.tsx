@@ -57,12 +57,14 @@ vi.mock("@/components/agentscope-chat/FilePreviewModal", () => {
   function MockFilePreviewModal(props: {
     fileName: string;
     nestedPreviewMode?: string;
+    enableAnnotations?: boolean;
   }) {
     const [nested, setNested] = useState(false);
     return (
       <div
         data-testid="session-file-preview"
         data-nested-preview-mode={props.nestedPreviewMode}
+        data-enable-annotations={String(Boolean(props.enableAnnotations))}
       >
         {nested ? "二级预览" : props.fileName}
         <button type="button" onClick={() => setNested(true)}>
@@ -214,7 +216,7 @@ describe("FileManager", () => {
   it("opens a registered session file in the same file workspace", async () => {
     render(
       <App>
-        <FileManager />
+        <FileManager enableSessionAnnotations />
       </App>,
     );
 
@@ -241,6 +243,10 @@ describe("FileManager", () => {
     expect(screen.getByTestId("session-file-preview")).toHaveAttribute(
       "data-nested-preview-mode",
       "replace",
+    );
+    expect(screen.getByTestId("session-file-preview")).toHaveAttribute(
+      "data-enable-annotations",
+      "true",
     );
     fireEvent.click(screen.getByRole("button", { name: "模拟打开详情" }));
     expect(screen.getByTestId("session-file-preview")).toHaveTextContent(
@@ -274,6 +280,29 @@ describe("FileManager", () => {
       screen.getByRole("button", { name: "收起会话文件列表" }),
     );
     expect(screen.queryByLabelText("当前会话文件")).not.toBeInTheDocument();
+  });
+
+  it("keeps session previews annotation-free unless the chat explicitly enables them", async () => {
+    render(
+      <App>
+        <FileManager />
+      </App>,
+    );
+
+    window.dispatchEvent(
+      new CustomEvent("copaw:chat-workspace-file", {
+        detail: {
+          action: "open",
+          fileName: "定时任务报告.html",
+          fileUrl: "/files/scheduled-report.html",
+        },
+      }),
+    );
+
+    expect(await screen.findByTestId("session-file-preview")).toHaveAttribute(
+      "data-enable-annotations",
+      "false",
+    );
   });
 
   it("permanently deletes a directory after confirmation without opening it", async () => {

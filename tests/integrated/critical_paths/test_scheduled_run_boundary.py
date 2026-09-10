@@ -13,6 +13,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 
 from swe.app.crons.executor import CronExecutor
+from swe.app.runner.query_contracts import QueryPersistenceResult
 from swe.config.context import (
     get_current_effective_tenant_id,
     get_current_source_id,
@@ -31,6 +32,7 @@ class RecordingRunner:
         self.text = text
         self.requests: list[dict] = []
         self.context: dict[str, object] = {}
+        self.session = _RecordingSession()
 
     async def stream_query(self, req):
         self.requests.append(dict(req))
@@ -45,6 +47,27 @@ class RecordingRunner:
             status=RunStatus.Completed,
             content=[TextContent(type=ContentType.TEXT, text=self.text)],
         )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-critical",
+            user_id="user-critical",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    async def mutate_session_state(self, *, mutator, **_kwargs):
+        self.state = mutator(self.state)
 
 
 @pytest.mark.asyncio
@@ -58,13 +81,18 @@ async def test_text_scheduled_run_delivers_without_mcp_availability(
     )
     job = build_text_job(workspace_dir=tmp_path, text="heartbeat ok")
 
-    result = await executor.execute(job)
+    result = await executor.execute(
+        job,
+        dispatch_meta={
+            "scheduled_fire_at": "2026-09-08T02:30:00Z",
+        },
+    )
 
     assert result.output_preview == "heartbeat ok"
-    assert recording_channel_manager.texts[0]["text"] == "heartbeat ok"
-    assert recording_channel_manager.texts[0]["meta"]["source_id"] == (
-        "source-critical"
-    )
+    assert recording_channel_manager.texts == []
+    assert executor._runner.session.state["task_messages"][0]["content"] == [
+        {"type": "text", "text": "heartbeat ok"},
+    ]
     assert get_current_workspace_dir() is None
     assert get_current_source_id() is None
 
@@ -81,7 +109,12 @@ async def test_agent_scheduled_run_builds_cron_request_and_sends_events(
     )
     job = build_agent_job(workspace_dir=tmp_path)
 
-    result = await executor.execute(job)
+    result = await executor.execute(
+        job,
+        dispatch_meta={
+            "scheduled_fire_at": "2026-09-08T02:30:00Z",
+        },
+    )
 
     assert runner.context["workspace_dir"] == tmp_path
     assert runner.context["source_id"] == "source-critical"

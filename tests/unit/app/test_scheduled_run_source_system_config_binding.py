@@ -173,7 +173,7 @@ async def test_execute_once_binds_source_config_across_job_boundary(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         current = get_current_source_system_config()
         observed["success"] = None if current is None else current.source_id
 
@@ -223,7 +223,7 @@ async def test_execute_once_passes_dispatch_meta_to_executor(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         return None
 
     async def fake_finalize(**_kwargs):
@@ -278,7 +278,7 @@ async def test_execute_once_falls_back_to_scope_source(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         return None
 
     async def fake_finalize(**_kwargs):
@@ -325,7 +325,7 @@ async def test_execute_once_keeps_legacy_source_less_run_unbound(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         return None
 
     async def fake_finalize(**_kwargs):
@@ -372,7 +372,7 @@ async def test_execute_once_clears_inherited_request_source_when_unbound(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         current = get_current_source_system_config()
         observed["success"] = None if current is None else current.source_id
 
@@ -424,7 +424,7 @@ async def test_execute_once_keeps_sourced_run_unbound_when_service_missing(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         return None
 
     async def fake_finalize(**_kwargs):
@@ -471,7 +471,7 @@ async def test_run_job_manual_clears_request_source_for_legacy_unbound_job(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         current = get_current_source_system_config()
         observed["success"] = None if current is None else current.source_id
 
@@ -545,7 +545,7 @@ async def test_run_job_uses_callback_source_for_legacy_unbound_job(
             execution_meta=None,
         )
 
-    async def fake_success(_job):
+    async def fake_success(_job, _execution_key=""):
         current = get_current_source_system_config()
         observed["success"] = None if current is None else current.source_id
 
@@ -576,6 +576,7 @@ async def test_run_job_uses_callback_source_for_legacy_unbound_job(
         job.id,
         is_manual=False,
         source_id="callback-source",
+        dispatch_meta={"external_execution_id": "execution-1"},
     )
 
     assert len(created_tasks) == 1

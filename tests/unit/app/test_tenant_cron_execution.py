@@ -106,7 +106,18 @@ def _get_current_llm_workload():
     return llm_workload_module.get_current_llm_workload()
 
 
+class _Session:
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    async def mutate_session_state(self, *, mutator, **_kwargs) -> None:
+        self.state = mutator(self.state)
+
+
 class _Runner:
+    def __init__(self) -> None:
+        self.session = _Session()
+
     async def stream_query(self, _req):
         for _item in ():
             yield _item
@@ -135,6 +146,10 @@ def _build_text_job(workspace_dir: str) -> object:
             meta={"workspace_dir": workspace_dir},
         ),
         runtime=JobRuntimeSpec(timeout_seconds=1),
+        meta={
+            "creator_user_id": "user-a",
+            "task_session_id": "task-session-a",
+        },
     )
 
 
@@ -217,6 +232,7 @@ async def test_prepare_agent_execution_uses_b3_dispatch_meta(monkeypatch):
                     "X-B3-Spanid": "32befd146889a61a",
                 },
                 "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+                "scheduled_fire_at": "2026-09-08T06:00:00Z",
             },
         )
     )
@@ -394,7 +410,10 @@ def test_malformed_dispatch_identity_is_not_a_batch(dispatch_meta) -> None:
             True,
         ),
         (
-            {"b3_trace_id": "8267fd70bacf497704fec30eaa353979"},
+            {
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+                "external_execution_id": "trace-1",
+            },
             False,
         ),
     ],
@@ -445,14 +464,13 @@ async def test_execute_text_job_resolves_trace_identifiers(
     start_kwargs = trace_manager.start_trace.await_args.kwargs
     if is_batch:
         assert start_kwargs["trace_id"] != dispatch_meta["b3_trace_id"]
-        assert str(uuid.UUID(start_kwargs["trace_id"])) == start_kwargs[
-            "trace_id"
-        ]
+        assert (
+            str(uuid.UUID(start_kwargs["trace_id"]))
+            == start_kwargs["trace_id"]
+        )
     else:
         assert start_kwargs["trace_id"] == dispatch_meta["b3_trace_id"]
-    assert start_kwargs["b3_trace_id"] == (
-        "8267fd70bacf497704fec30eaa353979"
-    )
+    assert start_kwargs["b3_trace_id"] == ("8267fd70bacf497704fec30eaa353979")
     assert result["trace_id"] == start_kwargs["trace_id"]
 
 
@@ -504,6 +522,90 @@ async def test_execute_text_job_keeps_batch_id_when_precreate_fails(
     assert str(uuid.UUID(result["trace_id"])) == result["trace_id"]
     assert start_kwargs["b3_trace_id"] == b3_trace_id
     trace_manager.end_trace.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_text_job_preserves_execution_key_in_snapshot() -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+
+    result = await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {"cron_execution_key": "execution-123"},
+    )
+
+    assert result["input_snapshot"] == {
+        "text": "hello",
+        "cron_execution_key": "execution-123",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_text_job_passes_stable_delivery_key_to_channel() -> (
+    None
+):
+    class _RecordingChannelManager(_ChannelManager):
+        def __init__(self) -> None:
+            self.texts: list[dict[str, object]] = []
+
+        async def send_text(self, **kwargs) -> bool:
+            self.texts.append(kwargs)
+            return True
+
+    channel_manager = _RecordingChannelManager()
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=channel_manager,
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "dispatch": DispatchSpec(
+                channel="zhaohu",
+                target=DispatchTarget(
+                    user_id="user-a",
+                    session_id="session-a",
+                ),
+            ),
+        },
+    )
+
+    await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {"scheduled_fire_at": "2026-09-08T02:30:00Z"},
+    )
+
+    meta = channel_manager.texts[0]["meta"]
+    assert isinstance(meta, dict)
+    assert meta["cron_delivery_key"] == (
+        "cron:job-text:2026-09-08T02:30:00Z:session-a:output"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_text_job_builds_key_from_scheduled_fire_time() -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+
+    result = await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {"scheduled_fire_at": "2026-09-08T02:30:00Z"},
+    )
+
+    assert result["input_snapshot"]["cron_execution_key"] == (
+        "job-text:2026-09-08T02:30:00Z:session-a"
+    )
 
 
 class _Provider:
@@ -678,6 +780,27 @@ def test_build_agent_request_skips_scope_for_default_source_template():
     assert "scope_id" not in req
 
 
+def test_build_agent_request_skips_scope_for_empty_default_source_id():
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job(
+        "/tmp/default/workspaces/default",
+    ).model_copy(
+        update={
+            "tenant_id": "default",
+            "source_id": "",
+            "scope_id": None,
+        },
+    )
+
+    req = executor._build_agent_request(job, "default", "session-a")
+
+    assert "source_id" not in req
+    assert "scope_id" not in req
+
+
 def test_build_agent_request_removes_stale_trace_id():
     executor = CronExecutor(
         runner=_Runner(),
@@ -832,7 +955,10 @@ def test_execute_aborts_agent_job_when_user_info_expired(monkeypatch):
                 job,
                 "user-a",
                 "session-a",
-                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+                {
+                    "workspace_dir": "/tmp/tenant-a/workspaces/beta",
+                    "cron_is_manual": True,
+                },
             ),
         )
 
@@ -876,7 +1002,10 @@ def test_execute_allows_agent_job_when_user_info_missing(monkeypatch):
                 job,
                 "user-a",
                 "session-a",
-                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+                {
+                    "workspace_dir": "/tmp/tenant-a/workspaces/beta",
+                    "cron_is_manual": True,
+                },
             ),
         )
 
@@ -925,7 +1054,10 @@ def test_execute_injects_auth_token_and_cookie_into_agent_request(monkeypatch):
                 job,
                 "user-a",
                 "session-a",
-                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+                {
+                    "workspace_dir": "/tmp/tenant-a/workspaces/beta",
+                    "cron_is_manual": True,
+                },
             ),
         )
 

@@ -143,6 +143,88 @@ def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
     )
 
 
+def test_internal_cron_callback_forwards_scheduler_execution_identity() -> (
+    None
+):
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=SimpleNamespace(task_type="agent")),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+    job_param = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "tenant_id": "runtime-scope",
+                "agent_id": "default",
+                "task_type": "job",
+                "job_id": "job-1",
+            },
+        ).encode(),
+    ).decode()
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "jobParam": job_param,
+            "logId": "scheduler-log-1",
+            "triggerTime": "2026-09-08T02:30:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once_with(
+        "job-1",
+        is_manual=False,
+        source_id=None,
+        dispatch_meta={
+            "scheduled_fire_at": "2026-09-08T02:30:00Z",
+            "external_execution_id": "scheduler-log-1",
+        },
+    )
+
+
+def test_internal_cron_callback_generates_identity_for_legacy_scheduler() -> (
+    None
+):
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=SimpleNamespace(task_type="agent")),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "80074361",
+            "source_id": "RMASSIST",
+            "scopeId": "80074361-RMASSIST",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "8819af9e-0bdf-4545-aa6c-7c3045a14ac2",
+            "fromId": "80074361",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once()
+    _, kwargs = cron_manager.run_job.await_args
+    assert kwargs["is_manual"] is False
+    assert kwargs["source_id"] == "RMASSIST"
+    assert kwargs["dispatch_meta"]["cron_execution_key"].startswith(
+        "legacy:",
+    )
+
+
 def test_internal_cron_callback_forwards_b3_headers_to_run_job() -> None:
     cron_manager = SimpleNamespace(run_job=AsyncMock())
     manager = SimpleNamespace(
@@ -431,6 +513,7 @@ def test_dispatch_service_callback_runs_batch_managed_child(
             "dispatch_intent_id": 7,
             "dispatch_batch_id": "batch-1",
             "dispatch_attempt": 2,
+            "execution_key": "child-1:batch-1:1",
         },
     )
 
@@ -454,6 +537,7 @@ def test_dispatch_service_callback_runs_batch_managed_child(
             "parent_scheduled_fire_at": "",
             "provider_id": "default",
             "model_id": "default",
+            "cron_execution_key": "child-1:batch-1:1",
         },
     )
 

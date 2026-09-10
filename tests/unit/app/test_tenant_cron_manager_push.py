@@ -151,3 +151,47 @@ def test_task_done_cb_pushes_error_to_tenant_scoped_store():
 
     assert push_calls[0]["tenant_id"] == "tenant-a"
     assert push_calls[0]["session_id"] == "session-a"
+
+
+def test_task_done_cb_skips_error_already_sent_by_executor():
+    push_calls.clear()
+    manager = CronManager(
+        repo=object(),
+        runner=object(),
+        channel_manager=object(),
+    )
+    job = CronJobSpec(
+        id="job-1",
+        name="tenant cron",
+        tenant_id="tenant-a",
+        schedule=ScheduleSpec(cron="* * * * *"),
+        task_type="agent",
+        request=CronJobRequest(
+            input=[{"content": [{"type": "text", "text": "ping"}]}],
+        ),
+        dispatch=DispatchSpec(
+            channel="console",
+            target=DispatchTarget(user_id="user-a", session_id="session-a"),
+            meta={},
+        ),
+        runtime=JobRuntimeSpec(),
+    )
+
+    class _Task:
+        def cancelled(self):
+            return False
+
+        def exception(self):
+            exc = RuntimeError("already sent")
+            exc.cron_execution_meta = {
+                "terminal_notification_sent": True,
+            }
+            return exc
+
+        def get_name(self):
+            return "cron-run-job-1"
+
+    manager._task_done_cb(_Task(), job)
+    asyncio.run(asyncio.sleep(0))
+
+    assert push_calls == []

@@ -1378,7 +1378,7 @@ class BaseChannel(ABC):
         to_handle: str,
         message: Any,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send all content of a Message
         (text, image, video, audio, file, refusal).
@@ -1386,25 +1386,49 @@ class BaseChannel(ABC):
         multi-part sending.
         """
         parts = self._message_to_content_parts(message)
-        if not parts:
+        if not parts or not self._has_sendable_content(parts):
             logger.debug(
                 f"channel send_message_content: no parts for to_handle="
                 f"{to_handle}, skip send",
             )
-            return
+            return False
         logger.debug(
             f"channel send_message_content: to_handle={to_handle} "
             f"parts_count={len(parts)} "
             f"part_types={[getattr(p, 'type', None) for p in parts]}",
         )
-        await self.send_content_parts(to_handle, parts, meta)
+        return await self.send_content_parts(to_handle, parts, meta) is True
+
+    @staticmethod
+    def _has_sendable_content(parts: List[OutgoingContentPart]) -> bool:
+        """Return whether rendered parts have text or supported media."""
+        return any(
+            BaseChannel._is_sendable_content_part(part) for part in parts
+        )
+
+    @staticmethod
+    def _is_sendable_content_part(part: OutgoingContentPart) -> bool:
+        content_type = getattr(part, "type", None)
+        if content_type in (ContentType.TEXT, ContentType.REFUSAL):
+            field = "text" if content_type == ContentType.TEXT else "refusal"
+            return bool(str(getattr(part, field, "") or "").strip())
+        media_fields = {
+            ContentType.IMAGE: ("image_url",),
+            ContentType.VIDEO: ("video_url",),
+            ContentType.FILE: ("file_url", "file_id"),
+            ContentType.AUDIO: ("data",),
+        }
+        return any(
+            getattr(part, field, None)
+            for field in media_fields.get(content_type, ())
+        )
 
     async def send_content_parts(
         self,
         to_handle: str,
         parts: List[OutgoingContentPart],
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send a list of content parts.
         Default: merge text/refusal into one text, append media URLs as
@@ -1442,15 +1466,17 @@ class BaseChannel(ABC):
                 body += f"\n[File: {m.file_url or m.file_id}]"
             elif t == ContentType.AUDIO and getattr(m, "data", None):
                 body += "\n[Audio]"
+        delivered = False
         if body.strip():
             logger.debug(
                 f"channel send_content_parts: to_handle={to_handle} "
                 f"body_len={len(body)} preview="
                 f"{body[:120] + '...' if len(body) > 120 else body}",
             )
-            await self.send(to_handle, body.strip(), meta)
+            delivered = await self.send(to_handle, body.strip(), meta) is True
         for m in media_parts:
             await self.send_media(to_handle, m, meta)
+        return delivered
 
     async def send_media(
         self,
@@ -1526,9 +1552,12 @@ class BaseChannel(ABC):
         to_handle: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Subclass implements: send one text
         (and optional attachments) to to_handle.
+
+        Return True only after the destination has explicitly confirmed the
+        send. A missing return value is not a delivery acknowledgement.
         """
         raise NotImplementedError
 
@@ -1548,7 +1577,7 @@ class BaseChannel(ABC):
         session_id: str,
         event: "Event",
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Send a runner Event to this channel (non-stream).
 
         We only send when event is a completed message, then reuse
@@ -1560,10 +1589,10 @@ class BaseChannel(ABC):
         status = getattr(event, "status", None)
 
         if obj != "message" or status != RunStatus.Completed:
-            return
+            return False
 
         to_handle = self.to_handle_from_target(
             user_id=user_id,
             session_id=session_id,
         )
-        await self.send_message_content(to_handle, event, meta)
+        return await self.send_message_content(to_handle, event, meta)

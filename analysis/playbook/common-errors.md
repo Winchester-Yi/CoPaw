@@ -2,6 +2,57 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## 定时任务显示成功但聊天窗口没有模型结果
+
+### 症状
+
+- 定时任务 Monitor 或任务列表显示 `success`，但关联聊天只有用户输入
+- 任务可能只收到 `response/completed`，没有可展示的 assistant 消息
+- 完成事件后任务被取消，或 session 提交发生超时/失败
+
+### 第一落点
+
+- [src/swe/app/crons/executor.py](../../src/swe/app/crons/executor.py)
+- [src/swe/app/runner/query_attempt.py](../../src/swe/app/runner/query_attempt.py)
+- [src/swe/app/crons/manager.py](../../src/swe/app/crons/manager.py)
+
+### 排查顺序
+
+1. 按 `job_id` 或 `trace_id` 查找唯一的 `cron final decision` 日志。普通
+   `success` 必须同时满足：`response_terminal_status=completed`、
+   `assistant_message_count>0`、`session_state_committed=true`。
+2. 检查 `final_error_code`：`empty_model_output` 表示 Runtime 完成但没有
+   assistant 内容；`session_state_commit_failed` 表示内容未可靠落盘；
+   `execution_key_conflict` 表示同一个执行 key 携带了不同输入。
+3. 比较日志中的 `task_session_id`、`request_session_id`、
+   `chat_session_id` 和 `creator_user_id`。任何不一致都应同时检查
+   `cron_session_route_mismatch_total`，任务会创建新 chat 而不会复用错误路由。
+4. 以日志中的 `task_session_id` 与 `creator_user_id` 定位 session JSON，确认
+   本次 assistant 消息和 `task_runs` 记录存在。示例命令：
+
+   ```bash
+   jq '.agent.memory.content, .task_runs' \
+     "$SWE_WORKING_DIR/sessions/<user_id>/<session_id>.json"
+   ```
+
+   实际路径由 `SafeJSONSession._get_save_path()` 决定；生产环境应先在容器内
+   执行该函数或查看同一请求的 session 保存日志，不能假定文件名编码规则。
+
+5. 查看以下计数器：
+   `cron_empty_model_output_total`、`cron_success_without_assistant_total`、
+   `cron_session_commit_failure_total`、`cron_cancel_after_completed_total`、
+   `cron_session_route_mismatch_total`、`cron_execution_key_conflict_total`。
+   `cron_success_without_assistant_total` 必须保持为零。
+
+### 历史数据与上线
+
+- 切换前备份任务定义、执行记录和受影响 session JSON；不得修改或伪造历史
+  assistant 内容。
+- 扫描历史 `success` 记录时，若关联 session 没有 assistant 消息，应标记为
+  `historical_incomplete`，不要继续视为普通成功。
+- 部署后立即覆盖成功、空输出、最终失败、取消、路由不一致和重复 execution
+  key 六类端到端场景，确认任务状态、Monitor 和聊天历史一致。
+
 ## 后端启动报 ModuleNotFoundError: No module named 'trace_sdk'
 
 ### 症状

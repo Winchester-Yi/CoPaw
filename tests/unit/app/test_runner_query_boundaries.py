@@ -60,6 +60,41 @@ def _blocked_msg(text: str) -> Msg:
     return Msg(name="Friday", role="assistant", content=text)
 
 
+def test_scheduled_agent_context_keeps_cron_persistence_key(monkeypatch):
+    """The exact receipt key must reach the Cron session-state writer."""
+    captured: dict[str, Any] = {}
+
+    class _Agent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs["request_context"])
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", _Agent)
+    runner = AgentRunner(agent_id="agent-1")
+    request = _request(
+        execution_origin="scheduled",
+        cron_execution_key="job-1:fire-1",
+        cron_persistence_key="receipt-1",
+        cron_job_id="job-1",
+    )
+
+    runner._create_agent_for_query(  # pylint: disable=protected-access
+        agent_config=_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=request,
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=None,
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+    )
+
+    assert captured["cron_persistence_key"] == "receipt-1"
+
+
 def test_final_snapshot_validation_removes_invalid_skill_hooks() -> None:
     source = LoadedSkillHookSource(
         source_id="skill:stale",

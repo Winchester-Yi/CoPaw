@@ -12,6 +12,10 @@ from swe.agents.skills_manager import (
     _require_workspace_layout_v2,
 )
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.app.channels.base import BaseChannel
+from swe.app.channels.zhaohu.channel import ZhaohuChannel
+from swe.app.crons.executor import CronExecutor
+from swe.app.crons.manager import CronManager
 from swe.app.runner.runner import AgentRunner, _extract_assistant_response
 
 
@@ -40,6 +44,14 @@ def test_targeted_agent_paths_stay_within_complexity_budget() -> None:
         ToolGuardMixin._selected_expert_follow_up,
         _extract_assistant_response,
         AgentRunner.query_handler,
+        BaseChannel._has_sendable_content,
+        ZhaohuChannel.send,
+        CronExecutor._build_agent_request,
+        CronExecutor._run_agent_stream,
+        CronExecutor._deliver_persisted_agent_output,
+        CronManager.run_job,
+        CronManager._record_task_execution_success,
+        CronManager._execute_once,
     )
 
     assert all(_cyclomatic_complexity(target) <= 15 for target in targets)
