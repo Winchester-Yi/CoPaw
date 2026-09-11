@@ -202,6 +202,12 @@ describe("CronJobsPage broadcast task refresh", () => {
     expect(await screen.findByText("批次内优先策略")).toBeInTheDocument();
     expect(screen.getByText("批调度运行状态")).toBeInTheDocument();
     expect(
+      screen
+        .getByText("批调度运行状态")
+        .compareDocumentPosition(screen.getByText("批次内优先策略")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(
       screen.queryByRole("button", { name: "Select tenant" }),
     ).not.toBeInTheDocument();
   }, 30_000);

@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
-import { Alert, Button, Select, Space } from "antd";
+import { useEffect, useId, useState } from "react";
+import { Alert, Button, Select } from "antd";
 import { ArrowUp, ArrowDown, X } from "lucide-react";
 import { BBK_ID_MAP } from "../../../../constants/bbk";
 import {
   batchOperations,
   type BatchPriority,
 } from "../../../../api/modules/batchOperations";
+import styles from "./BatchPriorityEditor.module.less";
 
 function readBatchPriority(value: unknown): BatchPriority {
   const raw =
@@ -33,6 +34,7 @@ export default function BatchPriorityEditor({
   onSaved?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const fieldId = useId();
   const [priority, setPriority] = useState(() => readBatchPriority(initial));
   const [savedPriority, setSavedPriority] = useState(() =>
     JSON.stringify(readBatchPriority(initial)),
@@ -78,72 +80,111 @@ export default function BatchPriorityEditor({
     }
   };
   return (
-    <Space direction="vertical" style={{ width: "100%" }}>
-      <strong>批次内优先策略</strong>
-      <span>用户优先于一级分行，同级沿用现有排序。名单不增加接收人。</span>
-      {(["user_ids", "branch_ids"] as const).map((field) => {
-        const label = field === "user_ids" ? "优先用户" : "优先一级分行";
-        return (
-          <Space key={field} direction="vertical" style={{ width: "100%" }}>
-            <label>{label}（从上到下优先）</label>
-            <Select
-              aria-label={label}
-              style={{ width: "100%" }}
-              mode={field === "user_ids" ? "tags" : "multiple"}
-              placeholder={
-                field === "user_ids"
-                  ? "输入用户 ID，按回车添加"
-                  : "选择一级分行"
-              }
-              options={field === "branch_ids" ? BBK_ID_MAP : undefined}
-              value={priority[field]}
-              onChange={(values) => change(field, values)}
-              disabled={busy}
-            />
-            {priority[field].map((id, index) => (
-              <Space key={id} wrap>
-                <span>
-                  {index + 1}.{" "}
-                  {field === "branch_ids"
-                    ? BBK_ID_MAP.find((b) => b.value === id)?.label || id
-                    : id}
-                </span>
-                <Button
-                  size="small"
-                  aria-label={`${label} ${id} 上移`}
-                  icon={<ArrowUp size={14} />}
-                  disabled={busy || index === 0}
-                  onClick={() => move(field, index, -1)}
-                />
-                <Button
-                  size="small"
-                  aria-label={`${label} ${id} 下移`}
-                  icon={<ArrowDown size={14} />}
-                  disabled={busy || index === priority[field].length - 1}
-                  onClick={() => move(field, index, 1)}
-                />
-                <Button
-                  size="small"
-                  aria-label={`${label} ${id} 移除`}
-                  icon={<X size={14} />}
-                  disabled={busy}
-                  onClick={() =>
-                    change(
-                      field,
-                      priority[field].filter((v) => v !== id),
-                    )
-                  }
-                />
-              </Space>
-            ))}
-          </Space>
-        );
-      })}
-      <Button onClick={save} loading={saving} disabled={busy}>
-        保存优先策略
-      </Button>
-      {dirty && <span>优先名单有未保存改动，请先保存优先策略。</span>}
+    <section className={styles.editor} aria-label="批次内优先策略">
+      <header className={styles.heading}>
+        <h3 className={styles.title}>批次内优先策略</h3>
+        <p className={styles.hint}>
+          用户优先级 &gt; 一级分行优先级 &gt; 默认排序
+        </p>
+        <p className={styles.hint}>
+          仅调整已有接收人的执行顺序，不增加接收人。
+        </p>
+      </header>
+      <div className={styles.fields}>
+        {(["user_ids", "branch_ids"] as const).map((field) => {
+          const label = field === "user_ids" ? "优先用户" : "优先一级分行";
+          return (
+            <div key={field} className={styles.field}>
+              <div className={styles.fieldHeading}>
+                <label htmlFor={`${fieldId}-${field}`}>{label}</label>
+                <span className={styles.hint}>从上到下优先</span>
+              </div>
+              <Select
+                id={`${fieldId}-${field}`}
+                aria-label={label}
+                className={styles.select}
+                mode={field === "user_ids" ? "tags" : "multiple"}
+                placeholder={
+                  field === "user_ids"
+                    ? "输入用户 ID，按回车添加"
+                    : "选择一级分行"
+                }
+                options={field === "branch_ids" ? BBK_ID_MAP : undefined}
+                maxTagCount={0}
+                maxTagPlaceholder={() => `已选 ${priority[field].length} 项`}
+                value={priority[field]}
+                onChange={(values) => change(field, values)}
+                disabled={busy}
+              />
+              {priority[field].length ? (
+                <ol
+                  className={styles.list}
+                  aria-label={`${label}排序`}
+                  tabIndex={0}
+                >
+                  {priority[field].map((id, index) => (
+                    <li key={id} className={styles.row}>
+                      <span className={styles.rank} aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <span className={styles.name}>
+                        {field === "branch_ids"
+                          ? BBK_ID_MAP.find((b) => b.value === id)?.label || id
+                          : id}
+                      </span>
+                      <div className={styles.rowActions}>
+                        <Button
+                          type="text"
+                          size="small"
+                          aria-label={`${label} ${id} 上移`}
+                          icon={<ArrowUp size={14} />}
+                          disabled={busy || index === 0}
+                          onClick={() => move(field, index, -1)}
+                        />
+                        <Button
+                          type="text"
+                          size="small"
+                          aria-label={`${label} ${id} 下移`}
+                          icon={<ArrowDown size={14} />}
+                          disabled={
+                            busy || index === priority[field].length - 1
+                          }
+                          onClick={() => move(field, index, 1)}
+                        />
+                        <Button
+                          type="text"
+                          size="small"
+                          aria-label={`${label} ${id} 移除`}
+                          icon={<X size={14} />}
+                          disabled={busy}
+                          onClick={() =>
+                            change(
+                              field,
+                              priority[field].filter((v) => v !== id),
+                            )
+                          }
+                        />
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className={styles.empty}>暂未设置{label}</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
       {notice && <Alert type={notice.type} message={notice.text} showIcon />}
-    </Space>
+      <footer className={styles.footer}>
+        <div className={styles.hint} aria-live="polite">
+          <div>保存后对新批次生效</div>
+          {dirty && <div className={styles.dirty}>有未保存的更改</div>}
+        </div>
+        <Button type="primary" onClick={save} loading={saving} disabled={busy}>
+          保存优先策略
+        </Button>
+      </footer>
+    </section>
   );
 }

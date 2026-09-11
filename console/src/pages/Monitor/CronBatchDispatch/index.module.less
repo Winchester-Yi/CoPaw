@@ -476,6 +476,20 @@
   min-width: 0;
 }
 
+.intentOrder {
+  display: inline-block;
+  min-width: 20px;
+  border-bottom: 1px dotted var(--console-management-border-strong, #d0d7e2);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+
+  &:focus-visible {
+    outline: 2px solid var(--console-management-primary, #3769fc);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+}
+
 .stackCell strong,
 .stackCell span {
   display: block;
@@ -767,6 +781,43 @@
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+}
+
+.workerEventPagination:global(.ant-pagination) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--console-management-border, #e5e7eb);
+
+  > li {
+    margin-inline-end: 0;
+  }
+
+  :global(.ant-pagination-total-text) {
+    flex: 0 0 100%;
+    height: auto;
+    margin-bottom: 4px;
+    color: var(--console-management-text-secondary, #4b5563);
+    font-size: 12px;
+    line-height: 20px;
+  }
+
+  :global(.ant-pagination-options) {
+    display: block;
+    margin-inline-start: 12px;
+  }
+
+  :global(.ant-pagination-options-quick-jumper) {
+    white-space: nowrap;
+
+    input {
+      width: 64px;
+      margin-inline: 8px;
+    }
+  }
 }
 
 .workerEvent {

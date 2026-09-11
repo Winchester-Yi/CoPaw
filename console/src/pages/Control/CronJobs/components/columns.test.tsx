@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 import type { TFunction } from "i18next";
 import type { CronJobSpecOutput } from "@/api/types";
@@ -85,16 +85,25 @@ describe("CronJobs columns", () => {
         (column) => column.key === "action",
       );
       const node = action?.render?.(undefined, job, 0) as ReactElement<{
-        children: ReactElement<{ children?: string }>[];
+        children: ReactElement[];
       }>;
-      render(
-        node.props.children.find(
-          (child) => child.props.children === "批调度配置",
-        )!,
+      expect(node.props.children).toHaveLength(3);
+      const dropdown = node.props.children[2] as ReactElement<{
+        menu: {
+          items: {
+            key: string;
+            label: string;
+            disabled: boolean;
+            onClick: () => void;
+          }[];
+        };
+      }>;
+      const item = dropdown.props.menu.items.find(
+        (entry) => entry.key === "batch_configuration",
       );
-      const button = screen.getByRole("button", { name: "批调度配置" });
-      expect(button).toHaveProperty("disabled", disabled);
-      fireEvent.click(button);
+      expect(item?.label).toBe("批调度配置");
+      expect(item?.disabled).toBe(disabled);
+      item?.onClick();
       expect(handlers.onBatchConfigure).toHaveBeenCalledTimes(disabled ? 0 : 1);
     },
   );
@@ -248,6 +257,7 @@ describe("CronJobs columns", () => {
     expect(dropdown.props.menu.items.map((item) => item.key)).toEqual([
       "broadcast",
       "broadcast_children",
+      "batch_configuration",
       "edit",
       "delete",
     ]);

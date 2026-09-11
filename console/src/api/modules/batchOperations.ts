@@ -52,12 +52,7 @@ export const batchOperations = {
         failure_types: types.join(","),
       })}`,
     ),
-  retry: (
-    batchId: string,
-    candidates: FailureCandidate[],
-    resolved: boolean,
-    stopped: boolean,
-  ) =>
+  retry: (batchId: string, candidates: FailureCandidate[], stopped: boolean) =>
     request<{ queued: number; skipped: number; dispatch_paused?: boolean }>(
       `${path(batchId)}/retry`,
       {
@@ -67,7 +62,6 @@ export const batchOperations = {
             id,
             attempt_count,
           })),
-          confirm_resolved: resolved,
           confirm_stopped: stopped,
         }),
       },

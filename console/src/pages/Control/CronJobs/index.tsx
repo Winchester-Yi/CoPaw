@@ -454,7 +454,7 @@ function CronJobsPage() {
           dataSource={jobs}
           loading={loading}
           rowKey="id"
-          scroll={{ x: 3100 }}
+          scroll={{ x: 3010 }}
           pagination={{
             current: tablePage,
             pageSize: tablePageSize,
@@ -495,20 +495,27 @@ function CronJobsPage() {
           title="批调度配置"
           onCancel={() => setBatchConfigJobId(null)}
           footer={null}
-          width={640}
+          width={720}
+          centered
+          className={styles.batchConfigModal}
           maskClosable={false}
         >
-          <div style={{ display: "grid", gap: 12 }}>
-            <div>任务：{configuringJob.name}</div>
+          <div className={styles.batchConfigContent}>
+            <div className={styles.batchConfigTask}>
+              <span>任务</span>
+              <span className={styles.batchConfigTaskName}>
+                {configuringJob.name}
+              </span>
+            </div>
+            <BatchRunStateControl
+              key={`run-state-${configuringJob.id}`}
+              job={configuringJob}
+            />
             <BatchPriorityEditor
               key={configuringJob.id}
               jobId={configuringJob.id}
               initial={configuringJob.meta?.batch_dispatch_priority}
               onSaved={fetchJobs}
-            />
-            <BatchRunStateControl
-              key={`run-state-${configuringJob.id}`}
-              job={configuringJob}
             />
           </div>
         </Modal>

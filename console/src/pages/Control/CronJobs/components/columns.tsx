@@ -429,10 +429,12 @@ export const createColumns = (
     {
       title: handlers.t("cronJobs.action"),
       key: "action",
-      width: 330,
+      width: 240,
       fixed: "right",
       render: (_: unknown, record: CronJob) => {
         const broadcastChild = isBroadcastChildJob(record);
+        const batchConfigurationDisabled =
+          broadcastChild || !isBatchDispatchJob(record);
         const menuItems: MenuProps["items"] = [
           {
             key: "broadcast",
@@ -453,6 +455,16 @@ export const createColumns = (
             onClick: () => {
               if (!broadcastChild) {
                 handlers.onManageChildren(record);
+              }
+            },
+          },
+          {
+            key: "batch_configuration",
+            label: "批调度配置",
+            disabled: batchConfigurationDisabled,
+            onClick: () => {
+              if (!batchConfigurationDisabled) {
+                handlers.onBatchConfigure(record);
               }
             },
           },
@@ -492,14 +504,6 @@ export const createColumns = (
             <Dropdown menu={{ items: menuItems }} placement="bottomRight">
               <Button type="text" size="small" icon={<MoreOutlined />} />
             </Dropdown>
-            <Button
-              type="link"
-              size="small"
-              disabled={broadcastChild || !isBatchDispatchJob(record)}
-              onClick={() => handlers.onBatchConfigure(record)}
-            >
-              批调度配置
-            </Button>
           </div>
         );
       },

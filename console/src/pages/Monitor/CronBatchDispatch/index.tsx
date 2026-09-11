@@ -430,13 +430,13 @@ function CapacityEventHistory({
       {visibleItems.length > WORKER_EVENT_PAGE_SIZE && (
         <Pagination
           aria-label="跳转调整记录"
+          className={styles.workerEventPagination}
           current={currentPage}
           pageSize={WORKER_EVENT_PAGE_SIZE}
           total={visibleItems.length}
           showSizeChanger={false}
           showQuickJumper
           showTotal={(total, range) => `${range[0]}-${range[1]} / ${total} 条`}
-          size="small"
           onChange={(page) => setNavigation({ eventKey, page })}
         />
       )}
@@ -782,39 +782,6 @@ export default function CronBatchDispatchPage() {
   };
 
   const intentColumns: ColumnsType<CronDispatchIntentItem> = [
-    {
-      title: "批内顺位",
-      dataIndex: "dispatch_order",
-      width: 84,
-      render: (value: number) => value + 1,
-    },
-    {
-      title: "优先依据",
-      key: "priority",
-      width: 180,
-      render: (_, record) => {
-        const p = record.priority;
-        const label =
-          p?.basis === "user"
-            ? `用户优先 · 第${p.user_rank}位`
-            : p?.basis === "branch"
-            ? `分行优先 · ${getBbkDisplayName(p.branch_id)} · 第${
-                p.branch_rank
-              }位`
-            : "默认排序";
-        return (
-          <Tooltip
-            title={`用户顺位：${p?.user_rank ?? "未设置"}；分行顺位：${
-              p?.branch_rank ?? "未设置"
-            }；分行：${p?.branch_id || "未知"}；热度：${
-              record.viewer_heat_score
-            }`}
-          >
-            <Tag>{label}</Tag>
-          </Tooltip>
-        );
-      },
-    },
     { title: "Intent", dataIndex: "id", width: 76 },
     { title: "角色", dataIndex: "intent_role", width: 72 },
     {
@@ -829,6 +796,50 @@ export default function CronBatchDispatchPage() {
           </Tooltip>
         </div>
       ),
+    },
+    {
+      title: "批内顺位",
+      dataIndex: "dispatch_order",
+      width: 84,
+      render: (value: number, record) => {
+        const p = record.priority;
+        const label =
+          p?.basis === "user"
+            ? `用户优先 · 第${p.user_rank}位`
+            : p?.basis === "branch"
+            ? `分行优先 · ${getBbkDisplayName(p.branch_id)} · 第${
+                p.branch_rank
+              }位`
+            : "默认排序";
+        return (
+          <Tooltip
+            trigger={["hover", "focus"]}
+            placement="topLeft"
+            title={
+              <div>
+                <div>优先依据：{label}</div>
+                <div>用户顺位：{p?.user_rank ?? "未设置"}</div>
+                <div>分行顺位：{p?.branch_rank ?? "未设置"}</div>
+                <div>
+                  分行：
+                  {p?.branch_id
+                    ? `${getBbkDisplayName(p.branch_id)}（${p.branch_id}）`
+                    : "未知"}
+                </div>
+                <div>热度：{record.viewer_heat_score ?? "-"}</div>
+              </div>
+            }
+          >
+            <span
+              tabIndex={0}
+              className={styles.intentOrder}
+              aria-label={`批内顺位 ${value + 1}，查看优先详情`}
+            >
+              {value + 1}
+            </span>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "状态",

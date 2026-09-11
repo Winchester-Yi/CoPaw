@@ -63,7 +63,6 @@ FAILURE_RULES = (
 )
 FAILURE_LABELS = {key: label for key, label, _ in FAILURE_RULES}
 FAILURE_LABELS["other"] = "其他错误"
-RESOLUTION_TYPES = {"auth_expired", "configuration"}
 STOP_TYPES = {
     "outcome_unknown",
     "execution_timeout",
@@ -107,6 +106,7 @@ class RetryCandidate(BaseModel):
 class RetryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidates: list[RetryCandidate] = Field(min_length=1, max_length=200)
+    # Accepted for older clients; repair confirmation no longer gates retries.
     confirm_resolved: bool = False
     confirm_stopped: bool = False
 
@@ -220,8 +220,6 @@ async def _retry_candidate(cur, source, batch, actor, candidate, body, now):
         else rows[0][0]
     ) or ""
     category = classify_failure(error)
-    if category in RESOLUTION_TYPES and not body.confirm_resolved:
-        raise ValueError("请先修复鉴权或配置，并确认已修复")
     if category in STOP_TYPES and not body.confirm_stopped:
         raise ValueError("请核对旧执行，并确认旧执行已停止")
     await cur.execute(

@@ -68,6 +68,58 @@ it("pauses independently using the server version", async () => {
   expect(batchOperations.setRunState).toHaveBeenCalledWith("parent", true, 1);
 });
 
+it("can synchronize an already-paused external batch timer without resuming", async () => {
+  const paused = { ...running, paused: true, version: 2 };
+  vi.mocked(batchOperations.getRunState).mockResolvedValue(paused);
+  vi.mocked(batchOperations.setRunState).mockResolvedValue(paused);
+  render(<BatchRunStateControl job={parent} />);
+  const sync = await screen.findByRole("button", { name: "同步外部暂停" });
+  expect(
+    screen.getByRole("heading", { name: "批调度运行状态" }),
+  ).toBeInTheDocument();
+  expect(sync).toHaveClass("ant-btn-link");
+  expect(screen.getByRole("button", { name: "刷新状态" })).toHaveClass(
+    "ant-btn-link",
+  );
+  await waitFor(() => expect(sync).toBeEnabled());
+  fireEvent.click(sync);
+  fireEvent.click(sync);
+  await waitFor(() =>
+    expect(batchOperations.setRunState).toHaveBeenCalledTimes(1),
+  );
+  expect(batchOperations.setRunState).toHaveBeenCalledWith("parent", true, 2);
+  expect(screen.getByRole("switch")).not.toBeChecked();
+});
+
+it("refreshes an internal pause after external failure and retries only the pause", async () => {
+  const paused = { ...running, paused: true, version: 2 };
+  vi.mocked(batchOperations.getRunState)
+    .mockResolvedValueOnce(running)
+    .mockResolvedValue(paused);
+  vi.mocked(batchOperations.setRunState)
+    .mockRejectedValueOnce(
+      new Error("内部批调度已暂停，但外部批调度定时器暂停失败"),
+    )
+    .mockResolvedValue(paused);
+  render(<BatchRunStateControl job={parent} />);
+  await waitFor(() => expect(screen.getByRole("switch")).toBeEnabled());
+  fireEvent.click(screen.getByRole("switch"));
+  await screen.findByText("内部批调度已暂停，但外部批调度定时器暂停失败");
+  expect(screen.getByRole("switch")).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+  const sync = await screen.findByRole("button", { name: "同步外部暂停" });
+  await waitFor(() => expect(sync).toBeEnabled());
+  fireEvent.click(sync);
+  await waitFor(() =>
+    expect(batchOperations.setRunState).toHaveBeenLastCalledWith(
+      "parent",
+      true,
+      2,
+    ),
+  );
+  expect(screen.getByRole("switch")).not.toBeChecked();
+});
+
 it("does not pretend a failed save succeeded and requires refresh", async () => {
   vi.mocked(batchOperations.getRunState).mockResolvedValue(running);
   vi.mocked(batchOperations.setRunState).mockRejectedValue(

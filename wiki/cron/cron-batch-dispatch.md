@@ -6,7 +6,7 @@
 
 暂停停止新批次及新交接许可，保留待执行和重试队列；恢复继续原顺序与 Worker 限制，不补跑暂停期间漏过的时点。未交接的新领取退回且不消耗重试机会，已交接及运行任务自然收尾。关闭任务在派发前明确跳过，不重试、不计入 Worker 反馈；结果页分别显示成功、失败、跳过／取消。
 
-控制状态由 Scheduler 独立表持久化，不能只修改父任务 enabled 或 job meta。首次升级需要增量迁移；SWE 恢复操作同时定向修复旧物理批定时器。参见[升级与验收说明](../../docs/deploy/cron-dispatch-run-state-upgrade.md)。
+控制状态由 Scheduler 独立表持久化，不能只修改父任务 enabled 或 job meta。首次升级需要增量迁移；SWE 暂停先关闭内部派发，再暂停对应外部批定时器，恢复则先恢复该定时器、再开启内部派发，均不操作普通定时器。外部暂停失败时内部仍暂停，刷新后可点“同步外部暂停”重试；本次外部联动不新增数据库结构。参见[升级与验收说明](../../docs/deploy/cron-dispatch-run-state-upgrade.md)。
 
 本文说明广播任务切换到“批调度”后，外部调度平台、独立 Scheduler、SWE 和 Monitor 如何共同完成提前触发、按模型作用域排序派发、执行回执、补位和重试。
 
@@ -194,9 +194,9 @@ Worker 调整历史沿用页面选择的 source 和起止时间，前端自动�
 
 失败批次卡片展示成功/失败 intent 数量。详情“失败类型与重试”统计整个批次的当前失败类型，选择类型后预览最多 200 个对象；超过时可分次提交。每次人工操作重跑整个 intent 一次，attempt 持续递增，保留原失败原因、操作者和确认信息。失败重新入队后批次恢复等待/运行，完成后再结算最终结果。
 
-配置类错误需要确认已修复；超时、结果未知和未识别错误需要人工核对旧执行已停止后确认。该确认不是后端自动停止旧任务。鉴权过期仍不自动重试、不参与 worker 调整。已成功、正在执行、轮次已变化、任务已删除/停用的对象会跳过。
+鉴权或配置类错误选择类型后可直接手动重试，不再要求勾选已修复；实际执行仍会校验真实鉴权和配置。超时、结果未知和未识别错误仍需要人工核对旧执行已停止后确认。该确认不是后端自动停止旧任务。鉴权过期仍不自动重试、不参与 worker 调整。已成功、正在执行、轮次已变化、任务已删除/停用的对象会跳过。
 
-SWE 管理接口：`PUT /api/cron/jobs/{job_id}/batch-dispatch/priority`，请求为 `{"user_ids":["alice","bob"],"branch_ids":["121","110"]}`；`GET /api/cron/dispatch/batches/{batch_id}/failures?failure_types=auth_expired`；`POST /api/cron/dispatch/batches/{batch_id}/retry`，提交预览的 `candidates`（每项含 id、attempt_count）、`confirm_resolved`、`confirm_stopped`。
+SWE 管理接口：`PUT /api/cron/jobs/{job_id}/batch-dispatch/priority`，请求为 `{"user_ids":["alice","bob"],"branch_ids":["121","110"]}`；`GET /api/cron/dispatch/batches/{batch_id}/failures?failure_types=auth_expired`；`POST /api/cron/dispatch/batches/{batch_id}/retry`，提交预览的 `candidates`（每项含 id、attempt_count）及必要的 `confirm_stopped`。旧客户端的可选 `confirm_resolved` 字段继续兼容，但不作为重试前置条件。
 
 这些操作要求 manager/admin、有效 source 和用户身份，并通过 `SWE_SCHEDULER_API_URL` 访问 Scheduler。批调度管理接口及 Scheduler→SWE Cron 回调均不要求内部 token；相关入口必须限制为可信内网调用。其他服务使用的 `SWE_INTERNAL_TOKEN` 不要全局删除。优先级和人工重试无需新增数据库字段，独立暂停／恢复所需结构见升级说明。多实例上线需避免新旧 Scheduler 领取代码混跑；共享 MySQL 的行锁行为需在部署环境验证。
 

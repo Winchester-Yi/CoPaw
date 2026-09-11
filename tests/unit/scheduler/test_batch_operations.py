@@ -4,8 +4,18 @@ from tests.unit.scheduler.test_cron_execution_reconciliation import _SqliteDb
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "repair_error,category,label",
+    [
+        ("cron auth user_info is expired", "auth_expired", "鉴权过期"),
+        ("channel not found", "configuration", "配置或请求校验错误"),
+    ],
+)
 async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
     monkeypatch,
+    repair_error,
+    category,
+    label,
 ):
     from scheduler.app.services.cron import batch_operations as ops
 
@@ -66,32 +76,40 @@ async def test_manual_retry_keeps_attempt_and_only_adds_one_chance(
         "queued"
     ] == 0
     db.connection.execute(
-        "UPDATE swe_cron_dispatch_intents "
-        "SET error_message='cron auth user_info is expired'"
+        "UPDATE swe_cron_dispatch_intents " "SET error_message=?",
+        (repair_error,),
     )
     current = ops.RetryRequest(candidates=[{"id": 7, "attempt_count": 4}])
-    with pytest.raises(ValueError, match="确认已修复"):
-        await ops.retry_failed("source-a", "batch-1", "admin", current)
     assert db.intent()["status"] == "failed"
-    preview = await ops.failure_preview(
-        "source-a", "batch-1", ["auth_expired"]
-    )
+    preview = await ops.failure_preview("source-a", "batch-1", [category])
     assert preview["counts"] == [
-        {"failure_type": "auth_expired", "count": 1, "label": "鉴权过期"}
+        {"failure_type": category, "count": 1, "label": label}
     ]
     assert preview["items"][0]["attempt_count"] == 4
     with pytest.raises(LookupError):
         await ops.retry_failed("source-b", "batch-1", "admin", current)
-    current.confirm_resolved = True
+    assert current.confirm_resolved is False
     assert (await ops.retry_failed("source-a", "batch-1", "admin", current))[
         "queued"
     ] == 1
     assert db.intent()["max_attempts"] == 5
     db.connection.execute(
-        "UPDATE swe_cron_dispatch_intents SET status='failed', attempt_count=5"
+        "UPDATE swe_cron_dispatch_intents SET status='failed', "
+        "attempt_count=5, error_message='execution timeout'"
+    )
+    current.candidates[0].attempt_count = 5
+    with pytest.raises(ValueError, match="旧执行已停止"):
+        await ops.retry_failed("source-a", "batch-1", "admin", current)
+    current.confirm_stopped = True
+    assert (await ops.retry_failed("source-a", "batch-1", "admin", current))[
+        "queued"
+    ] == 1
+    assert db.intent()["max_attempts"] == 6
+    db.connection.execute(
+        "UPDATE swe_cron_dispatch_intents SET status='failed', attempt_count=6"
     )
     db.connection.execute("UPDATE swe_cron_jobs SET enabled=0")
-    current.candidates[0].attempt_count = 5
+    current.candidates[0].attempt_count = 6
     assert (await ops.retry_failed("source-a", "batch-1", "admin", current))[
         "queued"
     ] == 0

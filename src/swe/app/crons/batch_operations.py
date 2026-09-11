@@ -18,7 +18,7 @@ from .manager import CronManager
 from .models import CronJobSpec, JobsFile
 from .monitor_sync_client import get_scheduler_api_url
 from .batch_run_state_client import request_run_state
-from .scheduler_adapter import NoopSchedulerAdapter
+from .scheduler_adapter import NoopSchedulerAdapter, SchedulerAdapter
 
 router = APIRouter(prefix="/cron", tags=["cron"])
 
@@ -231,6 +231,9 @@ async def save_batch_run_state(
         result = await request_run_state(
             job, actor, method="PUT", body=body.model_dump()
         )
+        if body.paused:
+            # Gate existing queues before stopping future external callbacks.
+            await _pause_batch_wakeup(mgr, job)
         await store.finish_task(snapshot.task_id)
         return result
     except Exception as exc:
@@ -238,10 +241,12 @@ async def save_batch_run_state(
         raise
 
 
-async def _ensure_batch_wakeup(mgr: CronManager, job: CronJobSpec) -> None:
+def _batch_wakeup_target(
+    mgr: CronManager, job: CronJobSpec
+) -> tuple[SchedulerAdapter, str]:
     external_id = str(
         (job.meta or {}).get("batch_dispatch_external_job_id") or ""
-    )
+    ).strip()
     adapter = mgr._scheduler_adapter
     if (
         not external_id
@@ -249,10 +254,36 @@ async def _ensure_batch_wakeup(mgr: CronManager, job: CronJobSpec) -> None:
         or isinstance(adapter, NoopSchedulerAdapter)
     ):
         raise HTTPException(409, "批调度定时器未就绪，请重新保存批调度配置")
+    normal_id = str((job.meta or {}).get("external_job_id") or "").strip()
+    if external_id == normal_id:
+        raise HTTPException(409, "批调度与普通定时器 ID 冲突，请修复配置")
+    return adapter, external_id
+
+
+async def _ensure_batch_wakeup(mgr: CronManager, job: CronJobSpec) -> None:
+    adapter, external_id = _batch_wakeup_target(mgr, job)
     try:
-        # Repair old batch timers only. Never resume the parent's ordinary timer.
+        # Repair old batch timers only; leave the ordinary timer unchanged.
         await adapter.resume_job(external_id)
     except Exception as exc:
         raise HTTPException(
             502, "批调度定时器恢复失败，未更新整批运行状态，请重试"
+        ) from exc
+
+
+async def _pause_batch_wakeup(mgr: CronManager, job: CronJobSpec) -> None:
+    """Synchronize only after the durable internal pause has succeeded."""
+    try:
+        adapter, external_id = _batch_wakeup_target(mgr, job)
+    except HTTPException as exc:
+        raise HTTPException(
+            exc.status_code, f"内部批调度已暂停；{exc.detail}"
+        ) from exc
+    try:
+        await adapter.pause_job(external_id)
+    except Exception as exc:
+        raise HTTPException(
+            502,
+            "内部批调度已暂停，但外部批调度定时器暂停失败；"
+            "请刷新状态后重试同步外部暂停",
         ) from exc

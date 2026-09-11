@@ -10,7 +10,7 @@
 
 - 独立状态与旧任务归属：`scheduler/src/scheduler/app/services/cron/batch_run_state.py`。先排除普通任务和批子任务，只对批父任务初始化；状态存储在控制表，不跟随父任务后续 enabled 变化。
 - 入队和交接：`batch_admission.py` 原子建批；`dispatch_gate.py` 检查 control、token 和自身任务状态。暂停退回未交接领取，已关闭任务结算为 skipped，不作为模型失败样本。
-- API：SWE `/api/cron/jobs/{id}/batch-dispatch/run-state`，Scheduler 内部 `/api/scheduler/cron/dispatch/parents/{id}/run-state`。恢复时只修复该父任务的物理批定时器。Console 控件为 `BatchRunStateControl.tsx`。
+- API：SWE `/api/cron/jobs/{id}/batch-dispatch/run-state`，Scheduler 内部 `/api/scheduler/cron/dispatch/parents/{id}/run-state`。暂停先内部门控、再关闭 batch_dispatch_external_job_id；恢复先恢复该物理批定时器、再解除门控，均不操作普通定时器。外部暂停失败时内部仍暂停；Console `BatchRunStateControl.tsx` 刷新后可点“同步外部暂停”重复提交当前版本的暂停请求，刷新本身只读。
 - 迁移 CLI：`python -m scheduler.migrate_batch_run_state` 默认只读预览，显式 `--apply` 才写入。部署、回滚及真实 MySQL 并发验收见 `docs/deploy/cron-dispatch-run-state-upgrade.md`；不能新旧 Scheduler 混跑。
 
 ## Worker 调整记录截断 / 模型变化折线

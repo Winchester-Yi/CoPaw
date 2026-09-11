@@ -16,7 +16,6 @@ export default function FailurePanel({
   const [preview, setPreview] = useState<FailurePreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [resolved, setResolved] = useState(false);
   const [stopped, setStopped] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [notice, setNotice] = useState<{
@@ -35,7 +34,6 @@ export default function FailurePanel({
     let active = true;
     setLoading(true);
     setPreview(null);
-    setResolved(false);
     setStopped(false);
     batchOperations
       .failures(batchId, types)
@@ -56,9 +54,6 @@ export default function FailurePanel({
       active = false;
     };
   }, [batchId, types, refresh]);
-  const needsResolved = preview?.items.some((item) =>
-    ["auth_expired", "configuration"].includes(item.failure_type),
-  );
   const needsStopped = preview?.items.some((item) =>
     [
       "outcome_unknown",
@@ -72,7 +67,6 @@ export default function FailurePanel({
     submitting ||
     !types.length ||
     !preview?.items.length ||
-    (needsResolved && !resolved) ||
     (needsStopped && !stopped);
   const retry = async () => {
     if (blocked || !preview || submitLock.current) return;
@@ -83,7 +77,6 @@ export default function FailurePanel({
       const result = await batchOperations.retry(
         batchId,
         preview.items,
-        resolved,
         stopped,
       );
       if (!alive.current) return;
@@ -140,11 +133,6 @@ export default function FailurePanel({
             setNotice(null);
           }}
         />
-        <Alert
-          type="info"
-          showIcon
-          message="重试会重新执行整个任务，包括 Agent 和子任务。每次仅增加一次执行机会，按原优先顺序等待共享 Worker 名额。"
-        />
         {preview?.has_more && (
           <Alert
             type="warning"
@@ -170,15 +158,6 @@ export default function FailurePanel({
             ]}
           />
         </Spin>
-        {needsResolved && (
-          <Checkbox
-            disabled={submitting}
-            checked={resolved}
-            onChange={(e) => setResolved(e.target.checked)}
-          >
-            已刷新鉴权或修复配置
-          </Checkbox>
-        )}
         {needsStopped && (
           <Checkbox
             disabled={submitting}

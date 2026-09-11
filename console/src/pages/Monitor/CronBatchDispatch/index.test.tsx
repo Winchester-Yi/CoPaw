@@ -413,6 +413,67 @@ describe("CronBatchDispatchPage", () => {
     expect(screen.getByText("success_70_90_add_1")).toBeInTheDocument();
   });
 
+  it.each([
+    [undefined, "默认排序", "hover"],
+    [
+      { basis: "user", user_rank: 2, branch_rank: 3, branch_id: "121" },
+      "用户优先 · 第2位",
+      "hover",
+    ],
+    [
+      { basis: "branch", user_rank: null, branch_rank: 1, branch_id: "121" },
+      "分行优先",
+      "focus",
+    ],
+  ] as const)(
+    "shows only intent rank after tenant/job and reveals priority on hover/focus: %s",
+    async (priority, label, trigger) => {
+      const detail =
+        (await monitorApiMock.getCronDispatchBatchDetail()) as CronDispatchBatchDetailResponse;
+      monitorApiMock.getCronDispatchBatchDetail.mockResolvedValue({
+        ...detail,
+        intents: detail.intents.map((item, index) =>
+          index === 0 ? { ...item, priority, viewer_heat_score: 12.5 } : item,
+        ),
+      });
+      render(<CronBatchDispatchPage />);
+      const table = (await screen.findByText("1001")).closest<HTMLElement>(
+        ".ant-table-wrapper",
+      )!;
+      expect(
+        within(table)
+          .getAllByRole("columnheader")
+          .map((header) => header.textContent),
+      ).toEqual([
+        "Intent",
+        "角色",
+        "租户 / 任务",
+        "批内顺位",
+        "状态",
+        "尝试",
+        "Due",
+        "结果 / 错误",
+      ]);
+      const rank = within(table).getByLabelText("批内顺位 2，查看优先详情");
+      expect(rank).toHaveTextContent(/^2$/);
+      expect(rank).toHaveAttribute("tabindex", "0");
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+      if (trigger === "focus") fireEvent.focus(rank);
+      else fireEvent.mouseEnter(rank);
+      const tooltip = await screen.findByRole("tooltip");
+      expect(tooltip).toHaveTextContent(`优先依据：${label}`);
+      expect(tooltip).toHaveTextContent(
+        `用户顺位：${priority?.user_rank ?? "未设置"}`,
+      );
+      expect(tooltip).toHaveTextContent(
+        `分行顺位：${priority?.branch_rank ?? "未设置"}`,
+      );
+      expect(tooltip).toHaveTextContent(priority?.branch_id ?? "未知");
+      expect(tooltip).toHaveTextContent("热度：12.5");
+    },
+    30_000,
+  );
+
   it("uses a fixed four-row page without an inner scrolling region", async () => {
     render(<CronBatchDispatchPage />);
 
@@ -995,6 +1056,9 @@ describe("CronBatchDispatchPage", () => {
     ).toBeInTheDocument();
     expect(monitorApiMock.getCronDispatchWorkers).toHaveBeenLastCalledWith(
       expect.objectContaining({ capacity_cursor: "page-2" }),
+    );
+    expect(screen.getByLabelText("跳转调整记录")).not.toHaveClass(
+      "ant-pagination-mini",
     );
     const jumpInput = within(screen.getByLabelText("跳转调整记录")).getByRole(
       "textbox",
