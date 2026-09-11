@@ -1,8 +1,5 @@
 """Internal-only operations; SWE validates the manager and source identity."""
 
-import hmac
-import os
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..services.cron.batch_operations import (
@@ -14,14 +11,7 @@ from ..services.cron.batch_run_state import RunStateNotReady
 
 
 def require_internal(request: Request):
-    secret = os.environ.get("SWE_INTERNAL_TOKEN") or os.environ.get(
-        "SCHEDULER_SWE_INTERNAL_TOKEN"
-    )
-    if not secret or not hmac.compare_digest(
-        request.headers.get("X-Internal-Token", ""),
-        f"Bearer {secret}",
-    ):
-        raise HTTPException(403, "Internal authentication required")
+    """Read trusted caller identity; deployment must isolate these routes."""
     source = request.headers.get("X-Source-Id", "").strip()
     actor = request.headers.get("X-User-Id", "").strip()
     if not source or not actor:

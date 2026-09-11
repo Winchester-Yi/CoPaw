@@ -1,6 +1,5 @@
 """HTTP-only access to Scheduler-owned batch controls."""
 
-import os
 from urllib.parse import quote
 
 import httpx
@@ -12,9 +11,6 @@ from .monitor_sync_client import get_scheduler_api_url
 async def request_run_state(
     job, actor: str, *, method: str = "GET", body=None
 ):
-    token = os.environ.get("SWE_INTERNAL_TOKEN", "")
-    if not token:
-        raise HTTPException(503, "Scheduler internal token is not configured")
     url = (
         f"{get_scheduler_api_url().rstrip('/')}"
         "/scheduler/cron/dispatch/parents/"
@@ -30,7 +26,6 @@ async def request_run_state(
                 params={"tenant_id": job.tenant_id},
                 json=body,
                 headers={
-                    "X-Internal-Token": f"Bearer {token}",
                     "X-Source-Id": job.source_id,
                     "X-User-Id": actor,
                 },

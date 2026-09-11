@@ -10,6 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CronJobSpecOutput } from "@/api/types";
 import CronJobsPage from "./index";
 
+vi.mock("./components/BatchPriorityEditor", () => ({
+  default: () => <div>批次内优先策略</div>,
+}));
+vi.mock("./components/BatchRunStateControl", () => ({
+  default: () => <div>批调度运行状态</div>,
+}));
+
 const mocks = vi.hoisted(() => {
   const job: CronJobSpecOutput = {
     id: "job-source",
@@ -153,6 +160,7 @@ vi.mock("./components", () => ({
   createColumns: (handlers: {
     onBroadcast: (job: CronJobSpecOutput) => void;
     onEdit: (job: CronJobSpecOutput) => void;
+    onBatchConfigure: (job: CronJobSpecOutput) => void;
   }) => [
     {
       title: "名称",
@@ -170,6 +178,9 @@ vi.mock("./components", () => ({
           <button type="button" onClick={() => handlers.onEdit(job)}>
             编辑
           </button>
+          <button type="button" onClick={() => handlers.onBatchConfigure(job)}>
+            批调度配置
+          </button>
         </>
       ),
     },
@@ -177,6 +188,23 @@ vi.mock("./components", () => ({
 }));
 
 describe("CronJobsPage broadcast task refresh", () => {
+  it("opens batch configuration separately from broadcast settings", async () => {
+    mocks.job.meta = { broadcast_dispatch_intents_enabled: true };
+    const { unmount } = render(<CronJobsPage />);
+    expect(screen.queryByText("批次内优先策略")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    await screen.findByText("Broadcasting 2/5 tenants");
+    expect(screen.queryByText("批次内优先策略")).not.toBeInTheDocument();
+    expect(screen.queryByText("批调度运行状态")).not.toBeInTheDocument();
+    unmount();
+    render(<CronJobsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "批调度配置" }));
+    expect(await screen.findByText("批次内优先策略")).toBeInTheDocument();
+    expect(screen.getByText("批调度运行状态")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Select tenant" }),
+    ).not.toBeInTheDocument();
+  }, 30_000);
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getUserTimezone.mockResolvedValue({ timezone: "UTC" });

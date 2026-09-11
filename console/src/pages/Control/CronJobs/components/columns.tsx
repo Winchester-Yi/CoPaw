@@ -27,6 +27,7 @@ interface ColumnHandlers {
   onExecuteNow: (job: CronJob) => void;
   onBroadcast: (job: CronJob) => void;
   onManageChildren: (job: CronJob) => void;
+  onBatchConfigure: (job: CronJob) => void;
   onEdit: (job: CronJob) => void;
   onDelete: (jobId: string) => void;
   onCopySuccess: () => void;
@@ -428,7 +429,7 @@ export const createColumns = (
     {
       title: handlers.t("cronJobs.action"),
       key: "action",
-      width: 240,
+      width: 330,
       fixed: "right",
       render: (_: unknown, record: CronJob) => {
         const broadcastChild = isBroadcastChildJob(record);
@@ -491,6 +492,14 @@ export const createColumns = (
             <Dropdown menu={{ items: menuItems }} placement="bottomRight">
               <Button type="text" size="small" icon={<MoreOutlined />} />
             </Dropdown>
+            <Button
+              type="link"
+              size="small"
+              disabled={broadcastChild || !isBatchDispatchJob(record)}
+              onClick={() => handlers.onBatchConfigure(record)}
+            >
+              批调度配置
+            </Button>
           </div>
         );
       },

@@ -34,7 +34,6 @@
 
 ```powershell
 $baseUrl = "http://127.0.0.1:8088"
-$token = $env:SWE_INTERNAL_TOKEN
 
 $body = @{
   tenant_id = "tenant-a"
@@ -46,7 +45,6 @@ $body = @{
 
 curl.exe -X POST "$baseUrl/api/internal/cron/callback" `
   -H "Content-Type: application/json" `
-  -H "X-Internal-Token: $token" `
   -d $body
 ```
 

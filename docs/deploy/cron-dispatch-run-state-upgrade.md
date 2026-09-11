@@ -21,10 +21,14 @@
 
 控制表由 Scheduler 写入，Monitor 只读。不把状态写入会被定义同步覆盖的 job meta。SWE 通过内部 HTTP 操作 Scheduler，不 import Scheduler 包。
 
+批次内优先策略和独立暂停／恢复位于定时任务管理操作列的“批调度配置”。普通任务及批调度子任务的按钮置灰；已启用批模式的父任务即使自身关闭或整批暂停，仍可配置。广播弹窗保留接收人、调度方式及散列设置，不再加载策略和运行状态。
+
+SWE→Scheduler 的批调度状态、初始化、失败预览和重试接口不要求 Scheduler token。Scheduler→SWE 的 `/api/internal/cron/callback` 同样不发送或校验内部 token，普通外部调度平台回调也不再依赖它。SWE 管理入口仍校验 manager/admin、来源和任务归属，Scheduler 仍要求来源与操作人并校验业务范围及版本。双方信任内部调用者，身份请求头本身不是鉴权证明，必须通过内网访问限制／网关隔离这些管理及执行入口，禁止公网直连。其他 SWE 内部接口、Market 认证、模型鉴权和防旧领取的 claim_token 不变。
+
 ## 上线顺序
 
 1. 在维护窗口阻止新批回调和旧 Scheduler 派发，保留在途任务结果接收。冻结任务定义修改，确认 Monitor 定义同步没有积压；不要把在途意图批量改回 pending。
-2. 备份相关表，确认 Scheduler 和 Monitor 访问同一批次、意图及执行数据，SWE 的 Scheduler 地址和内部 token 已配置。
+2. 备份相关表，确认 Scheduler 和 Monitor 访问同一批次、意图及执行数据，SWE 的 Scheduler 地址已配置；限制 Scheduler 管理接口和 SWE Cron 回调只允许可信内部调用。同步升级两端，避免旧 SWE 仍要求 token 而新 Scheduler 已不发送；其他服务使用的 SWE_INTERNAL_TOKEN 不要全局删除。
 3. 由数据库维护人员执行下方建表及补列 SQL。先确认两列尚不存在；已经存在的列不要重复添加。
 4. Scheduler 启动时自动初始化缺失的合格父任务控制记录，不需要调用初始化接口或执行迁移命令。已有独立状态不覆盖；缺失身份、异常元数据和非批调度父任务不会默认启用。检查因未读自动关闭而首次初始化为暂停的父任务，按需单独恢复批调度。
 5. 升级 Scheduler、SWE、Monitor；确认全部旧派发实例退出后再恢复批回调。**不能新旧 Scheduler 混跑**：旧进程不知道控制表与 token，不能保证暂停和领取隔离。

@@ -218,3 +218,55 @@ def test_non_manager_is_rejected_before_workspace_resolution():
         json={"user_ids": [], "branch_ids": []},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action,body", [("failures", None), ("retry", {"candidates": []})]
+)
+async def test_scheduler_proxy_needs_manager_identity_but_no_token(
+    monkeypatch, action, body
+):
+    import httpx
+    from src.swe.app.crons import batch_operations as ops
+
+    monkeypatch.delenv("SWE_INTERNAL_TOKEN", raising=False)
+    monkeypatch.setattr(
+        ops, "get_scheduler_api_url", lambda: "http://scheduler.test"
+    )
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        assert "X-Internal-Token" not in request.headers
+        assert request.headers["X-Source-Id"] == "source-a"
+        assert request.headers["X-User-Id"] == "admin"
+        return httpx.Response(200, json={"ok": True})
+
+    factory = httpx.AsyncClient
+    monkeypatch.setattr(
+        ops.httpx,
+        "AsyncClient",
+        lambda **kwargs: factory(
+            transport=httpx.MockTransport(handle), **kwargs
+        ),
+    )
+    scope = {
+        "type": "http",
+        "query_string": b"",
+        "headers": [
+            (b"x-user-role", b"manager"),
+            (b"x-source-id", b"source-a"),
+            (b"x-user-id", b"admin"),
+        ],
+    }
+    assert await ops._proxy(Request(scope), "batch", action, body) == {
+        "ok": True
+    }
+    assert len(calls) == 1
+    with pytest.raises(HTTPException) as exc:
+        await ops._proxy(
+            Request({**scope, "headers": []}), "batch", action, body
+        )
+    assert exc.value.status_code == 403
+    assert len(calls) == 1

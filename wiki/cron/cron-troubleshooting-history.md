@@ -14,7 +14,7 @@
 2. `jobs.json` 里 job 的 `meta.external_job_id` 是否存在。
 3. 外部平台的 `jobParam` 是否包含正确 `tenant_id/source_id/agent_id/task_type/job_id`。
 4. `SWE_SERVER_DOMAIN` 拼出的回调地址是否外部平台可访问。
-5. `/api/internal/cron/callback` 是否通过 `SWE_INTERNAL_TOKEN` 校验。
+5. 网关／网络是否允许调度平台访问 `/api/internal/cron/callback`；该入口不校验内部 token。
 
 如果任务已经切到批调度，不要继续按普通 timer 排查：
 
@@ -30,7 +30,7 @@
 1. `swe_cron_dispatch_intents` 的 status、attempt、due_at 和最近 event。
 2. source/provider/model 是否组成了预期作用域，`swe_cron_dispatch_worker_capacity.effective_workers` 是否大于 0。
 3. `swe_cron_dispatch_scope_leases` 是否存在未过期 lease；`effective_workers` 是容量槽位，不是进程数。
-4. Scheduler 回调的任务级 SWE domain 是否可达，`SCHEDULER_SWE_INTERNAL_TOKEN` 是否匹配。
+4. Scheduler 回调的任务级 SWE domain 是否可达，可信内网访问规则是否允许回调；不再依赖 Scheduler token。
 5. SWE execution meta 是否带完整 intent/batch/attempt，`/api/scheduler/cron/execution` 回执是否成功。
 6. intent 是否超过 `SCHEDULER_CRON_DISPATCHED_STALE_SECONDS`，或已达到默认 3 次尝试上限。
 

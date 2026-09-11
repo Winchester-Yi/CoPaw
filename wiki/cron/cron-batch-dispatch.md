@@ -33,7 +33,6 @@ SWE 侧还需要：
 | `SWE_SCHEDULER_API_URL` | 注册批调度物理任务及回传 execution 使用的 Scheduler API 基址；默认 `http://localhost:9100/api` |
 | `SWE_CRON_SCHEDULER_BASE_URL` | 外部调度平台地址 |
 | `SWE_SERVER_DOMAIN` | 当前 SWE 可被 Scheduler 回调的地址，会随父任务注册信息传入 Scheduler |
-| `SWE_INTERNAL_TOKEN` | SWE 内部回调鉴权 token；也会用于 Scheduler 回调 SWE |
 
 Scheduler 侧常用配置：
 
@@ -43,7 +42,6 @@ Scheduler 侧常用配置：
 | `SCHEDULER_PORT` | `9100` | 独立服务端口 |
 | `SCHEDULER_DB_*` | - | Scheduler/Monitor 共享 cron 表所需数据库配置 |
 | `SCHEDULER_SWE_API_BASE_URL` | - | 没有任务级 SWE 地址时的回调基址 |
-| `SCHEDULER_SWE_INTERNAL_TOKEN` | - | 回调 SWE 时使用的备用内部 token；Scheduler 优先读取 `SWE_INTERNAL_TOKEN` |
 | `SCHEDULER_CRON_DISPATCHED_STALE_SECONDS` | `7800` | 已派发 intent 的失联回收阈值 |
 | `SCHEDULER_OPENAPI_DOCS` | - | 是否开放 Scheduler OpenAPI 文档 |
 
@@ -200,7 +198,7 @@ Worker 调整历史沿用页面选择的 source 和起止时间，前端自动�
 
 SWE 管理接口：`PUT /api/cron/jobs/{job_id}/batch-dispatch/priority`，请求为 `{"user_ids":["alice","bob"],"branch_ids":["121","110"]}`；`GET /api/cron/dispatch/batches/{batch_id}/failures?failure_types=auth_expired`；`POST /api/cron/dispatch/batches/{batch_id}/retry`，提交预览的 `candidates`（每项含 id、attempt_count）、`confirm_resolved`、`confirm_stopped`。
 
-这些操作要求 manager/admin、有效 source 和用户身份。查询失败和重试还要求 SWE 的 `SWE_SCHEDULER_API_URL`、`SWE_INTERNAL_TOKEN`，以及 Scheduler 对应内部 token 配置一致。无需新增数据库字段。多实例上线需避免新旧 Scheduler 领取代码混跑；共享 MySQL 的行锁行为需在部署环境验证。
+这些操作要求 manager/admin、有效 source 和用户身份，并通过 `SWE_SCHEDULER_API_URL` 访问 Scheduler。批调度管理接口及 Scheduler→SWE Cron 回调均不要求内部 token；相关入口必须限制为可信内网调用。其他服务使用的 `SWE_INTERNAL_TOKEN` 不要全局删除。优先级和人工重试无需新增数据库字段，独立暂停／恢复所需结构见升级说明。多实例上线需避免新旧 Scheduler 领取代码混跑；共享 MySQL 的行锁行为需在部署环境验证。
 
 Monitor 提供批次看板接口：
 

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from scheduler.app.routers.batch_operations import router
 
 
-def test_internal_operations_reject_missing_secret_and_identity(monkeypatch):
+def test_internal_operations_require_identity_without_a_token(monkeypatch):
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app)
@@ -15,7 +15,7 @@ def test_internal_operations_reject_missing_secret_and_identity(monkeypatch):
         client.post(
             path, json={"candidates": [{"id": 1, "attempt_count": 1}]}
         ).status_code
-        == 403
+        == 400
     )
     monkeypatch.setenv("SWE_INTERNAL_TOKEN", "test-only-secret")
     assert (
@@ -27,7 +27,6 @@ def test_internal_operations_reject_missing_secret_and_identity(monkeypatch):
         == 400
     )
     headers = {
-        "X-Internal-Token": "Bearer test-only-secret",
         "X-Source-Id": "s",
         "X-User-Id": "alice",
     }

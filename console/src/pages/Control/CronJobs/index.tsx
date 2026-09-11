@@ -87,6 +87,13 @@ function CronJobsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
+  const [batchConfigJobId, setBatchConfigJobId] = useState<string | null>(null);
+  const configuringJob = jobs.find(
+    (job) =>
+      job.id === batchConfigJobId &&
+      isBatchDispatchEnabled(job) &&
+      !isBroadcastChildJob(job),
+  );
   const [selectedBroadcastTenantIds, setSelectedBroadcastTenantIds] = useState<
     string[]
   >([]);
@@ -107,7 +114,6 @@ function CronJobsPage() {
   const [childrenManagementJob, setChildrenManagementJob] =
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
-  const [priorityDirty, setPriorityDirty] = useState(false);
   const [broadcastRefreshing, setBroadcastRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [skillOptions, setSkillOptions] = useState<SkillSelectOption[]>([]);
@@ -417,6 +423,11 @@ function CronJobsPage() {
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
     onManageChildren: handleManageChildren,
+    onBatchConfigure: (job) => {
+      if (isBatchDispatchEnabled(job) && !isBroadcastChildJob(job)) {
+        setBatchConfigJobId(job.id);
+      }
+    },
     onEdit: handleEdit,
     onDelete: handleDelete,
     onCopySuccess: () => message.success(t("common.copied")),
@@ -443,7 +454,7 @@ function CronJobsPage() {
           dataSource={jobs}
           loading={loading}
           rowKey="id"
-          scroll={{ x: 3010 }}
+          scroll={{ x: 3100 }}
           pagination={{
             current: tablePage,
             pageSize: tablePageSize,
@@ -478,6 +489,31 @@ function CronJobsPage() {
         onClose={() => setChildrenManagementJob(null)}
       />
 
+      {configuringJob && (
+        <Modal
+          open
+          title="批调度配置"
+          onCancel={() => setBatchConfigJobId(null)}
+          footer={null}
+          width={640}
+          maskClosable={false}
+        >
+          <div style={{ display: "grid", gap: 12 }}>
+            <div>任务：{configuringJob.name}</div>
+            <BatchPriorityEditor
+              key={configuringJob.id}
+              jobId={configuringJob.id}
+              initial={configuringJob.meta?.batch_dispatch_priority}
+              onSaved={fetchJobs}
+            />
+            <BatchRunStateControl
+              key={`run-state-${configuringJob.id}`}
+              job={configuringJob}
+            />
+          </div>
+        </Modal>
+      )}
+
       <Modal
         open={Boolean(broadcastingJob)}
         title="广播到租户"
@@ -489,7 +525,6 @@ function CronJobsPage() {
             (selectedBroadcastTenantIds.length === 0 &&
               !hasBroadcastDispatchModeChange) ||
             broadcasting ||
-            priorityDirty ||
             hasVisibleBroadcastTask,
         }}
         width={640}
@@ -546,25 +581,6 @@ function CronJobsPage() {
               onSelectionInfoChange={setSelectedBroadcastTargets}
               hint="选择需要接收该定时任务的租户"
               excludeTenantId={currentTenantId}
-            />
-            {broadcastDispatchMode === "batch" && (
-              <BatchPriorityEditor
-                key={broadcastingJob.id}
-                jobId={broadcastingJob.id}
-                initial={broadcastingJob.meta?.batch_dispatch_priority}
-                onSaved={fetchJobs}
-                onDirtyChange={setPriorityDirty}
-                disabled={broadcasting || hasVisibleBroadcastTask}
-              />
-            )}
-            <BatchRunStateControl
-              key={`run-state-${broadcastingJob.id}`}
-              job={broadcastingJob}
-              disabled={
-                broadcasting ||
-                hasVisibleBroadcastTask ||
-                hasBroadcastDispatchModeChange
-              }
             />
             {broadcastTask && (
               <div className={styles.broadcastTaskProgress}>

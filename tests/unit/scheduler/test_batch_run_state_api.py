@@ -6,14 +6,18 @@ from tests.unit.scheduler.test_batch_run_state import control_db  # noqa: F401
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True])
 async def test_routes_validate_identity_version_and_do_not_initialize_on_get(
     monkeypatch,
     control_db,
+    configured,
 ):
     from scheduler.app.routers.batch_run_state import router
-    from scheduler.app.services.cron import batch_run_state as state
 
-    monkeypatch.setenv("SWE_INTERNAL_TOKEN", "test-only-secret")
+    monkeypatch.delenv("SWE_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("SCHEDULER_SWE_INTERNAL_TOKEN", raising=False)
+    if configured:
+        monkeypatch.setenv("SWE_INTERNAL_TOKEN", "test-only-secret")
     app = FastAPI()
     app.include_router(router)
     client = AsyncClient(
@@ -23,14 +27,16 @@ async def test_routes_validate_identity_version_and_do_not_initialize_on_get(
         "/scheduler/cron/dispatch/parents/parent/run-state?tenant_id=tenant-1"
     )
     headers = {
-        "X-Internal-Token": "Bearer test-only-secret",
         "X-Source-Id": "source-a",
         "X-User-Id": "admin",
     }
     control_db.add_job()
-    assert (await client.get(path)).status_code == 403
+    assert (await client.get(path)).status_code == 400
     assert (await client.get(path, headers=headers)).status_code == 503
-    await state.initialize_missing_controls(control_db)
+    initialized = await client.post(
+        path.replace("/run-state?", "/run-state/initialize?"), headers=headers
+    )
+    assert initialized.status_code == 200
     assert (await client.get(path, headers=headers)).json()["paused"] is False
     assert (
         await client.put(

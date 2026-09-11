@@ -1,6 +1,5 @@
 """Manager-facing batch priority settings and Scheduler operations proxy."""
 
-import os
 from urllib.parse import quote
 
 import httpx
@@ -139,9 +138,6 @@ async def save_priority(
 
 async def _proxy(request: Request, batch: str, action: str, body=None):
     source, actor = manager_identity(request)
-    token = os.environ.get("SWE_INTERNAL_TOKEN")
-    if not token:
-        raise HTTPException(503, "Scheduler internal token is not configured")
     url = (
         f"{get_scheduler_api_url().rstrip('/')}"
         "/scheduler/cron/dispatch/batches/"
@@ -155,7 +151,6 @@ async def _proxy(request: Request, batch: str, action: str, body=None):
                 json=body,
                 params=dict(request.query_params),
                 headers={
-                    "X-Internal-Token": f"Bearer {token}",
                     "X-Source-Id": source,
                     "X-User-Id": actor,
                 },

@@ -1,4 +1,4 @@
-"""Authenticated parent-scoped batch run-state operations."""
+"""Parent-scoped batch run-state operations for trusted internal callers."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictBool

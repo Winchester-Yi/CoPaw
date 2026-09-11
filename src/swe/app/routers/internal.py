@@ -1631,10 +1631,6 @@ async def refresh_external_cron_jobs(request: Request):
 # pylint: disable=too-many-statements
 async def internal_cron_callback(
     request: Request,
-    x_internal_token: Optional[str] = Header(
-        default=None,
-        alias="X-Internal-Token",
-    ),
     body: Dict[str, Any] = Body(...),
 ):
     """外部调度平台统一回调端点。
@@ -1644,8 +1640,8 @@ async def internal_cron_callback(
     2. body 顶层直接携带 tenant_id / agent_id / task_type / job_id
 
     根据 task_type 分发到对应的 CronManager 方法。
+    不校验内部 token；部署必须将此执行入口隔离在可信内网。
     """
-    _verify_internal_token(x_internal_token)
     params = _decode_cron_callback_params(body)
     tenant_id, source_id, agent_id, task_type, job_id = (
         _require_cron_callback_params(params)

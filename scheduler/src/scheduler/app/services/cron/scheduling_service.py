@@ -25,9 +25,7 @@ from scheduler.config.constant import (
     DEFAULT_SCHEDULER_LOOP_INTERVAL_SECONDS,
     DISPATCHED_STALE_SECONDS_ENV,
     DISPATCH_INTENTS_ENABLED_ENV,
-    SCHEDULER_SWE_INTERNAL_TOKEN_ENV,
     SWE_API_BASE_URL,
-    SWE_INTERNAL_TOKEN_ENV,
 )
 
 from .dispatch_intent_service import (
@@ -151,19 +149,9 @@ class SweCronCallbackClient:
         self,
         *,
         base_url: str = SWE_API_BASE_URL,
-        internal_token: str | None = None,
         timeout_seconds: float = DEFAULT_CALLBACK_TIMEOUT_SECONDS,
     ) -> None:
         self._base_url = (base_url or "").rstrip("/")
-        self._internal_token = (
-            internal_token
-            if internal_token is not None
-            else (
-                os.environ.get(SWE_INTERNAL_TOKEN_ENV)
-                or os.environ.get(SCHEDULER_SWE_INTERNAL_TOKEN_ENV)
-                or ""
-            )
-        )
         self._timeout_seconds = timeout_seconds
 
     async def dispatch_job(
@@ -189,8 +177,6 @@ class SweCronCallbackClient:
         if not base_url:
             raise RuntimeError("SWE callback base URL is not configured")
         headers = _extract_b3_passthrough_headers(passthrough_headers)
-        if self._internal_token:
-            headers["X-Internal-Token"] = f"Bearer {self._internal_token}"
         payload = {
             "tenant_id": tenant_id,
             "source_id": source_id,
