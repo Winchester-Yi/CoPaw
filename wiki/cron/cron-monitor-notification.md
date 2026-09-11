@@ -49,21 +49,28 @@ resolve_cron_unread_auto_pause_config(get_current_source_system_config())
 
 - 应用启动时 `_app.py` 创建 `CronNotificationWorker` 并启动。
 - worker 调 `MonitorSyncClient.claim_due_notifications()`。
-- Monitor 侧 `CronNotificationService` 用 `FOR UPDATE SKIP LOCKED` 原子领取 due execution。
+- Monitor 侧 `CronNotificationService` 按 `notification_due_at, id` 升序选择符合条件的 due execution，用 `FOR UPDATE SKIP LOCKED` 原子领取；正在被其他 worker 持有且未过期的通知锁会被过滤，数据库行锁会被跳过。
 - worker 解析 `tenant_id/source_id`，用 `resolve_runtime_tenant_id()` 找到 workspace。
 - 调 `CronManager.send_task_success_notification(job_id)`。
 - 最终通过 `zhaohu` channel 推送“定时任务已完成”消息。
+
+同一批已领取记录按每个 worker 的并发上限处理，名额覆盖 workspace 获取、通知发送和 Monitor 状态回写。某条处理完成后，排队记录立即接手空闲名额；批内完成顺序不保证。单条处理或失败状态回写抛出异常时，不中断其他记录；worker 停止时会取消并等待在途及排队处理结束。
+
+非空批次处理结束且没有报告处理异常时，worker 立即领取下一批，不要求上一批领满。空队列、领取异常或批内处理异常时，才进入可被停止操作打断的等待；处理失败的记录不会因连续领取而在同一 worker 上立即耗尽重试次数。
 
 通知 worker 相关环境变量：
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SWE_CRON_NOTIFICATION_SCAN_SECONDS` | 300 | 扫描间隔，代码限制在 300 到 600 秒 |
+| `SWE_CRON_NOTIFICATION_SCAN_SECONDS` | 300 | 空队列或异常后的等待间隔，代码限制在 300 到 600 秒；正常处理非空批次后立即继续领取 |
 | `SWE_CRON_NOTIFICATION_BATCH_SIZE` | 20 | 每次领取数量，限制在 1 到 100 |
+| `SWE_CRON_NOTIFICATION_CONCURRENCY` | 5 | 每个 worker 同时处理的通知数量，限制在 1 到 20；设为 1 恢复串行处理 |
 | `SWE_CRON_NOTIFICATION_MAX_ATTEMPTS` | 3 | 通知失败最大重试次数 |
 | `SWE_CRON_NOTIFICATION_SOURCE_IDS` | 空 | 当前 SWE 实例允许领取通知的 source 列表 |
 
 多实例部署时，如果不同 SWE 实例负责不同 source，必须配置 `SWE_CRON_NOTIFICATION_SOURCE_IDS`。Monitor 领取 SQL 会只领取这些 source 的记录，同时允许 `source_id` 为空的 legacy 记录被任意实例竞争。
+
+并发上限在 worker 初始化时读取，调整后需重启对应 SWE 实例。多实例的并发量会叠加，领取顺序不等于并发发送的完成顺序。领取锁仍按原有 600 秒过期规则处理，没有续租；整批耗时过长时仍可能发生过期记录被再次领取，不能用增大批量替代耗时排查。
 
 当前领取硬条件是：
 
