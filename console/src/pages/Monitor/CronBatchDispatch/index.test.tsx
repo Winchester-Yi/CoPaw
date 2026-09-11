@@ -15,7 +15,17 @@ import type {
 } from "../../../api/modules/monitor";
 import CronBatchDispatchPage from "./index";
 vi.mock("echarts-for-react", () => ({
-  default: () => <div aria-label="测试图表容器" />,
+  default: ({
+    option,
+  }: {
+    option: { series: unknown; legend?: { show?: boolean } };
+  }) => (
+    <div
+      aria-label="测试图表容器"
+      data-series={JSON.stringify(option.series)}
+      data-legend={String(option.legend?.show)}
+    />
+  ),
 }));
 
 const monitorApiMock = vi.hoisted(() => ({
@@ -515,12 +525,20 @@ describe("CronBatchDispatchPage", () => {
     expect(await screen.findByText("另一个定时任务")).toBeInTheDocument();
   });
 
-  it("shows one worker adjustment at a time, navigates and expands details", async () => {
+  it("shows five worker adjustments per page and resets after refresh", async () => {
     const workersResponse = (await monitorApiMock.getCronDispatchWorkers()) as
       | CronDispatchWorkersResponse
       | undefined;
     expect(workersResponse).toBeDefined();
     monitorApiMock.getCronDispatchWorkers.mockClear();
+    const records = Array.from({ length: 7 }, (_, index) => ({
+      ...workersResponse!.capacity_events[1],
+      id: 11 + index,
+    }));
+    monitorApiMock.getCronDispatchWorkers.mockResolvedValue({
+      ...workersResponse!,
+      capacity_events: records,
+    });
 
     render(<CronBatchDispatchPage />);
 
@@ -530,29 +548,24 @@ describe("CronBatchDispatchPage", () => {
       await screen.findByText(/"start_time": "16:00"/),
     ).toBeInTheDocument();
 
-    const previous = screen.getByRole("button", { name: "上一条调整记录" });
-    const next = screen.getByRole("button", { name: "下一条调整记录" });
-    expect(previous).toBeDisabled();
-    expect(next).toBeEnabled();
-    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/^查看调整记录 /)).toHaveLength(5);
     expect(screen.getByLabelText("查看调整记录 11")).toBeInTheDocument();
-    expect(screen.queryByLabelText("查看调整记录 12")).not.toBeInTheDocument();
-
-    fireEvent.click(next);
-
-    expect(previous).toBeEnabled();
-    expect(next).toBeDisabled();
-    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    expect(screen.getByLabelText("查看调整记录 15")).toBeInTheDocument();
+    expect(screen.queryByLabelText("查看调整记录 16")).not.toBeInTheDocument();
+    fireEvent.click(
+      within(screen.getByLabelText("跳转调整记录")).getByTitle("2"),
+    );
+    expect(screen.getAllByLabelText(/^查看调整记录 /)).toHaveLength(2);
     expect(screen.queryByLabelText("查看调整记录 11")).not.toBeInTheDocument();
-    const toggle = screen.getByLabelText("查看调整记录 12");
+    const toggle = screen.getByLabelText("查看调整记录 16");
     const details = toggle.closest("details");
     expect(details).not.toHaveAttribute("open");
 
     fireEvent.click(toggle);
     expect(details).toHaveAttribute("open");
-    expect(screen.getByText("Worker ID")).toBeInTheDocument();
-    expect(screen.getByText("worker-older")).toBeInTheDocument();
-    expect(screen.getByText("50.00%")).toBeInTheDocument();
+    expect(within(details!).getByText("Worker ID")).toBeInTheDocument();
+    expect(within(details!).getByText("worker-older")).toBeInTheDocument();
+    expect(within(details!).getByText("50.00%")).toBeInTheDocument();
 
     monitorApiMock.getCronDispatchWorkers.mockResolvedValue({
       ...workersResponse!,
@@ -569,14 +582,9 @@ describe("CronBatchDispatchPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
 
     expect(await screen.findByLabelText("查看调整记录 13")).toBeInTheDocument();
-    expect(screen.getByText("1 / 3")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "上一条调整记录" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "下一条调整记录" }),
-    ).toBeEnabled();
-    expect(screen.queryByText("worker-older")).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText(/^查看调整记录 /)).toHaveLength(3);
+    expect(screen.queryByLabelText("跳转调整记录")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("查看调整记录 16")).not.toBeInTheDocument();
   }, 30_000);
 
   it("sends a global Batch query, resets to page one, and does not filter locally", async () => {
@@ -991,10 +999,63 @@ describe("CronBatchDispatchPage", () => {
     const jumpInput = within(screen.getByLabelText("跳转调整记录")).getByRole(
       "textbox",
     );
-    fireEvent.change(jumpInput, { target: { value: "9" } });
+    fireEvent.change(jumpInput, { target: { value: "2" } });
     fireEvent.keyUp(jumpInput, { key: "Enter", keyCode: 13 });
     expect(screen.getByLabelText("查看调整记录 208")).toBeInTheDocument();
-    expect(screen.getByText("9 / 12")).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/^查看调整记录 /)).toHaveLength(5);
+    fireEvent.change(jumpInput, { target: { value: "3" } });
+    fireEvent.keyUp(jumpInput, { key: "Enter", keyCode: 13 });
+    expect(screen.getAllByLabelText(/^查看调整记录 /)).toHaveLength(2);
+    expect(screen.getByLabelText("查看调整记录 211")).toBeInTheDocument();
+  }, 30_000);
+
+  it("mounts a chart only when its provider/model row is expanded", async () => {
+    const base =
+      (await monitorApiMock.getCronDispatchWorkers()) as CronDispatchWorkersResponse;
+    monitorApiMock.getCronDispatchWorkers.mockClear();
+    monitorApiMock.getCronDispatchWorkers.mockResolvedValue({
+      ...base,
+      current_capacity: [
+        base.current_capacity[0],
+        { ...base.current_capacity[0], id: 20, provider_id: "other" },
+      ],
+      capacity_events: [
+        ...base.capacity_events,
+        { ...base.capacity_events[0], id: 30, provider_id: "other" },
+        { ...base.capacity_events[0], id: 31, model_id: "other-model" },
+      ],
+    });
+    render(<CronBatchDispatchPage />);
+    const first = await screen.findByRole("button", {
+      name: "查看 aaa / bbb 的 Worker 调整过程",
+    });
+    const second = screen.getByRole("button", {
+      name: "查看 other / bbb 的 Worker 调整过程",
+    });
+    expect(first).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("测试图表容器")).not.toBeInTheDocument();
+    fireEvent.click(first);
+    expect(first).toHaveAttribute("aria-expanded", "true");
+    const chart = screen.getByLabelText("测试图表容器");
+    const series = JSON.parse(chart.getAttribute("data-series")!);
+    expect(series).toHaveLength(1);
+    expect(
+      series[0].data
+        .map((point: { record: { id: number } }) => point.record.id)
+        .sort(),
+    ).toEqual([11, 12]);
+    expect(chart).toHaveAttribute("data-legend", "false");
+    expect(screen.queryByText("模型 Worker 调整过程")).not.toBeInTheDocument();
+    expect(screen.queryByText(/点击图例筛选/)).not.toBeInTheDocument();
+    fireEvent.click(second);
+    expect(screen.getAllByLabelText("测试图表容器")).toHaveLength(2);
+    fireEvent.click(first);
+    expect(screen.getAllByLabelText("测试图表容器")).toHaveLength(1);
+    expect(
+      JSON.parse(
+        screen.getByLabelText("测试图表容器").getAttribute("data-series")!,
+      )[0].data[0].record.id,
+    ).toBe(30);
   }, 30_000);
 
   it("shows outcome counts without a progress bar for a failed batch", async () => {

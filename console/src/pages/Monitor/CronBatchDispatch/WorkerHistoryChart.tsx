@@ -21,8 +21,8 @@ export default function WorkerHistoryChart({
           description: `模型 Worker 调整图，共 ${series.length} 个模型、${items.length} 条记录。横轴为调整时间，纵轴为有效 Worker 数量。详细调整原因可在下方记录中查看。`,
         },
       },
-      legend: { type: "scroll", top: 0, textStyle: { fontSize: 12 } },
-      grid: { left: 48, right: 24, top: 60, bottom: 72, containLabel: true },
+      legend: { show: false },
+      grid: { left: 36, right: 16, top: 36, bottom: 72, containLabel: true },
       tooltip: {
         trigger: "axis",
         renderMode: "richText",
@@ -60,12 +60,7 @@ export default function WorkerHistoryChart({
     [series, items.length],
   );
   return (
-    <section aria-label="各模型 Worker 调整折线图">
-      <h3>模型 Worker 调整过程</h3>
-      <p>
-        每条线对应一个
-        provider/model；点击图例筛选，拖动下方滑块缩放。仅绘制区间内实际记录。
-      </p>
+    <section aria-label="模型 Worker 调整折线图">
       {series.length ? (
         <ReactECharts
           option={option}

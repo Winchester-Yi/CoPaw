@@ -22,8 +22,6 @@ import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
 import {
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Clock3,
   RefreshCw,
   ShieldCheck,
@@ -50,6 +48,7 @@ import { getBbkDisplayName } from "../../../constants/bbk";
 
 const { RangePicker } = DatePicker;
 const DETAIL_PAGE_SIZE = 50;
+const WORKER_EVENT_PAGE_SIZE = 5;
 
 type DateShortcutKey = "today" | "last24h" | "last7" | "custom";
 
@@ -249,7 +248,14 @@ function PolicyCard({ policy }: { policy: CronDispatchPolicyItem }) {
   );
 }
 
-function CapacityRow({ item }: { item: CronDispatchCapacityItem }) {
+function CapacityRow({
+  item,
+  history,
+}: {
+  item: CronDispatchCapacityItem;
+  history?: CronDispatchCapacityItem[];
+}) {
+  const [expanded, setExpanded] = useState(false);
   const denominator = Math.max(
     item.max_workers || item.effective_workers || 1,
     1,
@@ -259,16 +265,41 @@ function CapacityRow({ item }: { item: CronDispatchCapacityItem }) {
     Math.round((item.effective_workers / denominator) * 100),
   );
   return (
-    <div className={styles.capacityRow}>
-      <div className={styles.capacityMeta}>
-        <strong>{item.model_id}</strong>
-        <span>{item.provider_id}</span>
-      </div>
-      <Progress percent={percent} showInfo={false} size="small" />
-      <div className={styles.capacityValue}>
-        <strong>{item.effective_workers}</strong>
-        <span>{item.decision_reason || "-"}</span>
-      </div>
+    <div>
+      <button
+        type="button"
+        className={styles.capacityRow}
+        aria-label={`查看 ${item.provider_id} / ${item.model_id} 的 Worker 调整过程`}
+        aria-expanded={expanded}
+        disabled={!history}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className={styles.capacityMeta}>
+          <strong title={item.model_id}>{item.model_id}</strong>
+          <span title={item.provider_id}>{item.provider_id}</span>
+        </span>
+        <Progress percent={percent} showInfo={false} size="small" />
+        <span className={styles.capacityValue}>
+          <strong>{item.effective_workers}</strong>
+          <span title={item.decision_reason || "-"}>
+            {item.decision_reason || "-"}
+          </span>
+        </span>
+        <ChevronDown
+          size={15}
+          className={styles.capacityChevron}
+          aria-hidden="true"
+        />
+      </button>
+      {expanded && history ? (
+        <WorkerHistoryChart
+          items={history.filter(
+            (record) =>
+              record.provider_id === item.provider_id &&
+              record.model_id === item.model_id,
+          )}
+        />
+      ) : null}
     </div>
   );
 }
@@ -364,13 +395,17 @@ function CapacityEventHistory({
   const visibleItems = items;
   const eventKey = `${visibleItems.length}:${visibleItems[0]
     ?.id}:${visibleItems[visibleItems.length - 1]?.id}`;
-  const [navigation, setNavigation] = useState({ eventKey: "", index: 0 });
-
-  const safeActiveIndex =
-    navigation.eventKey === eventKey
-      ? Math.min(navigation.index, Math.max(visibleItems.length - 1, 0))
-      : 0;
-  const activeItem = visibleItems[safeActiveIndex];
+  const [navigation, setNavigation] = useState({ eventKey: "", page: 1 });
+  const pageCount = Math.max(
+    1,
+    Math.ceil(visibleItems.length / WORKER_EVENT_PAGE_SIZE),
+  );
+  const currentPage =
+    navigation.eventKey === eventKey ? Math.min(navigation.page, pageCount) : 1;
+  const pageItems = visibleItems.slice(
+    (currentPage - 1) * WORKER_EVENT_PAGE_SIZE,
+    currentPage * WORKER_EVENT_PAGE_SIZE,
+  );
 
   return (
     <>
@@ -379,49 +414,12 @@ function CapacityEventHistory({
           <TimerReset size={16} />
           <span>区间内调整记录（{visibleItems.length} 条）</span>
         </div>
-        {activeItem ? (
-          <div
-            className={styles.workerEventNavigation}
-            role="group"
-            aria-label="调整记录翻页"
-          >
-            <span className={styles.workerEventPosition} aria-live="polite">
-              {safeActiveIndex + 1} / {visibleItems.length}
-            </span>
-            <Button
-              type="text"
-              size="small"
-              className={styles.workerEventNavButton}
-              aria-label="上一条调整记录"
-              icon={<ChevronLeft size={15} />}
-              disabled={safeActiveIndex === 0}
-              onClick={() =>
-                setNavigation({
-                  eventKey,
-                  index: Math.max(safeActiveIndex - 1, 0),
-                })
-              }
-            />
-            <Button
-              type="text"
-              size="small"
-              className={styles.workerEventNavButton}
-              aria-label="下一条调整记录"
-              icon={<ChevronRight size={15} />}
-              disabled={safeActiveIndex === visibleItems.length - 1}
-              onClick={() =>
-                setNavigation({
-                  eventKey,
-                  index: Math.min(safeActiveIndex + 1, visibleItems.length - 1),
-                })
-              }
-            />
-          </div>
-        ) : null}
       </div>
       <div className={styles.workerEventList}>
-        {activeItem ? (
-          <CapacityEventRow key={activeItem.id} item={activeItem} />
+        {pageItems.length ? (
+          pageItems.map((item) => (
+            <CapacityEventRow key={item.id} item={item} />
+          ))
         ) : (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -429,16 +427,17 @@ function CapacityEventHistory({
           />
         )}
       </div>
-      {visibleItems.length > 1 && (
+      {visibleItems.length > WORKER_EVENT_PAGE_SIZE && (
         <Pagination
           aria-label="跳转调整记录"
-          current={safeActiveIndex + 1}
-          pageSize={1}
+          current={currentPage}
+          pageSize={WORKER_EVENT_PAGE_SIZE}
           total={visibleItems.length}
           showSizeChanger={false}
           showQuickJumper
+          showTotal={(total, range) => `${range[0]}-${range[1]} / ${total} 条`}
           size="small"
-          onChange={(page) => setNavigation({ eventKey, index: page - 1 })}
+          onChange={(page) => setNavigation({ eventKey, page })}
         />
       )}
     </>
@@ -1277,7 +1276,17 @@ export default function CronBatchDispatchPage() {
             {currentCapacity.length ? (
               <div className={styles.capacityList}>
                 {currentCapacity.map((item) => (
-                  <CapacityRow key={item.id} item={item} />
+                  <CapacityRow
+                    key={JSON.stringify([
+                      item.source_id,
+                      item.provider_id,
+                      item.model_id,
+                    ])}
+                    item={item}
+                    history={
+                      workerLoading || workerError ? undefined : capacityEvents
+                    }
+                  />
                 ))}
               </div>
             ) : (
@@ -1293,10 +1302,7 @@ export default function CronBatchDispatchPage() {
             ) : workerError ? (
               <Alert type="error" showIcon message={workerError} />
             ) : (
-              <>
-                <WorkerHistoryChart items={capacityEvents} />
-                <CapacityEventHistory items={capacityEvents} />
-              </>
+              <CapacityEventHistory items={capacityEvents} />
             )}
           </Spin>
         </article>

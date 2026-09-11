@@ -670,16 +670,41 @@
 
 .capacityRow {
   display: grid;
-  grid-template-columns: minmax(120px, 0.9fr) minmax(100px, 1fr) minmax(
-      84px,
-      auto
-    );
+  width: 100%;
+  min-width: 0;
+  grid-template-columns:
+    minmax(120px, 0.9fr) minmax(100px, 1fr) minmax(84px, auto)
+    16px;
   gap: 10px;
   align-items: center;
   padding: 9px 10px;
   background: #f8f9fb;
   border: 1px solid #eaecf0;
   border-radius: 6px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    border-color: var(--console-management-primary, #3769fc);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--console-management-primary, #3769fc);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: wait;
+  }
+}
+
+.capacityChevron {
+  color: #667085;
+}
+
+.capacityRow[aria-expanded="true"] .capacityChevron {
+  transform: rotate(180deg);
 }
 
 .capacityMeta,
@@ -727,8 +752,7 @@
   font-weight: 700;
 }
 
-.subSectionTitleLabel,
-.workerEventNavigation {
+.subSectionTitleLabel {
   display: flex;
   align-items: center;
 }
@@ -738,29 +762,10 @@
   gap: 6px;
 }
 
-.workerEventNavigation {
-  flex: 0 0 auto;
-  gap: 3px;
-}
-
-.workerEventPosition {
-  min-width: 42px;
-  color: #667085;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  text-align: right;
-}
-
-.workerEventNavButton {
-  width: 26px;
-  min-width: 26px;
-  height: 26px;
-  padding: 0;
-  color: #475467;
-}
-
 .workerEventList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   min-height: 0;
 }
 
@@ -1016,9 +1021,21 @@
   }
 
   .eventItem,
-  .capacityRow,
   .workerEventSummary {
     grid-template-columns: 1fr;
+  }
+
+  .capacityRow {
+    grid-template-columns: minmax(0, 1fr) 16px;
+
+    > :not(.capacityChevron) {
+      grid-column: 1;
+    }
+  }
+
+  .capacityChevron {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .eventItem em {
