@@ -2,6 +2,24 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## Cron callback 报 Job not found
+
+- 症状：外部调度调用 `/api/internal/cron/callback`，收到 HTTP 500 和
+  `"detail":"'Job not found: <job_id>'"`。
+- 原因：`CronManager.run_job()` 从当前租户工作区读取不到任务时抛出
+  `KeyError`，原回调入口将它作为通用异常返回 500。任务可能已经被删除，
+  也可能是回调携带的租户、来源或 Agent 与任务归属不一致。
+- 处理：回调只对当前 `job_id` 的这类异常返回 HTTP 200，响应为
+  `{"status":"ok","skipped":"job_not_found","job_id":"<job_id>"}`。
+  这表示本次未执行；包括查询后、执行前任务被删除的情况。其他执行错误仍然
+  返回 500，缺少必填参数仍然返回 400。
+- Scheduler 识别该标记为明确未接受执行，沿用既有失败/重试处理；不会将其
+  标记为已接受或结果未知。发布时应同步更新 SWE 与 Scheduler。
+- 排查入口：[回调路由](../../src/swe/app/routers/internal.py)、
+  [CronManager](../../src/swe/app/crons/manager.py)、
+  [Scheduler 回调客户端](../../scheduler/src/scheduler/app/services/cron/scheduling_service.py)。
+  对照日志中的 `tenant/source/agent/job` 检查任务归属和外部平台残留的调度记录。
+
 ## 定时任务显示成功但聊天窗口没有模型结果
 
 ### 症状

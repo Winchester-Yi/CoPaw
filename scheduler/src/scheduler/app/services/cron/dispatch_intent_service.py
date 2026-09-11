@@ -8,10 +8,21 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Mapping, NamedTuple, Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from scheduler.app.database import get_db_connection
+from .batch_priority import priority_key, priority_snapshot
+from .capacity_claim import available_capacity, write_capacity
+from .batch_operations import refresh_batch_counts
+from .dispatch_gate import (
+    lock_batch_control,
+    prepare_handoff,
+    settle_callback_skip,
+)
+from .batch_run_state import validated_parent, initialize_parent, parse_meta
+from .batch_admission import admit_batch
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 logger = logging.getLogger(__name__)
@@ -98,6 +109,7 @@ class ClaimedDispatchIntent(BaseModel):
     dispatch_order: int = 0
     viewer_heat_score: float = 0
     attempt_count: int = 0
+    claim_token: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("payload", mode="before")
@@ -123,6 +135,7 @@ def compute_batch_dispatch_order(
     ordered = [dict(row) for row in rows]
     ordered.sort(
         key=lambda row: (
+            *priority_key(row),
             -float(row.get("viewer_heat_score") or 0),
             str(row.get("due_at") or ""),
             str(row.get("tenant_id") or ""),
@@ -237,6 +250,77 @@ def _viewer_heat_score_from_row(row: Mapping[str, Any]) -> Decimal:
 class CronDispatchIntentService:
     """Durable queue service for cron dispatch intents."""
 
+    async def create_batch_with_intents(
+        self, *, batch, jobs, due_at, scheduled_fire_at
+    ):
+        db = get_db_connection()
+        identity = tuple(
+            batch[k] for k in ("source_id", "tenant_id", "parent_job_id")
+        )
+        parent = await validated_parent(db, identity)
+        await initialize_parent(db, parent)
+        rows = await self._build_ordered_execution_rows(
+            parent_job_id=batch["parent_job_id"],
+            jobs=jobs,
+            due_at=due_at,
+            priority_policy=batch["callback_metadata"].get(
+                "batch_dispatch_priority", {}
+            ),
+        )
+        batch = {
+            **batch,
+            "scheduled_fire_at": _to_beijing_naive(scheduled_fire_at),
+            "callback_received_at": _to_beijing_naive(
+                batch["callback_received_at"]
+            ),
+        }
+        offset = max(
+            0,
+            int(
+                parse_meta(parent.get("meta")).get(
+                    "batch_dispatch_offset_minutes", 0
+                )
+                or 0
+            ),
+        )
+        return await admit_batch(
+            db,
+            batch,
+            rows,
+            physical_fire_at=batch["scheduled_fire_at"]
+            - timedelta(minutes=offset),
+        )
+
+    async def prepare_handoff(self, row, worker_id, now_utc):
+        result = await prepare_handoff(
+            get_db_connection(), row, worker_id, _to_beijing_naive(now_utc)
+        )
+        if result in {"skipped", "paused"}:
+            batch_id = (
+                row.get("batch_id")
+                if isinstance(row, Mapping)
+                else row.batch_id
+            )
+            await self.update_batch_counts(
+                batch_id=batch_id, updated_at=now_utc
+            )
+        return result
+
+    async def settle_callback_skip(self, row, worker_id, now_utc):
+        changed = await settle_callback_skip(
+            get_db_connection(), row, worker_id, _to_beijing_naive(now_utc)
+        )
+        if changed:
+            batch_id = (
+                row.get("batch_id")
+                if isinstance(row, Mapping)
+                else row.batch_id
+            )
+            await self.update_batch_counts(
+                batch_id=batch_id, updated_at=now_utc
+            )
+        return changed
+
     async def upsert_dispatch_batch(
         self,
         *,
@@ -270,7 +354,7 @@ class CronDispatchIntentService:
                 provider_id = VALUES(provider_id),
                 model_id = VALUES(model_id),
                 callback_received_at = VALUES(callback_received_at),
-                callback_metadata = VALUES(callback_metadata),
+                callback_metadata = callback_metadata,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
@@ -308,10 +392,16 @@ class CronDispatchIntentService:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ) -> list[int]:
         """Enqueue parent and child execution intents in one ordered batch."""
+        batch = await get_db_connection().fetch_one(
+            "SELECT callback_metadata FROM swe_cron_dispatch_batches WHERE batch_id=%s",
+            (batch_id,),
+        )
+        snapshot = _parse_json((batch or {}).get("callback_metadata")) or {}
         rows = await self._build_ordered_execution_rows(
             parent_job_id=parent_job_id,
             jobs=jobs,
             due_at=due_at,
+            priority_policy=snapshot.get("batch_dispatch_priority", {}),
         )
         ids: list[int] = []
         for row in rows:
@@ -328,56 +418,7 @@ class CronDispatchIntentService:
                     %s, %s, %s,
                     %s, %s, %s
                 )
-                ON DUPLICATE KEY UPDATE
-                    id = LAST_INSERT_ID(id),
-                    status = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN status ELSE 'pending'
-                    END,
-                    due_at = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN due_at ELSE VALUES(due_at)
-                    END,
-                    scheduled_fire_at = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN scheduled_fire_at ELSE VALUES(scheduled_fire_at)
-                    END,
-                    provider_id = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN provider_id ELSE VALUES(provider_id)
-                    END,
-                    model_id = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN model_id ELSE VALUES(model_id)
-                    END,
-                    dispatch_order = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN dispatch_order ELSE VALUES(dispatch_order)
-                    END,
-                    viewer_heat_score = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN viewer_heat_score ELSE VALUES(viewer_heat_score)
-                    END,
-                    max_attempts = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN max_attempts ELSE VALUES(max_attempts)
-                    END,
-                    payload = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN payload ELSE VALUES(payload)
-                    END,
-                    lock_owner = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN lock_owner ELSE ''
-                    END,
-                    locked_at = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN locked_at ELSE NULL
-                    END,
-                    error_message = CASE
-                        WHEN status IN ('claimed', 'acknowledged', 'dispatched', 'completed', 'failed', 'cancelled')
-                        THEN error_message ELSE ''
-                    END
+                ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
                 """,
                 (
                     batch_id,
@@ -420,6 +461,7 @@ class CronDispatchIntentService:
         parent_job_id: str,
         jobs: list[dict[str, Any]],
         due_at: datetime,
+        priority_policy: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         now = _to_beijing_naive(due_at)
         job_ids = [
@@ -434,12 +476,63 @@ class CronDispatchIntentService:
             include_parent_job=True,
         )
 
+        definitions = (
+            await get_db_connection().fetch_all(
+                "SELECT id, tenant_id, source_id, bbk_id, meta "
+                "FROM swe_cron_jobs WHERE id IN ("
+                + ",".join(["%s"] * len(job_ids))
+                + ")",
+                tuple(job_ids),
+            )
+            if job_ids
+            else []
+        )
+        definitions_by_key = {
+            (
+                str(d["id"]),
+                str(d.get("tenant_id") or ""),
+                str(d.get("source_id") or ""),
+            ): d
+            for d in definitions
+        }
+        parent = next(
+            (j for j in jobs if j.get("job_id") == parent_job_id), {}
+        )
+        parent_definition = definitions_by_key.get(
+            (
+                parent_job_id,
+                str(parent.get("tenant_id") or ""),
+                str(parent.get("source_id") or ""),
+            ),
+            {},
+        )
+        policy = (_parse_json(parent_definition.get("meta")) or {}).get(
+            "batch_dispatch_priority",
+            {},
+        )
+        if priority_policy is not None:
+            policy = priority_policy
+
         ordered_rows: list[dict[str, Any]] = []
         for job in jobs:
             job_id = str(job.get("job_id") or "").strip()
             tenant_id = str(job.get("tenant_id") or "").strip()
             if not job_id or not tenant_id:
                 continue
+            definition = definitions_by_key.get(
+                (
+                    job_id,
+                    tenant_id,
+                    str(job.get("source_id") or ""),
+                ),
+                {},
+            )
+            payload = dict(_build_execution_payload(job))
+            payload["dispatch_priority"] = priority_snapshot(
+                policy,
+                tenant_id,
+                str(definition.get("bbk_id") or ""),
+            )
             ordered_rows.append(
                 {
                     **job,
@@ -458,7 +551,7 @@ class CronDispatchIntentService:
                         job_id,
                         Decimal("0"),
                     ),
-                    "payload": _build_execution_payload(job),
+                    "payload": payload,
                 },
             )
 
@@ -470,74 +563,7 @@ class CronDispatchIntentService:
         batch_id: str,
         updated_at: datetime,
     ) -> None:
-        db = get_db_connection()
-        row = await db.fetch_one(
-            """
-            SELECT
-                COUNT(*) AS total_count,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)
-                    AS completed_count,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
-                    AS failed_count,
-                SUM(CASE WHEN status IN ('claimed', 'dispatched') THEN 1 ELSE 0 END)
-                    AS running_count,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
-                    AS pending_count
-            FROM swe_cron_dispatch_intents
-            WHERE batch_id = %s
-            """,
-            (batch_id,),
-        )
-        total = int((row or {}).get("total_count") or 0)
-        completed = int((row or {}).get("completed_count") or 0)
-        failed = int((row or {}).get("failed_count") or 0)
-        running = int((row or {}).get("running_count") or 0)
-        pending = int((row or {}).get("pending_count") or 0)
-        if total == 0:
-            status = "received"
-        elif completed + failed >= total:
-            status = "failed" if failed else "completed"
-        elif running > 0:
-            status = "running"
-        elif pending > 0:
-            status = "pending"
-        else:
-            status = "received"
-        await db.execute(
-            """
-            UPDATE swe_cron_dispatch_batches
-            SET status = %s,
-                total_count = %s,
-                completed_count = %s,
-                failed_count = %s,
-                updated_at = %s,
-                lock_owner = CASE
-                    WHEN %s IN ('completed', 'failed') THEN ''
-                    ELSE lock_owner
-                END,
-                locked_at = CASE
-                    WHEN %s IN ('completed', 'failed') THEN NULL
-                    ELSE locked_at
-                END,
-                completed_at = CASE
-                    WHEN %s IN ('completed', 'failed') THEN %s
-                    ELSE completed_at
-                END
-            WHERE batch_id = %s
-            """,
-            (
-                status,
-                total,
-                completed,
-                failed,
-                _to_beijing_naive(updated_at),
-                status,
-                status,
-                status,
-                _to_beijing_naive(updated_at),
-                batch_id,
-            ),
-        )
+        await refresh_batch_counts(batch_id, _to_beijing_naive(updated_at))
 
     async def enqueue_parent_intent(
         self,
@@ -780,7 +806,9 @@ class CronDispatchIntentService:
         source_ids: list[str] | None = None,
         provider_id: str = DEFAULT_PROVIDER_ID,
         model_id: str = DEFAULT_MODEL_ID,
+        capacity: dict[str, Any] | None = None,
     ) -> list[ClaimedDispatchIntent]:
+        claim_token = str(uuid4())
         ids = await self._claim_due_intent_ids(
             lock_owner=lock_owner,
             now_utc=now_utc,
@@ -790,10 +818,12 @@ class CronDispatchIntentService:
             source_ids=source_ids,
             provider_id=provider_id,
             model_id=model_id,
+            capacity=capacity,
+            claim_token=claim_token,
         )
         if not ids:
             return []
-        return await self._fetch_claimed_intents(lock_owner, ids)
+        return await self._fetch_claimed_intents(lock_owner, ids, claim_token)
 
     async def reconcile_dispatched_executions(
         self,
@@ -822,7 +852,7 @@ class CronDispatchIntentService:
                    e.async_status, e.error_message
             FROM swe_cron_dispatch_intents
             JOIN swe_cron_executions e ON {_CURRENT_EXECUTION_IDENTITY_SQL}
-            WHERE swe_cron_dispatch_intents.status = 'dispatched'
+            WHERE swe_cron_dispatch_intents.status IN ('claimed', 'acknowledged', 'dispatched')
               AND {_TERMINAL_EXECUTION_SQL}
               {scope_filter_clause}
             ORDER BY swe_cron_dispatch_intents.id, e.id DESC
@@ -895,23 +925,35 @@ class CronDispatchIntentService:
             await conn.begin()
             retryable_rows: list[Any] = []
             exhausted_rows: list[Any] = []
+            refunded_rows: list[Any] = []
             try:
                 async with conn.cursor() as cur:
+                    refunded_rows = await self._refund_stale_claims(
+                        cur,
+                        normalized_now,
+                        scope_filter_clause,
+                        scope_filter_params,
+                    )
                     await cur.execute(
                         f"""
                         SELECT id, batch_id, job_id, tenant_id, source_id,
                                attempt_count, max_attempts,
                                {_HAS_SUCCESSFUL_AGENT_SQL} AS awaiting_subtask
                         FROM swe_cron_dispatch_intents
-                        WHERE status = 'dispatched'
+                        WHERE (
+                            (status IN ('dispatched','acknowledged') AND locked_at < %s)
+                            OR (status IN ('claimed', 'acknowledged')
+                                AND (status='claimed' OR claim_token='')
+                                AND locked_at < %s)
+                        )
                           AND locked_at IS NOT NULL
-                          AND locked_at < %s
                           AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
                           {scope_filter_clause}
                         FOR UPDATE
                         """,
                         (
                             dispatched_stale_before,
+                            normalized_now - timedelta(seconds=600),
                             *scope_filter_params,
                         ),
                     )
@@ -983,10 +1025,27 @@ class CronDispatchIntentService:
         await self._record_retryable_dispatched_events(retryable_rows)
         await self._record_exhausted_dispatched_events(exhausted_rows)
         await self._refresh_batch_counts_for_rows(
-            [*retryable_rows, *exhausted_rows],
+            [*refunded_rows, *retryable_rows, *exhausted_rows],
             updated_at=now_utc,
         )
-        return len(retryable_rows) + len(exhausted_rows)
+        return len(refunded_rows) + len(retryable_rows) + len(exhausted_rows)
+
+    async def _refund_stale_claims(self, cur, now, scope_clause, scope_params):
+        await cur.execute(
+            "SELECT id,batch_id FROM swe_cron_dispatch_intents "
+            "WHERE status='claimed' AND claim_token<>'' AND locked_at<%s "
+            f"AND NOT {_HAS_TERMINAL_EXECUTION_SQL} {scope_clause} FOR UPDATE",
+            (now - timedelta(seconds=600), *scope_params),
+        )
+        rows = list(await cur.fetchall())
+        for row in rows:
+            await cur.execute(
+                "UPDATE swe_cron_dispatch_intents SET status='pending', "
+                "attempt_count=CASE WHEN attempt_count>0 THEN attempt_count-1 ELSE 0 END, "
+                "claim_token='',locked_at=NULL,lock_owner='',updated_at=%s WHERE id=%s",
+                (now, _row_value(row, 0, "id")),
+            )
+        return rows
 
     async def _claim_due_intent_ids(
         self,
@@ -999,6 +1058,8 @@ class CronDispatchIntentService:
         source_ids: list[str] | None,
         provider_id: str,
         model_id: str,
+        capacity: dict[str, Any] | None = None,
+        claim_token: str = "",
     ) -> list[int]:
         db = get_db_connection()
         normalized_now = _to_beijing_naive(now_utc)
@@ -1014,22 +1075,44 @@ class CronDispatchIntentService:
 
         async with db.acquire() as conn:
             await conn.begin()
-            exhausted_rows: list[Any] = []
             try:
                 async with conn.cursor() as cur:
-                    exhausted_rows = (
-                        await self._fetch_exhausted_dispatched_rows(
-                            cur,
-                            dispatched_stale_before=dispatched_stale_before,
-                            scope_filter_clause=scope_filter_clause,
-                            scope_filter_params=scope_filter_params,
+                    if capacity is not None:
+                        scope = (
+                            (source_ids or [""])[0],
+                            _normalized_provider_id(provider_id),
+                            _normalized_model_id(model_id),
                         )
-                    )
-                    await self._mark_exhausted_dispatched_rows_failed(
-                        cur,
-                        exhausted_rows=exhausted_rows,
-                        normalized_now=normalized_now,
-                    )
+                        limit = min(
+                            limit,
+                            await available_capacity(
+                                cur,
+                                scope,
+                                lock_owner,
+                                normalized_now,
+                                capacity,
+                            ),
+                        )
+                        # Strict source matching for capacity-managed claims.
+                        scope_filter_clause, scope_filter_params = (
+                            _build_single_scope_filter(
+                                dict(
+                                    zip(
+                                        (
+                                            "source_id",
+                                            "provider_id",
+                                            "model_id",
+                                        ),
+                                        scope,
+                                    )
+                                )
+                            )
+                        )
+                        if limit <= 0:
+                            await conn.commit()
+                            return []
+                    # Recovery commits before this transaction. Do not lock
+                    # exhausted intents here ahead of control/batch locks.
                     candidate_batch_ids = (
                         await self._fetch_candidate_batch_ids(
                             cur,
@@ -1057,77 +1140,13 @@ class CronDispatchIntentService:
                         ids=ids,
                         lock_owner=lock_owner,
                         normalized_now=normalized_now,
+                        claim_token=claim_token or str(uuid4()),
                     )
                 await conn.commit()
-                await self._record_exhausted_dispatched_events(exhausted_rows)
-                await self._refresh_batch_counts_for_rows(
-                    exhausted_rows,
-                    updated_at=now_utc,
-                )
                 return ids
             except Exception:
                 await conn.rollback()
                 raise
-
-    async def _fetch_exhausted_dispatched_rows(
-        self,
-        cur: Any,
-        *,
-        dispatched_stale_before: datetime,
-        scope_filter_clause: str,
-        scope_filter_params: tuple[Any, ...],
-    ) -> list[Any]:
-        await cur.execute(
-            f"""
-            SELECT id, batch_id, job_id, tenant_id, source_id,
-                   attempt_count, max_attempts,
-                   {_HAS_SUCCESSFUL_AGENT_SQL} AS awaiting_subtask
-            FROM swe_cron_dispatch_intents
-            WHERE status = 'dispatched'
-              AND locked_at IS NOT NULL
-              AND locked_at < %s
-              AND attempt_count >= max_attempts
-              AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
-              {scope_filter_clause}
-            FOR UPDATE
-            """,
-            (dispatched_stale_before, *scope_filter_params),
-        )
-        return list(await cur.fetchall())
-
-    async def _mark_exhausted_dispatched_rows_failed(
-        self,
-        cur: Any,
-        *,
-        exhausted_rows: list[Any],
-        normalized_now: datetime,
-    ) -> None:
-        exhausted_ids = _positive_int_ids_from_rows(exhausted_rows)
-        if not exhausted_ids:
-            return
-        placeholders = ", ".join(["%s"] * len(exhausted_ids))
-        await cur.execute(
-            f"""
-            UPDATE swe_cron_dispatch_intents
-            SET status = 'failed',
-                due_at = %s,
-                lock_owner = '',
-                locked_at = NULL,
-                completed_at = %s,
-                error_message = CASE
-                    WHEN {_HAS_SUCCESSFUL_AGENT_SQL} THEN %s
-                    ELSE %s
-                END
-            WHERE id IN ({placeholders})
-            """,
-            (
-                normalized_now,
-                normalized_now,
-                SUBTASK_STATUS_TIMEOUT,
-                EXECUTION_RECORD_MISSING,
-                *exhausted_ids,
-            ),
-        )
 
     async def _fetch_candidate_batch_ids(
         self,
@@ -1152,6 +1171,8 @@ class CronDispatchIntentService:
                 (status = 'pending' AND attempt_count < max_attempts)
                 OR (
                     status IN ('claimed', 'acknowledged')
+                    AND (status='claimed' OR claim_token='')
+                    AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
                     AND locked_at IS NOT NULL
                     AND locked_at < %s
                 )
@@ -1165,6 +1186,15 @@ class CronDispatchIntentService:
             )
               AND due_at <= %s
               {scope_filter_clause}
+              AND EXISTS (
+                  SELECT 1 FROM swe_cron_dispatch_batches b
+                  JOIN swe_cron_dispatch_controls c
+                    ON c.source_id=b.source_id AND c.tenant_id=b.tenant_id
+                   AND c.parent_job_id=b.parent_job_id
+                  WHERE b.batch_id=swe_cron_dispatch_intents.batch_id
+                    AND b.source_id=swe_cron_dispatch_intents.source_id
+                    AND c.paused=0
+              )
             GROUP BY batch_id
             ORDER BY next_dispatch_order, next_id
             LIMIT %s
@@ -1221,6 +1251,20 @@ class CronDispatchIntentService:
         scope_filter_clause: str,
         scope_filter_params: tuple[Any, ...],
     ) -> list[int]:
+        # Scope identity was already constrained by the candidate query.
+        await cur.execute(
+            "SELECT source_id FROM swe_cron_dispatch_batches WHERE batch_id=%s",
+            (candidate_batch_id,),
+        )
+        batch_rows = await cur.fetchall()
+        if not batch_rows:
+            return []
+        batch_source = str(_row_value(batch_rows[0], 0, "source_id") or "")
+        control = await lock_batch_control(
+            cur, candidate_batch_id, batch_source, skip_locked=True
+        )
+        if control is None or control["paused"]:
+            return []
         locked = await self._lock_candidate_batch(
             cur,
             batch_id=candidate_batch_id,
@@ -1238,6 +1282,8 @@ class CronDispatchIntentService:
                 (status = 'pending' AND attempt_count < max_attempts)
                 OR (
                     status IN ('claimed', 'acknowledged')
+                    AND (status='claimed' OR claim_token='')
+                    AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
                     AND locked_at IS NOT NULL
                     AND locked_at < %s
                 )
@@ -1306,6 +1352,7 @@ class CronDispatchIntentService:
         ids: list[int],
         lock_owner: str,
         normalized_now: datetime,
+        claim_token: str = "",
     ) -> None:
         if not ids:
             return
@@ -1316,11 +1363,12 @@ class CronDispatchIntentService:
             SET status = 'claimed',
                 lock_owner = %s,
                 locked_at = %s,
+                claim_token = %s,
                 attempt_count = attempt_count + 1,
                 error_message = ''
             WHERE id IN ({placeholders})
             """,
-            (lock_owner, normalized_now, *ids),
+            (lock_owner, normalized_now, claim_token, *ids),
         )
 
     async def _record_retryable_dispatched_events(
@@ -1369,6 +1417,7 @@ class CronDispatchIntentService:
         self,
         lock_owner: str,
         ids: list[int],
+        claim_token: str = "",
     ) -> list[ClaimedDispatchIntent]:
         db = get_db_connection()
         placeholders = ", ".join(["%s"] * len(ids))
@@ -1378,14 +1427,15 @@ class CronDispatchIntentService:
                 id, batch_id, intent_role, tenant_id, agent_id, source_id,
                 provider_id, model_id, job_id, parent_job_id,
                 scheduled_fire_at, dispatch_order, viewer_heat_score,
-                attempt_count, payload
+                attempt_count, payload, claim_token
             FROM swe_cron_dispatch_intents
             WHERE id IN ({placeholders})
               AND lock_owner = %s
+              AND claim_token = %s
               AND status = 'claimed'
             ORDER BY dispatch_order, id
             """,
-            (*ids, lock_owner),
+            (*ids, lock_owner, claim_token),
         )
         return [ClaimedDispatchIntent.model_validate(row) for row in rows]
 
@@ -1412,6 +1462,7 @@ class CronDispatchIntentService:
         worker_id: str,
         dispatched_at: datetime,
         details: dict[str, Any] | None = None,
+        claim_token: str | None = None,
     ) -> bool:
         """Record that SWE accepted the callback for an execution intent."""
         return await self._transition_intent(
@@ -1422,6 +1473,9 @@ class CronDispatchIntentService:
             timestamp=dispatched_at,
             event_type="callback_dispatched",
             details=details,
+            **(
+                {"claim_token": claim_token} if claim_token is not None else {}
+            ),
         )
 
     async def mark_intent_dispatch_unknown(
@@ -1431,6 +1485,7 @@ class CronDispatchIntentService:
         worker_id: str,
         observed_at: datetime,
         details: dict[str, Any] | None = None,
+        claim_token: str | None = None,
     ) -> bool:
         """Keep an ambiguously delivered callback in the dispatched state."""
         return await self._transition_intent(
@@ -1441,6 +1496,9 @@ class CronDispatchIntentService:
             timestamp=observed_at,
             event_type="callback_outcome_unknown",
             details=details,
+            **(
+                {"claim_token": claim_token} if claim_token is not None else {}
+            ),
         )
 
     async def complete_intent(
@@ -1469,6 +1527,7 @@ class CronDispatchIntentService:
         error: str,
         failed_at: datetime,
         retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
+        claim_token: str | None = None,
     ) -> bool:
         db = get_db_connection()
         failed_at_value = _to_beijing_naive(failed_at)
@@ -1498,6 +1557,7 @@ class CronDispatchIntentService:
             WHERE id = %s
               AND lock_owner = %s
               AND status IN ('claimed', 'acknowledged', 'dispatched')
+              AND (%s IS NULL OR claim_token=%s)
             """,
             (
                 "failed" if terminal else "pending",
@@ -1505,6 +1565,8 @@ class CronDispatchIntentService:
                 (error or "")[:2048],
                 intent_id,
                 worker_id,
+                claim_token,
+                claim_token,
             ),
         )
         if _rowcount(result) == 0:
@@ -1730,7 +1792,7 @@ class CronDispatchIntentService:
                 COALESCE(NULLIF(model_id, ''), %s) AS model_id
             FROM swe_cron_dispatch_intents
             WHERE (
-                status IN ('claimed', 'dispatched')
+                status IN ('claimed', 'acknowledged', 'dispatched')
                 OR (status = 'pending' AND due_at <= %s)
             )
               {source_clause}
@@ -1922,7 +1984,8 @@ class CronDispatchIntentService:
         recorded_at: datetime | None = None,
     ) -> None:
         db = get_db_connection()
-        await db.execute(
+        await write_capacity(
+            db,
             """
             INSERT INTO swe_cron_dispatch_worker_capacity (
                 worker_id, source_id, provider_id, model_id, strategy_id,
@@ -1972,6 +2035,7 @@ class CronDispatchIntentService:
         timestamp: datetime,
         event_type: str,
         details: dict[str, Any] | None = None,
+        claim_token: str | None = None,
     ) -> bool:
         db = get_db_connection()
         timestamp_value = _to_beijing_naive(timestamp)
@@ -1986,9 +2050,13 @@ class CronDispatchIntentService:
         if not row:
             return False
         expected_statuses = (
-            ("claimed",)
-            if status in ("acknowledged", "dispatched")
-            else ("claimed", "acknowledged", "dispatched")
+            ("claimed", "acknowledged")
+            if status == "dispatched"
+            else (
+                ("claimed",)
+                if status == "acknowledged"
+                else ("claimed", "acknowledged", "dispatched")
+            )
         )
         placeholders = ", ".join(["%s"] * len(expected_statuses))
         result = await db.execute(
@@ -2008,6 +2076,7 @@ class CronDispatchIntentService:
             WHERE id = %s
               AND lock_owner = %s
               AND status IN ({placeholders})
+              AND (%s IS NULL OR claim_token=%s)
             """,
             (
                 status,
@@ -2019,6 +2088,8 @@ class CronDispatchIntentService:
                 intent_id,
                 worker_id,
                 *expected_statuses,
+                claim_token,
+                claim_token,
             ),
         )
         if _rowcount(result) == 0:

@@ -775,6 +775,7 @@ class CronDispatchBatchStats(BaseModel):
     total_intents: int = Field(default=0, description="Intent 总数")
     completed_intents: int = Field(default=0, description="已完成 Intent 数")
     failed_intents: int = Field(default=0, description="失败 Intent 数")
+    skipped_intents: int = Field(default=0, description="跳过／取消 Intent 数")
     pending_intents: int = Field(default=0, description="未完成 Intent 数")
 
 
@@ -819,6 +820,10 @@ class CronDispatchBatchItem(BaseModel):
     total_count: int = Field(default=0, description="Intent 总数")
     completed_count: int = Field(default=0, description="完成数")
     failed_count: int = Field(default=0, description="失败数")
+    skipped_count: int = Field(default=0, description="跳过／取消数")
+    dispatch_paused: Optional[bool] = Field(
+        default=None, description="独立批调度暂停状态；空表示未知"
+    )
     error_message: str = Field(default="", description="错误摘要")
     completed_at: Optional[datetime] = Field(
         default=None,
@@ -832,6 +837,13 @@ class CronDispatchBatchItem(BaseModel):
         default=None,
         description="更新时间",
     )
+
+
+class CronDispatchPriority(BaseModel):
+    basis: str = "default"
+    user_rank: Optional[int] = None
+    branch_rank: Optional[int] = None
+    branch_id: str = ""
 
 
 class CronDispatchIntentItem(BaseModel):
@@ -852,6 +864,7 @@ class CronDispatchIntentItem(BaseModel):
     due_at: Optional[datetime] = Field(default=None, description="可领取时间")
     dispatch_order: int = Field(default=0, description="批内分发顺序")
     viewer_heat_score: float = Field(default=0.0, description="热度分")
+    priority: Optional[CronDispatchPriority] = None
     attempt_count: int = Field(default=0, description="尝试次数")
     max_attempts: int = Field(default=0, description="最大尝试次数")
     lock_owner: str = Field(default="", description="worker owner")
@@ -964,6 +977,7 @@ class CronDispatchWorkersResponse(BaseModel):
     """Source-level policy and worker-capacity response."""
 
     source_id: str = Field(default="", description="当前渠道 ID")
+    capacity_events_next_cursor: Optional[str] = None
     policies: List[CronDispatchPolicyItem] = Field(default_factory=list)
     current_capacity: List[CronDispatchCapacityItem] = Field(
         default_factory=list,

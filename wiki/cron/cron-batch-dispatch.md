@@ -1,5 +1,13 @@
 # Cron 批调度与独立 Scheduler
 
+## 独立运行状态与旧任务兼容
+
+“任务自身启停”“批调度模式”“整批暂停／恢复”是三个独立概念。普通任务不初始化整批状态，子任务没有整批开关。仅对缺少状态的批调度父任务首次保守继承自身 enabled：开启为运行，关闭为暂停；持久化后，父任务关闭（含未读保护）不连带停止其他子任务。
+
+暂停停止新批次及新交接许可，保留待执行和重试队列；恢复继续原顺序与 Worker 限制，不补跑暂停期间漏过的时点。未交接的新领取退回且不消耗重试机会，已交接及运行任务自然收尾。关闭任务在派发前明确跳过，不重试、不计入 Worker 反馈；结果页分别显示成功、失败、跳过／取消。
+
+控制状态由 Scheduler 独立表持久化，不能只修改父任务 enabled 或 job meta。首次升级需要增量迁移；SWE 暂停先关闭内部派发，再暂停对应外部批定时器，恢复则先恢复该定时器、再开启内部派发，均不操作普通定时器。外部暂停失败时内部仍暂停，刷新后可点“同步外部暂停”重试；本次外部联动不新增数据库结构。参见[升级与验收说明](../../docs/deploy/cron-dispatch-run-state-upgrade.md)。
+
 本文说明广播任务切换到“批调度”后，外部调度平台、独立 Scheduler、SWE 和 Monitor 如何共同完成提前触发、按模型作用域排序派发、执行回执、补位和重试。
 
 返回 [Cron 定时任务模块索引](README.md)。
@@ -25,7 +33,6 @@ SWE 侧还需要：
 | `SWE_SCHEDULER_API_URL` | 注册批调度物理任务及回传 execution 使用的 Scheduler API 基址；默认 `http://localhost:9100/api` |
 | `SWE_CRON_SCHEDULER_BASE_URL` | 外部调度平台地址 |
 | `SWE_SERVER_DOMAIN` | 当前 SWE 可被 Scheduler 回调的地址，会随父任务注册信息传入 Scheduler |
-| `SWE_INTERNAL_TOKEN` | SWE 内部回调鉴权 token；也会用于 Scheduler 回调 SWE |
 
 Scheduler 侧常用配置：
 
@@ -35,7 +42,6 @@ Scheduler 侧常用配置：
 | `SCHEDULER_PORT` | `9100` | 独立服务端口 |
 | `SCHEDULER_DB_*` | - | Scheduler/Monitor 共享 cron 表所需数据库配置 |
 | `SCHEDULER_SWE_API_BASE_URL` | - | 没有任务级 SWE 地址时的回调基址 |
-| `SCHEDULER_SWE_INTERNAL_TOKEN` | - | 回调 SWE 时使用的备用内部 token；Scheduler 优先读取 `SWE_INTERNAL_TOKEN` |
 | `SCHEDULER_CRON_DISPATCHED_STALE_SECONDS` | `7800` | 已派发 intent 的失联回收阈值 |
 | `SCHEDULER_OPENAPI_DOCS` | - | 是否开放 Scheduler OpenAPI 文档 |
 
@@ -173,6 +179,26 @@ Scheduler 必须访问 Monitor 更新的同一份 `swe_cron_executions`，直接
 | `swe_cron_executions` | execution 表增加 dispatch intent/batch/attempt 身份列及索引 |
 
 ## Monitor 查询
+
+### Worker 历史与模型折线图
+
+Worker 调整历史沿用页面选择的 source 和起止时间，前端自动分页取齐区间内记录，不再截取 8 条或最多 100 条。历史详情仍逐条展示，支持前后翻阅及直接跳转。每个 provider/model 对应一条有效 Worker 阶梯折线，可通过图例筛选、滑块缩放，悬停查看调整前后数量与原因；区间内无记录的模型不伪造零值或趋势。
+
+`GET /api/monitor/cron/dispatch/workers` 每页最多返回 100 条 `capacity_events`，通过响应 `capacity_events_next_cursor` 和请求 `capacity_cursor` 续取；游标为空表示已取完。第一页同时返回策略和当前容量，续页只返回历史（其他列表为空）。读取边界固定为首次查询的最大记录 ID，续页按 created_at/id 倒序定位，并校验 source/时间范围；刷新开启新一轮读取。分页途中出错时页面显示加载失败，不把部分记录冒充完整区间。
+
+### 优先策略与人工重试
+
+广播弹窗切换到批调度后，可填写有序用户 ID 名单、选择有序一级分行名单，并通过上移/下移调整顺序。点击“保存优先策略”后再确认批调度或分发；有未保存改动时确认按钮不可用。优先设置不新增接收人，不触发子租户全量初始化。策略从新批次生效，已有批次保留排序快照。
+
+排序依次比较用户顺位、一级分行顺位、现有阅读热度和稳定键；未设置的对象排在设置对象之后。各批次仍共享 `source/provider/model` 容量，跨批次规则不变。一级分行使用任务定义同步时归并后的 `bbk_id`；缺失/未知分行不会自动命中分行优先。
+
+失败批次卡片展示成功/失败 intent 数量。详情“失败类型与重试”统计整个批次的当前失败类型，选择类型后预览最多 200 个对象；超过时可分次提交。每次人工操作重跑整个 intent 一次，attempt 持续递增，保留原失败原因、操作者和确认信息。失败重新入队后批次恢复等待/运行，完成后再结算最终结果。
+
+鉴权或配置类错误选择类型后可直接手动重试，不再要求勾选已修复；实际执行仍会校验真实鉴权和配置。超时、结果未知和未识别错误仍需要人工核对旧执行已停止后确认。该确认不是后端自动停止旧任务。鉴权过期仍不自动重试、不参与 worker 调整。已成功、正在执行、轮次已变化、任务已删除/停用的对象会跳过。
+
+SWE 管理接口：`PUT /api/cron/jobs/{job_id}/batch-dispatch/priority`，请求为 `{"user_ids":["alice","bob"],"branch_ids":["121","110"]}`；`GET /api/cron/dispatch/batches/{batch_id}/failures?failure_types=auth_expired`；`POST /api/cron/dispatch/batches/{batch_id}/retry`，提交预览的 `candidates`（每项含 id、attempt_count）及必要的 `confirm_stopped`。旧客户端的可选 `confirm_resolved` 字段继续兼容，但不作为重试前置条件。
+
+这些操作要求 manager/admin、有效 source 和用户身份，并通过 `SWE_SCHEDULER_API_URL` 访问 Scheduler。批调度管理接口及 Scheduler→SWE Cron 回调均不要求内部 token；相关入口必须限制为可信内网调用。其他服务使用的 `SWE_INTERNAL_TOKEN` 不要全局删除。优先级和人工重试无需新增数据库字段，独立暂停／恢复所需结构见升级说明。多实例上线需避免新旧 Scheduler 领取代码混跑；共享 MySQL 的行锁行为需在部署环境验证。
 
 Monitor 提供批次看板接口：
 

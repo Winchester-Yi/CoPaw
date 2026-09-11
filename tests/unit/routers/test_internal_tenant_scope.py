@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from swe.app.identity_resolver import ResolvedIdentity
+from swe.app.crons.manager import CronManager
 from swe.app.routers import internal as internal_router
 from swe.app.routers.internal import router
 from swe.app.workspace.tenant_pool import BootstrapOutcome
@@ -105,6 +106,97 @@ def test_internal_reload_rejects_invalid_source_id() -> None:
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid source_id"
     manager.reload_agent.assert_not_called()
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("dispatch_service", [False, True])
+@pytest.mark.parametrize("deleted_after_lookup", [False, True])
+def test_internal_cron_callback_skips_missing_job(
+    encoded: bool,
+    dispatch_service: bool,
+    deleted_after_lookup: bool,
+) -> None:
+    job = SimpleNamespace(meta={}, task_type="agent")
+    repo = SimpleNamespace(
+        get_job=AsyncMock(
+            side_effect=[job if deleted_after_lookup else None, None],
+        ),
+    )
+    cron_manager = CronManager(
+        repo=repo,
+        runner=object(),
+        channel_manager=object(),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    payload = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "default",
+        "task_type": "job",
+        "job_id": "job-1",
+    }
+    if dispatch_service:
+        payload.update(
+            callback_source="dispatch_service",
+            dispatch_intent_id=7,
+            dispatch_batch_id="batch-1",
+            dispatch_attempt=1,
+        )
+    if encoded:
+        payload = {
+            "jobParam": base64.urlsafe_b64encode(
+                json.dumps(payload).encode(),
+            ).decode(),
+        }
+
+    response = _build_client(manager).post(
+        "/internal/cron/callback",
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "skipped": "job_not_found",
+        "job_id": "job-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeyError("provider_id"),
+        KeyError("Job not found: different-job"),
+        RuntimeError("database unavailable"),
+    ],
+)
+def test_internal_cron_callback_preserves_execution_errors(error) -> None:
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(side_effect=error),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+
+    response = _build_client(manager).post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "job-1",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == str(error)
 
 
 def test_internal_cron_callback_dispatches_job_param_tenant() -> None:

@@ -1,0 +1,54 @@
+.control {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--console-management-border, #e5e7eb);
+  min-width: 0;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+  color: var(--console-management-text, #111827);
+}
+
+.toggle,
+.secondaryActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.secondaryActions {
+  margin-left: auto;
+
+  button {
+    padding-inline: 0;
+  }
+}
+
+.hint {
+  margin: 0;
+  color: var(--console-management-text-secondary, #4b5563);
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}

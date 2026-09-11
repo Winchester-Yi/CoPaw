@@ -44,7 +44,7 @@
 | `SWE_CRON_SCHEDULER_CLIENT_KEY` | 外部平台 clientKey |
 | `SWE_CRON_SCHEDULER_CLIENT_REMARK` | 外部平台 clientRemark |
 | `SWE_SERVER_DOMAIN` | 拼接回调地址，默认 `http://localhost:8000` |
-| `SWE_INTERNAL_TOKEN` | `/api/internal/*` 可选内部调用 token |
+| `SWE_INTERNAL_TOKEN` | 其他受保护的内部接口使用；Cron 回调不读取或校验此 token |
 | `SWE_CRON_DISPATCH_INTENTS_ENABLED` | 是否允许广播源任务切换到独立 Scheduler 批调度 |
 | `SWE_SCHEDULER_API_URL` | 批调度 Scheduler API 基址，默认 `http://localhost:9100/api` |
 
@@ -170,7 +170,7 @@ POST /api/internal/cron/callback
 
 `src/swe/app/routers/internal.py` 的 `internal_cron_callback()` 会：
 
-1. 校验 `X-Internal-Token`，如果配置了 `SWE_INTERNAL_TOKEN`。
+1. 不校验 Scheduler/internal token；部署需保证入口仅供可信内网调用。
 2. 优先读取 `jobParam` 或 `job_param`，按 base64 JSON 解码。
 3. 如果没有 `jobParam`，直接读取 body 顶层字段。
 4. 提取 `tenant_id`、`source_id`、`agent_id`、`task_type`、`job_id`。

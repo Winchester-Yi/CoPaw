@@ -45,6 +45,8 @@ import {
   type SkillSelectOption,
 } from "./helpers";
 import styles from "./index.module.less";
+import BatchPriorityEditor from "./components/BatchPriorityEditor";
+import BatchRunStateControl from "./components/BatchRunStateControl";
 
 type CronJob = CronJobSpecOutput;
 type BroadcastDispatchMode = "normal" | "batch";
@@ -85,6 +87,13 @@ function CronJobsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
+  const [batchConfigJobId, setBatchConfigJobId] = useState<string | null>(null);
+  const configuringJob = jobs.find(
+    (job) =>
+      job.id === batchConfigJobId &&
+      isBatchDispatchEnabled(job) &&
+      !isBroadcastChildJob(job),
+  );
   const [selectedBroadcastTenantIds, setSelectedBroadcastTenantIds] = useState<
     string[]
   >([]);
@@ -414,6 +423,11 @@ function CronJobsPage() {
     onExecuteNow: handleExecuteNow,
     onBroadcast: handleBroadcast,
     onManageChildren: handleManageChildren,
+    onBatchConfigure: (job) => {
+      if (isBatchDispatchEnabled(job) && !isBroadcastChildJob(job)) {
+        setBatchConfigJobId(job.id);
+      }
+    },
     onEdit: handleEdit,
     onDelete: handleDelete,
     onCopySuccess: () => message.success(t("common.copied")),
@@ -474,6 +488,38 @@ function CronJobsPage() {
         job={childrenManagementJob}
         onClose={() => setChildrenManagementJob(null)}
       />
+
+      {configuringJob && (
+        <Modal
+          open
+          title="批调度配置"
+          onCancel={() => setBatchConfigJobId(null)}
+          footer={null}
+          width={720}
+          centered
+          className={styles.batchConfigModal}
+          maskClosable={false}
+        >
+          <div className={styles.batchConfigContent}>
+            <div className={styles.batchConfigTask}>
+              <span>任务</span>
+              <span className={styles.batchConfigTaskName}>
+                {configuringJob.name}
+              </span>
+            </div>
+            <BatchRunStateControl
+              key={`run-state-${configuringJob.id}`}
+              job={configuringJob}
+            />
+            <BatchPriorityEditor
+              key={configuringJob.id}
+              jobId={configuringJob.id}
+              initial={configuringJob.meta?.batch_dispatch_priority}
+              onSaved={fetchJobs}
+            />
+          </div>
+        </Modal>
+      )}
 
       <Modal
         open={Boolean(broadcastingJob)}

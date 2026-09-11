@@ -222,6 +222,7 @@ export interface CronDispatchBatchStats {
   completed_intents: number;
   failed_intents: number;
   pending_intents: number;
+  skipped_intents?: number;
 }
 
 export interface CronDispatchBatchItem {
@@ -242,6 +243,8 @@ export interface CronDispatchBatchItem {
   total_count: number;
   completed_count: number;
   failed_count: number;
+  skipped_count?: number;
+  dispatch_paused?: boolean | null;
   error_message: string;
   completed_at: string | null;
   created_at: string | null;
@@ -249,6 +252,12 @@ export interface CronDispatchBatchItem {
 }
 
 export interface CronDispatchIntentItem {
+  priority?: {
+    basis: string;
+    user_rank: number | null;
+    branch_rank: number | null;
+    branch_id: string;
+  } | null;
   id: number;
   batch_id: string;
   intent_role: string;
@@ -349,6 +358,7 @@ export interface CronDispatchCapacityItem {
 }
 
 export interface CronDispatchWorkersResponse {
+  capacity_events_next_cursor?: string | null;
   source_id: string;
   policies: CronDispatchPolicyItem[];
   current_capacity: CronDispatchCapacityItem[];
@@ -1030,7 +1040,9 @@ export const monitorApi = {
   },
 
   getCronDispatchWorkers: async (
-    filters?: Omit<CronDispatchDateFilters, "status">,
+    filters?: Omit<CronDispatchDateFilters, "status"> & {
+      capacity_cursor?: string;
+    },
   ): Promise<CronDispatchWorkersResponse> => {
     return request(`/monitor/cron/dispatch/workers${buildQuery(filters)}`);
   },

@@ -67,6 +67,39 @@
   gap: 8px;
 }
 
+.batchConfigModal {
+  :global(.ant-modal-body),
+  :global(.swe-modal-body) {
+    max-height: calc(100dvh - 160px);
+    overflow-y: auto;
+  }
+}
+
+.batchConfigContent {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.batchConfigTask {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  color: var(--console-management-text-secondary, #4b5563);
+  font-size: 13px;
+
+  > span:first-child {
+    flex-shrink: 0;
+  }
+}
+
+.batchConfigTaskName {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--console-management-text, #111827);
+  font-weight: 500;
+}
+
 /* Status indicator styling */
 .statusIndicator {
   display: inline-flex;
