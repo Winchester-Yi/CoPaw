@@ -72,6 +72,62 @@ async def test_callback_explicit_disabled_is_not_an_accepted_execution(
 
 
 @pytest.mark.asyncio
+async def test_callback_missing_job_is_a_definite_rejection(monkeypatch):
+    from scheduler.app.services.cron import scheduling_service as service
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={"status": "ok", "skipped": "job_not_found", "job_id": "job"},
+        )
+    )
+    factory = httpx.AsyncClient
+    monkeypatch.setattr(
+        service.httpx,
+        "AsyncClient",
+        lambda **kwargs: factory(transport=transport, **kwargs),
+    )
+    store = SimpleNamespace(
+        fail_intent=AsyncMock(return_value=True),
+        update_batch_counts=AsyncMock(),
+        mark_intent_dispatched=AsyncMock(),
+        mark_intent_dispatch_unknown=AsyncMock(),
+    )
+    scheduler = service.CronSchedulingService(
+        dispatch_store=store,
+        callback_client=service.SweCronCallbackClient(base_url="http://swe"),
+        worker_id="worker-1",
+        retry_delay_seconds=120,
+    )
+    now = datetime.now(timezone.utc)
+    row = dict(
+        id=7,
+        intent_role="child",
+        batch_id="batch",
+        job_id="job",
+        tenant_id="tenant",
+        source_id="source",
+        attempt_count=1,
+        claim_token="token",
+    )
+
+    assert await scheduler._dispatch_execution_intent(row, now) is False
+    store.fail_intent.assert_awaited_once_with(
+        intent_id=7,
+        worker_id="worker-1",
+        error="SWE cron callback skipped: job_not_found",
+        failed_at=now,
+        retry_delay_seconds=120,
+        claim_token="token",
+    )
+    store.update_batch_counts.assert_awaited_once_with(
+        batch_id="batch", updated_at=now
+    )
+    store.mark_intent_dispatched.assert_not_awaited()
+    store.mark_intent_dispatch_unknown.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_does_not_send_paused_claim_or_count_it_as_failure():
     from scheduler.app.services.cron.scheduling_service import (
         CronSchedulingService,

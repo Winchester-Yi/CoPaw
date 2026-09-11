@@ -252,6 +252,8 @@ class SweCronCallbackClient:
         skipped = body.get("skipped") if isinstance(body, dict) else None
         if skipped == "job_disabled":
             return skipped
+        if skipped == "job_not_found":
+            raise RuntimeError("SWE cron callback skipped: job_not_found")
         if skipped:
             raise SweCronCallbackOutcomeUnknownError(
                 httpx.RemoteProtocolError(

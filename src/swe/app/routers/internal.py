@@ -500,7 +500,20 @@ async def _run_job_callback(
     run_kwargs = {"is_manual": False, "source_id": source_id}
     if dispatch_meta:
         run_kwargs["dispatch_meta"] = dispatch_meta
-    result = await mgr.run_job(job_id, **run_kwargs)
+    try:
+        result = await mgr.run_job(job_id, **run_kwargs)
+    except KeyError as exc:
+        if exc.args != (f"Job not found: {job_id}",):
+            raise
+        logger.info(
+            "Callback skipped for missing job: "
+            "tenant=%s source=%s agent=%s job=%s",
+            tenant_id,
+            source_id,
+            agent_id,
+            job_id,
+        )
+        return {"status": "ok", "skipped": "job_not_found", "job_id": job_id}
     if result is False:
         return {"status": "ok", "skipped": "job_disabled", "job_id": job_id}
     return None
