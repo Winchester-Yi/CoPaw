@@ -174,6 +174,7 @@ function ModelsPage() {
                   <ModelsSection
                     providers={providers}
                     activeModels={activeModels}
+                    onSaved={refreshProvidersSilently}
                   />
                 </section>
 

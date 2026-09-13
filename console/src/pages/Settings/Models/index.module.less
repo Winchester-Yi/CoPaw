@@ -533,6 +533,48 @@
   border-top: 1px solid #f0f0f0;
 }
 
+.defaultLlmControls {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.defaultLlmSelection {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.defaultLlmSelection label {
+  color: #4d4d4d;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.defaultLlmCurrentValue {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.defaultLlmActions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .defaultLlmControls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .defaultLlmActions {
+    justify-content: flex-end;
+  }
+}
+
 /* ---- Section Header Row (title + button) ---- */
 
 .sectionHeaderRow {
@@ -1797,6 +1839,14 @@
 
   .slotActions {
     border-top-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .defaultLlmSelection label {
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .defaultLlmCurrentValue {
+    color: rgba(255, 255, 255, 0.45);
   }
 
   /* Advanced config */

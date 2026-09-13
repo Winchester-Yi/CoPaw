@@ -776,6 +776,8 @@
     "providersDescription": "为每个提供商配置 API 密钥和端点。",
     "llmTitle": "默认 LLM",
     "llmDescription": "在这里设置全局默认的 LLM 模型。你也可以在聊天页面为具体 Agent 单独选择使用的模型。",
+    "noAvailableRemoteModel": "暂无可用远程模型",
+    "currentModelUnavailable": "当前模型不可用",
     "distribute": "分发",
     "distributeHint": "将当前租户的活动模型及其提供商配置复制到每个选中的目标租户。",
     "distributeTitle": "分发活动模型",

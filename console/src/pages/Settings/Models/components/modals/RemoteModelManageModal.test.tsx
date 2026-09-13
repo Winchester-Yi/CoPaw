@@ -1,20 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderInfo } from "../../../../../api/types";
 import { RemoteModelManageModal } from "./RemoteModelManageModal";
 
-const mocks = vi.hoisted(() => ({
-  error: vi.fn(),
-  setActiveLlm: vi.fn(),
-}));
+const mocks = vi.hoisted(() => ({ error: vi.fn() }));
 
 vi.mock("@agentscope-ai/design", () => {
   const Form = ({ children }: { children: React.ReactNode }) => <>{children}</>;
@@ -22,7 +12,6 @@ vi.mock("@agentscope-ai/design", () => {
     { setFieldsValue: vi.fn(), validateFields: vi.fn(), resetFields: vi.fn() },
   ];
   Form.Item = ({ children }: { children: React.ReactNode }) => <>{children}</>;
-
   return {
     Button: ({
       children,
@@ -30,10 +19,8 @@ vi.mock("@agentscope-ai/design", () => {
     }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
       <button {...props}>{children}</button>
     ),
-    Checkbox: ({ children }: { children: React.ReactNode }) => <>{children}</>,
     Form,
     Input: () => <input />,
-    InputNumber: () => <input />,
     Modal: ({
       children,
       open,
@@ -41,29 +28,21 @@ vi.mock("@agentscope-ai/design", () => {
       children: React.ReactNode;
       open?: boolean;
     }) => (open ? <div>{children}</div> : null),
-    Switch: () => <button type="button" />,
     Tag: ({ children }: { children: React.ReactNode }) => (
       <span>{children}</span>
     ),
   };
 });
 
-vi.mock("../../../../../api", () => ({
-  default: {
-    setActiveLlm: mocks.setActiveLlm,
-  },
-}));
-
+vi.mock("../../../../../api", () => ({ default: {} }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (_key: string, fallback?: string) => fallback || _key,
   }),
 }));
-
 vi.mock("../../../../../contexts/ThemeContext", () => ({
   useTheme: () => ({ isDark: false }),
 }));
-
 vi.mock("../../../../../hooks/useAppMessage", () => ({
   useAppMessage: () => ({
     message: {
@@ -74,13 +53,11 @@ vi.mock("../../../../../hooks/useAppMessage", () => ({
     },
   }),
 }));
-
 vi.mock("@ant-design/icons", () => ({
   ApiOutlined: () => <span />,
   DeleteOutlined: () => <span />,
   EyeOutlined: () => <span />,
   PlusOutlined: () => <span />,
-  SettingOutlined: () => <span />,
   SyncOutlined: () => <span />,
 }));
 
@@ -117,64 +94,26 @@ const provider: ProviderInfo = {
 };
 
 describe("RemoteModelManageModal", () => {
-  afterEach(() => cleanup());
+  afterEach(cleanup);
 
-  beforeEach(() => {
-    mocks.error.mockReset();
-    mocks.setActiveLlm.mockReset().mockResolvedValue({});
-  });
-
-  it("keeps the newly activated model selected when refresh fails", async () => {
+  it("keeps model management focused on directory maintenance", () => {
     render(
       <RemoteModelManageModal
         provider={provider}
-        activeModels={{ active_llm: { provider_id: "openai", model: "gpt-4" } }}
         open
         onClose={vi.fn()}
-        onSaved={vi.fn().mockRejectedValue(new Error("refresh failed"))}
+        onSaved={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /GPT-5/ }));
-
-    await waitFor(() =>
-      expect(mocks.setActiveLlm).toHaveBeenCalledWith({
-        provider_id: "openai",
-        model: "gpt-5",
-        scope: "global",
-      }),
-    );
-    expect(screen.getByRole("button", { name: /GPT-5/ })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(mocks.error).not.toHaveBeenCalled();
+    expect(
+      screen.getAllByRole("button", { name: "models.testConnection" }),
+    ).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", { name: "配置" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /GPT-5/ }),
+    ).not.toBeInTheDocument();
   });
-
-  it.each(["Enter", " "])(
-    "does not activate a model when %s is pressed on a nested action",
-    (key) => {
-      render(
-        <RemoteModelManageModal
-          provider={provider}
-          activeModels={{
-            active_llm: { provider_id: "openai", model: "gpt-4" },
-          }}
-          open
-          onClose={vi.fn()}
-          onSaved={vi.fn()}
-        />,
-      );
-
-      const modelItem = screen.getByRole("button", { name: /GPT-5/ });
-      fireEvent.keyDown(
-        within(modelItem).getByRole("button", {
-          name: "models.testConnection",
-        }),
-        { key },
-      );
-
-      expect(mocks.setActiveLlm).not.toHaveBeenCalled();
-    },
-  );
 });

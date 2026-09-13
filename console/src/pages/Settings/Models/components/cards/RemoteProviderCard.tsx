@@ -231,7 +231,6 @@ export function RemoteProviderCard({
       />
       <RemoteModelManageModal
         provider={provider}
-        activeModels={activeModels}
         open={modelManageOpen}
         onClose={() => setModelManageOpen(false)}
         onSaved={onSaved}
