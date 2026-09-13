@@ -8,7 +8,7 @@ import {
 } from "@ant-design/icons";
 import type { ProviderInfo, ActiveModelsInfo } from "../../../../../api/types";
 import { ProviderConfigModal } from "../modals/ProviderConfigModal";
-import { ModelManageModal } from "../modals/ModelManageModal";
+import { RemoteModelManageModal } from "../modals/RemoteModelManageModal";
 import api from "../../../../../api";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
@@ -62,9 +62,7 @@ export function RemoteProviderCard({
 
   let isConfigured = false;
 
-  if (provider.id === "copaw-local") {
-    isConfigured = true;
-  } else if (provider.is_custom && provider.base_url) {
+  if (provider.is_custom && provider.base_url) {
     isConfigured = true;
   } else if (provider.require_api_key === false) {
     isConfigured = true;
@@ -231,8 +229,9 @@ export function RemoteProviderCard({
         onClose={() => setModalOpen(false)}
         onSaved={onSaved}
       />
-      <ModelManageModal
+      <RemoteModelManageModal
         provider={provider}
+        activeModels={activeModels}
         open={modelManageOpen}
         onClose={() => setModelManageOpen(false)}
         onSaved={onSaved}

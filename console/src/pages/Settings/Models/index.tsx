@@ -47,23 +47,17 @@ function ModelsPage() {
     void fetchAll(false);
   }, [fetchAll]);
 
-  const { regularProviders, localProviders } = useMemo(() => {
-    const regular: ProviderInfo[] = [];
-    const local: ProviderInfo[] = [];
-    for (const p of providers) {
-      if (p.is_local) local.push(p);
-      else regular.push(p);
-    }
+  const { regularProviders } = useMemo(() => {
+    const regular: ProviderInfo[] = providers.filter((p) => !p.is_local);
     // Fuzzy search filter: match provider name (case-insensitive)
     const query = searchQuery.trim().toLowerCase();
     if (!query) {
-      return { regularProviders: regular, localProviders: local };
+      return { regularProviders: regular };
     }
     return {
       regularProviders: regular.filter((p) =>
         p.name.toLowerCase().includes(query),
       ),
-      localProviders: local.filter((p) => p.name.toLowerCase().includes(query)),
     };
   }, [providers, searchQuery]);
 
@@ -111,7 +105,7 @@ function ModelsPage() {
       />
     ));
 
-  const visibleProviderCount = regularProviders.length + localProviders.length;
+  const visibleProviderCount = regularProviders.length;
 
   return (
     <ConfigProvider
@@ -248,14 +242,6 @@ function ModelsPage() {
                       </div>
                     </div>
                   ) : null}
-
-                  {localProviders.length > 0 && (
-                    <div className={styles.providerGroup}>
-                      <div className={styles.providerCards}>
-                        {renderProviderCards(localProviders)}
-                      </div>
-                    </div>
-                  )}
 
                   {regularProviders.length > 0 && (
                     <div className={styles.providerGroup}>

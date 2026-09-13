@@ -220,4 +220,32 @@ describe("providerModelStore", () => {
       reasoning_effort: "high",
     });
   });
+
+  it("preserves provider state when invalidating only the provider cache", async () => {
+    vi.mocked(request)
+      .mockResolvedValueOnce([
+        provider("openai", [
+          {
+            id: "gpt-5",
+            name: "GPT-5",
+            supports_multimodal: false,
+            supports_image: false,
+            supports_video: false,
+          },
+        ]),
+      ])
+      .mockResolvedValueOnce({
+        active_llm: { provider_id: "openai", model: "gpt-5" },
+      });
+
+    const store = useProviderModelStore.getState();
+    await store.loadModelData();
+    store.invalidate({
+      providers: true,
+      active: false,
+      preserveProviders: true,
+    });
+
+    expect(useProviderModelStore.getState().providers[0]?.id).toBe("openai");
+  });
 });

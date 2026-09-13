@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ModelSelector from ".";
+import { getModelIcon } from "./modelIcon";
 import type { ModelRuntimeConfig, ProviderInfo } from "../../../api/types";
 
 const mocks = vi.hoisted(() => ({
@@ -122,10 +123,26 @@ vi.mock("antd", () => ({
   Button: ({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
     <button {...props}>{children}</button>
   ),
-  Dropdown: ({ children, dropdownRender }: { children: React.ReactNode; dropdownRender: () => React.ReactNode }) => (
+  Dropdown: ({
+    children,
+    dropdownRender,
+    open,
+    onOpenChange,
+  }: {
+    children: React.ReactNode;
+    dropdownRender: () => React.ReactNode;
+    open?: boolean;
+    onOpenChange?: (next: boolean) => void;
+  }) => (
     <>
-      {children}
-      {dropdownRender()}
+      <div
+        data-testid="model-selector-trigger"
+        data-open={open ? "true" : "false"}
+        onClick={() => onOpenChange?.(!open)}
+      >
+        {children}
+      </div>
+      {open ? dropdownRender() : null}
     </>
   ),
   Select: ({ onChange, options }: { onChange: (value: string) => void; options: Array<{ value: string; label: string }> }) => (
@@ -189,6 +206,11 @@ vi.mock("../../../stores/providerModelStore", () => ({
 describe("ModelSelector", () => {
   afterEach(cleanup);
 
+  const renderOpen = () => {
+    render(<ModelSelector />);
+    fireEvent.click(screen.getByTestId("model-selector-trigger"));
+  };
+
   beforeEach(() => {
     activeModel = { provider_id: "openai", model: "gpt-5" };
     providerFixture[0].model_configs!["gpt-5"] = {
@@ -208,8 +230,23 @@ describe("ModelSelector", () => {
     vi.clearAllMocks();
   });
 
+  it.each([
+    ["deepseek-v4-flash", "/icons/providers/deepseek.svg"],
+    ["MiniMax-M3", "/icons/providers/minimax.svg"],
+    ["Qwen/Qwen3.6-27B", "/icons/providers/qwen.svg"],
+    ["Pro/zai-org/GLM-5.1", "/icons/providers/glm.svg"],
+  ])("maps %s to its built-in model icon", (modelId, expectedIcon) => {
+    expect(getModelIcon(modelId, "openai")).toBe(expectedIcon);
+  });
+
+  it("falls back to the provider icon for an unknown model", () => {
+    expect(getModelIcon("custom-model", "openai")).toBe(
+      "/icons/providers/openai.png",
+    );
+  });
+
   it("renders every model with its provider and display-name metadata", () => {
-    render(<ModelSelector />);
+    renderOpen();
 
     expect(screen.getByRole("button", { name: /gpt-5/i })).toBeInTheDocument();
     expect(screen.getByText("OpenAI · GPT-5")).toBeInTheDocument();
@@ -217,7 +254,7 @@ describe("ModelSelector", () => {
   });
 
   it("shows declared efforts without selecting one until the user chooses", () => {
-    render(<ModelSelector />);
+    renderOpen();
 
     expect(screen.getByRole("button", { name: "低" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "高" })).toBeInTheDocument();
@@ -226,7 +263,7 @@ describe("ModelSelector", () => {
   });
 
   it("persists the selected reasoning effort as a tenant model default", async () => {
-    render(<ModelSelector />);
+    renderOpen();
 
     fireEvent.click(screen.getByRole("button", { name: "高" }));
 
@@ -239,6 +276,32 @@ describe("ModelSelector", () => {
     );
   });
 
+  it("keeps the selector open after changing the reasoning effort", async () => {
+    renderOpen();
+
+    fireEvent.click(screen.getByRole("button", { name: "高" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("model-selector-trigger")).toHaveAttribute(
+        "data-open",
+        "true",
+      ),
+    );
+  });
+
+  it("keeps the selector open after changing thinking mode", async () => {
+    renderOpen();
+
+    fireEvent.click(screen.getByRole("switch"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("model-selector-trigger")).toHaveAttribute(
+        "data-open",
+        "true",
+      ),
+    );
+  });
+
   it("prevents concurrent model configuration updates while one is saving", async () => {
     let resolveUpdate!: (config: ModelRuntimeConfig) => void;
     mocks.updateModelRuntimeConfig.mockImplementationOnce(
@@ -247,7 +310,7 @@ describe("ModelSelector", () => {
           resolveUpdate = resolve;
         }),
     );
-    render(<ModelSelector />);
+    renderOpen();
 
     fireEvent.click(screen.getByRole("button", { name: "高" }));
 
@@ -269,7 +332,7 @@ describe("ModelSelector", () => {
       enable_thinking: false,
       reasoning_effort: "high",
     };
-    render(<ModelSelector />);
+    renderOpen();
 
     expect(screen.getByRole("button", { name: "高" })).toBeDisabled();
     expect(screen.getByText("平衡推理效果与速度")).toBeInTheDocument();
@@ -277,7 +340,7 @@ describe("ModelSelector", () => {
 
   it("shows only effort controls for a reasoning-only model", () => {
     activeModel = { provider_id: "dashscope", model: "qwen-max" };
-    render(<ModelSelector />);
+    renderOpen();
 
     expect(screen.queryByText("思考模式")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "低" })).toBeEnabled();
@@ -289,14 +352,14 @@ describe("ModelSelector", () => {
 
   it("does not render a configuration region for a model without thinking capabilities", () => {
     activeModel = { provider_id: "plain", model: "plain-model" };
-    render(<ModelSelector />);
+    renderOpen();
 
     expect(screen.queryByText("模型配置")).not.toBeInTheDocument();
     expect(screen.queryByText("思考模式")).not.toBeInTheDocument();
   });
 
   it("persists a selected model and refreshes its runtime configuration", async () => {
-    render(<ModelSelector />);
+    renderOpen();
 
     fireEvent.click(screen.getByRole("button", { name: /qwen-max/i }));
 
@@ -310,8 +373,21 @@ describe("ModelSelector", () => {
     expect(mocks.loadModelData).toHaveBeenCalledWith({ scope: "effective" });
   });
 
+  it("keeps the selector open after changing the model", async () => {
+    renderOpen();
+
+    fireEvent.click(screen.getByRole("button", { name: /qwen-max/i }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("model-selector-trigger")).toHaveAttribute(
+        "data-open",
+        "true",
+      ),
+    );
+  });
+
   it("keeps activation successful when the post-activation refresh fails", async () => {
-    render(<ModelSelector />);
+    renderOpen();
     await waitFor(() => expect(mocks.loadModelData).toHaveBeenCalled());
     mocks.loadModelData.mockRejectedValueOnce(new Error("refresh failed"));
     const dispatchSpy = vi
@@ -338,7 +414,7 @@ describe("ModelSelector", () => {
 
   it("keeps the previous active card and reports an error when model activation fails", async () => {
     mocks.setActiveLlm.mockRejectedValueOnce(new Error("activation failed"));
-    render(<ModelSelector />);
+    renderOpen();
 
     fireEvent.click(screen.getByRole("button", { name: /qwen-max/i }));
 
@@ -355,7 +431,7 @@ describe("ModelSelector", () => {
     mocks.updateModelRuntimeConfig.mockRejectedValueOnce(
       new Error("save failed"),
     );
-    render(<ModelSelector />);
+    renderOpen();
 
     fireEvent.click(screen.getByRole("button", { name: "高" }));
 

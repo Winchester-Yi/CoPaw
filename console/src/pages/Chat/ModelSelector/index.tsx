@@ -10,7 +10,7 @@ import { useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { providerApi } from "../../../api/modules/provider";
 import { useProviderModelStore } from "../../../stores/providerModelStore";
-import { providerIcon } from "../../Settings/Models/components/providerIcon";
+import { getModelIcon } from "./modelIcon";
 import type {
   ModelRuntimeConfig,
   ProviderInfo,
@@ -197,12 +197,10 @@ export default function ModelSelector() {
   const handleSelect = async (providerId: string, modelId: string) => {
     if (savingRef.current) return;
     if (providerId === activeProviderId && modelId === activeModelId) {
-      setOpen(false);
       return;
     }
     savingRef.current = true;
     setSaving(true);
-    setOpen(false);
     try {
       // Use 'global' scope - tenant-level active model (agent scope deprecated)
       await providerApi.setActiveLlm({
@@ -249,6 +247,7 @@ export default function ModelSelector() {
       className={`${styles.panel} ${
         hasThinkingConfiguration ? styles.panelWithConfig : ""
       }`}
+      onClick={(event) => event.stopPropagation()}
     >
       {loading ? (
         <div className={styles.spinWrapper}>
@@ -276,7 +275,7 @@ export default function ModelSelector() {
               >
                 <img
                   className={styles.modelIcon}
-                  src={providerIcon(providerId)}
+                  src={getModelIcon(model.id, providerId)}
                   alt=""
                 />
                 <span className={styles.modelIdentity}>

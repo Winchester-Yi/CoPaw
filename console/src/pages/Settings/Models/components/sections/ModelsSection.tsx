@@ -8,6 +8,7 @@ import { useAppMessage } from "../../../../../hooks/useAppMessage";
 import { useIframeStore } from "../../../../../stores/iframeStore";
 import { getUserId } from "../../../../../utils/identity";
 import { TenantSelector } from "../../../../../components/TenantSelector";
+import { getRemoteProviders } from "../../modelManagement";
 import styles from "../../index.module.less";
 
 interface ModelsSectionProps {
@@ -58,7 +59,7 @@ export function ModelsSection({
 
   const eligible = useMemo(
     () =>
-      providers.filter((p) => {
+      getRemoteProviders(providers).filter((p) => {
         const hasModels =
           (p.models?.length ?? 0) + (p.extra_models?.length ?? 0) > 0;
         if (!hasModels) return false;
@@ -76,7 +77,7 @@ export function ModelsSection({
       setSelectedModel(currentSlot.model || undefined);
     }
     setDirty(false);
-  }, [currentSlot?.provider_id, currentSlot?.model]);
+  }, [currentSlot]);
 
   const chosenProvider = providers.find((p) => p.id === selectedProviderId);
   const currentProvider = providers.find(

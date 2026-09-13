@@ -17,15 +17,17 @@ import {
   EyeOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
-import type { ProviderInfo } from "../../../../../api/types";
+import type { ActiveModelsInfo, ProviderInfo } from "../../../../../api/types";
 import api from "../../../../../api";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "../../../../../contexts/ThemeContext";
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
 import styles from "../../index.module.less";
+import { isActiveModel } from "../../modelManagement";
 
 interface RemoteModelManageModalProps {
   provider: ProviderInfo;
+  activeModels: ActiveModelsInfo | null;
   open: boolean;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
@@ -33,6 +35,7 @@ interface RemoteModelManageModalProps {
 
 export function RemoteModelManageModal({
   provider,
+  activeModels,
   open,
   onClose,
   onSaved,
@@ -47,9 +50,17 @@ export function RemoteModelManageModal({
   const [probingModelId, setProbingModelId] = useState<string | null>(null);
   const [configModelId, setConfigModelId] = useState<string | null>(null);
   const [configSaving, setConfigSaving] = useState(false);
+  const [activatingModelId, setActivatingModelId] = useState<string | null>(
+    null,
+  );
+  const [activeModel, setActiveModel] = useState(activeModels?.active_llm);
   const [form] = Form.useForm();
   const [configForm] = Form.useForm();
   const canDiscover = provider.support_model_discovery;
+
+  useEffect(() => {
+    setActiveModel(activeModels?.active_llm);
+  }, [activeModels?.active_llm]);
 
   // For custom providers ALL models are deletable.
   // For built-in providers only extra_models are deletable.
@@ -207,6 +218,35 @@ export function RemoteModelManageModal({
     }
   };
 
+  const handleActivateModel = async (modelId: string) => {
+    if (activatingModelId || isActiveModel(activeModel, provider.id, modelId)) {
+      return;
+    }
+    setActivatingModelId(modelId);
+    try {
+      await api.setActiveLlm({
+        provider_id: provider.id,
+        model: modelId,
+        scope: "global",
+      });
+      setActiveModel({ provider_id: provider.id, model: modelId });
+      try {
+        await onSaved();
+      } catch (error) {
+        console.error(
+          "RemoteModelManageModal: failed to refresh model data",
+          error,
+        );
+      }
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : t("models.failedToSave"),
+      );
+    } finally {
+      setActivatingModelId(null);
+    }
+  };
+
   const saveModelConfig = async () => {
     if (!configModelId) return;
     try {
@@ -302,7 +342,25 @@ export function RemoteModelManageModal({
           all_models.map((m) => {
             const isDeletable = extraModelIds.has(m.id);
             return (
-              <div key={m.id} className={styles.modelListItem}>
+              <div
+                key={m.id}
+                className={`${styles.modelListItem} ${
+                  isActiveModel(activeModel, provider.id, m.id)
+                    ? styles.activeModelListItem
+                    : ""
+                }`}
+                onClick={() => void handleActivateModel(m.id)}
+                aria-pressed={isActiveModel(activeModel, provider.id, m.id)}
+                aria-busy={activatingModelId === m.id}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    void handleActivateModel(m.id);
+                  }
+                }}
+              >
                 <div className={styles.modelListItemInfo}>
                   <span className={styles.modelListItemName}>
                     {m.name}
@@ -335,7 +393,10 @@ export function RemoteModelManageModal({
                   </span>
                   <span className={styles.modelListItemId}>{m.id}</span>
                 </div>
-                <div className={styles.modelListItemActions}>
+                <div
+                  className={styles.modelListItemActions}
+                  onClick={(event) => event.stopPropagation()}
+                >
                   {isDeletable ? (
                     <>
                       <Tag
@@ -348,7 +409,7 @@ export function RemoteModelManageModal({
                         type="text"
                         size="small"
                         icon={<EyeOutlined />}
-                        onClick={() => handleProbeMultimodal(m.id)}
+                        onClick={() => void handleProbeMultimodal(m.id)}
                         loading={probingModelId === m.id}
                         style={{
                           marginRight: 4,
@@ -361,7 +422,7 @@ export function RemoteModelManageModal({
                         type="text"
                         size="small"
                         icon={<ApiOutlined />}
-                        onClick={() => handleTestModel(m.id)}
+                        onClick={() => void handleTestModel(m.id)}
                         loading={testingModelId === m.id}
                         style={{
                           marginRight: 4,
@@ -374,7 +435,7 @@ export function RemoteModelManageModal({
                         type="text"
                         size="small"
                         icon={<SettingOutlined />}
-                        onClick={() => openModelConfig(m.id)}
+                        onClick={() => void openModelConfig(m.id)}
                       >
                         {t("models.configure", "配置")}
                       </Button>
@@ -398,7 +459,7 @@ export function RemoteModelManageModal({
                         type="text"
                         size="small"
                         icon={<EyeOutlined />}
-                        onClick={() => handleProbeMultimodal(m.id)}
+                        onClick={() => void handleProbeMultimodal(m.id)}
                         loading={probingModelId === m.id}
                         style={{
                           marginRight: 4,
@@ -411,7 +472,7 @@ export function RemoteModelManageModal({
                         type="text"
                         size="small"
                         icon={<ApiOutlined />}
-                        onClick={() => handleTestModel(m.id)}
+                        onClick={() => void handleTestModel(m.id)}
                         loading={testingModelId === m.id}
                         style={{
                           color: isDark ? "rgba(255,255,255,0.65)" : undefined,
@@ -423,7 +484,7 @@ export function RemoteModelManageModal({
                         type="text"
                         size="small"
                         icon={<SettingOutlined />}
-                        onClick={() => openModelConfig(m.id)}
+                        onClick={() => void openModelConfig(m.id)}
                       >
                         {t("models.configure", "配置")}
                       </Button>

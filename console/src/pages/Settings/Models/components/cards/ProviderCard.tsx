@@ -1,5 +1,4 @@
 import type { ProviderInfo, ActiveModelsInfo } from "../../../../../api/types";
-import { LocalProviderCard } from "./LocalProviderCard";
 import { RemoteProviderCard } from "./RemoteProviderCard";
 
 interface ProviderCardProps {
@@ -13,10 +12,6 @@ export function ProviderCard({
   activeModels,
   onSaved,
 }: ProviderCardProps) {
-  if (provider.id === "copaw-local") {
-    return <LocalProviderCard provider={provider} onSaved={onSaved} />;
-  }
-
   return (
     <RemoteProviderCard
       provider={provider}
