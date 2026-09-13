@@ -174,7 +174,6 @@ function ModelsPage() {
                   <ModelsSection
                     providers={providers}
                     activeModels={activeModels}
-                    onSaved={fetchAll}
                   />
                 </section>
 

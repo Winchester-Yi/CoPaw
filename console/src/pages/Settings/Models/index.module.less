@@ -525,73 +525,6 @@
   }
 }
 
-.slotHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.slotTitle {
-  font-size: 18px;
-  font-weight: 600;
-  color: #1a1a1a;
-}
-
-.slotDescription {
-  margin: 8px 0 0;
-  color: #6b7280;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.slotCurrent {
-  font-size: 13px;
-  color: #52c41a;
-  font-family: "SF Mono", "Menlo", monospace;
-  background: #f6ffed;
-  padding: 4px 12px;
-  border-radius: 20px;
-  border: 1px solid #b7eb8f;
-}
-
-.slotForm {
-  display: flex;
-  gap: 20px;
-  align-items: flex-end;
-  flex-wrap: wrap;
-
-  @media (max-width: 768px) {
-    flex-direction: column;
-    gap: 16px;
-    align-items: stretch;
-  }
-}
-
-.slotField {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 200px;
-
-  @media (max-width: 768px) {
-    min-width: unset;
-    width: 100%;
-  }
-}
-
-.slotLabel {
-  font-size: 14px;
-  color: #666;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
 .slotActions {
   display: flex;
   justify-content: flex-end;
@@ -903,25 +836,6 @@
   }
 }
 
-.slotForm {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr) 120px;
-  gap: 12px;
-  align-items: end;
-}
-
-.slotField {
-  min-width: 0;
-  gap: 6px;
-}
-
-.slotLabel {
-  color: #4d4d4d;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 18px;
-}
-
 .slotActions {
   display: flex;
   flex-direction: column;
@@ -930,15 +844,6 @@
   margin: 0;
   padding: 0;
   border: 0;
-}
-
-.visuallyHiddenLabel {
-  visibility: hidden;
-}
-
-.slotActionButtons {
-  display: grid;
-  gap: 6px;
 }
 
 .providerGroup {
@@ -1673,39 +1578,11 @@
 }
 
 .managementSectionDescription,
-.slotLabel,
 .infoValue,
 .actionBtn,
 .moreActionBtn,
 .modalHint {
   color: var(--console-management-text-secondary);
-}
-
-.managementSelectDropdown {
-  :global {
-    .swe-select-item,
-    .ant-select-item {
-      color: var(--console-management-text);
-      background: var(--console-management-surface) !important;
-    }
-
-    .swe-select-item-option-active:not(.swe-select-item-option-selected),
-    .ant-select-item-option-active:not(.ant-select-item-option-selected) {
-      background: var(--console-management-surface-subtle) !important;
-    }
-
-    .swe-select-item-option-selected,
-    .ant-select-item-option-selected {
-      color: var(--console-management-text) !important;
-      background: var(--console-management-primary-soft) !important;
-      font-weight: 600;
-    }
-
-    .swe-select-item-option-selected .swe-select-item-option-content,
-    .ant-select-item-option-selected .ant-select-item-option-content {
-      color: var(--console-management-text) !important;
-    }
-  }
 }
 
 .sectionHeaderRow,
@@ -1916,24 +1793,6 @@
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
       border-color: rgba(255, 255, 255, 0.15);
     }
-  }
-
-  .slotHeader {
-    border-bottom-color: rgba(255, 255, 255, 0.08);
-  }
-
-  .slotTitle {
-    color: rgba(255, 255, 255, 0.85);
-  }
-
-  .slotCurrent {
-    color: #52c41a;
-    background: rgba(82, 196, 26, 0.1);
-    border-color: rgba(82, 196, 26, 0.3);
-  }
-
-  .slotLabel {
-    color: rgba(255, 255, 255, 0.5);
   }
 
   .slotActions {

@@ -355,6 +355,7 @@ export function RemoteModelManageModal({
                 role="button"
                 tabIndex={0}
                 onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     void handleActivateModel(m.id);
@@ -396,6 +397,7 @@ export function RemoteModelManageModal({
                 <div
                   className={styles.modelListItemActions}
                   onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
                 >
                   {isDeletable ? (
                     <>

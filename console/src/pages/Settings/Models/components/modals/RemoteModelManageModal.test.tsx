@@ -1,6 +1,13 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderInfo } from "../../../../../api/types";
 import { RemoteModelManageModal } from "./RemoteModelManageModal";
 
@@ -110,6 +117,8 @@ const provider: ProviderInfo = {
 };
 
 describe("RemoteModelManageModal", () => {
+  afterEach(() => cleanup());
+
   beforeEach(() => {
     mocks.error.mockReset();
     mocks.setActiveLlm.mockReset().mockResolvedValue({});
@@ -141,4 +150,31 @@ describe("RemoteModelManageModal", () => {
     );
     expect(mocks.error).not.toHaveBeenCalled();
   });
+
+  it.each(["Enter", " "])(
+    "does not activate a model when %s is pressed on a nested action",
+    (key) => {
+      render(
+        <RemoteModelManageModal
+          provider={provider}
+          activeModels={{
+            active_llm: { provider_id: "openai", model: "gpt-4" },
+          }}
+          open
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+        />,
+      );
+
+      const modelItem = screen.getByRole("button", { name: /GPT-5/ });
+      fireEvent.keyDown(
+        within(modelItem).getByRole("button", {
+          name: "models.testConnection",
+        }),
+        { key },
+      );
+
+      expect(mocks.setActiveLlm).not.toHaveBeenCalled();
+    },
+  );
 });
