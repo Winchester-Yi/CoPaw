@@ -1,0 +1,203 @@
+/**
+ * 智能财富工作台 —— 规划看板·日历视图
+ * 对应原型 calendarHTML：月/周双维度、排程事件卡片、今日高亮。
+ */
+import cx from "classnames";
+import styles from "../index.module.less";
+import type { Plan } from "../types";
+import {
+  addCalendarDays,
+  calendarDate,
+  calendarRange,
+  planFrequency,
+  planScheduledOn,
+  todayKey,
+} from "../utils";
+import { Icon } from "../components/Icon";
+
+const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+export function Calendar({
+  visible,
+  dimension,
+  anchor,
+  onShift,
+  onToday,
+  onDimension,
+  onShowDetails,
+}: {
+  visible: Plan[];
+  dimension: "week" | "month";
+  anchor: string;
+  onShift: (delta: number) => void;
+  onToday: () => void;
+  onDimension: (d: "week" | "month") => void;
+  onShowDetails: (day: string, id?: string) => void;
+}) {
+  const [start, end] = calendarRange(anchor, dimension);
+  const first =
+    dimension === "month"
+      ? addCalendarDays(start, -((calendarDate(start).getDay() + 6) % 7))
+      : start;
+  const last =
+    dimension === "month"
+      ? addCalendarDays(end, 6 - ((calendarDate(end).getDay() + 6) % 7))
+      : end;
+  const days: string[] = [];
+  for (let day = first; day <= last; day = addCalendarDays(day, 1))
+    days.push(day);
+  const month = calendarDate(anchor);
+  const todayKeyStr = todayKey();
+  const heading =
+    dimension === "month"
+      ? `${month.getFullYear()}年 ${month.getMonth() + 1}月`
+      : `${start.replace(/-/g, ".")} — ${end.slice(5).replace("-", ".")}`;
+
+  return (
+    <>
+      <div className={styles.calendarToolbar}>
+        <div className={styles.calendarNavigation}>
+          <button
+            className={styles.iconbtn}
+            aria-label={dimension === "month" ? "上月" : "上周"}
+            onClick={() => onShift(-1)}
+          >
+            <Icon name="left" />
+          </button>
+          <strong>{heading}</strong>
+          <button
+            className={styles.iconbtn}
+            aria-label={dimension === "month" ? "下月" : "下周"}
+            onClick={() => onShift(1)}
+          >
+            <Icon name="right" />
+          </button>
+          <button className={`${styles.btn} ${styles.sm}`} onClick={onToday}>
+            今天
+          </button>
+        </div>
+        <div className={styles.calendarControls}>
+          <div className={styles.calendarLegend}>
+            <span>
+              <i></i>分行关注
+            </span>
+            <span>
+              <i className={styles.purple}></i>行长 / 我的关注
+            </span>
+          </div>
+          <div className={styles.switch} aria-label="日历维度">
+            <button
+              className={dimension === "week" ? styles.active : ""}
+              aria-pressed={dimension === "week"}
+              onClick={() => onDimension("week")}
+            >
+              周
+            </button>
+            <button
+              className={dimension === "month" ? styles.active : ""}
+              aria-pressed={dimension === "month"}
+              onClick={() => onDimension("month")}
+            >
+              月
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className={styles.calendarScroll}>
+        <div
+          className={cx(styles.calendarGrid, styles[dimension])}
+          aria-label={`${heading}工作任务日历`}
+        >
+          {WEEKDAYS.map((w) => (
+            <div className={styles.calendarWeekday} key={w}>
+              {w}
+            </div>
+          ))}
+          {days.map((day) => {
+            const inRange = day >= start && day <= end;
+            const items = inRange
+              ? visible.filter((p) => planScheduledOn(p, day))
+              : [];
+            const today = day === todayKeyStr;
+            const weekday = calendarDate(day).getDay();
+            const shown = dimension === "month" ? items.slice(0, 3) : items;
+            return (
+              <div
+                key={day}
+                className={cx(
+                  styles.calendarCell,
+                  !inRange && styles.outside,
+                  today && styles.isToday,
+                  (weekday === 0 || weekday === 6) && styles.weekend,
+                )}
+                data-date={day}
+              >
+                <div className={styles.calendarDateLine}>
+                  <button
+                    className={cx(styles.calendarDay, today && styles.today)}
+                    aria-label={
+                      day +
+                      (items.length
+                        ? `，查看${items.length}项任务详情`
+                        : "，暂无工作任务")
+                    }
+                    disabled={!inRange}
+                    onClick={() => onShowDetails(day)}
+                  >
+                    {Number(day.slice(8))}
+                  </button>
+                  <span className={styles.calendarDayCount}>
+                    {today ? "今天" : items.length ? `${items.length} 项` : ""}
+                  </span>
+                </div>
+                {shown.map((p) => (
+                  <button
+                    key={p.id}
+                    className={cx(
+                      styles.calendarEvent,
+                      p.source !== "分行关注" && styles.purple,
+                    )}
+                    title={`${p.name} · ${p.status} · 点击查看详情`}
+                    onClick={() => onShowDetails(day, p.id)}
+                  >
+                    <span className={styles.calendarEventTitle}>
+                      <strong>{p.name}</strong>
+                      <span className={styles.calendarFrequency}>
+                        {planFrequency(p)}
+                      </span>
+                    </span>
+                    {dimension === "week" && (
+                      <small>
+                        {p.source} · {p.customers} 位目标客户
+                        <br />
+                        已生成 {p.tasks} 项任务 · {p.rate}%<br />
+                        {p.status}
+                      </small>
+                    )}
+                  </button>
+                ))}
+                {dimension === "month" && items.length > 3 && (
+                  <button
+                    className={styles.calendarMore}
+                    onClick={() => onShowDetails(day)}
+                  >
+                    +{items.length - 3} 项 · 查看全部
+                  </button>
+                )}
+                {inRange && !items.length && (
+                  <div className={styles.calendarEmpty}>暂无工作任务</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className={styles.calendarNote}>
+        <span>
+          按各场景的任务周期和执行频率展示；卡片数量与执行率为整项规划累计数据。
+        </span>
+        <span>点击任务或日期查看详情</span>
+      </div>
+    </>
+  );
+}

@@ -76,6 +76,27 @@ def test_provider_updates_one_model_config_without_legacy_generate_kwargs() -> (
     assert "generate_kwargs" not in provider.model_dump()
 
 
+def test_provider_disabling_thinking_preserves_reasoning_effort() -> None:
+    provider = _provider()
+    provider.update_model_config(
+        "gpt-5",
+        {
+            "supports_enable_thinking": True,
+            "supported_reasoning_efforts": ["low", "high"],
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        },
+    )
+
+    updated = provider.update_model_config(
+        "gpt-5",
+        {"enable_thinking": False},
+    )
+
+    assert updated.enable_thinking is False
+    assert updated.reasoning_effort == "high"
+
+
 def test_provider_deleting_model_config_removes_only_target() -> None:
     provider = _provider()
     provider.update_model_config("gpt-5", {"temperature": 0.2})
@@ -170,16 +191,31 @@ def test_provider_adapters_forward_resolved_model_configuration(
 
     provider.get_chat_model_instance(
         "configured-model",
-        generation_kwargs=provider.build_generation_kwargs(config),
+        generation_kwargs=provider.build_generation_kwargs(
+            config,
+            model_id="qwen-configured-model",
+        ),
     )
 
+    expected_thinking: dict[str, object] = (
+        {
+            "extra_body": {
+                "enable_thinking": True,
+                "reasoning_effort": "high",
+            },
+        }
+        if provider_type in (OpenAIProvider, OllamaProvider)
+        else {
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        }
+    )
     assert created[0]["generate_kwargs"] == {
         "temperature": 0.2,
         "top_p": 0.8,
         "top_k": 20,
         output_length_key: 4_096,
-        "enable_thinking": True,
-        "reasoning_effort": "high",
+        **expected_thinking,
     }
 
 
@@ -197,13 +233,18 @@ def test_provider_maps_model_config_to_request_arguments() -> None:
         reasoning_effort="high",
     )
 
-    assert provider.build_generation_kwargs(config) == {
+    assert provider.build_generation_kwargs(
+        config,
+        model_id="qwen-test",
+    ) == {
         "temperature": 0.2,
         "top_p": 0.8,
         "top_k": 20,
         "max_tokens": 4_096,
-        "enable_thinking": True,
-        "reasoning_effort": "high",
+        "extra_body": {
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        },
     }
 
 
@@ -217,5 +258,145 @@ def test_reasoning_effort_is_independent_of_thinking_switch_capability() -> (
     )
 
     assert (
-        provider.build_generation_kwargs(config)["reasoning_effort"] == "low"
+        provider.build_generation_kwargs(
+            config,
+            model_id="qwen-test",
+        )[
+            "extra_body"
+        ]["reasoning_effort"]
+        == "low"
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        (
+            "deepseek-flash",
+            {
+                "max_tokens": 4_096,
+                "extra_body": {"thinking": {"type": "enabled"}},
+                "reasoning_effort": "high",
+            },
+        ),
+        (
+            "MiniMax-M3",
+            {
+                "max_tokens": 4_096,
+                "extra_body": {"thinking": {"type": "adaptive"}},
+            },
+        ),
+        (
+            "qwen3.8-max",
+            {
+                "max_tokens": 4_096,
+                "extra_body": {
+                    "enable_thinking": True,
+                    "reasoning_effort": "high",
+                },
+            },
+        ),
+        (
+            "custom-reasoning-model",
+            {
+                "max_tokens": 4_096,
+                "extra_body": {
+                    "enable_thinking": True,
+                    "reasoning_effort": "high",
+                },
+            },
+        ),
+    ],
+)
+def test_openai_provider_adapts_thinking_arguments_by_model_id(
+    model_id: str,
+    expected: dict,
+) -> None:
+    provider = _provider()
+    config = ModelRuntimeConfig(
+        max_output_length=4_096,
+        supports_enable_thinking=True,
+        supported_reasoning_efforts=["high"],
+        enable_thinking=True,
+        reasoning_effort="high",
+    )
+
+    assert (
+        provider.build_generation_kwargs(config, model_id=model_id) == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        (
+            "deepseek-flash",
+            {"extra_body": {"thinking": {"type": "disabled"}}},
+        ),
+        (
+            "minimax-m3",
+            {"extra_body": {"thinking": {"type": "disabled"}}},
+        ),
+        (
+            "QWEN3.8-MAX",
+            {"extra_body": {"enable_thinking": False}},
+        ),
+    ],
+)
+def test_openai_provider_suppresses_effort_when_thinking_is_disabled(
+    model_id: str,
+    expected: dict,
+) -> None:
+    provider = _provider()
+    config = ModelRuntimeConfig(
+        supports_enable_thinking=True,
+        supported_reasoning_efforts=["high"],
+        enable_thinking=False,
+        reasoning_effort="high",
+    )
+
+    assert (
+        provider.build_generation_kwargs(config, model_id=model_id) == expected
+    )
+
+
+def test_deepseek_reasoning_only_model_keeps_top_level_effort() -> None:
+    provider = _provider()
+    config = ModelRuntimeConfig(
+        supported_reasoning_efforts=["low"],
+        reasoning_effort="low",
+    )
+
+    assert provider.build_generation_kwargs(
+        config,
+        model_id="deepseek-reasoning",
+    ) == {"reasoning_effort": "low"}
+
+
+def test_qwen_reasoning_only_model_uses_extra_body_effort() -> None:
+    provider = _provider()
+    config = ModelRuntimeConfig(
+        supported_reasoning_efforts=["low"],
+        reasoning_effort="low",
+    )
+
+    assert provider.build_generation_kwargs(
+        config,
+        model_id="qwen-reasoning",
+    ) == {"extra_body": {"reasoning_effort": "low"}}
+
+
+def test_minimax_never_sends_reasoning_effort() -> None:
+    provider = _provider()
+    config = ModelRuntimeConfig(
+        supported_reasoning_efforts=["high"],
+        reasoning_effort="high",
+    )
+
+    assert (
+        provider.build_generation_kwargs(
+            config,
+            model_id="minimax-m3",
+        )
+        == {}
     )

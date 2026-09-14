@@ -116,7 +116,11 @@ class FakeProvider:
 
         return ModelRuntimeConfig()
 
-    def build_generation_kwargs(self, _config) -> dict[str, Any]:
+    def build_generation_kwargs(
+        self,
+        _config,
+        model_id: str = "",
+    ) -> dict[str, Any]:
         return dict(self.generation_kwargs)
 
 

@@ -1055,7 +1055,10 @@ def _create_model_from_provider(
     model_config = provider.get_model_config(model_slot.model)
     model = provider.get_chat_model_instance(
         model_slot.model,
-        generation_kwargs=provider.build_generation_kwargs(model_config),
+        generation_kwargs=provider.build_generation_kwargs(
+            model_config,
+            model_id=model_slot.model,
+        ),
     )
     return model_config, model
 

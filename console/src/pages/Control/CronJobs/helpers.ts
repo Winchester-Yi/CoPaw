@@ -14,8 +14,8 @@ import {
   toNotificationDelayMinutes,
   type NotificationDelayUnit,
 } from "@/utils/cron";
-import type { CronParts } from "./components/parseCron";
-import { parseCron, serializeCron } from "./components/parseCron";
+import type { CronParts } from "@/utils/parseCron";
+import { parseCron, serializeCron } from "@/utils/parseCron";
 
 const MAX_SKILL_IDS_LENGTH = 200;
 

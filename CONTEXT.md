@@ -3251,3 +3251,43 @@ Domain Expert: "It exposes a Shared Conversation Snapshot made from at least one
 Developer: "Can the owner revoke or expire the link?"
 
 Domain Expert: "No. It is a Permanent Share Link: every generation creates a new opaque Share Token, and the link remains valid without time expiry or owner revocation."
+
+## Wealth Workbench Language
+
+Console-side domain language for the standalone-route Wealth Workbench page (ported from the single-file prototype 智能财富工作台.html).
+
+**Plan Draft (草稿)**:
+The unsubmitted form state of the Create Plan page. It is session-scoped and never persisted in the mock phase; durability is a concern of the later API-integration phase, not of the client.
+_Avoid_: localStorage draft, persisted draft, auto-saved artifact
+
+**Plan (规划)**:
+A wealth-domain work plan owned by its creator's sapId, composed of selected 经营场景 — each with its own Execution Schedule — and distributed to its Distribution Targets upon Plan Publication. A Plan is visible on the board both to its creator and to every Distribution Target; modification and removal are creator-only, recipients get a read-only view. A Plan comes into existence only through publication: there is no "saved but unpublished" Plan.
+_Avoid_: task, campaign, saved-unpublished plan, draft
+
+**Plan Publication (规划发布)**:
+The asynchronous server-side orchestration triggered when a Plan is created or a published Plan is modified: one scheduled job per selected scene, each broadcast to every Distribution Target, followed by skill/MCP distribution. The caller receives success once the Plan record is accepted; the board's status column reflects the aggregated distribution progress of these legs (and, for a recipient, the leg addressed to that recipient specifically).
+_Avoid_: synchronous publish, one job per plan, client-orchestrated fan-out
+
+**Execution Schedule (执行排程)**:
+The per-scene firing rule of a Plan, expressed with the same frequency model as the console's scheduled-task form (hourly / daily at a chosen time / weekly on chosen weekdays at a chosen time / custom cron). It is distinct from the scene's validity window (任务周期 + 起止日期), which bounds the campaign period and travels in the job's task text rather than in the firing rule.
+_Avoid_: cronExample as schedule, validity dates inside the cron expression, the prototype's 每日/每周/隔天-only picker
+
+**Workbench Role (角色)**:
+One of 客户经理 / 支行行长 / 分行中台. It gates page access in the Wealth Workbench through the Role Permission Matrix (角色权限矩阵) — the task pages (today / pending / done) are reachable only by 客户经理 — and selects the data scope of every view. In embedded deployment the Role is resolved from the host-supplied positionId, never chosen in-page. The host's position codes map as: 客户经理 = RB0101, 支行行长 = RB0208, 分行中台 = RB0304 or RB0906. A missing or unmapped positionId resolves to the pseudo-role unknown under deny-by-default: no page permissions, the entry renders a full-page "no access" notice, and no business data is loaded.
+_Avoid_: account type, user preference, switchable profile
+
+**Role Permission Matrix (角色权限矩阵)**:
+The single decision point for page access in the Wealth Workbench: each Workbench Role maps to the page groups it may open (board / create / tasks). Route guards, navigation, and top-bar affordances all read the Matrix; they never inspect account fields directly. Operation-level permissions are deliberately out of scope for now.
+_Avoid_: per-component role checks, boolean flags on accounts
+
+**Role Preview (角色预览)**:
+A mock-phase-only aid inside the Wealth Workbench that temporarily overrides the effective Workbench Role so a developer can confirm which pages each Role may access. It is not an identity source and never says "switch account": in production the host system's External Identity decides the Role, and the preview entry is hidden once real identity and APIs go live.
+_Avoid_: account switcher, identity provider, user selection feature, production role picker
+
+**sapId (用户工号)**:
+The single user-identity term of the Wealth Workbench domain: the employee id supplied by the host system for the current user. It is the same value the SWE runtime carries as X-User-Id / tenant_id, and it identifies both a Plan's creator and its Distribution Targets. Wealth-domain prose and schema columns say sapId; tenant_id and user_id are reserved for the infrastructure layer that transports the same value.
+_Avoid_: account id, employee number, switching identities
+
+**Distribution Target (分发目标)**:
+The set of 客户经理 who receive a published Plan. For 支行行长 and 分行中台 the creator picks them in a dedicated wizard step from the branch's user pool (the tenants-by-source API filtered client-side by the operator's own branch id), and the chosen sapId list travels with the publish request. A 客户经理 never picks targets: their Plan is distributed to themselves by default.
+_Avoid_: plan audience, CC list, sharing recipients

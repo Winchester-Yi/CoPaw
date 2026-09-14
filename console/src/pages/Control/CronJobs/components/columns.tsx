@@ -5,7 +5,7 @@ import { Popover, Tag } from "antd";
 import type { CronJobSpecOutput } from "../../../../api/types";
 import { CopyOutlined, MoreOutlined } from "@ant-design/icons";
 import { TFunction } from "i18next";
-import { parseCron } from "./parseCron";
+import { parseCron } from "../../../../utils/parseCron";
 import { copyToClipboard } from "../../../../utils/clipboard";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { formatExecutionModelLabel } from "@/hooks/useExecutionModelOptions";

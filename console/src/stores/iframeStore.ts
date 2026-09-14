@@ -100,6 +100,8 @@ const initialState: IframeContext = {
   sessionId: null,
   taskId: null,
   hideChat: false,
+  pageSource: null,
+  plantformSource: null,
 };
 
 export const useIframeStore = create<IframeStore>()(
@@ -151,6 +153,8 @@ export const useIframeStore = create<IframeStore>()(
         positionId: state.positionId,
         userChange: state.userChange,
         hideChat: state.hideChat,
+        pageSource: state.pageSource,
+        plantformSource: state.plantformSource,
         // isOriginY 仅描述本次页面入口，不持久化到后续访问。
         // 导航参数不需要持久化，只在首次加载时使用
       }),

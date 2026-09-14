@@ -757,7 +757,17 @@
   "modelSelector": {
     "selectModel": "选择模型",
     "noConfiguredModels": "暂无已配置模型",
-    "switchFailed": "切换模型失败"
+    "switchFailed": "切换模型失败",
+    "settings": "模型配置",
+    "thinkingMode": "思考模式",
+    "thinkingEffort": "思考强度",
+    "selectThinkingEffort": "请选择思考强度",
+    "reasoningLow": "低",
+    "reasoningHigh": "高",
+    "reasoningMax": "极高",
+    "reasoningLowHint": "更快响应",
+    "reasoningHighHint": "平衡推理效果与速度",
+    "reasoningMaxHint": "优先推理质量"
   },
   "models": {
     "breadcrumbLabel": "模型管理页面路径",

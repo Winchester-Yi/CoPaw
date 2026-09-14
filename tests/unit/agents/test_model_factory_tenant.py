@@ -874,7 +874,9 @@ class TestScopedModelSlotOverride:
                 lambda _model_id: current_config
             )
             provider.build_generation_kwargs.side_effect = (
-                lambda config: config.generation_kwargs("max_tokens")
+                lambda config, **_kwargs: config.generation_kwargs(
+                    "max_tokens",
+                )
             )
             provider.get_chat_model_instance.side_effect = [
                 first_model,

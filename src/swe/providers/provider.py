@@ -167,6 +167,7 @@ class Provider(ProviderInfo, ABC):
     def build_generation_kwargs(
         self,
         model_config: ModelRuntimeConfig,
+        model_id: str = "",
     ) -> dict[str, Any]:
         """Map model runtime configuration to this provider's API shape."""
         return model_config.generation_kwargs(self._output_length_key)
@@ -267,12 +268,6 @@ class Provider(ProviderInfo, ABC):
             )
             if selected not in supported:
                 updates = {**updates, "reasoning_effort": None}
-        supports_thinking = updates.get(
-            "supports_enable_thinking",
-            current.supports_enable_thinking,
-        )
-        if updates.get("enable_thinking") is False and supports_thinking:
-            updates = {**updates, "reasoning_effort": None}
         updated = ModelRuntimeConfig.model_validate(
             {**current.model_dump(), **updates},
         )

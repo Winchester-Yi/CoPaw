@@ -802,7 +802,10 @@ class ProviderManager:
         model_config = provider.get_model_config(model.model)
         return provider.get_chat_model_instance(
             model.model,
-            generation_kwargs=provider.build_generation_kwargs(model_config),
+            generation_kwargs=provider.build_generation_kwargs(
+                model_config,
+                model_id=model.model,
+            ),
         )
 
     def _prepare_disk_storage(self):

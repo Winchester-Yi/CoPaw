@@ -14,7 +14,7 @@ from openai import APIError, AsyncOpenAI
 from swe.providers.chat_model_registry import (
     is_openai_compatible_chat_model,
 )
-from swe.providers.provider import ModelInfo, Provider
+from swe.providers.provider import ModelInfo, ModelRuntimeConfig, Provider
 
 if TYPE_CHECKING:
     from swe.providers.multimodal_prober import ProbeResult
@@ -27,6 +27,49 @@ CODING_DASHSCOPE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 
 class OpenAIProvider(Provider):
     """Provider implementation for OpenAI API and compatible endpoints."""
+
+    def build_generation_kwargs(
+        self,
+        model_config: ModelRuntimeConfig,
+        model_id: str = "",
+    ) -> dict[str, Any]:
+        """Map thinking settings to the selected compatible model API."""
+        result = super().build_generation_kwargs(
+            model_config,
+            model_id=model_id,
+        )
+        thinking = result.pop("enable_thinking", None)
+        effort = result.pop("reasoning_effort", None)
+        normalized_model_id = model_id.casefold()
+
+        if "deepseek" in normalized_model_id:
+            if thinking is not None:
+                result["extra_body"] = {
+                    "thinking": {
+                        "type": "enabled" if thinking else "disabled",
+                    },
+                }
+            if effort is not None:
+                result["reasoning_effort"] = effort
+            return result
+
+        if "minimax" in normalized_model_id:
+            if thinking is not None:
+                result["extra_body"] = {
+                    "thinking": {
+                        "type": "adaptive" if thinking else "disabled",
+                    },
+                }
+            return result
+
+        extra_body: dict[str, Any] = {}
+        if thinking is not None:
+            extra_body["enable_thinking"] = thinking
+        if effort is not None:
+            extra_body["reasoning_effort"] = effort
+        if extra_body:
+            result["extra_body"] = extra_body
+        return result
 
     def update_config(self, config: dict) -> None:
         """Allow OpenAI-compatible providers to switch local chat model."""

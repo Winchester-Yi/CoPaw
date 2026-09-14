@@ -186,6 +186,8 @@ async function handleUserDataMessage(
     parentOrigin: origin,
     bbk: message.data.bbkId || message.data.bbkOrgId || null,
     hideChat: toBoolean(message.data.hideChat),
+    pageSource: message.data.pageSource || null,
+    plantformSource: message.data.plantformSource || null,
   });
 
   // 等待 userName 获取完成后再标记初始化完成

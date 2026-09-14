@@ -30,6 +30,8 @@ export interface HtmlTrackerPayloadType {
   result_id?: string | null;
   event_target_id?: string | null;
   event_target_name?: string | null;
+  page_source?: string | null;
+  plantform_source?: string | null;
 }
 
 export interface HtmlPreviewClickSubmitResponse {
