@@ -104,11 +104,11 @@ async def test_distribute_skill_returns_task_submission(tmp_path, monkeypatch):
         for call in app.state.db.execute.await_args_list
         if "INSERT INTO swe_async_tasks" in call.args[0]
     )
-    assert task_insert_call.args[1][5] == "分发技能「skill-a」，目标 1 个用户"
+    assert task_insert_call.args[1][6] == "分发技能「skill-a」，目标 1 个用户"
     item_insert_call = next(
         call
         for call in app.state.db.execute_many.await_args_list
-        if "INSERT INTO swe_async_task_items" in call.args[0]
+        if "INSERT IGNORE INTO swe_async_task_items" in call.args[0]
     )
     assert item_insert_call.args[1] == [
         (task_id, "tenant-a", "用户A", "queued", None, None),
@@ -178,7 +178,7 @@ async def test_distribute_skill_accepts_skill_id_reference(
         for call in app.state.db.execute.await_args_list
         if "INSERT INTO swe_async_tasks" in call.args[0]
     )
-    assert task_insert_call.args[1][5] == "分发技能「skill-a」，目标 1 个用户"
+    assert task_insert_call.args[1][6] == "分发技能「skill-a」，目标 1 个用户"
 
 
 @pytest.mark.asyncio
@@ -225,7 +225,7 @@ async def test_distribute_mcp_returns_task_submission(tmp_path, monkeypatch):
         for call in app.state.db.execute.await_args_list
         if "INSERT INTO swe_async_tasks" in call.args[0]
     )
-    assert task_insert_call.args[1][5] == "分发 MCP「demo」，目标 1 个用户"
+    assert task_insert_call.args[1][6] == "分发 MCP「demo」，目标 1 个用户"
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_distribute_mcp_accepts_client_key_reference(
         for call in app.state.db.execute.await_args_list
         if "INSERT INTO swe_async_tasks" in call.args[0]
     )
-    assert task_insert_call.args[1][5] == "分发 MCP「demo」，目标 1 个用户"
+    assert task_insert_call.args[1][6] == "分发 MCP「demo」，目标 1 个用户"
 
 
 @pytest.mark.asyncio
@@ -337,6 +337,55 @@ async def test_mcp_distribution_records_failed_item_target_name() -> None:
 
     assert store.items[0]["result"]["tenant_name"] == "用户A"
     assert store.items[0]["error_message"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_mcp_distribution_exception_keeps_item_id_in_task_result() -> (
+    None
+):
+    """MCP 分发异常兜底时，任务结果也应保留 item_id。"""
+
+    class FakeStore:
+        """记录后台任务写入参数的任务表替身。"""
+
+        def __init__(self) -> None:
+            self.finished: dict[str, Any] | None = None
+
+        async def mark_running(self, task_id: str) -> None:
+            del task_id
+
+        async def record_item_result(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def finish_task(self, **kwargs: Any) -> None:
+            self.finished = kwargs
+
+    class FakeService:
+        """抛出 MCP 分发异常的服务替身。"""
+
+        async def distribute_mcp(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise RuntimeError("service unavailable")
+
+    store = FakeStore()
+
+    await mcp_router._run_mcp_distribution_task(  # noqa: SLF001
+        task_id="task-1",
+        store=store,
+        svc=FakeService(),
+        source_id="src1",
+        item_id="mcp-a",
+        operator_id="admin",
+        operator_name="admin",
+        req=MCPDistributionRequest(target_tenant_ids=["tenant-a"]),
+    )
+
+    assert store.finished is not None
+    assert store.finished["result"] == {
+        "item_id": "mcp-a",
+        "status": "failed",
+        "error": "service unavailable",
+    }
 
 
 @pytest.mark.asyncio
@@ -416,3 +465,53 @@ async def test_skill_distribution_records_failed_item_per_result() -> None:
     assert store.finished["status"] == "partial_failed"
     assert store.finished["done_count"] == 2
     assert store.finished["failed_count"] == 1
+    assert store.finished["result"]["item_id"] == "skill-a"
+
+
+@pytest.mark.asyncio
+async def test_skill_distribution_exception_keeps_item_id_in_task_result() -> (
+    None
+):
+    """技能分发异常兜底时，任务结果也应保留 item_id。"""
+
+    class FakeStore:
+        """记录后台任务写入参数的任务表替身。"""
+
+        def __init__(self) -> None:
+            self.finished: dict[str, Any] | None = None
+
+        async def mark_running(self, task_id: str) -> None:
+            del task_id
+
+        async def record_item_result(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def finish_task(self, **kwargs: Any) -> None:
+            self.finished = kwargs
+
+    class FakeService:
+        """抛出技能分发异常的服务替身。"""
+
+        async def distribute_skill(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise RuntimeError("service unavailable")
+
+    store = FakeStore()
+
+    await skills_router._run_skill_distribution_task(  # noqa: SLF001
+        task_id="task-1",
+        store=store,
+        svc=FakeService(),
+        source_id="src1",
+        item_id="skill-a",
+        operator_id="admin",
+        operator_name="admin",
+        req=DistributeRequest(
+            target_type="user_id",
+            target_values=["tenant-a"],
+        ),
+        target_user_ids=["tenant-a"],
+    )
+
+    assert store.finished is not None
+    assert store.finished["result"]["item_id"] == "skill-a"

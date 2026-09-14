@@ -173,7 +173,7 @@ class MySkillItem(BaseModel):
     updated_at: Optional[str] = None  # 技能最后更新时间
     # 新增字段
     skill_id: str = ""  # 唯一标识符，跨租户共享
-    cn_name: str = Field(default="", max_length=50)  # 中文展示名
+    cn_name: str = Field(default="", max_length=256)  # 中文展示名
 
 
 class BatchOperationRequest(BaseModel):
@@ -233,6 +233,53 @@ class AsyncTaskSubmitResponse(BaseModel):
     task_id: str
     status: str = "queued"
     reused: bool = False
+
+
+class BatchDistributionRequest(BaseModel):
+    """批量分发技能和 MCP 请求体。"""
+
+    batch_id: str = Field(..., min_length=1, max_length=128)
+    skill_item_ids: list[str] = Field(default_factory=list)
+    mcp_item_ids: list[str] = Field(default_factory=list)
+    target_tenant_ids: list[str] = Field(default_factory=list)
+    overwrite: bool = True
+
+
+class BatchDistributionTask(BaseModel):
+    """批量分发中的单个异步任务。"""
+
+    task_id: str
+    resource_type: Literal["skill", "mcp"]
+    item_id: str
+    status: str = "queued"
+
+
+class BatchDistributionResponse(BaseModel):
+    """批量分发提交响应。"""
+
+    batch_id: str
+    status: str = "queued"
+    reused: bool = False
+    task_ids: list[str] = Field(default_factory=list)
+    tasks: list[BatchDistributionTask] = Field(default_factory=list)
+
+
+class BatchDistributionQueryItem(BaseModel):
+    """单个批次查询结果。"""
+
+    batch_id: str
+    status: str = "queued"
+    task_ids: list[str] = Field(default_factory=list)
+    tasks: list[BatchDistributionTask] = Field(default_factory=list)
+    total_task_count: int = 0
+    done_task_count: int = 0
+    failed_task_count: int = 0
+
+
+class BatchDistributionQueryResponse(BaseModel):
+    """批量分发查询响应。"""
+
+    batches: list[BatchDistributionQueryItem] = Field(default_factory=list)
 
 
 class FileTreeNode(BaseModel):

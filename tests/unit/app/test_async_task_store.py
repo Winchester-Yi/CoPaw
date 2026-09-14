@@ -53,10 +53,10 @@ async def test_start_task_inserts_master_and_items() -> None:
     assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
     assert "tenant_id" not in db.executed[0][0]
     assert db.executed[0][1] is not None
-    assert len(db.executed[0][1]) == 10
+    assert len(db.executed[0][1]) == 12
     assert db.executed[0][1][7] is None
     assert db.executed[0][1][8] is None
-    assert "INSERT INTO swe_async_task_items" in db.executed_many[0][0]
+    assert "INSERT IGNORE INTO swe_async_task_items" in db.executed_many[0][0]
     assert db.executed_many[0][1] == [
         ("task-1", "tenant-a", None, "queued", None, None),
         ("task-1", "tenant-b", None, "queued", None, None),
@@ -78,7 +78,7 @@ async def test_start_task_generates_title_from_task_type() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[4] == "模型分发"
+    assert params[5] == "模型分发"
 
 
 @pytest.mark.asyncio
@@ -96,7 +96,7 @@ async def test_start_task_generates_summary_from_task_type() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[5] == "向 2 个用户分发供应商配置"
+    assert params[6] == "向 2 个用户分发供应商配置"
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_start_task_keeps_explicit_summary() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[5] == "将任务 job-1 广播到 2 个用户"
+    assert params[6] == "将任务 job-1 广播到 2 个用户"
 
 
 @pytest.mark.asyncio
@@ -155,8 +155,8 @@ async def test_start_task_keeps_empty_actor_fields() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[7] == ""
     assert params[8] == ""
+    assert params[9] == ""
 
 
 @pytest.mark.asyncio

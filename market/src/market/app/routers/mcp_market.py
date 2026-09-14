@@ -155,7 +155,10 @@ async def _run_mcp_distribution_task(
                 task_id=task_id,
                 target_id=item.tenant_id,
                 success=item.success,
-                result=item.model_dump(),
+                result={
+                    **item.model_dump(),
+                    "item_id": item_id,
+                },
                 error_message=item.error,
             )
             if item.success:
@@ -172,7 +175,10 @@ async def _run_mcp_distribution_task(
             done_count=done_count,
             failed_count=failed_count,
             error_message=None if failed_count == 0 else "部分目标分发失败",
-            result=result.model_dump(),
+            result={
+                **result.model_dump(),
+                "item_id": item_id,
+            },
         )
     except Exception as exc:  # pylint: disable=broad-except
         for tenant_id in req.target_tenant_ids:
@@ -197,6 +203,11 @@ async def _run_mcp_distribution_task(
                 done_count=0,
                 failed_count=len(req.target_tenant_ids),
                 error_message=str(exc),
+                result={
+                    "item_id": item_id,
+                    "status": "failed",
+                    "error": str(exc),
+                },
             )
         except Exception:
             logger.warning(
