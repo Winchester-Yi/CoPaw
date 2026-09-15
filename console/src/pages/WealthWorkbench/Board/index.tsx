@@ -70,10 +70,7 @@ export default function Board() {
     [all, boardTab],
   );
 
-  const total = all.reduce((s, p) => s + p.tasks, 0);
-  const rate = total
-    ? Math.round(all.reduce((s, p) => s + p.tasks * p.rate, 0) / total)
-    : 0;
+  // 已生成任务数 / 任务执行率的统计依赖任务实例接口，待接入后恢复计算（见下方统计卡注释）
   const sceneCount = new Set(
     all.flatMap((p) => p.items?.map((x) => x.id) ?? []),
   ).size;
@@ -278,7 +275,8 @@ export default function Board() {
     },
     {
       icon: "check",
-      n: total.toLocaleString(),
+      // n: total.toLocaleString(),
+      n: "--",
       title: "已生成任务",
       detail: "较上月",
       val: "+18% ↗",
@@ -286,7 +284,8 @@ export default function Board() {
     },
     {
       icon: "users",
-      n: rate + "%",
+      // n: rate + "%",
+      n: "--",
       title: "任务执行率",
       detail: "较上月",
       val: "+5% ↗",

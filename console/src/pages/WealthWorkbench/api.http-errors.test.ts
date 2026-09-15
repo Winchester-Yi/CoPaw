@@ -7,11 +7,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "./api";
 import { request } from "../../api/request";
-import type { DistributeTarget } from "./types";
+import type { Account, DistributeTarget } from "./types";
 
 vi.mock("../../api/request", () => ({ request: vi.fn() }));
 
 const mockRequest = vi.mocked(request);
+
+const RM_ACCOUNT: Account = {
+  id: "rm",
+  name: "张**",
+  role: "客户经理",
+  department: "xxx支行",
+  source: "我的关注",
+};
 
 const RM_TARGET: DistributeTarget = {
   sapId: "rm",
@@ -24,8 +32,7 @@ function httpError(status: number, message: string): Error {
 }
 
 async function publishWithDefaults() {
-  const account = (await api.fetchAccounts())[0];
-  return api.publishPlan(account, api.newAccountDraft(), null, [RM_TARGET]);
+  return api.publishPlan(RM_ACCOUNT, api.newAccountDraft(), null, [RM_TARGET]);
 }
 
 describe("WealthWorkbench api 错误传播", () => {

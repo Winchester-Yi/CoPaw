@@ -19,21 +19,19 @@ export interface Account {
   source: string;
 }
 
-/** 经营场景（/wealth/scene-skills 返回，外部接口或后端兜底的统一形状） */
+/** 经营场景（/wealth/scene-skills 返回，与外部 skill-config 接口字段对齐） */
 export interface Scene {
-  /** 场景标识：外部接口 skillId，兜底为 skill-wealth-{code}-{n} */
+  /** 场景标识：外部接口 skillId */
   id: string;
   /** 外部接口 itemId，发布时回传 */
   itemId?: string | null;
   name: string;
-  /** 产品大类中文名：保险 / 理财 / 存款 / 代发 / 跨境 / 基金 */
+  /** 产品大类中文名：保险 / 贷款 / 存款 / 理财 / 基金 / 代发 */
   category: string;
-  /** 产品大类英文 code：insurance / finance / deposit / payroll / cross_border / fund */
+  /** 产品大类英文 code：insurance / loan / deposit / finance / fund / payroll */
   categoryCode: string;
   icon: string;
   desc: string;
-  /** AI 能力是否就绪 */
-  ready: boolean;
   /** 来源标签：总部预置 / 分行自建 */
   source: string;
   cronExample?: string | null;
@@ -101,10 +99,16 @@ export interface DistributeTarget {
 
 /** 客户 / 触达记录 */
 export interface Customer {
-  id: number;
+  /** 页面内唯一标识：`${skillId}|${custUid}`（同一客户可出现在多个任务下） */
+  id: string;
+  /** 外部 name-list 返回的客户 UID */
+  custUid: string;
+  /** 所属经营场景的技能 ID（触达登记/名单接口入参） */
+  skillId: string;
   name: string;
-  /** 重点标签：总行重点 / 分行重点 / 行长指派 */
+  /** 重点标签：总行重点 / 分行重点 / 行长指派（真实名单暂无此概念，置空） */
   label: string;
+  /** 推荐理由（外部 name-list 的 recomReason） */
   reason: string;
   category: string;
   task: string;
@@ -113,4 +117,6 @@ export interface Customer {
   time: string;
   note: string;
   opportunities?: string[];
+  /** 客户详情跳转链接（外部 name-list 的 filename，可直接 iframe 渲染） */
+  link?: string;
 }

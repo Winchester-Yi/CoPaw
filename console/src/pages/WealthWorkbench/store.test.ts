@@ -7,8 +7,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMockDb } from "./api";
 import { request } from "../../api/request";
 import { useIframeStore } from "../../stores/iframeStore";
-import { useWealthStore, validateDraft, planScheduledOn } from "./store";
-import { cycleRange, DEFAULT_SCHEDULE } from "./utils";
+import {
+  useWealthStore,
+  selectCurrentAccount,
+  validateDraft,
+  planScheduledOn,
+} from "./store";
+import { cycleRange, DEFAULT_SCHEDULE, todayKey } from "./utils";
 import type { Plan, PlanItem } from "./types";
 
 vi.mock("../../api/request", () => ({ request: vi.fn() }));
@@ -18,7 +23,25 @@ const mockRequest = vi.mocked(request);
 const INSURANCE = "skill-wealth-insurance-1";
 const INSURANCE_2 = "skill-wealth-insurance-2";
 const FINANCE = "skill-wealth-finance-3";
-const NOT_READY = "skill-wealth-cross_border-7";
+const LOAN = "skill-wealth-loan-4";
+
+/** 客户名单夹具：仅 LOAN 技能返回两个客户，其余技能为空 */
+const NAME_LIST_FIXTURE = [
+  {
+    custUid: "CUST001",
+    custNm: "张三",
+    sapId: "10086",
+    filename: "http://example/cust001",
+    recomReason: "命中贷款核验规则",
+  },
+  {
+    custUid: "CUST002",
+    custNm: "李四",
+    sapId: "10086",
+    filename: "http://example/cust002",
+    recomReason: "",
+  },
+];
 
 /** 后端 /wealth/plans 的返回形状（PlanView 夹具） */
 interface FixturePlanView {
@@ -110,7 +133,6 @@ const SCENE_FIXTURES = [
     senceDesc: "挖掘高潜保险客户",
     mcpRelationList: ["mcp-customer", "mcp-insurance"],
     skillBbkLabel: "总部预置",
-    ready: true,
   },
   {
     skillId: INSURANCE_2,
@@ -120,7 +142,6 @@ const SCENE_FIXTURES = [
     senceDesc: "识别客户保障缺口",
     mcpRelationList: ["mcp-customer", "mcp-insurance"],
     skillBbkLabel: "总部预置",
-    ready: true,
   },
   {
     skillId: FINANCE,
@@ -130,17 +151,15 @@ const SCENE_FIXTURES = [
     senceDesc: "优先承接近期到期资金",
     mcpRelationList: ["mcp-wealth"],
     skillBbkLabel: "总部预置",
-    ready: true,
   },
   {
-    skillId: NOT_READY,
-    itemId: "item-wealth-cross_border-7",
-    senceName: "跨境客户经营",
-    category: "cross_border",
-    senceDesc: "拓展跨境客户",
-    mcpRelationList: ["mcp-cross-border"],
+    skillId: LOAN,
+    itemId: "item-wealth-loan-4",
+    senceName: "信贷需求挖掘",
+    category: "loan",
+    senceDesc: "识别潜在信贷客户",
+    mcpRelationList: ["mcp-loan"],
     skillBbkLabel: "总部预置",
-    ready: false,
   },
 ];
 
@@ -158,6 +177,11 @@ async function requestHandler(
         ? SCENE_FIXTURES.filter((s) => s.category === category)
         : SCENE_FIXTURES,
     };
+  }
+  if (path.startsWith("/wealth/name-list")) {
+    const skillId =
+      new URL(path, "http://test").searchParams.get("skill_id") ?? "";
+    return { items: skillId === LOAN ? NAME_LIST_FIXTURE : [] };
   }
   if (path === "/wealth/plans" && method === "GET") {
     return { items: planViews };
@@ -201,20 +225,49 @@ function makeItem(patch: Partial<PlanItem> = {}): PlanItem {
   };
 }
 
+/** 构造一个「今天有排程」的已发布规划（日期按运行当天动态计算，保证测试与日期无关） */
+function makeTodayPlan(): Plan {
+  const today = todayKey();
+  return {
+    id: "plan-today",
+    name: "今日规划",
+    source: "我的关注",
+    desc: "",
+    customers: 0,
+    tasks: 0,
+    rate: 0,
+    status: "已自动下发",
+    publishStatus: "published",
+    period: "自定义",
+    start: today,
+    end: today,
+    items: [
+      makeItem({
+        id: LOAN,
+        sceneName: "信贷需求挖掘",
+        categoryLabel: "贷款",
+        categoryCode: "loan",
+        start: today,
+        end: today,
+      }),
+    ],
+  };
+}
+
 async function initStore() {
   resetMockDb();
   planViews = fixturePlanViews();
   mockRequest.mockImplementation(requestHandler as never);
   // 显式声明测试身份为客户经理（RB0101），不依赖 FALLBACK_ROLE 兜底
-  useIframeStore.setState({ positionId: "RB0101" });
+  useIframeStore.setState({ positionId: "RB0101", userId: null });
   useWealthStore.setState({
     initialized: false,
-    accounts: [],
     accountId: "rm",
     scenesByCategory: {},
     scenesLoading: false,
     plans: [],
     customers: [],
+    customersLoading: false,
     history: [],
     draft: { name: "", items: [] },
     savedAt: "",
@@ -252,9 +305,11 @@ describe("WealthWorkbench store", () => {
     await initStore();
   });
 
-  it("init 加载账户与工作台数据；场景不进系统时预加载", () => {
+  it("init 加载工作台数据并推导真实身份账户；场景不进系统时预加载", () => {
     const s = useWealthStore.getState();
-    expect(s.accounts).toHaveLength(3);
+    // initStore 声明岗位 RB0101 → 客户经理，账户信息来自真实身份推导而非 mock 列表
+    expect(selectCurrentAccount(s).role).toBe("客户经理");
+    expect(selectCurrentAccount(s).source).toBe("我的关注");
     expect(s.scenesByCategory).toEqual({});
     expect(s.plans).toHaveLength(6);
     expect(s.draft).toEqual({ name: "", items: [] });
@@ -270,7 +325,7 @@ describe("WealthWorkbench store", () => {
     expect(sceneCalls()).toBe(2);
     expect(
       useWealthStore.getState().scenesByCategory[""]?.map((s) => s.id),
-    ).toEqual([INSURANCE, INSURANCE_2, FINANCE, NOT_READY]);
+    ).toEqual([INSURANCE, INSURANCE_2, FINANCE, LOAN]);
 
     const { toggleScene } = useWealthStore.getState();
     const ids = () => useWealthStore.getState().draft.items.map((x) => x.id);
@@ -278,7 +333,7 @@ describe("WealthWorkbench store", () => {
     expect(ids()).toEqual([INSURANCE]);
     toggleScene(INSURANCE_2);
     expect(ids()).toEqual([INSURANCE, INSURANCE_2]);
-    toggleScene(NOT_READY); // 能力建设中
+    toggleScene("skill-not-in-pool"); // 场景池外的 id 为无效操作
     expect(ids()).toEqual([INSURANCE, INSURANCE_2]);
     toggleScene(INSURANCE_2);
     expect(ids()).toEqual([INSURANCE]);
@@ -397,7 +452,7 @@ describe("WealthWorkbench store", () => {
   });
 
   it("publishPlan 行长未选分发目标时校验失败", async () => {
-    await useWealthStore.getState().previewRole("president");
+    useWealthStore.setState({ accountId: "president" });
     seedDraft();
     const ok = await useWealthStore.getState().publishPlan();
     expect(ok).toBe(false);
@@ -406,7 +461,7 @@ describe("WealthWorkbench store", () => {
   });
 
   it("publishPlan 行长选择分发目标后发布成功并记录 sapIds", async () => {
-    await useWealthStore.getState().previewRole("president");
+    useWealthStore.setState({ accountId: "president" });
     seedDraft();
     useWealthStore.getState().toggleTarget("zhangwl");
     useWealthStore.getState().toggleTarget("chenjy");
@@ -424,35 +479,51 @@ describe("WealthWorkbench store", () => {
     expect(useWealthStore.getState().targetSapIds).toEqual([]);
   });
 
+  it("loadTodayCustomers 客户视角传 sapId 拉取今日名单，经营视角不传", async () => {
+    useIframeStore.setState({ userId: "10086" });
+    useWealthStore.setState({ plans: [makeTodayPlan()] });
+    const nameListCalls = () =>
+      mockRequest.mock.calls
+        .filter(([p]) => String(p).startsWith("/wealth/name-list"))
+        .map(([p]) => String(p));
+
+    await useWealthStore.getState().loadTodayCustomers("customer");
+    expect(nameListCalls().slice(-1)[0]).toContain("sap_id=10086");
+    const customers = useWealthStore.getState().customers;
+    expect(customers).toHaveLength(2);
+    expect(customers[0]).toMatchObject({
+      id: `${LOAN}|CUST001`,
+      task: "信贷需求挖掘",
+      category: "贷款",
+      reason: "命中贷款核验规则",
+      done: false,
+    });
+
+    await useWealthStore.getState().loadTodayCustomers("business");
+    expect(nameListCalls().slice(-1)[0]).not.toContain("sap_id=");
+  });
+
+  it("触达登记后切换视角重新拉取，触达结果回填", async () => {
+    useWealthStore.setState({ plans: [makeTodayPlan()] });
+    await useWealthStore.getState().loadTodayCustomers("business");
+    const id = useWealthStore.getState().customers[0]?.id ?? "";
+    await useWealthStore.getState().reportContact(id, "电话", "done", "已沟通");
+    expect(
+      useWealthStore.getState().customers.find((c) => c.id === id)?.done,
+    ).toBe(true);
+
+    await useWealthStore.getState().loadTodayCustomers("customer");
+    expect(
+      useWealthStore.getState().customers.find((c) => c.id === id)?.done,
+    ).toBe(true);
+  });
+
   it("editPlan 将规划内容载入草稿并设置编辑态", () => {
     useWealthStore.getState().editPlan("plan-demo-2");
     const s = useWealthStore.getState();
     expect(s.editingId).toBe("plan-demo-2");
     expect(s.draft.name).toBe("产品到期承接");
     expect(s.draft.items.length).toBeGreaterThan(0);
-  });
-
-  it("previewRole 切换预览角色并恢复目标账户草稿", async () => {
-    const store = useWealthStore.getState();
-    store.setDraftName("客户经理的草稿");
-    await useWealthStore.getState().previewRole("president");
-    let s = useWealthStore.getState();
-    expect(s.accountId).toBe("president");
-    expect(s.editingId).toBeNull();
-    expect(s.draft).toEqual({ name: "", items: [] });
-    expect(s.toastText).toContain("角色视角预览");
-    await useWealthStore.getState().previewRole("rm");
-    s = useWealthStore.getState();
-    expect(s.draft.name).toBe("客户经理的草稿");
-  });
-
-  it("previewRole 拒绝非法角色与相同角色", async () => {
-    const before = useWealthStore.getState().toastSeq;
-    await useWealthStore.getState().previewRole("nobody" as never);
-    await useWealthStore.getState().previewRole("rm");
-    const s = useWealthStore.getState();
-    expect(s.accountId).toBe("rm");
-    expect(s.toastSeq).toBe(before);
   });
 
   it("removePlan 移除规划并提示", async () => {

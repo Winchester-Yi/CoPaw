@@ -6,7 +6,6 @@
  *   组件与路由守卫一律经 canAccessPage 判定，不再各自读账户字段。
  * - 生产环境角色由父系统身份解析：cookie positionID 经 handleUrlOriginParam
  *   写入 iframeStore.positionId，再由 resolveRole 映射为角色。
- * - mock 期的「角色预览」只是临时覆盖生效角色，见 store.previewRole。
  *
  * 矩阵（与原型一致的最小版本）：
  * - 三个角色均可访问 规划看板 / 创建计划；
@@ -46,6 +45,20 @@ export const POSITION_ROLE_MAP: Record<string, WealthRole> = {
   RB0208: "president",
   RB0304: "middle",
   RB0906: "middle",
+};
+
+/**
+ * 角色展示元数据（非 mock）：角色显示名 + 发布入参的规划来源标签。
+ * source 与后端 SOURCE_LABEL_BY_ROLE 保持一致。
+ */
+export const ROLE_ACCOUNT_META: Record<
+  WealthRole,
+  { role: string; source: string }
+> = {
+  rm: { role: "客户经理", source: "我的关注" },
+  president: { role: "支行行长", source: "行长关注" },
+  middle: { role: "分行中台", source: "分行关注" },
+  unknown: { role: "未识别", source: "" },
 };
 
 /** 由父系统岗位编号解析工作台角色；未命中时回退 FALLBACK_ROLE 并留痕 */

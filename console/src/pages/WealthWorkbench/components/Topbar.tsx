@@ -1,11 +1,9 @@
 /**
- * 智能财富工作台 —— 顶部栏：品牌、标题、通知、角色预览
+ * 智能财富工作台 —— 顶部栏：品牌、标题、通知、当前账户
  */
 import { useNavigate } from "react-router-dom";
 import styles from "../index.module.less";
-import { IS_MOCK } from "../api";
 import { selectCurrentAccount, useCanAccess, useWealthStore } from "../store";
-import { AccountSwitcher } from "./AccountSwitcher";
 import { Icon } from "./Icon";
 
 /** 消息通知弹窗（原型 showNotifications） */
@@ -22,8 +20,8 @@ function NotificationsDialogBody() {
         <div className={styles.recommendation}>
           <h3>今日客户清单已准备</h3>
           <p>
-            目标客户 28 人，尚有 {customers.filter((c) => !c.done).length}{" "}
-            人待触达。
+            目标客户 {customers.length} 人，尚有{" "}
+            {customers.filter((c) => !c.done).length} 人待触达。
           </p>
         </div>
       ) : (
@@ -100,14 +98,8 @@ export function Topbar() {
           <Icon name="bell" />
         </button>
         <span className={styles.sep}></span>
-        {IS_MOCK && (
-          <>
-            <AccountSwitcher />
-            <span className={styles.sep}></span>
-          </>
-        )}
         <span className={`${styles.department} ${styles.subtle}`}>
-          {account?.department}
+          {[account?.name, account?.department].filter(Boolean).join(" · ")}
         </span>
       </div>
     </header>

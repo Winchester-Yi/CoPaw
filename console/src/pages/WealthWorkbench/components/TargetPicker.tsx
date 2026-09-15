@@ -1,6 +1,6 @@
 /**
  * 智能财富工作台 —— 分发目标选择器（支行行长 / 分行中台发布规划时使用）
- * 用户池来自 distributeTargets.ts（真实接口按 bbk 过滤，无身份时回退 mock 池），
+ * 用户池来自 distributeTargets.ts（真实接口按 bbk 过滤，查不到时显示无数据），
  * 选中结果写入 store.targetSapIds，发布规划时随请求上传。
  */
 import { useEffect, useMemo, useState } from "react";

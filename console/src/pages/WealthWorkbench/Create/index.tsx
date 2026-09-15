@@ -277,7 +277,8 @@ export default function Create() {
   const scenesByCategory = useWealthStore((s) => s.scenesByCategory);
   const scenesLoading = useWealthStore((s) => s.scenesLoading);
   const loadScenes = useWealthStore((s) => s.loadScenes);
-  const savedAt = useWealthStore((s) => s.savedAt);
+  // 「保存草稿」功能暂缓上线，入口已注释；恢复时一并解开下方 saveDraft 与 savedAt
+  // const savedAt = useWealthStore((s) => s.savedAt);
   const editingId = useWealthStore((s) => s.editingId);
   const toggleScene = useWealthStore((s) => s.toggleScene);
   const moveScene = useWealthStore((s) => s.moveScene);
@@ -286,7 +287,7 @@ export default function Create() {
   const setDraftName = useWealthStore((s) => s.setDraftName);
   const normalizeDraft = useWealthStore((s) => s.normalizeDraft);
   const clearEditingId = useWealthStore((s) => s.clearEditingId);
-  const saveDraft = useWealthStore((s) => s.saveDraft);
+  // const saveDraft = useWealthStore((s) => s.saveDraft);
   const publishPlan = useWealthStore((s) => s.publishPlan);
   const openDialog = useWealthStore((s) => s.openDialog);
   const toast = useWealthStore((s) => s.toast);
@@ -481,9 +482,7 @@ export default function Create() {
                       styles.scene,
                       i < 3 && filterCategory === "全部" && styles.featured,
                       chosen && styles.selected,
-                      !s.ready && styles.disabled,
                     )}
-                    disabled={!s.ready}
                     aria-pressed={chosen}
                     onClick={() => toggleScene(s.id)}
                   >
@@ -499,11 +498,9 @@ export default function Create() {
                         <span className={styles.tag}>{s.category}</span>
                       </div>
                       <p>{s.desc}</p>
-                      <span
-                        className={cx(styles.status, !s.ready && styles.gray)}
-                      >
+                      <span className={styles.status}>
                         <i className={styles.dot}></i>
-                        {s.ready ? "AI能力已就绪" : "能力建设中"}
+                        AI能力已就绪
                         <span
                           className={styles.muted}
                           style={{ marginLeft: 6 }}
@@ -549,7 +546,6 @@ export default function Create() {
                     categoryCode: x.categoryCode,
                     icon: "layer",
                     desc: x.direction,
-                    ready: true,
                     source: "",
                     mcpRelations: x.mcpRelations,
                   } as Scene);
@@ -668,9 +664,11 @@ export default function Create() {
       </div>
 
       <div className={styles.footerActions}>
+        {/* 「保存草稿」功能暂缓上线：入口与提示先注释，store/api 能力保留
         <span className={styles.draftNote}>
           {savedAt ? `草稿已保存 · ${savedAt}` : "可保存草稿，稍后继续编辑"}
         </span>
+        */}
         <button
           className={styles.btn}
           onClick={() =>
@@ -679,9 +677,11 @@ export default function Create() {
         >
           上一步
         </button>
+        {/*
         <button className={styles.btn} onClick={() => void saveDraft()}>
           保存草稿
         </button>
+        */}
         <button
           className={`${styles.btn} ${styles.primary}`}
           onClick={onPublish}

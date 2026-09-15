@@ -18,11 +18,11 @@ export type TaskPageKind = "today" | "pending" | "done";
 /** 任务树大类图标（对应 Icon 组件的命名） */
 const CATEGORY_ICONS: Record<string, string> = {
   保险: "shield",
+  贷款: "bank",
+  存款: "safe",
   理财: "money",
-  存款: "bank",
-  代发: "user",
-  跨境: "globe",
   基金: "pie",
+  代发: "user",
 };
 
 /** 树节点来源标签的配色：复用重点标签的既有色板 */
@@ -139,8 +139,10 @@ function labelTagClass(label: string) {
 export default function Tasks({ page }: { page: TaskPageKind }) {
   const canViewTasks = useCanAccess("tasks");
   const customers = useWealthStore((s) => s.customers);
+  const customersLoading = useWealthStore((s) => s.customersLoading);
   const history = useWealthStore((s) => s.history);
   const plans = useWealthStore((s) => s.plans);
+  const loadTodayCustomers = useWealthStore((s) => s.loadTodayCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
   const reportContactSaveRef = useRef<() => void>(() => {});
   const navigate = useNavigate();
@@ -312,11 +314,11 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     choices[next]?.focus();
   };
 
-  const getCustomer = (id: number) =>
+  const getCustomer = (id: string) =>
     [...customers, ...history].find((c) => c.id === id);
 
   /** 客户经营方案弹窗（原型 showScheme） */
-  const showScheme = (id: number) => {
+  const showScheme = (id: string) => {
     const c = getCustomer(id);
     if (!c) return;
     openDialog({
@@ -380,7 +382,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   };
 
   /** 触达登记弹窗（原型 contact） */
-  const contact = (id: number, channel: string) => {
+  const contact = (id: string, channel: string) => {
     const c = getCustomer(id);
     if (!c) return;
     openDialog({
@@ -406,7 +408,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   };
 
   /** 触达记录弹窗（原型 showResult） */
-  const showResult = (id: number) => {
+  const showResult = (id: string) => {
     const c = getCustomer(id);
     if (!c) return;
     openDialog({
@@ -505,6 +507,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 onClick={() => {
                   setView("business");
                   setTaskPage(1);
+                  void loadTodayCustomers("business");
                 }}
               >
                 经营视角
@@ -514,6 +517,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 onClick={() => {
                   setView("customer");
                   setTaskPage(1);
+                  void loadTodayCustomers("customer");
                 }}
               >
                 客户视角
@@ -755,8 +759,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 <tr>
                   <td colSpan={doneView ? 6 : 5}>
                     <div className={styles.empty}>
-                      {isBiz && selectedTask && !search.trim()
-                        ? `「${selectedTask}」的客户清单将由定时任务执行后生成，待任务实例接口接入后展示`
+                      {customersLoading
+                        ? "客户清单加载中…"
+                        : isBiz && selectedTask && !search.trim()
+                        ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
                         : "暂无符合条件的客户"}
                     </div>
                   </td>

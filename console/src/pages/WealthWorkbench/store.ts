@@ -4,7 +4,7 @@
  * 只承载跨页共享的领域数据（账户 / 场景池 / 规划 / 客户 / 草稿）与全局 UI（弹窗、Toast）。
  * 页面内视图状态（筛选、分页、日历锚点等）留在组件内 useState。
  * 规划与场景经由 api.ts 的真实接口（/wealth/plans、/wealth/scene-skills），
- * 后端不可达时 api 层自动回退内存 mock。
+ * 接口不可达时读路径返回空、写路径抛错提示，不做假数据兜底。
  */
 import { create } from "zustand";
 import type { ReactNode } from "react";
@@ -16,11 +16,13 @@ import {
   FALLBACK_ROLE,
   needsDistributeTargets,
   resolveRole,
+  ROLE_ACCOUNT_META,
   type WealthPage,
   type WealthRole,
 } from "./permissions";
 import { fetchDistributeTargets } from "./distributeTargets";
 import {
+  buildTaskTree,
   CYCLE_LABELS,
   cycleRange,
   DEFAULT_SCHEDULE,
@@ -56,8 +58,7 @@ export interface DialogState {
 
 interface WealthState {
   initialized: boolean;
-  accounts: Account[];
-  /** 生效角色对应的账户 id；生产环境由 positionId 解析，mock 期可被预览覆盖 */
+  /** 生效角色：由父系统 positionId 经 resolveRole 解析（见 permissions.ts） */
   accountId: WealthRole;
   /** 按大类缓存的经营场景（/wealth/scene-skills）；键为大类英文 code，空串表示全部 */
   scenesByCategory: Record<string, Scene[]>;
@@ -65,6 +66,8 @@ interface WealthState {
   scenesLoading: boolean;
   plans: Plan[];
   customers: Customer[];
+  /** 客户名单查询中（今日任务视角切换时重新拉取） */
+  customersLoading: boolean;
   history: Customer[];
   draft: Draft;
   savedAt: string;
@@ -79,10 +82,14 @@ interface WealthState {
   toastSeq: number;
 
   init: () => Promise<void>;
-  /** 角色预览：mock 期临时切换生效角色，仅用于查看各角色页面权限 */
-  previewRole: (id: WealthRole) => Promise<void>;
   /** 看板轮询：有规划处于发布中时刷新列表 */
   refreshPlans: () => Promise<void>;
+  /**
+   * 拉取今日任务的客户经营清单（/wealth/name-list）。
+   * 客户视角（customer）传当前登录人 sapId 只看自己名下客户；
+   * 经营视角（business）不传，看全分行客户池。仅客户经理可访问任务页。
+   */
+  loadTodayCustomers: (view: "business" | "customer") => Promise<void>;
 
   // —— 分发目标（行长/中台） ——
   loadTargets: () => Promise<void>;
@@ -111,7 +118,7 @@ interface WealthState {
 
   // —— 客户触达 ——
   reportContact: (
-    id: number,
+    id: string,
     channel: string,
     outcome: "done" | "pending",
     note: string,
@@ -123,13 +130,37 @@ interface WealthState {
   toast: (text: string) => void;
 }
 
-function currentAccountOf(state: {
-  accounts: Account[];
-  accountId: WealthRole;
-}): Account {
-  return (
-    state.accounts.find((a) => a.id === state.accountId) ?? state.accounts[0]
-  );
+/**
+ * 由生效角色推导当前账户：角色元数据（显示名/来源标签）来自 ROLE_ACCOUNT_META，
+ * 姓名与机构取 iframeStore 的真实身份（父系统 cookie 链路），无任何 mock。
+ *
+ * 该函数同时是 useWealthStore 的 selector（见 selectCurrentAccount），
+ * zustand 以 Object.is 比较结果，因此按入参缓存、输入不变时返回同一引用，
+ * 避免每次渲染生成新对象导致的无限重渲染。
+ */
+let accountCacheKey = "";
+let accountCache: Account | null = null;
+
+function accountForRole(role: WealthRole): Account {
+  const { userName, orgCode } = useIframeStore.getState();
+  const key = `${role}|${userName ?? ""}|${orgCode ?? ""}`;
+  if (accountCache && accountCacheKey === key) {
+    return accountCache;
+  }
+  const meta = ROLE_ACCOUNT_META[role];
+  accountCacheKey = key;
+  accountCache = {
+    id: role,
+    name: userName ?? "",
+    role: meta.role,
+    department: orgCode ?? "",
+    source: meta.source,
+  };
+  return accountCache;
+}
+
+function currentAccountOf(state: { accountId: WealthRole }): Account {
+  return accountForRole(state.accountId);
 }
 
 /** 与原型 normalizeDraft 一致：补齐周期区间与排程 */
@@ -193,12 +224,12 @@ export {
 
 export const useWealthStore = create<WealthState>()((set, get) => ({
   initialized: false,
-  accounts: [],
   accountId: "rm",
   scenesByCategory: {},
   scenesLoading: false,
   plans: [],
   customers: [],
+  customersLoading: false,
   history: [],
   draft: { name: "", items: [] },
   savedAt: "",
@@ -218,32 +249,34 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       set({ initialized: true, accountId });
       return;
     }
-    const accounts = await api.fetchAccounts();
     const data = await api.fetchBootstrap(accountId);
-    set({ initialized: true, accounts, accountId, ...data });
-  },
-
-  previewRole: async (id) => {
-    const state = get();
-    if (!state.accounts.some((a) => a.id === id) || id === state.accountId)
-      return;
-    await api.stashDraft(state.accountId, state.draft, state.savedAt);
-    const data = await api.fetchBootstrap(id);
-    set({
-      accountId: id,
-      editingId: null,
-      targets: [],
-      targetsLoaded: false,
-      targetSapIds: [],
-      ...data,
-    });
-    const account = currentAccountOf(get());
-    get().toast(`正以「${account.role}」角色视角预览（演示）`);
+    set({ initialized: true, accountId, ...data });
+    await get().loadTodayCustomers("business");
   },
 
   refreshPlans: async () => {
     const plans = await api.fetchPlanList();
     set({ plans });
+  },
+
+  loadTodayCustomers: async (view) => {
+    const { accountId, plans } = get();
+    // 仅客户经理有任务页；行长/中台不发名单查询
+    if (!canAccessPage(accountId, "tasks")) return;
+    set({ customersLoading: true });
+    const tasks = buildTaskTree(plans, todayKey()).flatMap((g) =>
+      g.nodes.map((n) => ({
+        skillId: n.sceneId,
+        sceneName: n.sceneName,
+        category: g.category,
+      })),
+    );
+    const sapId =
+      view === "customer"
+        ? useIframeStore.getState().userId || undefined
+        : undefined;
+    const customers = await api.fetchTodayCustomers(tasks, sapId);
+    set({ customers, customersLoading: false });
   },
 
   loadTargets: async () => {
@@ -281,7 +314,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       const scene = Object.values(scenesByCategory)
         .flat()
         .find((s) => s.id === id);
-      if (!scene?.ready) return;
+      if (!scene) return;
       const range = cycleRange("本月");
       set({
         draft: {
@@ -488,10 +521,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
 
 /** 组装发布入参的分发目标（含姓名冗余）；客户经理默认发给自己 */
 function buildPublishTargets(
-  state: Pick<
-    WealthState,
-    "targets" | "targetSapIds" | "accounts" | "accountId"
-  >,
+  state: Pick<WealthState, "targets" | "targetSapIds" | "accountId">,
   account: Account,
 ): DistributeTarget[] {
   if (!needsDistributeTargets(account.id)) {
@@ -508,9 +538,9 @@ function buildPublishTargets(
   });
 }
 
-/** 当前账户；组件内配合 useWealthStore 使用 */
-export function selectCurrentAccount(s: WealthState): Account | undefined {
-  return s.accounts.find((a) => a.id === s.accountId);
+/** 当前账户（角色元数据 + iframeStore 真实身份推导）；组件内配合 useWealthStore 使用 */
+export function selectCurrentAccount(s: WealthState): Account {
+  return accountForRole(s.accountId);
 }
 
 /** 当前生效角色是否可访问某页面组；权限唯一判定入口（矩阵见 permissions.ts） */

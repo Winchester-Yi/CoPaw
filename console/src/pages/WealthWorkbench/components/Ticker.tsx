@@ -11,14 +11,14 @@ import { Icon } from "./Icon";
 function TickerGroup({ hidden }: { hidden?: boolean }) {
   return (
     <div className={styles.tickerGroup} aria-hidden={hidden || undefined}>
-      <span className={styles.tickerItem}>
+      {/* <span className={styles.tickerItem}>
         <span className={styles.tickerCategory}>市场行情</span>
         <span>
           上证指数 <b>3,258.76</b> <b className={styles.marketUp}>+0.62%</b>
-          {"　·　沪深300 "}
+          {"\u3000·\u3000沪深300 "}
           <b>3,826.45</b> <b className={styles.marketUp}>+0.48%</b>
         </span>
-      </span>
+      </span> */}
       <span className={styles.tickerItem}>
         <span className={styles.tickerCategory}>财经信息</span>
         <span>

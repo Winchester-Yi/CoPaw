@@ -33,6 +33,8 @@ from .models import (
     PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_PUBLISHING,
     PUBLISH_STATUS_PUBLISHED,
+    NameListItem,
+    NameListResponse,
     PlanCreateResponse,
     PlanListResponse,
     PlanSceneRecord,
@@ -56,10 +58,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wealth", tags=["wealth"])
 
-# 外部场景接口基础地址：默认值在 src/swe/config/envs/{dev,prd}.json 维护，
+# 外部 agent-workspace 服务基础地址（skill-config 与 name-list 同 host）：
+# 默认值在 src/swe/config/envs/{dev,prd}.json 维护，
 # 启动时由 load_env_defaults() 注入 os.environ；进程环境变量/K8s env 优先。
 _SKILL_CONFIG_API_BASE_ENV = "SWE_SKILL_CONFIG_API_BASE"
 _SKILL_CONFIG_PATH = "/api/agent/workspace/skill-config/list"
+_NAME_LIST_PATH = "/api/agent/workspace/name-list"
 _SKILL_CONFIG_TIMEOUT_SECONDS = 8
 
 _SNAP_RUNNING = "running"
@@ -143,6 +147,74 @@ def _parse_external_scene(row: Any) -> SceneSkillItem | None:
         return None
     try:
         return SceneSkillItem(**row)
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 客户名单查询（外部接口代理）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/name-list", response_model=NameListResponse)
+async def list_name_list(
+    request: Request,
+    skill_id: str = "",
+    sap_id: str = "",
+) -> NameListResponse:
+    """按技能查询客户名单；传 sap_id 为客户视角（该经理名下客户），不传为经营视角。
+
+    外部接口不可用时返回空列表，由前端展示空态，不做假数据兜底。
+    """
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id is required")
+    items = await _fetch_external_name_list(request, skill_id, sap_id)
+    return NameListResponse(items=items)
+
+
+async def _fetch_external_name_list(
+    request: Request,
+    skill_id: str,
+    sap_id: str,
+) -> list[NameListItem]:
+    base = os.environ.get(_SKILL_CONFIG_API_BASE_ENV, "").strip().rstrip("/")
+    if not base:
+        return []
+    bbk_id = getattr(request.state, "bbk_id", None) or ""
+    body: dict[str, str] = {
+        "bbkId": bbk_id,
+        "skillId": skill_id,
+        "platformSource": "workspace",
+        "pageSource": "name-list",
+    }
+    if sap_id:
+        body["sapId"] = sap_id
+    try:
+        async with httpx.AsyncClient(
+            timeout=_SKILL_CONFIG_TIMEOUT_SECONDS,
+        ) as client:
+            resp = await client.post(f"{base}{_NAME_LIST_PATH}", json=body)
+            payload = resp.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("name-list request failed: %s", exc)
+        return []
+    if str(payload.get("code")) != "200":
+        logger.warning("name-list rejected: %s", payload.get("code"))
+        return []
+    data = payload.get("data") or {}
+    rows = data.get("list") or []
+    return [
+        item
+        for row in rows
+        if (item := _parse_name_list_item(row)) is not None
+    ]
+
+
+def _parse_name_list_item(row: Any) -> NameListItem | None:
+    if not isinstance(row, dict) or not row.get("custUid"):
+        return None
+    try:
+        return NameListItem(**row)
     except ValueError:
         return None
 

@@ -246,6 +246,28 @@ def test_scene_skills_allows_empty_category(client: TestClient) -> None:
     assert resp.json() == {"items": []}
 
 
+def test_name_list_requires_skill_id(client: TestClient) -> None:
+    resp = client.get("/api/wealth/name-list")
+
+    assert resp.status_code == 400
+
+
+def test_name_list_empty_when_external_absent(client: TestClient) -> None:
+    """外部接口未配置/不可达时返回空列表，不做假数据兜底。"""
+    resp = client.get("/api/wealth/name-list?skill_id=loan_verify")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
+def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
+    """sap_id 为空表示客户视角（不限定客户经理），参数合法。"""
+    resp = client.get("/api/wealth/name-list?skill_id=loan_verify&sap_id=")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
 async def _make_broadcast_store(
     task_status: str,
     results: list[dict] | None = None,

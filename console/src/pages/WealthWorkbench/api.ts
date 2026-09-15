@@ -1,18 +1,14 @@
 /**
  * 智能财富工作台 —— 数据访问层
  *
- * 规划与场景走真实后端接口（/wealth/plans、/wealth/scene-skills），不做假数据
- * 回退：接口不可达时读路径返回空、写路径直接抛错，避免联调期被 mock 掩盖问题。
- * 客户/触达/草稿仍为本期外的 mock 实现，待外部接口就绪后接入。
+ * 规划、场景与客户名单走真实后端接口（/wealth/plans、/wealth/scene-skills、
+ * /wealth/name-list），不做假数据回退：接口不可达时读路径返回空、写路径直接
+ * 抛错，避免联调期被 mock 掩盖问题。
+ * 触达历史/触达登记/草稿仍为本期外的内存实现，待外部接口就绪后接入。
  */
 import { parseCron, serializeCron } from "@/utils/parseCron";
 import { request } from "../../api/request";
-import {
-  accounts,
-  buildCustomers,
-  buildHistory,
-  SCENE_CATEGORIES,
-} from "./mock/data";
+import { buildHistory, SCENE_CATEGORIES } from "./mock/data";
 import { DEFAULT_SCHEDULE } from "./utils";
 import type {
   Account,
@@ -23,13 +19,6 @@ import type {
   PlanItem,
   Scene,
 } from "./types";
-
-/**
- * 是否显示「角色预览」入口。
- * 岗位映射（POSITION_ROLE_MAP）已生效，生产身份由父系统 positionId 唯一决定，
- * 预览器随之关闭（见 Topbar / AccountSwitcher）；本地演示如需临时打开可置回 true。
- */
-export const IS_MOCK = false;
 
 /** 模拟网络延迟（毫秒），让离线 mock 的异步行为贴近真实接口 */
 const MOCK_LATENCY_MS = 60;
@@ -97,7 +86,6 @@ interface SceneSkillItem {
   cronExample?: string | null;
   mcpRelationList: string[];
   skillBbkLabel?: string | null;
-  ready: boolean;
 }
 
 interface SceneSkillListResponse {
@@ -111,11 +99,11 @@ interface SceneSkillListResponse {
 /** 大类英文 code → 场景图标（原型图标集） */
 const CATEGORY_ICON: Record<string, string> = {
   insurance: "shield",
-  finance: "layer",
-  deposit: "chart",
-  payroll: "user",
-  cross_border: "globe",
-  fund: "layer",
+  loan: "bank",
+  deposit: "safe",
+  finance: "chart",
+  fund: "pie",
+  payroll: "money",
 };
 
 const CATEGORY_LABEL: Record<string, string> = Object.fromEntries(
@@ -131,7 +119,6 @@ function mapScene(item: SceneSkillItem): Scene {
     categoryCode: item.category,
     icon: CATEGORY_ICON[item.category] ?? "layer",
     desc: item.senceDesc ?? "",
-    ready: item.ready,
     source: item.skillBbkLabel ?? "",
     cronExample: item.cronExample,
     mcpRelations: item.mcpRelationList ?? [],
@@ -199,6 +186,102 @@ export async function fetchScenesByCategory(
 }
 
 // ---------------------------------------------------------------------------
+// 客户名单查询：/wealth/name-list（外部接口代理）
+// ---------------------------------------------------------------------------
+
+interface NameListItemView {
+  custUid: string;
+  custNm: string;
+  sapId?: string | null;
+  bbkOrgId?: string | null;
+  filename?: string | null;
+  recomReason?: string | null;
+}
+
+interface NameListResponse {
+  items: NameListItemView[];
+}
+
+/**
+ * 按技能查询客户名单；传 sapId 为客户视角（该经理名下客户），
+ * 不传为经营视角（不限定客户经理，全分行客户池）。
+ * 接口不可达时返回空列表，由页面展示空态，不做假数据兜底。
+ */
+export async function fetchNameList(
+  skillId: string,
+  sapId?: string,
+): Promise<NameListItemView[]> {
+  try {
+    const params = new URLSearchParams({ skill_id: skillId });
+    if (sapId) {
+      params.set("sap_id", sapId);
+    }
+    const resp = await request<NameListResponse>(
+      `/wealth/name-list?${params.toString()}`,
+    );
+    return resp.items;
+  } catch (error) {
+    console.warn("[Wealth] 客户名单接口不可用，返回空列表", error);
+    return [];
+  }
+}
+
+/** 今日有排程的经营场景（客户名单查询的入参上下文） */
+export interface TodayTaskRef {
+  skillId: string;
+  sceneName: string;
+  category: string;
+}
+
+/**
+ * 拉取今日任务对应的客户经营清单：按技能去重并发查询 name-list，
+ * 合并为页面客户列表并回填会话级触达登记；同一客户在同一任务下只出现一次。
+ */
+export async function fetchTodayCustomers(
+  tasks: TodayTaskRef[],
+  sapId?: string,
+): Promise<Customer[]> {
+  const uniqueTasks = [...new Map(tasks.map((t) => [t.skillId, t])).values()];
+  const groups = await Promise.all(
+    uniqueTasks.map(async (t) => ({
+      task: t,
+      list: await fetchNameList(t.skillId, sapId),
+    })),
+  );
+  const seen = new Set<string>();
+  const customers: Customer[] = [];
+  for (const { task, list } of groups) {
+    for (const item of list) {
+      const id = `${task.skillId}|${item.custUid}`;
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      const mark = db.contacts[id];
+      const reason = item.recomReason ?? "";
+      customers.push({
+        id,
+        custUid: item.custUid,
+        skillId: task.skillId,
+        name: item.custNm,
+        label: "",
+        reason,
+        category: task.category,
+        task: task.sceneName,
+        done: mark?.done ?? false,
+        channel: mark?.channel ?? "",
+        time: mark?.time ?? "",
+        note: mark?.note ?? "",
+        opportunities: reason ? [reason] : [],
+        link: item.filename ?? undefined,
+      });
+    }
+  }
+  db.customers = clone(customers);
+  return customers;
+}
+
+// ---------------------------------------------------------------------------
 // 规划接口：/wealth/plans
 // ---------------------------------------------------------------------------
 
@@ -262,8 +345,17 @@ export async function fetchPlanList(): Promise<Plan[]> {
 }
 
 // ---------------------------------------------------------------------------
-// 内存 mock（客户/触达/草稿，刷新即复原；规划已全程走真实接口）
+// 内存实现（触达登记覆盖层/触达历史/草稿，刷新即复原；
+// 规划、场景与客户名单已全程走真实接口）
 // ---------------------------------------------------------------------------
+
+/** 触达登记结果：按 `${skillId}|${custUid}` 记录，切换视角重新拉名单后回填 */
+interface ContactMark {
+  done: boolean;
+  channel: string;
+  time: string;
+  note: string;
+}
 
 interface DraftEntry {
   draft: Draft;
@@ -271,7 +363,10 @@ interface DraftEntry {
 }
 
 interface WealthDb {
+  /** 当前视图的客户清单（fetchTodayCustomers 写入，reportContact 原地更新） */
   customers: Customer[];
+  /** 触达登记覆盖层（触达记录接口未出前的会话级实现） */
+  contacts: Record<string, ContactMark>;
   history: Customer[];
   /** 按账户隔离的会话级草稿 */
   drafts: Record<string, DraftEntry>;
@@ -281,7 +376,8 @@ let db: WealthDb = createInitialDb();
 
 function createInitialDb(): WealthDb {
   return {
-    customers: buildCustomers(),
+    customers: [],
+    contacts: {},
     history: buildHistory(),
     drafts: {},
   };
@@ -298,18 +394,12 @@ export function newAccountDraft(): Draft {
 
 export interface BootstrapData {
   plans: Plan[];
-  customers: Customer[];
   history: Customer[];
   draft: Draft;
   savedAt: string;
 }
 
-export async function fetchAccounts(): Promise<Account[]> {
-  await sleep(MOCK_LATENCY_MS);
-  return clone(accounts);
-}
-
-/** 拉取账户视角下的工作台全量数据（规划走真实接口，其余本期仍为 mock） */
+/** 拉取账户视角下的工作台基础数据（规划走真实接口；客户名单由 fetchTodayCustomers 单独加载） */
 export async function fetchBootstrap(
   accountId: string,
 ): Promise<BootstrapData> {
@@ -324,21 +414,10 @@ export async function fetchBootstrap(
   await sleep(MOCK_LATENCY_MS);
   return {
     plans,
-    customers: clone(db.customers),
     history: clone(db.history),
     draft: cached ? clone(cached.draft) : newAccountDraft(),
     savedAt: cached?.at ?? "",
   };
-}
-
-/** 切换账户前暂存当前账户草稿（会话级，不落盘） */
-export async function stashDraft(
-  accountId: string,
-  draft: Draft,
-  savedAt: string,
-): Promise<void> {
-  await sleep(0);
-  db.drafts[accountId] = { draft: clone(draft), at: savedAt };
 }
 
 /** 保存草稿：仅记录保存时间并写内存表（草稿不进后端，见 CONTEXT.md） */
@@ -397,30 +476,39 @@ export async function removePlan(id: string): Promise<{ plans: Plan[] }> {
 }
 
 export interface ContactPayload {
-  id: number;
+  /** 客户页面内标识：`${skillId}|${custUid}` */
+  id: string;
   channel: string;
   outcome: "done" | "pending";
   note: string;
 }
 
-/** 登记触达结果，返回最新客户清单（本期仍为 mock） */
+/**
+ * 登记触达结果，返回最新客户清单。
+ * 触达记录接口未出前为会话级内存实现：写入覆盖层（切换视角重新拉名单后回填），
+ * 并同步更新当前视图的客户清单。
+ */
 export async function reportContact(
   payload: ContactPayload,
   today: string,
 ): Promise<{ customers: Customer[] }> {
   await sleep(MOCK_LATENCY_MS);
-  const c = db.customers.find((x) => x.id === payload.id);
-  if (c) {
-    c.note = payload.note;
-    c.channel = payload.channel;
-    c.time =
+  const mark: ContactMark = {
+    note: payload.note,
+    channel: payload.channel,
+    time:
       today +
       " " +
       new Date().toLocaleTimeString("zh-CN", {
         hour: "2-digit",
         minute: "2-digit",
-      });
-    c.done = payload.outcome === "done";
+      }),
+    done: payload.outcome === "done",
+  };
+  db.contacts[payload.id] = mark;
+  const c = db.customers.find((x) => x.id === payload.id);
+  if (c) {
+    Object.assign(c, mark);
   }
   return { customers: clone(db.customers) };
 }
