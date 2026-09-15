@@ -25,6 +25,20 @@ def _make_app(tmp_path):
     marketplace = AsyncMock()
     marketplace.db = db
     marketplace.marketplace_root = tmp_path / "market"
+    marketplace._resolve_target_users = AsyncMock(  # noqa: SLF001
+        return_value=[
+            {
+                "tenant_id": "tenant-a",
+                "tenant_name": "用户A",
+                "bbk_id": "100",
+            },
+            {
+                "tenant_id": "tenant-b",
+                "tenant_name": "用户B",
+                "bbk_id": "101",
+            },
+        ],
+    )
 
     def find_market_item(source_id, item_ref):
         del source_id

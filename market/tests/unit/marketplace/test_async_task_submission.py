@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from market.app.routers import distribution as distribution_router
 from market.app.routers import mcp_market as mcp_router
 from market.app.routers import skills_market as skills_router
 from market.database.connection import DatabaseConnection
@@ -226,6 +227,71 @@ async def test_distribute_mcp_returns_task_submission(tmp_path, monkeypatch):
         if "INSERT INTO swe_async_tasks" in call.args[0]
     )
     assert task_insert_call.args[1][6] == "分发 MCP「demo」，目标 1 个用户"
+
+
+@pytest.mark.asyncio
+async def test_batch_skill_distribution_writes_target_names(
+    tmp_path,
+    monkeypatch,
+):
+    """批量技能分发任务明细应写入目标用户名称。"""
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc._resolve_target_users = AsyncMock(  # noqa: SLF001
+        return_value=[
+            {
+                "tenant_id": "tenant-a",
+                "tenant_name": "用户A",
+                "bbk_id": "100",
+            },
+        ],
+    )
+    item, _ = await svc.publish_skill(
+        "src1",
+        PublishSkillRequest(
+            name="skill-a",
+            description="",
+            creator_id="alice",
+            creator_name="Alice",
+            skill_json={},
+            skill_md="",
+        ),
+    )
+
+    monkeypatch.setattr(
+        distribution_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/market/distributions",
+        json={
+            "batch_id": "batch-1",
+            "skill_item_ids": [item.item_id],
+            "target_tenant_ids": ["tenant-a"],
+        },
+        headers={
+            "X-Source-Id": "src1",
+            "X-Manager": "true",
+            "X-User-Id": "admin",
+            "X-User-Name": "admin",
+        },
+    )
+
+    assert resp.status_code == 200
+    task_id = resp.json()["task_ids"][0]
+    item_insert_call = next(
+        call
+        for call in app.state.db.execute_many.await_args_list
+        if "INSERT IGNORE INTO swe_async_task_items" in call.args[0]
+    )
+    assert item_insert_call.args[1] == [
+        (task_id, "tenant-a", "用户A", "queued", None, None),
+    ]
 
 
 @pytest.mark.asyncio

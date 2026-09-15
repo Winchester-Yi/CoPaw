@@ -248,6 +248,20 @@ async def _create_batch_tasks(
         target_type="user_id",
         target_values=target_tenant_ids,
     )
+    target_names: dict[str, str | None] = {}
+    if any(task.resource_type == "skill" for task in tasks):
+        target_users = await svc._resolve_target_users(  # noqa: SLF001
+            source_id,
+            skill_req,
+        )
+        target_names = {
+            user["tenant_id"]: (
+                user.get("tenant_name")
+                or user.get("user_name")
+                or user.get("name")
+            )
+            for user in target_users
+        }
     scheduled: list[tuple[str, dict[str, Any]]] = []
     for task in tasks:
         if task.task_id in existing_ids:
@@ -268,6 +282,7 @@ async def _create_batch_tasks(
                 actor_user_id=operator_id,
                 actor_user_name=operator_name,
                 target_ids=target_tenant_ids,
+                target_names=target_names,
                 result=task_result,
                 summary=_distribution_summary(
                     "技能",

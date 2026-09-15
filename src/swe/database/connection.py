@@ -18,6 +18,12 @@ _CURRENT_CONNECTION: ContextVar[Any | None] = ContextVar(
     default=None,
 )
 
+
+def _named_lock_name(name: str) -> str:
+    """Generate a stable lock name within MySQL GET_LOCK's limit."""
+    return f"swe:{sha256(name.encode()).hexdigest()[:60]}"
+
+
 # Try to import aiomysql, fall back to None if not available
 try:
     import aiomysql
@@ -130,7 +136,7 @@ class DatabaseConnection:
     @asynccontextmanager
     async def named_lock(self, name: str, timeout: int = 10):
         """持有 MySQL 命名锁，跨实例串行化同一业务键。"""
-        lock_name = "swe:" + sha256(name.encode()).hexdigest()
+        lock_name = _named_lock_name(name)
         conn = _CURRENT_CONNECTION.get()
         if conn is None:
             async with self.acquire() as conn:

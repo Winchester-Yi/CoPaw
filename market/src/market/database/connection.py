@@ -15,6 +15,12 @@ _CURRENT_CONNECTION: ContextVar[Any | None] = ContextVar(
     default=None,
 )
 
+
+def _named_lock_name(name: str) -> str:
+    """生成不超过 MySQL GET_LOCK 限制的稳定锁名。"""
+    return f"swe:{sha256(name.encode()).hexdigest()[:60]}"
+
+
 try:
     import aiomysql
 
@@ -110,7 +116,7 @@ class DatabaseConnection:
         if _CURRENT_CONNECTION.get() is not None:
             raise RuntimeError("Named transaction cannot be nested")
 
-        lock_name = "swe:" + sha256(name.encode()).hexdigest()
+        lock_name = _named_lock_name(name)
         async with self.acquire() as conn:
             token = _CURRENT_CONNECTION.set(conn)
             acquired = False
@@ -145,7 +151,7 @@ class DatabaseConnection:
     @asynccontextmanager
     async def named_lock(self, name: str, timeout: int = 10):
         """持有 MySQL 命名锁，跨实例串行化同一业务键。"""
-        lock_name = "swe:" + sha256(name.encode()).hexdigest()
+        lock_name = _named_lock_name(name)
         conn = _CURRENT_CONNECTION.get()
         if conn is None:
             async with self.acquire() as conn:
