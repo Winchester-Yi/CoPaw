@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
+import type { TFunction } from "i18next";
 import type { CronJobSpecOutput } from "@/api/types";
 import {
   createColumns,
@@ -49,18 +50,63 @@ function buildHandlers(overrides = {}) {
     onExecuteNow: vi.fn(),
     onBroadcast: vi.fn(),
     onManageChildren: vi.fn(),
+    onBatchConfigure: vi.fn(),
     onEdit: vi.fn(),
     onDelete: vi.fn(),
     onCopySuccess: vi.fn(),
     onCopyError: vi.fn(),
     executionModelOptions: [],
     tenantDefaultModelLabel: "Tenant default",
-    t: ((key: string) => key) as any,
+    t: ((key: string) => key) as TFunction,
     ...overrides,
   };
 }
 
 describe("CronJobs columns", () => {
+  it.each([
+    [{}, true, true],
+    [{ broadcast_dispatch_intents_enabled: false }, true, true],
+    [{ broadcast_dispatch_intents_enabled: true }, true, false],
+    [{ broadcast_dispatch_intents_enabled: true }, false, false],
+    [
+      {
+        broadcast_dispatch_intents_enabled: true,
+        broadcast_source_job_id: "parent",
+      },
+      true,
+      true,
+    ],
+  ])(
+    "gates batch configuration by saved parent mode, not job enabled",
+    (meta, enabled, disabled) => {
+      const handlers = buildHandlers();
+      const job = buildCronJob({ meta, enabled });
+      const action = createColumns(handlers).find(
+        (column) => column.key === "action",
+      );
+      const node = action?.render?.(undefined, job, 0) as ReactElement<{
+        children: ReactElement[];
+      }>;
+      expect(node.props.children).toHaveLength(3);
+      const dropdown = node.props.children[2] as ReactElement<{
+        menu: {
+          items: {
+            key: string;
+            label: string;
+            disabled: boolean;
+            onClick: () => void;
+          }[];
+        };
+      }>;
+      const item = dropdown.props.menu.items.find(
+        (entry) => entry.key === "batch_configuration",
+      );
+      expect(item?.label).toBe("批调度配置");
+      expect(item?.disabled).toBe(disabled);
+      item?.onClick();
+      expect(handlers.onBatchConfigure).toHaveBeenCalledTimes(disabled ? 0 : 1);
+    },
+  );
   afterEach(() => {
     cleanup();
   });
@@ -211,14 +257,15 @@ describe("CronJobs columns", () => {
     expect(dropdown.props.menu.items.map((item) => item.key)).toEqual([
       "broadcast",
       "broadcast_children",
+      "batch_configuration",
       "edit",
       "delete",
     ]);
-    expect(
-      dropdown.props.menu.items.map((item) => item.label),
-    ).not.toContain("启动批调度");
-    expect(
-      dropdown.props.menu.items.map((item) => item.label),
-    ).not.toContain("关闭批调度");
+    expect(dropdown.props.menu.items.map((item) => item.label)).not.toContain(
+      "启动批调度",
+    );
+    expect(dropdown.props.menu.items.map((item) => item.label)).not.toContain(
+      "关闭批调度",
+    );
   });
 });

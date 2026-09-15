@@ -298,6 +298,12 @@ export default function Sidebar({
       path: "/analytics/business-overview",
       label: t("nav.analyticsBusinessOverview", "运营看板"),
     },
+    {
+      key: "analytics-claw-data-overview",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/claw-data-overview",
+      label: t("nav.analyticsClawDataOverview", "Claw技能运行看板"),
+    },
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -311,16 +317,6 @@ export default function Sidebar({
             icon: <SparkRefreshLine size={18} />,
             path: "/monitor/cron-batch-dispatch",
             label: t("nav.monitorCronBatchDispatch", "批调度监控"),
-          },
-        ]
-      : []),
-    ...(isRMassistSource
-      ? [
-          {
-            key: "analytics-claw-data-overview",
-            icon: <SparkBarChartLine size={18} />,
-            path: "/analytics/claw-data-overview",
-            label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
           },
         ]
       : []),
@@ -530,6 +526,13 @@ export default function Sidebar({
             : t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={16} />,
         },
+        {
+          key: "analytics-claw-data-overview",
+          label: collapsed
+            ? null
+            : t("nav.analyticsClawDataOverview", "Claw技能运行看板"),
+          icon: <SparkBarChartLine size={16} />,
+        },
         ...(canManageCurrentSourceConfig
           ? [
               {
@@ -545,17 +548,6 @@ export default function Sidebar({
                   ? null
                   : t("nav.monitorCronBatchDispatch", "批调度监控"),
                 icon: <SparkRefreshLine size={16} />,
-              },
-            ]
-          : []),
-        ...(isRMassistSource
-          ? [
-              {
-                key: "analytics-claw-data-overview",
-                label: collapsed
-                  ? null
-                  : t("nav.analyticsClawDataOverview", "Claw数据看板"),
-                icon: <SparkBarChartLine size={16} />,
               },
             ]
           : []),

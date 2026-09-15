@@ -1033,6 +1033,15 @@ _Avoid_: one-shot plan flag, global plan switch
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
 
+**Scheduled Job Enablement**:
+The permission for a particular **Scheduled Job** to execute. Disabling a broadcast source job, manually or through unread-result protection, does not itself pause batch dispatch for its other recipients.
+
+**Batch Dispatch Mode**:
+The choice to dispatch a broadcast source job and its recipients through the **Cron Scheduling Service** instead of their ordinary timers. This choice is distinct from **Batch Dispatch Run State**.
+
+**Batch Dispatch Run State**:
+The independently controlled running or paused state of batch dispatch for one broadcast source job. It is distinct from both that job's **Scheduled Job Enablement** and the execution status of any individual **Dispatch Batch**.
+
 **Scheduled Firing Count**:
 The number of planned firing occurrences produced by enabled, active **Scheduled Job** definitions within a selected time range. One Scheduled Job contributes once for every matching cron occurrence. A **Scheduled Firing Count** describes planned schedule density only; it does not prove that runs are queued, delayed, executing, or backlogged.
 _Avoid_: backlog count, running task count, execution count
@@ -1098,7 +1107,13 @@ A bounded priority signal for a user or tenant, derived from recent **Scheduled 
 _Avoid_: total read count, user importance, notification priority
 
 **Batch Dispatch Order**:
-The stable child-intent order computed for a **Dispatch Batch** after viewer heat, due time, retry penalty, and deterministic tie-breakers are applied. Waiting does not reshuffle the order; later claims continue from this ordered queue.
+The stable intent order within a **Dispatch Batch**, with explicitly ranked users preceding ranked primary branches, followed by viewer heat and deterministic tie-breakers. Waiting and manual retry do not reshuffle this order, and it does not impose priority across batches.
+
+**Batch Priority Policy**:
+The ordered user and primary-branch preference lists belonging to a broadcast source **Scheduled Job**. A **Dispatch Batch** retains the preferences that applied when it was created; preferences never add recipients.
+
+**Manual Intent Retry**:
+An administrator-authorized additional execution of one failed **Scheduled Run Intent**, including its Agent and subtasks. It preserves earlier attempts and waits for shared dispatch capacity; each authorization grants only one additional attempt.
 _Avoid_: fairness aging, dynamic reprioritization, starvation compensation
 
 **Scheduled Run Boundary**:
@@ -3273,7 +3288,7 @@ The per-scene firing rule of a Plan, expressed with the same frequency model as 
 _Avoid_: cronExample as schedule, validity dates inside the cron expression, the prototype's 每日/每周/隔天-only picker
 
 **Workbench Role (角色)**:
-One of 客户经理 / 支行行长 / 分行中台. It gates page access in the Wealth Workbench through the Role Permission Matrix (角色权限矩阵) — the task pages (today / pending / done) are reachable only by 客户经理 — and selects the data scope of every view. In embedded deployment the Role is resolved from the host-supplied positionId, never chosen in-page. The host's position codes map as: 客户经理 = RB0101, 支行行长 = RB0208, 分行中台 = RB0304 or RB0906. A missing or unmapped positionId resolves to the pseudo-role unknown under deny-by-default: no page permissions, the entry renders a full-page "no access" notice, and no business data is loaded.
+One of 客户经理 / 支行行长 / 分行中台. It gates page access in the Wealth Workbench through the Role Permission Matrix (角色权限矩阵) — the task pages (today / pending / done) are reachable only by 客户经理 — and selects the data scope of every view. In embedded deployment the Role is resolved from the host-supplied positionId, never chosen in-page. The host's position codes map as: 客户经理 = RB0101, 支行行长 = RB1101 or RB0306, 分行中台 = RB0304. A missing or unmapped positionId resolves to the pseudo-role unknown under deny-by-default: no page permissions, the entry renders a full-page "no access" notice, and no business data is loaded.
 _Avoid_: account type, user preference, switchable profile
 
 **Role Permission Matrix (角色权限矩阵)**:

@@ -51,13 +51,13 @@ beforeEach(() => {
 });
 
 describe("WealthWorkbench api", () => {
-  it("fetchBootstrap 返回历史与空草稿；客户名单不在 bootstrap 内", async () => {
+  it("fetchBootstrap 返回空草稿；客户名单与触达历史均不在 bootstrap 内", async () => {
     const data = await api.fetchBootstrap("rm");
     expect(data.plans).toEqual([]);
-    expect(data.history).toHaveLength(34);
     expect(data.draft).toEqual({ name: "", items: [] });
     expect(data.savedAt).toBe("");
     expect("customers" in data).toBe(false);
+    expect("history" in data).toBe(false);
   });
 
   it("fetchNameList 透传 skillId 与 sapId；接口失败返回空列表", async () => {
@@ -74,10 +74,14 @@ describe("WealthWorkbench api", () => {
   });
 
   it("fetchTodayCustomers 按任务上下文映射名单并去重", async () => {
-    const customers = await api.fetchTodayCustomers([
-      TASK,
-      { ...TASK }, // 同一技能重复任务只查一次、只出一条
-    ]);
+    const customers = await api.fetchTodayCustomers(
+      [
+        TASK,
+        { ...TASK }, // 同一技能重复任务只查一次、只出一条
+      ],
+      "10086",
+      "business",
+    );
     expect(customers).toHaveLength(2);
     expect(customers[0]).toMatchObject({
       id: "skill-loan-1|CUST001",
@@ -94,10 +98,68 @@ describe("WealthWorkbench api", () => {
       String(p).startsWith("/wealth/name-list"),
     );
     expect(nameListCalls).toHaveLength(1);
+    expect(String(nameListCalls[0]?.[0])).toContain("sap_id=10086");
+  });
+
+  it("fetchTodayCustomers 客户视角：一次查询不带 skillId，按客户聚合并标注命中场景", async () => {
+    mockRequest.mockImplementation(async (path: unknown) => {
+      const p = String(path);
+      if (p.startsWith("/wealth/name-list")) {
+        return {
+          items: [
+            { ...NAME_LIST_FIXTURE[0], skillIds: ["skill-loan-1"] },
+            { ...NAME_LIST_FIXTURE[1], skillIds: ["skill-unknown"] },
+          ],
+        };
+      }
+      throw new Error(`未 mock 的请求：${p}`);
+    });
+
+    const customers = await api.fetchTodayCustomers(
+      [TASK],
+      "10086",
+      "customer",
+    );
+
+    const nameListCalls = mockRequest.mock.calls.filter(([p]) =>
+      String(p).startsWith("/wealth/name-list"),
+    );
+    expect(nameListCalls).toHaveLength(1);
+    expect(String(nameListCalls[0]?.[0])).not.toContain("skill_id=");
+    expect(String(nameListCalls[0]?.[0])).toContain("sap_id=10086");
+    // 以 custUid 为页面 id；今日树内的技能映射为场景名标签，树外技能不产生标签
+    expect(customers[0]).toMatchObject({
+      id: "CUST001",
+      name: "张三",
+      label: "信贷需求挖掘",
+      task: "信贷需求挖掘",
+      category: "贷款",
+    });
+    expect(customers[1]).toMatchObject({ id: "CUST002", label: "", task: "" });
+  });
+
+  it("fetchPendingCustomers / fetchDoneCustomers 以 touched 区分名单口径", async () => {
+    await api.fetchPendingCustomers([TASK], "10086");
+    await api.fetchDoneCustomers([TASK], "10086");
+    const calls = mockRequest.mock.calls.map(([p]) => String(p));
+    expect(calls[0]).toContain("touched=0");
+    expect(calls[1]).toContain("touched=1");
+    // 两个口径都不带 skillId（客户视角粒度），都带 sapId
+    for (const c of calls) {
+      expect(c).not.toContain("skill_id=");
+      expect(c).toContain("sap_id=10086");
+    }
+  });
+
+  it("fetchDoneCustomers 名单全部为已触达，触达方式/时间置空待接口补字段", async () => {
+    const done = await api.fetchDoneCustomers([TASK], "10086");
+    expect(done).toHaveLength(2);
+    expect(done.every((c) => c.done)).toBe(true);
+    expect(done[0]).toMatchObject({ channel: "", time: "", note: "" });
   });
 
   it("reportContact 写入覆盖层，重新拉取名单后回填触达结果", async () => {
-    await api.fetchTodayCustomers([TASK]);
+    await api.fetchTodayCustomers([TASK], "10086", "business");
     const { customers } = await api.reportContact(
       {
         id: "skill-loan-1|CUST001",
@@ -112,8 +174,8 @@ describe("WealthWorkbench api", () => {
     expect(hit?.channel).toBe("电话");
     expect(hit?.time.startsWith("2026-09-14 ")).toBe(true);
 
-    // 切换视角重新拉取后触达结果仍回填
-    const again = await api.fetchTodayCustomers([TASK]);
+    // 重新拉取后触达结果仍回填
+    const again = await api.fetchTodayCustomers([TASK], "10086", "business");
     expect(again.find((c) => c.id === "skill-loan-1|CUST001")?.done).toBe(true);
     expect(again.find((c) => c.id === "skill-loan-1|CUST002")?.done).toBe(
       false,
@@ -121,7 +183,7 @@ describe("WealthWorkbench api", () => {
   });
 
   it("resetMockDb 后触达覆盖层与草稿恢复初始（模拟刷新）", async () => {
-    await api.fetchTodayCustomers([TASK]);
+    await api.fetchTodayCustomers([TASK], "10086", "business");
     await api.reportContact(
       {
         id: "skill-loan-1|CUST001",
@@ -133,7 +195,11 @@ describe("WealthWorkbench api", () => {
     );
     await api.saveDraft("rm", { name: "改过的草稿", items: [] });
     api.resetMockDb();
-    const customers = await api.fetchTodayCustomers([TASK]);
+    const customers = await api.fetchTodayCustomers(
+      [TASK],
+      "10086",
+      "business",
+    );
     expect(customers.find((c) => c.id === "skill-loan-1|CUST001")?.done).toBe(
       false,
     );

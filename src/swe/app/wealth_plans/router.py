@@ -161,14 +161,19 @@ async def list_name_list(
     request: Request,
     skill_id: str = "",
     sap_id: str = "",
+    touched: int | None = None,
 ) -> NameListResponse:
-    """按技能查询客户名单；传 sap_id 为客户视角（该经理名下客户），不传为经营视角。
+    """客户名单查询；两个视角都传 sap_id（当前登录客户经理）。
 
+    skill_id 非空为经营视角（按技能过滤）；为空为客户视角
+    （该经理名下全部技能客户，一次查全）。
+    touched 透传外部接口的触达状态过滤：0 未触达（待触达）/
+    1 已触达（已完成）/ 2 全部（今日任务）；缺省不过滤。
     外部接口不可用时返回空列表，由前端展示空态，不做假数据兜底。
     """
-    if not skill_id:
-        raise HTTPException(status_code=400, detail="skill_id is required")
-    items = await _fetch_external_name_list(request, skill_id, sap_id)
+    if touched is not None and touched not in (0, 1, 2):
+        raise HTTPException(status_code=400, detail="invalid touched")
+    items = await _fetch_external_name_list(request, skill_id, sap_id, touched)
     return NameListResponse(items=items)
 
 
@@ -176,17 +181,21 @@ async def _fetch_external_name_list(
     request: Request,
     skill_id: str,
     sap_id: str,
+    touched: int | None,
 ) -> list[NameListItem]:
     base = os.environ.get(_SKILL_CONFIG_API_BASE_ENV, "").strip().rstrip("/")
     if not base:
         return []
     bbk_id = getattr(request.state, "bbk_id", None) or ""
-    body: dict[str, str] = {
+    body: dict[str, Any] = {
         "bbkId": bbk_id,
-        "skillId": skill_id,
-        "platformSource": "workspace",
-        "pageSource": "name-list",
+        "platformSource": "AGENT_WORKSPACE",
+        "pageSource": "AGENT_WORKSPACE_TASK_LIST",
     }
+    if touched is not None:
+        body["touched"] = touched
+    if skill_id:
+        body["skillId"] = skill_id
     if sap_id:
         body["sapId"] = sap_id
     try:
@@ -202,12 +211,32 @@ async def _fetch_external_name_list(
         logger.warning("name-list rejected: %s", payload.get("code"))
         return []
     data = payload.get("data") or {}
-    rows = data.get("list") or []
-    return [
-        item
-        for row in rows
-        if (item := _parse_name_list_item(row)) is not None
-    ]
+    skill_map = _skill_ids_by_customer(data.get("items") or [])
+    items: list[NameListItem] = []
+    for row in data.get("list") or []:
+        if (item := _parse_name_list_item(row)) is not None:
+            item.skillIds = skill_map.get(item.custUid.lower(), [])
+            items.append(item)
+    return items
+
+
+def _skill_ids_by_customer(rows: Any) -> dict[str, list[str]]:
+    """从原始名单（data.items）提取 custuid → 命中技能列表的映射。
+
+    客户视角不按技能过滤，同一客户可能被多个技能命中；
+    前端标签列据此展示客户命中的场景。
+    """
+    mapping: dict[str, list[str]] = {}
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        uid = str(entry.get("custuid") or "").strip().lower()
+        skill = str(entry.get("skillId") or "").strip()
+        if uid and skill:
+            bucket = mapping.setdefault(uid, [])
+            if skill not in bucket:
+                bucket.append(skill)
+    return mapping
 
 
 def _parse_name_list_item(row: Any) -> NameListItem | None:

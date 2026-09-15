@@ -56,9 +56,9 @@ export function Ticker() {
               本周关注：养老金融、保险保障与到期资金承接。
             </p>
           </div>
-          <p className={styles.pageNote}>
+          {/* <p className={styles.pageNote}>
             当前内容为原型示例数据，未接入实时行情或资讯系统。
-          </p>
+          </p> */}
         </>
       ),
       buttons: [{ label: "关闭" }],
@@ -81,7 +81,7 @@ export function Ticker() {
         </div>
       </div>
       <div className={styles.tickerActions}>
-        <span className={styles.tickerDemo}>示例数据</span>
+        {/* <span className={styles.tickerDemo}>示例数据</span> */}
         <button
           className={styles.tickerControl}
           aria-label={paused ? "继续自动播报" : "暂停自动播报"}

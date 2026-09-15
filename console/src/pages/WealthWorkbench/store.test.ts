@@ -25,7 +25,7 @@ const INSURANCE_2 = "skill-wealth-insurance-2";
 const FINANCE = "skill-wealth-finance-3";
 const LOAN = "skill-wealth-loan-4";
 
-/** 客户名单夹具：仅 LOAN 技能返回两个客户，其余技能为空 */
+/** 客户名单夹具：经营视角仅 LOAN 技能返回两个客户；客户视角（无 skill_id）返回全量并带 skillIds */
 const NAME_LIST_FIXTURE = [
   {
     custUid: "CUST001",
@@ -33,6 +33,7 @@ const NAME_LIST_FIXTURE = [
     sapId: "10086",
     filename: "http://example/cust001",
     recomReason: "命中贷款核验规则",
+    skillIds: [LOAN],
   },
   {
     custUid: "CUST002",
@@ -40,6 +41,7 @@ const NAME_LIST_FIXTURE = [
     sapId: "10086",
     filename: "http://example/cust002",
     recomReason: "",
+    skillIds: [LOAN],
   },
 ];
 
@@ -181,7 +183,8 @@ async function requestHandler(
   if (path.startsWith("/wealth/name-list")) {
     const skillId =
       new URL(path, "http://test").searchParams.get("skill_id") ?? "";
-    return { items: skillId === LOAN ? NAME_LIST_FIXTURE : [] };
+    // 客户视角（无 skill_id）或 LOAN 技能返回夹具，其余技能为空
+    return { items: !skillId || skillId === LOAN ? NAME_LIST_FIXTURE : [] };
   }
   if (path === "/wealth/plans" && method === "GET") {
     return { items: planViews };
@@ -268,7 +271,10 @@ async function initStore() {
     plans: [],
     customers: [],
     customersLoading: false,
-    history: [],
+    pendingCustomers: [],
+    pendingLoading: false,
+    doneCustomers: [],
+    doneLoading: false,
     draft: { name: "", items: [] },
     savedAt: "",
     editingId: null,
@@ -479,7 +485,7 @@ describe("WealthWorkbench store", () => {
     expect(useWealthStore.getState().targetSapIds).toEqual([]);
   });
 
-  it("loadTodayCustomers 客户视角传 sapId 拉取今日名单，经营视角不传", async () => {
+  it("loadTodayCustomers 两视角都带 sapId；经营视角按技能查，客户视角一次查全", async () => {
     useIframeStore.setState({ userId: "10086" });
     useWealthStore.setState({ plans: [makeTodayPlan()] });
     const nameListCalls = () =>
@@ -487,11 +493,13 @@ describe("WealthWorkbench store", () => {
         .filter(([p]) => String(p).startsWith("/wealth/name-list"))
         .map(([p]) => String(p));
 
-    await useWealthStore.getState().loadTodayCustomers("customer");
-    expect(nameListCalls().slice(-1)[0]).toContain("sap_id=10086");
-    const customers = useWealthStore.getState().customers;
-    expect(customers).toHaveLength(2);
-    expect(customers[0]).toMatchObject({
+    await useWealthStore.getState().loadTodayCustomers("business");
+    const bizCall = nameListCalls().slice(-1)[0] ?? "";
+    expect(bizCall).toContain("sap_id=10086");
+    expect(bizCall).toContain(`skill_id=${LOAN}`);
+    const bizCustomers = useWealthStore.getState().customers;
+    expect(bizCustomers).toHaveLength(2);
+    expect(bizCustomers[0]).toMatchObject({
       id: `${LOAN}|CUST001`,
       task: "信贷需求挖掘",
       category: "贷款",
@@ -499,11 +507,20 @@ describe("WealthWorkbench store", () => {
       done: false,
     });
 
-    await useWealthStore.getState().loadTodayCustomers("business");
-    expect(nameListCalls().slice(-1)[0]).not.toContain("sap_id=");
+    await useWealthStore.getState().loadTodayCustomers("customer");
+    const custCall = nameListCalls().slice(-1)[0] ?? "";
+    expect(custCall).toContain("sap_id=10086");
+    expect(custCall).not.toContain("skill_id=");
+    const custCustomers = useWealthStore.getState().customers;
+    expect(custCustomers).toHaveLength(2);
+    expect(custCustomers[0]).toMatchObject({
+      id: "CUST001",
+      label: "信贷需求挖掘",
+      task: "信贷需求挖掘",
+    });
   });
 
-  it("触达登记后切换视角重新拉取，触达结果回填", async () => {
+  it("触达登记后重新拉取同视角名单，触达结果回填", async () => {
     useWealthStore.setState({ plans: [makeTodayPlan()] });
     await useWealthStore.getState().loadTodayCustomers("business");
     const id = useWealthStore.getState().customers[0]?.id ?? "";
@@ -512,10 +529,30 @@ describe("WealthWorkbench store", () => {
       useWealthStore.getState().customers.find((c) => c.id === id)?.done,
     ).toBe(true);
 
-    await useWealthStore.getState().loadTodayCustomers("customer");
+    await useWealthStore.getState().loadTodayCustomers("business");
     expect(
       useWealthStore.getState().customers.find((c) => c.id === id)?.done,
     ).toBe(true);
+  });
+
+  it("loadPendingCustomers / loadDoneCustomers 按 touched 拉取各自名单", async () => {
+    useIframeStore.setState({ userId: "10086" });
+    useWealthStore.setState({ plans: [makeTodayPlan()] });
+    const nameListCalls = () =>
+      mockRequest.mock.calls
+        .filter(([p]) => String(p).startsWith("/wealth/name-list"))
+        .map(([p]) => String(p));
+
+    await useWealthStore.getState().loadPendingCustomers();
+    await useWealthStore.getState().loadDoneCustomers();
+
+    const calls = nameListCalls();
+    expect(calls.some((c) => c.includes("touched=0"))).toBe(true);
+    expect(calls.some((c) => c.includes("touched=1"))).toBe(true);
+    expect(useWealthStore.getState().pendingCustomers).toHaveLength(2);
+    const done = useWealthStore.getState().doneCustomers;
+    expect(done).toHaveLength(2);
+    expect(done.every((c) => c.done)).toBe(true);
   });
 
   it("editPlan 将规划内容载入草稿并设置编辑态", () => {

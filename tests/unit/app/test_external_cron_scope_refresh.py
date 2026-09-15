@@ -618,6 +618,12 @@ async def test_batch_dispatch_parent_registers_normal_swe_callback(
 async def test_enable_batch_dispatch_registers_separate_scheduler_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from unittest.mock import AsyncMock
+    from swe.app.crons import batch_run_state_client
+
+    monkeypatch.setattr(
+        batch_run_state_client, "initialize_run_state", AsyncMock()
+    )
     monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
     monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")
     monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://swe.local")

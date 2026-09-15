@@ -418,6 +418,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_batches (
     total_count INT NOT NULL DEFAULT 0 COMMENT 'total intents',
     completed_count INT NOT NULL DEFAULT 0 COMMENT 'completed intents',
     failed_count INT NOT NULL DEFAULT 0 COMMENT 'failed intents',
+    skipped_count INT NOT NULL DEFAULT 0 COMMENT 'skipped or cancelled intents',
     callback_metadata JSON DEFAULT NULL COMMENT 'raw callback metadata',
     error_message VARCHAR(2048) DEFAULT '' COMMENT 'batch error summary',
     completed_at DATETIME DEFAULT NULL COMMENT 'batch completed time',
@@ -453,6 +454,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_dispatch_intents (
     attempt_count INT NOT NULL DEFAULT 0 COMMENT 'attempt count',
     max_attempts INT NOT NULL DEFAULT 3 COMMENT 'max attempts',
     lock_owner VARCHAR(128) DEFAULT '' COMMENT 'worker lock owner',
+    claim_token VARCHAR(36) NOT NULL DEFAULT '' COMMENT 'unique claim generation',
     locked_at DATETIME DEFAULT NULL COMMENT 'lock time',
     acked_at DATETIME DEFAULT NULL COMMENT 'worker acknowledged time',
     completed_at DATETIME DEFAULT NULL COMMENT 'completion time',
@@ -610,6 +612,8 @@ ALTER_CRON_DISPATCH_INTENTS_INDEXES = [
 ]
 
 ALTER_CRON_DISPATCH_BATCHES_MODEL_COLUMNS = [
+    "ALTER TABLE swe_cron_dispatch_intents ADD COLUMN claim_token VARCHAR(36) NOT NULL DEFAULT ''",
+    "ALTER TABLE swe_cron_dispatch_batches ADD COLUMN skipped_count INT NOT NULL DEFAULT 0",
     """
     ALTER TABLE swe_cron_dispatch_batches
     ADD COLUMN provider_id VARCHAR(128) NOT NULL DEFAULT 'default'

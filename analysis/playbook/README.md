@@ -8,6 +8,7 @@
 |------|------|
 | [agent-config-read-consistency.md](agent-config-read-consistency.md) | agent 控制面读写一致性边界、排查入口和与 console agent switching 的职责分界 |
 | [common-errors.md](common-errors.md) | 常见报错模式、典型触发点和第一落点 |
+| [external-job-list.md](external-job-list.md) | 外部 jobs 列表的无初始化接口、原接口契约及任务绑定的只读边界 |
 | [location-paths.md](location-paths.md) | 按问题类型给出优先查看的代码路径、配置路径和命令入口 |
 | [log-entrypoints.md](log-entrypoints.md) | 运行日志、daemon logs、query error dump、Tracing 的实际入口 |
 | [my-mcp-manual-validation.md](my-mcp-manual-validation.md) | MyMCP 在本地环境下按用户、来源、应用和管理员身份进行手工验证的方法 |

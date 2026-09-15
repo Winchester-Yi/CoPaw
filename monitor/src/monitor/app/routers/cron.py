@@ -238,15 +238,20 @@ async def get_dispatch_workers(
     request: Request,
     start_time: datetime | None = Query(default=None, description="开始时间"),
     end_time: datetime | None = Query(default=None, description="结束时间"),
+    capacity_cursor: str | None = Query(default=None, max_length=2048),
     service: QueryService = Depends(get_query_service),
 ) -> CronDispatchWorkersResponse:
     """查询当前渠道下模型策略和 worker capacity 变动。"""
     actual_source_id = _get_source_id_from_header(request)
-    return await service.get_dispatch_workers(
-        source_id=actual_source_id,
-        start_time=start_time,
-        end_time=end_time,
-    )
+    try:
+        return await service.get_dispatch_workers(
+            source_id=actual_source_id,
+            start_time=start_time,
+            end_time=end_time,
+            capacity_cursor=capacity_cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @schedule_distribution_router.get(

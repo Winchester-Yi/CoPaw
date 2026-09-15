@@ -7,7 +7,6 @@ import { useNavigate } from "react-router-dom";
 import cx from "classnames";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
-import { PLATFORM_CAPABILITY_COUNT } from "../mock/data";
 import {
   addCalendarDays,
   calendarDate,
@@ -270,7 +269,7 @@ export default function Board() {
       n: String(sceneCount),
       title: "覆盖经营场景",
       detail: "可用能力",
-      val: String(PLATFORM_CAPABILITY_COUNT),
+      val: "--",
       up: false,
     },
     {
@@ -279,7 +278,7 @@ export default function Board() {
       n: "--",
       title: "已生成任务",
       detail: "较上月",
-      val: "+18% ↗",
+      val: "--",
       up: true,
     },
     {
@@ -288,7 +287,7 @@ export default function Board() {
       n: "--",
       title: "任务执行率",
       detail: "较上月",
-      val: "+5% ↗",
+      val: "--",
       up: true,
     },
   ];

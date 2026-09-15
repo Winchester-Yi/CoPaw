@@ -8,6 +8,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import cx from "classnames";
 import styles from "../index.module.less";
 import { useCanAccess, useWealthStore } from "../store";
+import { buildTaskTree, todayKey } from "../utils";
 import { Icon } from "./Icon";
 
 export function Sidebar({
@@ -18,7 +19,8 @@ export function Sidebar({
   onToggleCollapse: () => void;
 }) {
   const customers = useWealthStore((s) => s.customers);
-  const history = useWealthStore((s) => s.history);
+  const doneCustomers = useWealthStore((s) => s.doneCustomers);
+  const plans = useWealthStore((s) => s.plans);
   const hasTasks = useCanAccess("tasks");
   const [tasksOpen, setTasksOpen] = useState(true);
   const location = useLocation();
@@ -26,6 +28,11 @@ export function Sidebar({
 
   const current = location.pathname;
   const done = customers.filter((c) => c.done).length;
+  // 角标口径与任务页一致：今日有排程的任务节点数；待触达 = 名单内未完成客户数
+  const todayTaskCount = buildTaskTree(plans, todayKey()).flatMap(
+    (g) => g.nodes,
+  ).length;
+  const pendingCount = customers.length - done;
 
   const navClass = (path: string) =>
     cx(styles.nav, current === path && styles.active);
@@ -81,7 +88,9 @@ export function Sidebar({
                   >
                     <Icon name="list" />
                     <span className={styles.navLabel}>今日任务</span>
-                    <span className={styles.badge}>12</span>
+                    {todayTaskCount > 0 && (
+                      <span className={styles.badge}>{todayTaskCount}</span>
+                    )}
                   </button>
                   <button
                     className={cx(
@@ -97,7 +106,9 @@ export function Sidebar({
                   >
                     <Icon name="user" />
                     <span className={styles.navLabel}>待触达客户</span>
-                    <span className={styles.badge}>{28 - done}</span>
+                    {pendingCount > 0 && (
+                      <span className={styles.badge}>{pendingCount}</span>
+                    )}
                   </button>
                   <button
                     className={cx(
@@ -111,9 +122,11 @@ export function Sidebar({
                   >
                     <Icon name="check" />
                     <span className={styles.navLabel}>已完成</span>
-                    <span className={styles.badge}>
-                      {history.length + done}
-                    </span>
+                    {doneCustomers.length > 0 && (
+                      <span className={styles.badge}>
+                        {doneCustomers.length}
+                      </span>
+                    )}
                   </button>
                 </div>
               )}

@@ -57,6 +57,7 @@ export default function WPlusSopActiveBar({
         .then((snapshot) =>
           setSession((current) =>
             current &&
+            snapshot &&
             current.session_id === snapshot.session_id &&
             current.state_version > snapshot.state_version
               ? current

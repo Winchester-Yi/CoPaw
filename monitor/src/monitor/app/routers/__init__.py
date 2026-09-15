@@ -11,6 +11,7 @@ from .warmup import router as warmup_router
 from .subtask import router as subtask_router
 from .async_tasks import router as async_tasks_router
 from .high_frequency_question import router as high_frequency_question_router
+from .task_type_report import router as task_type_report_router
 
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
@@ -27,3 +28,4 @@ api_router.include_router(
     high_frequency_question_router,
     tags=["high-frequency-question"],
 )
+api_router.include_router(task_type_report_router)

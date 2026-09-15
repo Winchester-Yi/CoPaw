@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 SCAN_INTERVAL_ENV = "SWE_CRON_NOTIFICATION_SCAN_SECONDS"
 BATCH_SIZE_ENV = "SWE_CRON_NOTIFICATION_BATCH_SIZE"
+CONCURRENCY_ENV = "SWE_CRON_NOTIFICATION_CONCURRENCY"
 MAX_ATTEMPTS_ENV = "SWE_CRON_NOTIFICATION_MAX_ATTEMPTS"
 SOURCE_IDS_ENV = "SWE_CRON_NOTIFICATION_SOURCE_IDS"
 
@@ -52,6 +53,14 @@ class CronNotificationWorker:
             minimum=1,
             maximum=100,
         )
+        self._send_semaphore = asyncio.Semaphore(
+            _get_int_env(
+                CONCURRENCY_ENV,
+                default=5,
+                minimum=1,
+                maximum=20,
+            ),
+        )
         self._max_attempts = max_attempts or _get_int_env(
             MAX_ATTEMPTS_ENV,
             default=3,
@@ -82,8 +91,8 @@ class CronNotificationWorker:
         except asyncio.CancelledError:
             pass
 
-    async def scan_once(self) -> None:
-        """执行一次通知扫描。"""
+    async def scan_once(self) -> bool:
+        """处理一批通知，返回是否可立即继续领取。"""
         now_utc = self._now_utc()
         rows = await self._monitor_client.claim_due_notifications(
             lock_owner=self._lock_owner,
@@ -91,13 +100,29 @@ class CronNotificationWorker:
             limit=self._batch_size,
             source_ids=self._source_ids,
         )
-        for row in rows:
-            await self._send_one(row)
+        results = await asyncio.gather(
+            *(self._send_one_with_limit(row) for row in rows),
+        )
+        return bool(rows) and all(results)
+
+    async def _send_one_with_limit(self, row: dict[str, Any]) -> bool:
+        async with self._send_semaphore:
+            try:
+                return await self._send_one(row)
+            except Exception:
+                # 状态回写失败也只影响当前记录；取消仍由 worker 向下传播。
+                logger.warning(
+                    "Cron notification processing failed: execution_id=%s",
+                    row.get("id"),
+                    exc_info=True,
+                )
+                return False
 
     async def _run_loop(self) -> None:
         while not self._stopped.is_set():
             try:
-                await self.scan_once()
+                if await self.scan_once():
+                    continue
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -110,7 +135,7 @@ class CronNotificationWorker:
             except asyncio.TimeoutError:
                 continue
 
-    async def _send_one(self, row: dict[str, Any]) -> None:
+    async def _send_one(self, row: dict[str, Any]) -> bool:
         execution_id = int(row.get("id"))
         try:
             tenant_id = str(row.get("tenant_id") or "")
@@ -131,12 +156,14 @@ class CronNotificationWorker:
                 execution_id=execution_id,
                 sent_at=self._now_utc(),
             )
+            return True
         except Exception as exc:  # pylint: disable=broad-except
             await self._monitor_client.mark_notification_failed(
                 execution_id=execution_id,
                 error=repr(exc),
                 max_attempts=self._max_attempts,
             )
+            return False
 
     def _now_utc(self) -> datetime:
         try:

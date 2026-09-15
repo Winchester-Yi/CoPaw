@@ -246,10 +246,12 @@ def test_scene_skills_allows_empty_category(client: TestClient) -> None:
     assert resp.json() == {"items": []}
 
 
-def test_name_list_requires_skill_id(client: TestClient) -> None:
-    resp = client.get("/api/wealth/name-list")
+def test_name_list_allows_empty_skill_id(client: TestClient) -> None:
+    """skill_id 为空表示客户视角（该经理名下全部技能客户），参数合法。"""
+    resp = client.get("/api/wealth/name-list?sap_id=10086")
 
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
 
 
 def test_name_list_empty_when_external_absent(client: TestClient) -> None:
@@ -261,11 +263,21 @@ def test_name_list_empty_when_external_absent(client: TestClient) -> None:
 
 
 def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
-    """sap_id 为空表示客户视角（不限定客户经理），参数合法。"""
+    """sap_id 可空（缺省场景/兼容调用），参数合法。"""
     resp = client.get("/api/wealth/name-list?skill_id=loan_verify&sap_id=")
 
     assert resp.status_code == 200
     assert resp.json() == {"items": []}
+
+
+def test_name_list_rejects_invalid_touched(client: TestClient) -> None:
+    """touched 仅接受 0 未触达 / 1 已触达 / 2 全部。"""
+    resp = client.get("/api/wealth/name-list?touched=3")
+
+    assert resp.status_code == 400
+
+    ok = client.get("/api/wealth/name-list?touched=2")
+    assert ok.status_code == 200
 
 
 async def _make_broadcast_store(
@@ -393,3 +405,19 @@ async def test_board_status_distributing_while_running(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
 
     assert creator_view["items"][0]["board_status"] == "分发中"
+
+
+def test_skill_ids_by_customer_dedupes_and_skips_bad_rows() -> None:
+    """客户视角标签列的数据来源：custuid → 命中技能列表（去重、跳过脏行）。"""
+    rows = [
+        {"custuid": "CUST001", "skillId": "loan_verify"},
+        {"custuid": "cust001", "skillId": "loan_verify"},  # 大小写归一并去重
+        {"custuid": "CUST001", "skillId": "deposit_growth"},
+        {"custuid": "CUST002", "skillId": ""},  # 无技能，跳过
+        {"custuid": "", "skillId": "loan_verify"},  # 无客户，跳过
+        "not-a-dict",
+    ]
+
+    mapping = wealth_router._skill_ids_by_customer(rows)
+
+    assert mapping == {"cust001": ["loan_verify", "deposit_growth"]}

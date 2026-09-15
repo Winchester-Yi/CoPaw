@@ -48,6 +48,7 @@ from .auth_state import prefetch_auth_token
 from .cron_utils import compute_next_run_at, compute_next_run_times
 from .executor import CronExecutor
 from .models import CronJobSpec, CronJobState, CronTaskView, JobsFile
+from .task_view import MANUAL_PAUSE_REASON, build_cron_task_view
 from ..runner.models import ChatSpec
 from .repo.base import BaseJobRepository
 from .scheduler_adapter import SchedulerAdapter, NoopSchedulerAdapter
@@ -63,7 +64,6 @@ HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
 TASK_SESSION_CLEANUP_TASK_TYPE = "cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
-MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_SUCCESS_EXECUTION_KEYS_META_KEY = "task_success_execution_keys"
 MAX_TASK_SUCCESS_EXECUTION_KEYS = 100
@@ -1174,10 +1174,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     f"for {spec.id}",
                 )
 
-        if spec.enabled:
-            await self._scheduler_adapter.resume_job(batch_ext_id)
-        else:
-            await self._scheduler_adapter.pause_job(batch_ext_id)
+        # This is a batch wakeup timer, not the parent's own execution switch.
+        # Scheduler's durable run state gates new batches and queued work.
+        await self._scheduler_adapter.resume_job(batch_ext_id)
 
         meta[BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY] = True
         meta[BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY] = batch_ext_id
@@ -1261,7 +1260,13 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 0,
             ),
         )
-        return await self._persist_job_definition(updated)
+        saved = await self._persist_job_definition(updated)
+        from .batch_run_state_client import initialize_run_state
+
+        await initialize_run_state(
+            saved, self._monitor_sync_client, self._agent_id or "default"
+        )
+        return saved
 
     async def disable_batch_dispatch_for_parent(
         self,
@@ -1830,7 +1835,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
             # Resume on external scheduler
             ext_id = self._states.get(job_id, CronJobState()).external_job_id
             if ext_id and self._scheduler_adapter:
-                await self._scheduler_adapter.resume_job(ext_id)
+                if is_batch_dispatch_parent(
+                    job
+                ) or is_batch_dispatch_managed_broadcast_child(job):
+                    await self._scheduler_adapter.pause_job(ext_id)
+                else:
+                    await self._scheduler_adapter.resume_job(ext_id)
             elif not ext_id:
                 logger.warning(
                     "resume_job: no external_job_id for %s, skipping external sync",
@@ -1854,7 +1864,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         is_manual: bool = True,
         source_id: str | None = None,
         dispatch_meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool | None:
         """Trigger a job to run in the background (fire-and-forget).
 
         This is called either by:
@@ -1870,7 +1880,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             raise KeyError(f"Job not found: {job_id}")
         if not job.enabled:
             logger.debug("Job %s is disabled, skipping run", job_id)
-            return
+            return False
         dispatch_meta = self._prepare_run_dispatch_meta(
             job,
             is_manual,
@@ -1984,36 +1994,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         spec: CronJobSpec,
         user_id: Optional[str],
     ) -> CronTaskView:
-        meta = spec.meta or {}
-        state = self.get_state(spec.id)
-        creator_user_id = meta.get("creator_user_id")
-        visible_in_my_tasks = bool(
-            spec.task_type in {"agent", "text"}
-            and creator_user_id
-            and creator_user_id == user_id,
-        )
-        pause_reason = meta.get("pause_reason")
-        if visible_in_my_tasks and not pause_reason and not spec.enabled:
-            pause_reason = MANUAL_PAUSE_REASON
-        return CronTaskView(
-            visible_in_my_tasks=visible_in_my_tasks,
-            chat_id=meta.get("task_chat_id"),
-            session_id=meta.get("task_session_id"),
-            has_scheduled_result=bool(
-                meta.get("task_has_scheduled_result", False),
-            ),
-            latest_scheduled_preview=str(
-                meta.get("task_last_scheduled_preview", "") or "",
-            ),
-            unread_execution_count=int(
-                meta.get("task_unread_execution_count", 0) or 0,
-            ),
-            last_scheduled_run_at=meta.get("task_last_scheduled_run_at"),
-            is_running=state.last_status == "running",
-            is_paused=bool(pause_reason),
-            pause_reason=pause_reason,
-            auto_paused_at=meta.get("auto_paused_at"),
-        )
+        return build_cron_task_view(spec, self.get_state(spec.id), user_id)
 
     # ----- callbacks -----
 

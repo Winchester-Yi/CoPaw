@@ -36,11 +36,11 @@ describe("WealthWorkbench permissions", () => {
     ]);
   });
 
-  it("resolveRole 命中映射表：RB0101 客户经理 / RB0208 行长 / RB0304、RB0906 中台", () => {
+  it("resolveRole 命中映射表：RB0101 客户经理 / RB1101、RB0306 行长 / RB0304 中台", () => {
     expect(resolveRole("RB0101")).toBe("rm");
-    expect(resolveRole("RB0208")).toBe("president");
+    expect(resolveRole("RB1101")).toBe("president");
+    expect(resolveRole("RB0306")).toBe("president");
     expect(resolveRole("RB0304")).toBe("middle");
-    expect(resolveRole("RB0906")).toBe("middle");
   });
 
   it("仅行长/中台需要选择分发目标，客户经理发给自己", () => {
