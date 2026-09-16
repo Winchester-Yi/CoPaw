@@ -2,7 +2,7 @@
  * 智能财富工作台 —— 数据访问层测试
  * 规划、场景与客户名单接口不做假数据回退：离线时读路径返回空列表、写路径上抛
  * （错误传播用例见 api.http-errors.test.ts）。
- * 本文件覆盖客户名单映射、触达登记覆盖层与草稿等内存行为。
+ * 本文件覆盖客户名单映射与草稿等内存行为。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "./api";
@@ -71,6 +71,54 @@ describe("WealthWorkbench api", () => {
 
     mockRequest.mockRejectedValueOnce(new Error("boom"));
     await expect(api.fetchNameList("skill-loan-1")).resolves.toEqual([]);
+  });
+
+  it("fetchAvailableSceneCount 返回全部大类场景数；失败返回 null", async () => {
+    mockRequest.mockResolvedValueOnce({
+      items: [{ skillId: "a" }, { skillId: "b" }, { skillId: "c" }],
+    });
+    await expect(api.fetchAvailableSceneCount()).resolves.toBe(3);
+    expect(String(mockRequest.mock.calls[0]?.[0])).toBe(
+      "/wealth/scene-skills?category=",
+    );
+
+    mockRequest.mockRejectedValueOnce(new Error("boom"));
+    await expect(api.fetchAvailableSceneCount()).resolves.toBeNull();
+  });
+
+  it("fetchSkillStats 按场景统计键映射结果；失败返回 null", async () => {
+    mockRequest.mockResolvedValueOnce({
+      items: [
+        { skillId: "s1", targetCustomerCount: 125, generatedTaskCount: 30 },
+        { skillId: "s2", targetCustomerCount: 89, generatedTaskCount: 17 },
+      ],
+    });
+    const queries = [
+      { skillId: "s1", startDate: "2026-09-01", endDate: "2026-09-30" },
+      { skillId: "s2", startDate: "2026-09-05", endDate: "2026-09-15" },
+    ];
+    const stats = await api.fetchSkillStats(queries);
+    expect(stats).toEqual({
+      "s1|2026-09-01|2026-09-30": {
+        targetCustomerCount: 125,
+        generatedTaskCount: 30,
+      },
+      "s2|2026-09-05|2026-09-15": {
+        targetCustomerCount: 89,
+        generatedTaskCount: 17,
+      },
+    });
+    const [path, options] = mockRequest.mock.calls[0] ?? [];
+    expect(String(path)).toBe("/wealth/skill-stats");
+    expect(JSON.parse(String((options as RequestInit).body))).toEqual({
+      skills: queries,
+    });
+
+    mockRequest.mockRejectedValueOnce(new Error("boom"));
+    await expect(api.fetchSkillStats(queries)).resolves.toBeNull();
+
+    // 空查询不发请求
+    await expect(api.fetchSkillStats([])).resolves.toEqual({});
   });
 
   it("fetchTodayCustomers 按任务上下文映射名单并去重", async () => {
@@ -158,51 +206,9 @@ describe("WealthWorkbench api", () => {
     expect(done[0]).toMatchObject({ channel: "", time: "", note: "" });
   });
 
-  it("reportContact 写入覆盖层，重新拉取名单后回填触达结果", async () => {
-    await api.fetchTodayCustomers([TASK], "10086", "business");
-    const { customers } = await api.reportContact(
-      {
-        id: "skill-loan-1|CUST001",
-        channel: "电话",
-        outcome: "done",
-        note: "已沟通",
-      },
-      "2026-09-14",
-    );
-    const hit = customers.find((c) => c.id === "skill-loan-1|CUST001");
-    expect(hit?.done).toBe(true);
-    expect(hit?.channel).toBe("电话");
-    expect(hit?.time.startsWith("2026-09-14 ")).toBe(true);
-
-    // 重新拉取后触达结果仍回填
-    const again = await api.fetchTodayCustomers([TASK], "10086", "business");
-    expect(again.find((c) => c.id === "skill-loan-1|CUST001")?.done).toBe(true);
-    expect(again.find((c) => c.id === "skill-loan-1|CUST002")?.done).toBe(
-      false,
-    );
-  });
-
-  it("resetMockDb 后触达覆盖层与草稿恢复初始（模拟刷新）", async () => {
-    await api.fetchTodayCustomers([TASK], "10086", "business");
-    await api.reportContact(
-      {
-        id: "skill-loan-1|CUST001",
-        channel: "电话",
-        outcome: "done",
-        note: "已沟通",
-      },
-      "2026-09-14",
-    );
+  it("resetMockDb 后草稿恢复初始（模拟刷新）", async () => {
     await api.saveDraft("rm", { name: "改过的草稿", items: [] });
     api.resetMockDb();
-    const customers = await api.fetchTodayCustomers(
-      [TASK],
-      "10086",
-      "business",
-    );
-    expect(customers.find((c) => c.id === "skill-loan-1|CUST001")?.done).toBe(
-      false,
-    );
     const data = await api.fetchBootstrap("rm");
     expect(data.draft).toEqual({ name: "", items: [] });
   });

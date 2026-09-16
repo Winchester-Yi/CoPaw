@@ -40,6 +40,14 @@ def app(
     application.state.wealth_plan_store = store
     application.state.wealth_plan_launches = launches
     application.state.wealth_plan_cascades = cascades
+
+    @application.middleware("http")
+    async def _bbk_state(request, call_next):  # 模拟租户中间件的 bbk 注入
+        bbk = request.headers.get("X-Bbk-Id")
+        if bbk:
+            request.state.bbk_id = bbk
+        return await call_next(request)
+
     application.include_router(wealth_router.router, prefix="/api")
     return application
 
@@ -63,6 +71,7 @@ def plan_payload(**overrides) -> dict:
                 "start_date": "2026-09-01",
                 "end_date": "2026-09-30",
                 "cron_expr": "0 9 * * *",
+                "cron_example": "每日生成高潜保险客户名单",
                 "mcp_relations": ["mcp-customer"],
             },
         ],
@@ -108,9 +117,66 @@ def test_list_visible_to_creator_and_target_only(client: TestClient) -> None:
     assert [p["id"] for p in creator_items["items"]] == [created["id"]]
     assert creator_items["items"][0]["editable"] is True
     assert creator_items["items"][0]["board_status"] == "发布中"
+    assert (
+        creator_items["items"][0]["scenes"][0]["cron_example"]
+        == "每日生成高潜保险客户名单"
+    )
     assert [p["id"] for p in target_items["items"]] == [created["id"]]
     assert target_items["items"][0]["editable"] is False
     assert outsider_items["items"] == []
+
+
+def test_list_branch_wide_for_president_and_middle(client: TestClient) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers={**VIEWER, "X-Bbk-Id": "100"},
+    ).json()
+
+    president = {
+        "X-User-Id": "wangly",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB1101",
+    }
+    middle = {**president, "X-Position-Id": "RB0304"}
+    rm = {**president, "X-Position-Id": "RB0101"}
+    other_branch = {**president, "X-Bbk-Id": "200"}
+
+    for headers in (president, middle):
+        items = client.get("/api/wealth/plans", headers=headers).json()[
+            "items"
+        ]
+        assert [p["id"] for p in items] == [created["id"]]
+        assert items[0]["editable"] is False  # 可见但只读
+    assert client.get("/api/wealth/plans", headers=rm).json()["items"] == []
+    assert (
+        client.get("/api/wealth/plans", headers=other_branch).json()["items"]
+        == []
+    )
+
+
+def test_detail_visible_to_branch_peer_readonly(client: TestClient) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers={**VIEWER, "X-Bbk-Id": "100"},
+    ).json()
+    president = {
+        "X-User-Id": "wangly",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB0306",
+    }
+
+    detail = client.get(
+        f"/api/wealth/plans/{created['id']}",
+        headers=president,
+    )
+    assert detail.status_code == 200
+    assert detail.json()["editable"] is False
+
+    outsider = {**president, "X-Bbk-Id": "200"}
+    resp = client.get(f"/api/wealth/plans/{created['id']}", headers=outsider)
+    assert resp.status_code == 403
 
 
 def test_get_detail_forbidden_for_outsider(client: TestClient) -> None:
@@ -278,6 +344,158 @@ def test_name_list_rejects_invalid_touched(client: TestClient) -> None:
 
     ok = client.get("/api/wealth/name-list?touched=2")
     assert ok.status_code == 200
+
+
+def test_name_list_forwards_touch_filter_context(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """触达筛选请求应携带支行、岗位和登录态。"""
+    captured: dict = {}
+
+    class FakeResponse:
+        def json(self) -> dict:
+            return {"code": "200", "data": {"list": []}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+        async def post(
+            self,
+            url: str,
+            json: dict,
+            headers: dict | None = None,
+        ) -> FakeResponse:
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setenv("SWE_SKILL_CONFIG_API_BASE", "http://external.test")
+    monkeypatch.setattr(wealth_router.httpx, "AsyncClient", FakeClient)
+
+    resp = client.get(
+        "/api/wealth/name-list?skill_id=SKILL0001&sap_id=80280256&touched=0",
+        headers={
+            **VIEWER,
+            "X-Bbk-Id": "755",
+            "X-Org-Code": "755480",
+            "X-Position-Id": "RB0101",
+            "x-header-cookie": "session=active",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["url"].endswith("/api/agent/workspace/name-list")
+    assert captured["json"] == {
+        "bbkId": "755",
+        "platformSource": "WP",
+        "pageSource": "WP_AGENT_WORKSPACE_TASK_LIST",
+        "touched": 0,
+        "skillId": "SKILL0001",
+        "sapId": "80280256",
+        "subBbkId": "755480",
+        "posId": "RB0101",
+    }
+    assert captured["headers"] == {"Cookie": "session=active"}
+
+
+def test_skill_stats_empty_when_external_absent(client: TestClient) -> None:
+    """外部接口未配置/不可达时返回空列表，由前端保持占位。"""
+    resp = client.post(
+        "/api/wealth/skill-stats",
+        json={
+            "skills": [
+                {
+                    "skillId": "s1",
+                    "startDate": "2026-09-01",
+                    "endDate": "2026-09-30",
+                },
+            ],
+        },
+        headers=VIEWER,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"items": []}
+
+
+def test_skill_stats_requires_non_empty_skills(client: TestClient) -> None:
+    resp = client.post(
+        "/api/wealth/skill-stats",
+        json={"skills": []},
+        headers=VIEWER,
+    )
+
+    assert resp.status_code == 422
+
+
+def test_skill_stats_forwards_bbk_and_skills(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """代理层注入 bbkId 并原样转发 skills，响应项透传。"""
+    captured: dict = {}
+
+    class FakeResponse:
+        def json(self) -> dict:
+            return {
+                "code": "200",
+                "data": {
+                    "items": [
+                        {
+                            "skillId": "s1",
+                            "targetCustomerCount": 5,
+                            "generatedTaskCount": 2,
+                        },
+                    ],
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setenv("SWE_SKILL_CONFIG_API_BASE", "http://external.test")
+    monkeypatch.setattr(wealth_router.httpx, "AsyncClient", FakeClient)
+
+    resp = client.post(
+        "/api/wealth/skill-stats",
+        json={
+            "skills": [
+                {
+                    "skillId": "s1",
+                    "startDate": "2026-09-01",
+                    "endDate": "2026-09-30",
+                },
+            ],
+        },
+        headers={**VIEWER, "X-Bbk-Id": "755"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["targetCustomerCount"] == 5
+    assert captured["url"].endswith("/api/agent/workspace/skill-stats")
+    assert captured["json"]["bbkId"] == "755"
+    assert captured["json"]["skills"][0]["skillId"] == "s1"
 
 
 async def _make_broadcast_store(

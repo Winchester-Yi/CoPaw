@@ -3,7 +3,7 @@
  * 排程模型与控制台定时任务一致（@/utils/parseCron 的 CronParts）。
  */
 import type { CronParts } from "@/utils/parseCron";
-import type { Plan, PlanItem } from "./types";
+import type { Draft, Plan, PlanItem, SkillStatQuery } from "./types";
 
 export function calendarDate(value: string): Date {
   return new Date(value + "T12:00:00");
@@ -217,4 +217,67 @@ export function buildTaskTree(plans: Plan[], day: string): TaskTreeGroup[] {
     }
   }
   return groups;
+}
+
+/** 发布确认前的场景冲突项：草稿场景已被哪个规划占用 */
+export interface SceneConflict {
+  scene: PlanItem;
+  planName: string;
+}
+
+/**
+ * 发布前置冲突检查（行长/中台）：草稿中的场景若已被其他
+ * 已发布/发布中的规划占用，则不允许重复新建发布，应去编辑原规划。
+ * 发布失败的规划不产生占用；编辑模式排除正在编辑的规划本身。
+ */
+export function findSceneConflicts(
+  plans: Plan[],
+  draft: Draft,
+  editingId: string | null,
+): SceneConflict[] {
+  const ownerBySceneId = new Map<string, string>();
+  for (const p of plans) {
+    if (p.id === editingId) continue;
+    if (p.publishStatus === "publish_failed") continue;
+    for (const item of p.items ?? []) {
+      if (!ownerBySceneId.has(item.id)) {
+        ownerBySceneId.set(item.id, p.name);
+      }
+    }
+  }
+  return draft.items
+    .filter((x) => ownerBySceneId.has(x.id))
+    .map((x) => ({
+      scene: x,
+      planName: ownerBySceneId.get(x.id) ?? "",
+    }));
+}
+
+/** 场景统计键：技能 + 区间唯一确定一份统计结果 */
+export function sceneStatKey(q: SkillStatQuery): string {
+  return `${q.skillId}|${q.startDate}|${q.endDate}`;
+}
+
+/**
+ * 收集看板规划列表的技能统计查询：按「技能 + 起止日期」去重；
+ * 缺起止日期的场景无法统计，跳过。
+ */
+export function collectSkillStatQueries(plans: Plan[]): SkillStatQuery[] {
+  const seen = new Set<string>();
+  const queries: SkillStatQuery[] = [];
+  for (const p of plans) {
+    for (const item of p.items ?? []) {
+      if (!item.start || !item.end) continue;
+      const query: SkillStatQuery = {
+        skillId: item.id,
+        startDate: item.start,
+        endDate: item.end,
+      };
+      const key = sceneStatKey(query);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      queries.push(query);
+    }
+  }
+  return queries;
 }

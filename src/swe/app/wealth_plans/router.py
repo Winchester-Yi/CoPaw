@@ -45,6 +45,10 @@ from .models import (
     PlanView,
     SceneSkillItem,
     SceneSkillListResponse,
+    SkillStatItem,
+    SkillStatQuery,
+    SkillStatsRequest,
+    SkillStatsResponse,
     WealthPlanRecord,
 )
 from .publish import (
@@ -52,6 +56,7 @@ from .publish import (
     delete_removed_scene_jobs,
     launch_publish,
 )
+from .roles import can_view_branch_wide, resolve_role
 from .store import WealthPlanStore, new_plan_id
 
 logger = logging.getLogger(__name__)
@@ -63,6 +68,7 @@ router = APIRouter(prefix="/wealth", tags=["wealth"])
 # 启动时由 load_env_defaults() 注入 os.environ；进程环境变量/K8s env 优先。
 _SKILL_CONFIG_API_BASE_ENV = "SWE_SKILL_CONFIG_API_BASE"
 _SKILL_CONFIG_PATH = "/api/agent/workspace/skill-config/list"
+_SKILL_STATS_PATH = "/api/agent/workspace/skill-stats"
 _NAME_LIST_PATH = "/api/agent/workspace/name-list"
 _SKILL_CONFIG_TIMEOUT_SECONDS = 8
 
@@ -85,6 +91,11 @@ def _request_sap_id(request: Request) -> str:
         "X-User-Id",
     )
     return (sap_id or "default").strip()
+
+
+def _request_role(request: Request) -> str:
+    """当前用户角色：由 X-Position-Id 解析（前端 authHeaders 透传父系统岗位）。"""
+    return resolve_role(request.headers.get("X-Position-Id"))
 
 
 def _fmt_dt(value: datetime | None) -> str | None:
@@ -152,6 +163,66 @@ def _parse_external_scene(row: Any) -> SceneSkillItem | None:
 
 
 # ---------------------------------------------------------------------------
+# 技能统计查询（外部接口代理）：看板「目标客户 / 已生成任务」
+# ---------------------------------------------------------------------------
+
+
+@router.post("/skill-stats", response_model=SkillStatsResponse)
+async def query_skill_stats(
+    request: Request,
+    body: SkillStatsRequest,
+) -> SkillStatsResponse:
+    """按技能 + 日期区间统计目标客户数与已生成任务数。
+
+    bbkId 由请求上下文注入；外部接口不可用时返回空列表，
+    由前端保持占位展示，不做假数据兜底。
+    """
+    items = await _fetch_external_skill_stats(request, body.skills)
+    return SkillStatsResponse(items=items)
+
+
+async def _fetch_external_skill_stats(
+    request: Request,
+    skills: list[SkillStatQuery],
+) -> list[SkillStatItem]:
+    base = os.environ.get(_SKILL_CONFIG_API_BASE_ENV, "").strip().rstrip("/")
+    if not base:
+        return []
+    bbk_id = getattr(request.state, "bbk_id", None) or ""
+    body = {
+        "bbkId": bbk_id,
+        "skills": [s.model_dump() for s in skills],
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=_SKILL_CONFIG_TIMEOUT_SECONDS,
+        ) as client:
+            resp = await client.post(f"{base}{_SKILL_STATS_PATH}", json=body)
+            payload = resp.json()
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("skill-stats request failed: %s", exc)
+        return []
+    if str(payload.get("code")) != "200":
+        logger.warning("skill-stats rejected: %s", payload.get("code"))
+        return []
+    data = payload.get("data") or {}
+    return [
+        item
+        for row in data.get("items") or []
+        if (item := _parse_skill_stat(row)) is not None
+    ]
+
+
+def _parse_skill_stat(row: Any) -> SkillStatItem | None:
+    if not isinstance(row, dict) or not row.get("skillId"):
+        return None
+    try:
+        return SkillStatItem(**row)
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # 客户名单查询（外部接口代理）
 # ---------------------------------------------------------------------------
 
@@ -189,8 +260,8 @@ async def _fetch_external_name_list(
     bbk_id = getattr(request.state, "bbk_id", None) or ""
     body: dict[str, Any] = {
         "bbkId": bbk_id,
-        "platformSource": "AGENT_WORKSPACE",
-        "pageSource": "AGENT_WORKSPACE_TASK_LIST",
+        "platformSource": "WP",
+        "pageSource": "WP_AGENT_WORKSPACE_TASK_LIST",
     }
     if touched is not None:
         body["touched"] = touched
@@ -198,11 +269,25 @@ async def _fetch_external_name_list(
         body["skillId"] = skill_id
     if sap_id:
         body["sapId"] = sap_id
+    sub_bbk_id = request.headers.get("X-Org-Code")
+    if sub_bbk_id:
+        body["subBbkId"] = sub_bbk_id
+    pos_id = request.headers.get("X-Position-Id")
+    if pos_id:
+        body["posId"] = pos_id
+    cookie = request.headers.get("cookie") or request.headers.get(
+        "x-header-cookie",
+    )
+    headers = {"Cookie": cookie} if cookie else None
     try:
         async with httpx.AsyncClient(
             timeout=_SKILL_CONFIG_TIMEOUT_SECONDS,
         ) as client:
-            resp = await client.post(f"{base}{_NAME_LIST_PATH}", json=body)
+            resp = await client.post(
+                f"{base}{_NAME_LIST_PATH}",
+                json=body,
+                headers=headers,
+            )
             payload = resp.json()
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("name-list request failed: %s", exc)
@@ -271,10 +356,14 @@ async def create_plan(
 
 @router.get("/plans", response_model=PlanListResponse)
 async def list_plans(request: Request) -> PlanListResponse:
-    """看板列表：我创建的 + 分发给我的。"""
+    """看板列表：客户经理看自己创建 + 分发给自己的；行长/中台看本行全部。"""
     store = _get_store(request)
     viewer = _request_sap_id(request)
-    records = await store.list_for_sap(viewer)
+    records = await store.list_for_viewer(
+        viewer,
+        _request_role(request),
+        getattr(request.state, "bbk_id", None),
+    )
     items = [await _build_view(request, record, viewer) for record in records]
     return PlanListResponse(items=items)
 
@@ -283,7 +372,13 @@ async def list_plans(request: Request) -> PlanListResponse:
 async def get_plan(request: Request, plan_id: str) -> PlanView:
     store = _get_store(request)
     viewer = _request_sap_id(request)
-    record = await _get_visible_plan(store, plan_id, viewer)
+    record = await _get_visible_plan(
+        store,
+        plan_id,
+        viewer,
+        _request_role(request),
+        getattr(request.state, "bbk_id", None),
+    )
     return await _build_view(request, record, viewer)
 
 
@@ -337,13 +432,19 @@ async def _get_visible_plan(
     store: WealthPlanStore,
     plan_id: str,
     viewer: str,
+    role: str,
+    bbk_id: str | None,
 ) -> WealthPlanRecord:
     record = await store.get(plan_id)
     if record is None:
         raise HTTPException(status_code=404, detail="plan not found")
     is_creator = record.sap_id == viewer
     is_target = any(t.sap_id == viewer for t in record.targets)
-    if not is_creator and not is_target:
+    # 行长/中台可读本行（同 bbk_id）全部规划，但仍只读、不可编辑
+    is_branch_peer = (
+        can_view_branch_wide(role) and bool(bbk_id) and record.bbk_id == bbk_id
+    )
+    if not is_creator and not is_target and not is_branch_peer:
         raise HTTPException(status_code=403, detail="forbidden")
     return record
 
@@ -392,6 +493,7 @@ def _build_record(
                 cycle=scene.cycle,
                 start_date=scene.start_date,
                 end_date=scene.end_date,
+                cron_example=scene.cron_example,
                 mcp_relations=list(scene.mcp_relations),
                 sort_order=index,
             )
@@ -453,6 +555,7 @@ async def _build_view(
                 start_date=scene.start_date,
                 end_date=scene.end_date,
                 cron_expr=scene.cron_expr,
+                cron_example=scene.cron_example,
                 mcp_relations=list(scene.mcp_relations),
             )
             for scene in record.scenes

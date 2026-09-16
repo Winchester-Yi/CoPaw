@@ -2,6 +2,7 @@
  * 智能财富工作台 —— 规划看板·日历视图
  * 对应原型 calendarHTML：月/周双维度、排程事件卡片、今日高亮。
  */
+import { useEffect, useRef, useState } from "react";
 import cx from "classnames";
 import styles from "../index.module.less";
 import type { Plan } from "../types";
@@ -34,6 +35,8 @@ export function Calendar({
   onDimension: (d: "week" | "month") => void;
   onShowDetails: (day: string, id?: string) => void;
 }) {
+  const todayCellRef = useRef<HTMLDivElement>(null);
+  const [shouldFocusToday, setShouldFocusToday] = useState(false);
   const [start, end] = calendarRange(anchor, dimension);
   const first =
     dimension === "month"
@@ -52,6 +55,32 @@ export function Calendar({
     dimension === "month"
       ? `${month.getFullYear()}年 ${month.getMonth() + 1}月`
       : `${start.replace(/-/g, ".")} — ${end.slice(5).replace("-", ".")}`;
+
+  useEffect(() => {
+    if (!shouldFocusToday) return;
+
+    if (dimension === "month") {
+      const todayCell = todayCellRef.current;
+      if (todayCell) {
+        const { top, bottom } = todayCell.getBoundingClientRect();
+        const isVisible = top >= 0 && bottom <= window.innerHeight;
+        if (!isVisible) {
+          todayCell.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+            inline: "nearest",
+          });
+        }
+      }
+    }
+
+    setShouldFocusToday(false);
+  }, [anchor, dimension, shouldFocusToday]);
+
+  const handleToday = () => {
+    setShouldFocusToday(true);
+    onToday();
+  };
 
   return (
     <>
@@ -72,7 +101,10 @@ export function Calendar({
           >
             <Icon name="right" />
           </button>
-          <button className={`${styles.btn} ${styles.sm}`} onClick={onToday}>
+          <button
+            className={`${styles.btn} ${styles.sm}`}
+            onClick={handleToday}
+          >
             今天
           </button>
         </div>
@@ -124,6 +156,7 @@ export function Calendar({
             return (
               <div
                 key={day}
+                ref={today ? todayCellRef : undefined}
                 className={cx(
                   styles.calendarCell,
                   !inRange && styles.outside,

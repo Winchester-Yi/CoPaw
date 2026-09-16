@@ -133,6 +133,7 @@ const SCENE_FIXTURES = [
     senceName: "保障潜客经营",
     category: "insurance",
     senceDesc: "挖掘高潜保险客户",
+    cronExample: "每日生成高潜保险客户名单",
     mcpRelationList: ["mcp-customer", "mcp-insurance"],
     skillBbkLabel: "总部预置",
   },
@@ -218,6 +219,7 @@ function makeItem(patch: Partial<PlanItem> = {}): PlanItem {
     sceneName: "保障潜客经营",
     categoryLabel: "保险",
     categoryCode: "insurance",
+    cronExample: "每日生成高潜保险客户名单",
     mcpRelations: [],
     direction: "d",
     cycle: "本月",
@@ -282,6 +284,7 @@ async function initStore() {
     targetsLoaded: false,
     targetSapIds: [],
     dialog: null,
+    acting: false,
     toastText: "",
     toastSeq: 0,
   });
@@ -337,6 +340,10 @@ describe("WealthWorkbench store", () => {
     const ids = () => useWealthStore.getState().draft.items.map((x) => x.id);
     toggleScene(INSURANCE);
     expect(ids()).toEqual([INSURANCE]);
+    // 选入草稿时携带场景技能的 cronExample（发布时作为定时任务请求内容）
+    expect(useWealthStore.getState().draft.items[0]?.cronExample).toBe(
+      "每日生成高潜保险客户名单",
+    );
     toggleScene(INSURANCE_2);
     expect(ids()).toEqual([INSURANCE, INSURANCE_2]);
     toggleScene("skill-not-in-pool"); // 场景池外的 id 为无效操作
@@ -449,6 +456,14 @@ describe("WealthWorkbench store", () => {
     expect(s.plans).toHaveLength(7);
     expect(s.editingId).toBeNull();
     expect(s.toastText).toContain("规划已发布");
+    // 发布 payload 携带场景技能的 cron_example（后端组装定时任务请求内容用）
+    const post = mockRequest.mock.calls.find(
+      ([p, o]) =>
+        String(p) === "/wealth/plans" &&
+        (o as RequestInit | undefined)?.method === "POST",
+    );
+    const body = JSON.parse(String((post?.[1] as RequestInit).body));
+    expect(body.scenes[0].cron_example).toBe("每日生成高潜保险客户名单");
   });
 
   it("publishPlan 客户经理默认分发给自己", async () => {
@@ -476,6 +491,38 @@ describe("WealthWorkbench store", () => {
     const s = useWealthStore.getState();
     expect(s.plans[0]?.targetSapIds).toEqual(["zhangwl", "chenjy"]);
     expect(s.targetSapIds).toEqual([]);
+  });
+
+  it("publishPlan 进行中重复触发只发一次请求", async () => {
+    seedDraft();
+    mockRequest.mockClear(); // 调用记录跨用例累积，只统计本用例内的请求
+    const first = useWealthStore.getState().publishPlan();
+    // 第一次调用尚未 await 完成时再触发，应被 acting 守卫直接拒绝
+    const second = await useWealthStore.getState().publishPlan();
+    expect(second).toBe(false);
+    expect(await first).toBe(true);
+    const posts = mockRequest.mock.calls.filter(
+      ([p, o]) =>
+        String(p) === "/wealth/plans" &&
+        (o as RequestInit | undefined)?.method === "POST",
+    );
+    expect(posts).toHaveLength(1);
+    expect(useWealthStore.getState().acting).toBe(false); // finally 复位
+  });
+
+  it("removePlan 进行中重复触发只发一次请求", async () => {
+    mockRequest.mockClear();
+    const id = planViews[0]?.id ?? "";
+    const first = useWealthStore.getState().removePlan(id);
+    await useWealthStore.getState().removePlan(id); // 被守卫忽略
+    await first;
+    const dels = mockRequest.mock.calls.filter(
+      ([p, o]) =>
+        String(p).startsWith("/wealth/plans/") &&
+        (o as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(dels).toHaveLength(1);
+    expect(useWealthStore.getState().acting).toBe(false);
   });
 
   it("toggleTarget 选中/取消分发目标", () => {
@@ -518,21 +565,6 @@ describe("WealthWorkbench store", () => {
       label: "信贷需求挖掘",
       task: "信贷需求挖掘",
     });
-  });
-
-  it("触达登记后重新拉取同视角名单，触达结果回填", async () => {
-    useWealthStore.setState({ plans: [makeTodayPlan()] });
-    await useWealthStore.getState().loadTodayCustomers("business");
-    const id = useWealthStore.getState().customers[0]?.id ?? "";
-    await useWealthStore.getState().reportContact(id, "电话", "done", "已沟通");
-    expect(
-      useWealthStore.getState().customers.find((c) => c.id === id)?.done,
-    ).toBe(true);
-
-    await useWealthStore.getState().loadTodayCustomers("business");
-    expect(
-      useWealthStore.getState().customers.find((c) => c.id === id)?.done,
-    ).toBe(true);
   });
 
   it("loadPendingCustomers / loadDoneCustomers 按 touched 拉取各自名单", async () => {

@@ -44,6 +44,8 @@ export interface DialogButton {
   label: string;
   primary?: boolean;
   danger?: boolean;
+  /** 置灰不可点击（用于前置校验未通过的场景，原因在弹窗正文说明） */
+  disabled?: boolean;
   /** 缺省时点击仅关闭弹窗 */
   onClick?: () => void;
 }
@@ -83,6 +85,8 @@ interface WealthState {
   /** 已选中的分发目标 sapId 列表 */
   targetSapIds: string[];
   dialog: DialogState | null;
+  /** 写操作进行中（发布/移除）：弹窗按钮禁用并防重复提交 */
+  acting: boolean;
   toastText: string;
   toastSeq: number;
 
@@ -124,14 +128,6 @@ interface WealthState {
   clearEditingId: () => void;
   publishPlan: () => Promise<boolean>;
   removePlan: (id: string) => Promise<void>;
-
-  // —— 客户触达 ——
-  reportContact: (
-    id: string,
-    channel: string,
-    outcome: "done" | "pending",
-    note: string,
-  ) => Promise<void>;
 
   // —— 全局 UI ——
   openDialog: (dialog: DialogState) => void;
@@ -261,6 +257,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
   targetsLoaded: false,
   targetSapIds: [],
   dialog: null,
+  acting: false,
   toastText: "",
   toastSeq: 0,
 
@@ -274,7 +271,6 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     }
     const data = await api.fetchBootstrap(accountId);
     set({ initialized: true, accountId, ...data });
-    await get().loadTodayCustomers("business");
   },
 
   refreshPlans: async () => {
@@ -368,6 +364,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
               categoryLabel: scene.category,
               categoryCode: scene.categoryCode,
               itemId: scene.itemId,
+              cronExample: scene.cronExample,
               mcpRelations: scene.mcpRelations,
               direction: scene.desc,
               cycle: "本月",
@@ -498,6 +495,8 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       get().toast("请至少选择一个分发目标");
       return false;
     }
+    if (get().acting) return false; // 防重复提交
+    set({ acting: true });
     const draft = normalizeItems(state.draft);
     try {
       const { plans, created } = await api.publishPlan(
@@ -526,10 +525,14 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
         error instanceof Error ? `发布失败：${error.message}` : "发布失败",
       );
       return false;
+    } finally {
+      set({ acting: false });
     }
   },
 
   removePlan: async (id) => {
+    if (get().acting) return; // 防重复提交
+    set({ acting: true });
     try {
       const { plans } = await api.removePlan(id);
       set({ plans, dialog: null });
@@ -538,20 +541,9 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       get().toast(
         error instanceof Error ? `移除失败：${error.message}` : "移除失败",
       );
+    } finally {
+      set({ acting: false });
     }
-  },
-
-  reportContact: async (id, channel, outcome, note) => {
-    const { customers } = await api.reportContact(
-      { id, channel, outcome, note },
-      todayKey(),
-    );
-    set({ customers, dialog: null });
-    get().toast(
-      outcome === "done"
-        ? "触达已登记，任务已移至已完成"
-        : "跟进记录已保存，客户保留在待触达清单",
-    );
   },
 
   openDialog: (dialog) => set({ dialog }),

@@ -4,12 +4,12 @@
  * 规划、场景与客户名单走真实后端接口（/wealth/plans、/wealth/scene-skills、
  * /wealth/name-list），不做假数据回退：接口不可达时读路径返回空、写路径直接
  * 抛错，避免联调期被 mock 掩盖问题。
- * 触达历史/触达登记/草稿仍为本期外的内存实现，待外部接口就绪后接入。
+ * 草稿仍为会话级内存实现；触达登记功能已下线，待外部触达接口就绪后重新接入。
  */
 import { parseCron, serializeCron } from "@/utils/parseCron";
 import { request } from "../../api/request";
 import { SCENE_CATEGORIES } from "./mock/data";
-import { DEFAULT_SCHEDULE } from "./utils";
+import { DEFAULT_SCHEDULE, sceneStatKey } from "./utils";
 import type {
   Account,
   Customer,
@@ -18,6 +18,8 @@ import type {
   Plan,
   PlanItem,
   Scene,
+  SkillStat,
+  SkillStatQuery,
 } from "./types";
 
 /** 模拟网络延迟（毫秒），让离线 mock 的异步行为贴近真实接口 */
@@ -46,6 +48,7 @@ interface PlanSceneView {
   start_date?: string | null;
   end_date?: string | null;
   cron_expr: string;
+  cron_example?: string | null;
   mcp_relations: string[];
 }
 
@@ -132,6 +135,7 @@ function mapSceneItem(scene: PlanSceneView): PlanItem {
     categoryLabel: scene.category_label,
     categoryCode: scene.category,
     itemId: scene.item_id,
+    cronExample: scene.cron_example,
     mcpRelations: scene.mcp_relations ?? [],
     direction: scene.direction ?? "",
     cycle: scene.cycle ?? "自定义",
@@ -182,6 +186,73 @@ export async function fetchScenesByCategory(
   } catch (error) {
     console.warn("[Wealth] 场景接口不可用，返回空列表", error);
     return [];
+  }
+}
+
+/**
+ * 看板「可用能力」统计：全部大类的场景技能总数。
+ * 与 fetchScenesByCategory 不同，接口不可达时返回 null，
+ * 由页面保持 "--" 占位，避免把查询失败误显为 0。
+ */
+export async function fetchAvailableSceneCount(): Promise<number | null> {
+  try {
+    const resp = await request<SceneSkillListResponse>(
+      "/wealth/scene-skills?category=",
+    );
+    return resp.items.length;
+  } catch (error) {
+    console.warn("[Wealth] 可用场景总数查询失败", error);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 技能统计：/wealth/skill-stats（外部接口代理）
+// ---------------------------------------------------------------------------
+
+interface SkillStatItemView {
+  skillId: string;
+  targetCustomerCount: number;
+  generatedTaskCount: number;
+}
+
+interface SkillStatsResponse {
+  items: SkillStatItemView[];
+}
+
+/**
+ * 看板「目标客户 / 已生成任务」统计：按技能 + 区间批量查询。
+ * 返回以 sceneStatKey 为键的结果表；接口不可达返回 null，由看板保持 "--" 占位。
+ */
+export async function fetchSkillStats(
+  queries: SkillStatQuery[],
+): Promise<Record<string, SkillStat> | null> {
+  if (!queries.length) return {};
+  try {
+    const resp = await request<SkillStatsResponse>("/wealth/skill-stats", {
+      method: "POST",
+      body: JSON.stringify({ skills: queries }),
+    });
+    // 外部按请求顺序返回且我们入参字段齐全（不会跳项），按下标对齐；
+    // skillId 不一致时退化为按 skillId 查找兜底
+    const bySkill = new Map(resp.items.map((i) => [i.skillId, i]));
+    const byKey: Record<string, SkillStat> = {};
+    queries.forEach((q, index) => {
+      const hit =
+        resp.items[index]?.skillId === q.skillId
+          ? resp.items[index]
+          : bySkill.get(q.skillId);
+      if (hit) {
+        byKey[sceneStatKey(q)] = {
+          targetCustomerCount: hit.targetCustomerCount,
+          generatedTaskCount: hit.generatedTaskCount,
+        };
+      }
+    });
+    return byKey;
+  } catch (error) {
+    console.warn("[Wealth] 技能统计接口不可用", error);
+    return null;
   }
 }
 
@@ -244,7 +315,7 @@ export interface TodayTaskRef {
 }
 
 /**
- * 拉取今日任务对应的客户经营清单并回填会话级触达登记。
+ * 拉取今日任务对应的客户经营清单。
  * 经营视角：按技能去重并发查询（skillId + sapId），同一客户在同一任务下只出现一次；
  * 客户视角：一次查询该经理名下全部技能客户（仅 sapId），同一客户聚合为一条。
  */
@@ -274,7 +345,6 @@ export async function fetchTodayCustomers(
         continue;
       }
       seen.add(id);
-      const mark = db.contacts[id];
       const reason = item.recomReason ?? "";
       customers.push({
         id,
@@ -285,16 +355,15 @@ export async function fetchTodayCustomers(
         reason,
         category: task.category,
         task: task.sceneName,
-        done: mark?.done ?? false,
-        channel: mark?.channel ?? "",
-        time: mark?.time ?? "",
-        note: mark?.note ?? "",
+        done: false,
+        channel: "",
+        time: "",
+        note: "",
         opportunities: reason ? [reason] : [],
         link: item.filename ?? undefined,
       });
     }
   }
-  db.customers = clone(customers);
   return customers;
 }
 
@@ -303,7 +372,7 @@ const TOUCHED_PENDING = 0;
 const TOUCHED_DONE = 1;
 const TOUCHED_ALL = 2;
 
-/** 待触达客户名单：客户视角口径（仅 sapId + touched=0），触达覆盖层生效（登记后从列表消失） */
+/** 待触达客户名单：客户视角口径（仅 sapId + touched=0） */
 export async function fetchPendingCustomers(
   tasks: TodayTaskRef[],
   sapId?: string,
@@ -328,7 +397,7 @@ export async function fetchDoneCustomers(
 /**
  * 客户视角名单：一次查询（不带 skillId），按客户聚合。
  * 重点标签列展示客户命中的场景名（skillId → 今日任务树场景名映射，
- * 不在今日树中的技能不产生标签）；触达登记以 custUid 为键。
+ * 不在今日树中的技能不产生标签）。
  */
 async function fetchCustomerViewCustomers(
   tasks: TodayTaskRef[],
@@ -356,7 +425,6 @@ async function fetchCustomerViewCustomers(
         entries.map((e) => e.recomReason ?? "").filter((r) => r.length > 0),
       ),
     ];
-    const mark = opts.done ? undefined : db.contacts[custUid];
     customers.push({
       id: custUid,
       custUid,
@@ -366,16 +434,13 @@ async function fetchCustomerViewCustomers(
       reason: reasons[0] ?? "",
       category: scenes[0]?.category ?? "",
       task: scenes.map((t) => t.sceneName).join("、"),
-      done: opts.done ? true : mark?.done ?? false,
-      channel: mark?.channel ?? "",
-      time: mark?.time ?? "",
-      note: mark?.note ?? "",
+      done: opts.done ?? false,
+      channel: "",
+      time: "",
+      note: "",
       opportunities: reasons,
       link: first.filename ?? undefined,
     });
-  }
-  if (opts.touched === TOUCHED_ALL) {
-    db.customers = clone(customers);
   }
   return customers;
 }
@@ -394,6 +459,7 @@ interface PlanScenePayload {
   start_date?: string;
   end_date?: string;
   cron_expr: string;
+  cron_example?: string | null;
   mcp_relations: string[];
 }
 
@@ -411,6 +477,7 @@ function buildScenePayload(item: PlanItem): PlanScenePayload {
     scene_name: item.sceneName,
     category: item.categoryCode,
     item_id: item.itemId ?? null,
+    cron_example: item.cronExample ?? null,
     direction: item.direction,
     cycle: item.cycle,
     start_date: item.start,
@@ -444,17 +511,8 @@ export async function fetchPlanList(): Promise<Plan[]> {
 }
 
 // ---------------------------------------------------------------------------
-// 内存实现（触达登记覆盖层/触达历史/草稿，刷新即复原；
-// 规划、场景与客户名单已全程走真实接口）
+// 内存实现（会话级草稿，刷新即复原；规划、场景与客户名单已全程走真实接口）
 // ---------------------------------------------------------------------------
-
-/** 触达登记结果：按 `${skillId}|${custUid}` 记录，切换视角重新拉名单后回填 */
-interface ContactMark {
-  done: boolean;
-  channel: string;
-  time: string;
-  note: string;
-}
 
 interface DraftEntry {
   draft: Draft;
@@ -462,10 +520,6 @@ interface DraftEntry {
 }
 
 interface WealthDb {
-  /** 当前视图的客户清单（fetchTodayCustomers 写入，reportContact 原地更新） */
-  customers: Customer[];
-  /** 触达登记覆盖层（触达记录接口未出前的会话级实现） */
-  contacts: Record<string, ContactMark>;
   /** 按账户隔离的会话级草稿 */
   drafts: Record<string, DraftEntry>;
 }
@@ -474,8 +528,6 @@ let db: WealthDb = createInitialDb();
 
 function createInitialDb(): WealthDb {
   return {
-    customers: [],
-    contacts: {},
     drafts: {},
   };
 }
@@ -568,42 +620,4 @@ export async function removePlan(id: string): Promise<{ plans: Plan[] }> {
     { method: "DELETE" },
   );
   return { plans: await fetchPlans() };
-}
-
-export interface ContactPayload {
-  /** 客户页面内标识：`${skillId}|${custUid}` */
-  id: string;
-  channel: string;
-  outcome: "done" | "pending";
-  note: string;
-}
-
-/**
- * 登记触达结果，返回最新客户清单。
- * 触达记录接口未出前为会话级内存实现：写入覆盖层（切换视角重新拉名单后回填），
- * 并同步更新当前视图的客户清单。
- */
-export async function reportContact(
-  payload: ContactPayload,
-  today: string,
-): Promise<{ customers: Customer[] }> {
-  await sleep(MOCK_LATENCY_MS);
-  const mark: ContactMark = {
-    note: payload.note,
-    channel: payload.channel,
-    time:
-      today +
-      " " +
-      new Date().toLocaleTimeString("zh-CN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    done: payload.outcome === "done",
-  };
-  db.contacts[payload.id] = mark;
-  const c = db.customers.find((x) => x.id === payload.id);
-  if (c) {
-    Object.assign(c, mark);
-  }
-  return { customers: clone(db.customers) };
 }

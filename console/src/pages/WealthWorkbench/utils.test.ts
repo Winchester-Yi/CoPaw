@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 import type { Plan, PlanItem } from "./types";
 import {
   buildTaskTree,
+  collectSkillStatQueries,
   cycleRange,
   DEFAULT_SCHEDULE,
+  findSceneConflicts,
   planItemScheduledOn,
 } from "./utils";
 
@@ -167,5 +169,71 @@ describe("cycleRange（按传入当天动态计算）", () => {
   it("自定义与未知标签返回 null", () => {
     expect(cycleRange("自定义", TODAY)).toBeNull();
     expect(cycleRange("随便", TODAY)).toBeNull();
+  });
+});
+
+describe("findSceneConflicts", () => {
+  it("草稿场景被其他已发布/发布中规划占用时给出冲突与所在规划名", () => {
+    const published = makePlan({ id: "p1", name: "九月规划" });
+    const publishing = makePlan({
+      id: "p2",
+      name: "十月规划",
+      publishStatus: "publishing",
+      items: [makeItem({ id: "skill-wealth-finance-3" })],
+    });
+    const draft = {
+      name: "新规划",
+      items: [makeItem(), makeItem({ id: "skill-wealth-finance-3" })],
+    };
+
+    const conflicts = findSceneConflicts([published, publishing], draft, null);
+
+    expect(conflicts).toEqual([
+      { scene: draft.items[0], planName: "九月规划" },
+      { scene: draft.items[1], planName: "十月规划" },
+    ]);
+  });
+
+  it("发布失败的规划不产生占用；编辑模式排除自身", () => {
+    const failed = makePlan({ id: "p1", publishStatus: "publish_failed" });
+    const self = makePlan({ id: "p2" });
+    const draft = { name: "x", items: [makeItem()] };
+
+    expect(findSceneConflicts([failed], draft, null)).toEqual([]);
+    expect(findSceneConflicts([self], draft, "p2")).toEqual([]);
+  });
+
+  it("场景均未被占用时无冲突", () => {
+    const plan = makePlan({ items: [makeItem({ id: "skill-other" })] });
+    const draft = { name: "x", items: [makeItem()] };
+
+    expect(findSceneConflicts([plan], draft, null)).toEqual([]);
+  });
+});
+
+describe("collectSkillStatQueries", () => {
+  it("按「技能 + 区间」去重收集，缺起止日期的场景跳过", () => {
+    const planA = makePlan({
+      id: "p1",
+      items: [
+        makeItem({ id: "s1", start: "2026-09-01", end: "2026-09-30" }),
+        makeItem({ id: "s1", start: "2026-09-01", end: "2026-09-30" }), // 重复
+        makeItem({ id: "s2", start: "2026-09-01", end: "2026-09-30" }),
+      ],
+    });
+    const planB = makePlan({
+      id: "p2",
+      items: [
+        makeItem({ id: "s1", start: "2026-10-01", end: "2026-10-31" }), // 同技能不同区间
+        makeItem({ id: "s3" }), // 有起止（makeItem 默认带），改缺日期
+      ],
+    });
+    planB.items![1] = { ...planB.items![1], start: undefined, end: undefined };
+
+    expect(collectSkillStatQueries([planA, planB])).toEqual([
+      { skillId: "s1", startDate: "2026-09-01", endDate: "2026-09-30" },
+      { skillId: "s2", startDate: "2026-09-01", endDate: "2026-09-30" },
+      { skillId: "s1", startDate: "2026-10-01", endDate: "2026-10-31" },
+    ]);
   });
 });

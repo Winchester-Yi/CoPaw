@@ -1,7 +1,7 @@
 /**
  * 智能财富工作台 —— 任务页（今日任务 / 待触达客户 / 已完成）
  * 对应原型 tasksHTML：经营/客户双视角、任务树、重点标签表头筛选、
- * 分页、经营方案/触达登记/触达记录三类弹窗。
+ * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
@@ -70,77 +70,9 @@ function Opportunities({
   return <>{customer.reason}</>;
 }
 
-/** 触达登记弹窗表单：通过 registerSave 把保存动作暴露给弹窗确认按钮 */
-function ContactForm({
-  customer,
-  channel,
-  registerSave,
-}: {
-  customer: Customer;
-  channel: string;
-  registerSave: (fn: () => void) => void;
-}) {
-  const reportContact = useWealthStore((s) => s.reportContact);
-  const toast = useWealthStore((s) => s.toast);
-  const [outcome, setOutcome] = useState<"done" | "pending">("done");
-  const [note, setNote] = useState("");
-
-  useEffect(() => {
-    registerSave(() => {
-      const trimmed = note.trim();
-      if (!trimmed) {
-        toast("请填写沟通记录");
-        return;
-      }
-      void reportContact(customer.id, channel, outcome, trimmed);
-    });
-  });
-
-  return (
-    <>
-      <p>
-        {channel === "电话"
-          ? "联系客户后，请登记本次电话沟通结果。"
-          : channel === "企微"
-          ? "通过企业微信联系客户后，请登记沟通结果。"
-          : "完成线上面访后，请登记面访情况。"}
-      </p>
-      <div className={styles.detailGrid}>
-        <div>
-          <small>客户姓名</small>
-          <strong>{customer.name}</strong>
-        </div>
-        <div>
-          <small>经营场景</small>
-          {customer.task}
-        </div>
-      </div>
-      <label className={styles.formLabel} htmlFor="contactOutcome">
-        触达结果
-      </label>
-      <select
-        id="contactOutcome"
-        value={outcome}
-        onChange={(e) => setOutcome(e.target.value as "done" | "pending")}
-      >
-        <option value="done">已完成触达</option>
-        <option value="pending">未接通 / 待跟进</option>
-      </select>
-      <label className={styles.formLabel} htmlFor="contactNote">
-        沟通记录 <span style={{ color: "var(--red)" }}>*</span>
-      </label>
-      <textarea
-        id="contactNote"
-        placeholder="记录客户需求、沟通结果与后续安排"
-        maxLength={1000}
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-      ></textarea>
-      <p className={styles.pageNote}>
-        当前页面仅演示触达登记，不会拨打电话或发送消息。
-      </p>
-    </>
-  );
+/** 电访 / 客户洞察外链占位：地址待外部系统提供，当前新窗口打开占位页 */
+function openOutboundLink(kind: "dial" | "insight", c: Customer) {
+  window.open(`https://example.com/${kind}?custUid=${c.custUid}`, "_blank");
 }
 
 function labelTagClass(label: string) {
@@ -164,13 +96,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
-  const reportContactSaveRef = useRef<() => void>(() => {});
   const navigate = useNavigate();
 
   const [view, setView] = useState<"business" | "customer">("business");
   const [taskLabel, setTaskLabel] = useState("全部");
-  const [taskPage, setTaskPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
   const [search, setSearch] = useState("");
   const [selectedTask, setSelectedTask] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
@@ -237,18 +166,16 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     [page, pool, isBiz, selectedTask, selectedCategory, search, taskLabel],
   );
 
-  // 待触达 / 已完成页进入时加载各自名单（touched 区分口径）
+  // 进入任务页加载名单：今日任务按当前视角查询；待触达/已完成按 touched 口径各查一次
   useEffect(() => {
+    if (page === "today") void loadTodayCustomers(view);
     if (page === "pending") void loadPendingCustomers();
     if (page === "done") void loadDoneCustomers();
-  }, [page, loadPendingCustomers, loadDoneCustomers]);
+  }, [page, view, loadTodayCustomers, loadPendingCustomers, loadDoneCustomers]);
 
   const doneToday = customers.filter(
     (c) => c.done && (taskLabel === "全部" || matchLabel(c.label, taskLabel)),
   ).length;
-  const pages = Math.max(1, Math.ceil(list.length / pageSize));
-  const currentPage = Math.min(pages, taskPage);
-  const rows = list.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   // 标签筛选浮层：外部点击 / Escape / 滚动 / 缩放时关闭
   useEffect(() => {
@@ -309,7 +236,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
   const applyTagFilter = (label: string) => {
     setTaskLabel(label);
-    setTaskPage(1);
     setTagFilterOpen(false);
     triggerRef.current?.focus();
   };
@@ -336,93 +262,14 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
   const getCustomer = (id: string) => pool.find((c) => c.id === id);
 
-  /** 客户经营方案弹窗（原型 showScheme） */
+  /** 客户经营方案弹窗：内容待外部经营方案接口接入，当前为空白占位 */
   const showScheme = (id: string) => {
     const c = getCustomer(id);
     if (!c) return;
     openDialog({
       title: "客户经营方案",
-      body: (
-        <>
-          <div className={styles.detailGrid}>
-            <div>
-              <small>客户姓名</small>
-              <strong>{c.name}</strong>
-            </div>
-            <div>
-              <small>重点标签</small>
-              <span className={styles.tag}>{c.label}</span>
-            </div>
-            <div>
-              <small>经营场景</small>
-              {c.task}
-            </div>
-            <div>
-              <small>产品大类</small>
-              {c.category}
-            </div>
-          </div>
-          <h3>经营机会</h3>
-          <div style={{ marginTop: 8, color: "var(--text)" }}>
-            <Opportunities customer={c} />
-          </div>
-          <div className={styles.recommendation}>
-            <h3>建议经营动作</h3>
-            <ol>
-              <li>核实客户当前资金安排与近期使用需求。</li>
-              <li>结合客户意愿、风险测评与产品适配情况梳理备选方案。</li>
-              <li>通过电话或企微沟通，必要时预约线上面访。</li>
-              <li>记录沟通结果，约定后续跟进时间。</li>
-            </ol>
-          </div>
-          <div className={styles.recommendation}>
-            <h3>沟通参考</h3>
-            <p style={{ margin: 0 }}>
-              {c.name}
-              ，您好，我是您的客户经理。想和您确认一下近期的资金安排与服务需求，您什么时候方便沟通？
-            </p>
-          </div>
-          <p className={styles.pageNote}>以上为原型示例内容。</p>
-        </>
-      ),
-      buttons: [
-        { label: "关闭" },
-        ...(!c.done
-          ? [
-              {
-                label: "登记电话触达",
-                primary: true,
-                onClick: () => contact(id, "电话"),
-              },
-            ]
-          : []),
-      ],
-    });
-  };
-
-  /** 触达登记弹窗（原型 contact） */
-  const contact = (id: string, channel: string) => {
-    const c = getCustomer(id);
-    if (!c) return;
-    openDialog({
-      title: `${channel}触达 · ${c.name}`,
-      body: (
-        <ContactForm
-          customer={c}
-          channel={channel}
-          registerSave={(fn) => {
-            reportContactSaveRef.current = fn;
-          }}
-        />
-      ),
-      buttons: [
-        { label: "取消" },
-        {
-          label: "保存记录",
-          primary: true,
-          onClick: () => reportContactSaveRef.current(),
-        },
-      ],
+      body: <div className={styles.empty}>暂无内容</div>,
+      buttons: [{ label: "关闭" }],
     });
   };
 
@@ -497,7 +344,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                     onClick={() => {
                       setSelectedTask(n.sceneName);
                       setSelectedCategory(g.category);
-                      setTaskPage(1);
                     }}
                   >
                     <span className={cx(styles.tag, sourceTagClass(n.source))}>
@@ -525,9 +371,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 className={view === "business" ? styles.active : ""}
                 onClick={() => {
                   setView("business");
-                  setTaskPage(1);
                   setTaskLabel("全部");
-                  void loadTodayCustomers("business");
                 }}
               >
                 经营视角
@@ -536,9 +380,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 className={view === "customer" ? styles.active : ""}
                 onClick={() => {
                   setView("customer");
-                  setTaskPage(1);
                   setTaskLabel("全部");
-                  void loadTodayCustomers("customer");
                 }}
               >
                 客户视角
@@ -618,7 +460,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
               defaultValue={search}
               onChange={(e) => {
                 setSearch(e.target.value);
-                setTaskPage(1);
               }}
             />
           </div>
@@ -686,8 +527,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
               </tr>
             </thead>
             <tbody>
-              {rows.length ? (
-                rows.map((c) => (
+              {list.length ? (
+                list.map((c) => (
                   <tr key={c.id}>
                     <td className={styles.name}>{c.name}</td>
                     {!isBiz && (
@@ -733,39 +574,21 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                     <td className={styles.executionCol}>
                       {doneView ? (
                         c.time
-                      ) : c.done ? (
-                        <span className={styles.status}>
-                          <i className={styles.dot}></i>已触达
-                          <button
-                            className={styles.link}
-                            style={{ marginLeft: 8, fontSize: 12 }}
-                            onClick={() => showResult(c.id)}
-                          >
-                            查看记录
-                          </button>
-                        </span>
                       ) : (
                         <div className={styles.contactActions}>
                           <button
                             className={`${styles.btn} ${styles.primary}`}
-                            onClick={() => contact(c.id, "电话")}
+                            onClick={() => openOutboundLink("dial", c)}
                           >
                             <Icon name="phone" />
-                            电话
+                            电访
                           </button>
                           <button
                             className={styles.btn}
-                            onClick={() => contact(c.id, "企微")}
-                          >
-                            <Icon name="chat" />
-                            企微
-                          </button>
-                          <button
-                            className={styles.btn}
-                            onClick={() => contact(c.id, "线上面访")}
+                            onClick={() => openOutboundLink("insight", c)}
                           >
                             <Icon name="user" />
-                            线上面访
+                            客户洞察
                           </button>
                         </div>
                       )}
@@ -807,49 +630,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
         <div className={styles.pagination}>
           <span className={styles.total}>共 {list.length} 条记录</span>
-          <button
-            className={styles.pageBtn}
-            aria-label="上一页"
-            disabled={currentPage === 1}
-            onClick={() => setTaskPage((p) => p - 1)}
-          >
-            ‹
-          </button>
-          {Array.from({ length: pages }, (_, i) => (
-            <button
-              key={i + 1}
-              className={cx(
-                styles.pageBtn,
-                currentPage === i + 1 && styles.active,
-              )}
-              aria-label={`第${i + 1}页`}
-              onClick={() => setTaskPage(i + 1)}
-            >
-              {i + 1}
-            </button>
-          ))}
-          <button
-            className={styles.pageBtn}
-            aria-label="下一页"
-            disabled={currentPage === pages}
-            onClick={() => setTaskPage((p) => p + 1)}
-          >
-            ›
-          </button>
-          <select
-            aria-label="每页记录数"
-            value={pageSize}
-            onChange={(e) => {
-              setPageSize(Number(e.target.value));
-              setTaskPage(1);
-            }}
-          >
-            {[10, 20, 30].map((n) => (
-              <option key={n} value={n}>
-                {n} 条/页
-              </option>
-            ))}
-          </select>
         </div>
       </section>
 

@@ -364,6 +364,10 @@
     width: 17px;
     height: 17px;
   }
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
   .iconbtn {
     display: inline-flex;
     align-items: center;
@@ -379,6 +383,10 @@
   }
   .iconbtn:hover {
     background: #eaf3ff;
+  }
+  .iconbtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .link {
     border: 0;
@@ -451,7 +459,7 @@
   }
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 12px;
   }
   .stat {
@@ -1624,7 +1632,9 @@
 
   @media (min-width: 1700px) {
     .planRow {
-      grid-template-columns: 32px 105px minmax(260px, 1fr) 105px 110px 170px 130px 206px;
+      // 恢复任务执行率后调整回来
+      // grid-template-columns: 32px 105px minmax(260px, 1fr) 105px 110px 170px 130px 206px;
+      grid-template-columns: 32px 105px minmax(260px, 1fr) 120px 120px 180px 206px;
       min-height: 94px;
     }
     .planTitle {
@@ -2670,10 +2680,24 @@
     font-size: 12px;
   }
   .taskCustomDates input {
-    width: 141px;
+    width: 142px;
+    height: 29px;
     min-width: 0;
-    padding: 5px 7px;
+    padding: 5px 8px;
     font-size: 12px;
+    border: 1px solid #d4e4fa;
+    border-radius: 4px;
+    background: #fff;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .taskCustomDates input:hover,
+  .taskCustomDates input:focus {
+    border-color: #bcd5ff;
+    outline: none;
+  }
+  .taskCustomDates input:focus-visible {
+    box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
   }
   .scheduleBlock {
     display: flex;

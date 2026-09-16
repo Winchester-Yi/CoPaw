@@ -180,7 +180,10 @@ def _build_job_spec(
         schedule=ScheduleSpec(cron=scene.cron_expr, timezone=WEALTH_TIMEZONE),
         task_type="agent",
         text=task_text,
-        request=CronJobRequest(input=task_text, user_id=plan.sap_id),
+        request=CronJobRequest(
+            input=_build_request_input(plan, scene),
+            user_id=plan.sap_id,
+        ),
         skill_ids=scene.scene_id,
         dispatch=DispatchSpec(
             target=DispatchTarget(user_id=plan.sap_id, session_id=""),
@@ -196,7 +199,7 @@ def _build_job_spec(
 
 
 def _build_task_text(plan: WealthPlanRecord, scene: PlanSceneRecord) -> str:
-    """任务文本 = 规划名 + 场景名 + 经营方向 + 有效期。"""
+    """任务文本 = 规划名 + 场景名 + 经营方向 + 有效期（展示与兜底用）。"""
     parts = [f"经营规划「{plan.name}」场景「{scene.scene_name}」。"]
     if scene.direction:
         parts.append(f"经营方向：{scene.direction}。")
@@ -206,6 +209,24 @@ def _build_task_text(plan: WealthPlanRecord, scene: PlanSceneRecord) -> str:
             "仅在该期间内生成经营名单。",
         )
     return "".join(parts)
+
+
+def _build_request_input(
+    plan: WealthPlanRecord,
+    scene: PlanSceneRecord,
+) -> list[dict]:
+    """定时任务「请求内容」：固定 message 结构，text 取场景技能的 cronExample。
+
+    cronExample 缺失时退化为任务文本，避免发出空指令。
+    """
+    text = (scene.cron_example or "").strip() or _build_task_text(plan, scene)
+    return [
+        {
+            "content": [{"text": text, "type": "text"}],
+            "role": "user",
+            "type": "message",
+        },
+    ]
 
 
 async def _broadcast_scene_job(

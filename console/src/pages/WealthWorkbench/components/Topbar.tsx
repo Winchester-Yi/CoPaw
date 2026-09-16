@@ -1,14 +1,18 @@
 /**
- * 智能财富工作台 —— 顶部栏：品牌、标题、通知、当前账户
+ * 智能财富工作台 —— 顶部栏：品牌、标题、当前账户
+ * 消息通知（铃铛入口）为原型示例、无真实接口，已注释隐藏；
+ * 待通知接口确定后取消注释恢复，并对齐真实数据。
  */
-import { useNavigate } from "react-router-dom";
+// import { useNavigate } from "react-router-dom"; // 随通知入口一并注释
 import styles from "../index.module.less";
-import { selectCurrentAccount, useCanAccess, useWealthStore } from "../store";
-import { Icon } from "./Icon";
+import { getBbkDisplayName } from "@/constants/bbk";
+import { useIframeStore } from "@/stores/iframeStore";
+import { selectCurrentAccount, useWealthStore } from "../store";
+// import { useCanAccess } from "../store"; // 随通知入口一并注释
+// import { Icon } from "./Icon"; // 随通知入口一并注释
 
-/** 消息通知弹窗（原型 showNotifications） */
+/** 消息通知弹窗（原型 showNotifications）—— 原型示例，暂无真实通知接口，暂时隐藏
 function NotificationsDialogBody() {
-  const customers = useWealthStore((s) => s.customers);
   const hasTasks = useCanAccess("tasks");
   return (
     <>
@@ -19,10 +23,7 @@ function NotificationsDialogBody() {
       {hasTasks ? (
         <div className={styles.recommendation}>
           <h3>今日客户清单已准备</h3>
-          <p>
-            目标客户 {customers.length} 人，尚有{" "}
-            {customers.filter((c) => !c.done).length} 人待触达。
-          </p>
+          <p>目标客户名单已生成，请前往「今日任务」查看并跟进。</p>
         </div>
       ) : (
         <div className={styles.recommendation}>
@@ -34,31 +35,35 @@ function NotificationsDialogBody() {
     </>
   );
 }
+*/
 
 export function Topbar() {
   const account = useWealthStore(selectCurrentAccount);
-  const openDialog = useWealthStore((s) => s.openDialog);
-  const closeDialog = useWealthStore((s) => s.closeDialog);
-  const hasTasks = useCanAccess("tasks");
-  const navigate = useNavigate();
+  const bbkId = useIframeStore((state) => state.bbk);
+  const branchName = bbkId ? getBbkDisplayName(bbkId) : "";
+  // 以下通知相关状态随入口一并注释，恢复时取消注释
+  // const openDialog = useWealthStore((s) => s.openDialog);
+  // const closeDialog = useWealthStore((s) => s.closeDialog);
+  // const hasTasks = useCanAccess("tasks");
+  // const navigate = useNavigate();
 
-  const showNotifications = () => {
-    openDialog({
-      title: "消息通知",
-      body: <NotificationsDialogBody />,
-      buttons: [
-        { label: "关闭" },
-        {
-          label: hasTasks ? "查看今日任务" : "查看规划看板",
-          primary: true,
-          onClick: () => {
-            closeDialog();
-            navigate(hasTasks ? "/wealth/today" : "/wealth/board");
-          },
-        },
-      ],
-    });
-  };
+  // const showNotifications = () => {
+  //   openDialog({
+  //     title: "消息通知",
+  //     body: <NotificationsDialogBody />,
+  //     buttons: [
+  //       { label: "关闭" },
+  //       {
+  //         label: hasTasks ? "查看今日任务" : "查看规划看板",
+  //         primary: true,
+  //         onClick: () => {
+  //           closeDialog();
+  //           navigate(hasTasks ? "/wealth/today" : "/wealth/board");
+  //         },
+  //       },
+  //     ],
+  //   });
+  // };
 
   return (
     <header className={styles.topbar}>
@@ -90,6 +95,7 @@ export function Topbar() {
       </div>
       <div className={styles.brandtitle}>智能财富管理工作台</div>
       <div className={styles.account}>
+        {/* 消息通知入口：原型示例、无真实接口，暂时隐藏；待接口确定后恢复
         <button
           className={`${styles.iconbtn} ${styles.bell}`}
           aria-label="查看通知"
@@ -98,8 +104,9 @@ export function Topbar() {
           <Icon name="bell" />
         </button>
         <span className={styles.sep}></span>
+        */}
         <span className={`${styles.department} ${styles.subtle}`}>
-          {[account?.name, account?.department].filter(Boolean).join(" · ")}
+          {[account?.name, branchName].filter(Boolean).join(" · ")}
         </span>
       </div>
     </header>

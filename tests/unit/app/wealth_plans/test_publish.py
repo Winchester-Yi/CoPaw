@@ -10,6 +10,7 @@ import pytest
 from swe.app.wealth_plans.models import PlanSceneRecord, WealthPlanRecord
 from swe.app.wealth_plans.publish import (
     _build_job_spec,
+    _build_request_input,
     _build_task_text,
     _broadcast_scene_job,
 )
@@ -69,6 +70,49 @@ def test_build_task_text_skips_optional_parts() -> None:
 
     assert "经营方向" not in text
     assert "有效期" not in text
+
+
+def test_build_request_input_wraps_cron_example_in_message() -> None:
+    scene = make_scene(cron_example="每日生成高潜保险客户名单")
+
+    messages = _build_request_input(make_plan([]), scene)
+
+    assert messages == [
+        {
+            "content": [{"text": "每日生成高潜保险客户名单", "type": "text"}],
+            "role": "user",
+            "type": "message",
+        },
+    ]
+
+
+def test_build_request_input_falls_back_to_task_text() -> None:
+    scene = make_scene(cron_example=None)
+
+    messages = _build_request_input(make_plan([]), scene)
+
+    assert messages[0]["content"][0]["text"] == _build_task_text(
+        make_plan([]),
+        scene,
+    )
+
+
+def test_build_job_spec_request_input_uses_cron_example() -> None:
+    job = _build_job_spec(
+        fake_request(),
+        make_plan(["chenjy"]),
+        make_scene(cron_example="每日生成高潜保险客户名单"),
+        "job-1",
+    )
+
+    assert job.request.input == [
+        {
+            "content": [{"text": "每日生成高潜保险客户名单", "type": "text"}],
+            "role": "user",
+            "type": "message",
+        },
+    ]
+    assert job.request.user_id == "zhangwl"
 
 
 def test_build_job_spec_maps_identity_and_schedule() -> None:

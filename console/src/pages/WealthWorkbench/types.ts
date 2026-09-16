@@ -49,6 +49,8 @@ export interface PlanItem {
   /** 产品大类英文 code（发布入参用） */
   categoryCode: string;
   itemId?: string | null;
+  /** 场景技能自带的 cron 示例文本（发布时作为定时任务请求内容） */
+  cronExample?: string | null;
   mcpRelations: string[];
   direction: string;
   /** 任务周期（有效期）：本月 / 本季 / 今日 / T+1日 / 自定义 */
@@ -88,8 +90,20 @@ export interface Draft {
   items: PlanItem[];
 }
 
-/** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */
-export interface DistributeTarget {
+/** 技能统计查询项（/wealth/skill-stats 入参）：技能 + 起止日期 yyyy-MM-dd */
+export interface SkillStatQuery {
+  skillId: string;
+  startDate: string;
+  endDate: string;
+}
+
+/** 技能统计结果：目标客户数 / 已生成任务数 */
+export interface SkillStat {
+  targetCustomerCount: number;
+  generatedTaskCount: number;
+}
+
+/** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */ export interface DistributeTarget {
   /** 用户 ID（sapId，即 /user-info/tenants/by-source 返回的 tenant_id） */
   sapId: string;
   name: string;

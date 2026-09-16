@@ -12,18 +12,18 @@ CREATE TABLE IF NOT EXISTS swe_wealth_plans (
   agent_id VARCHAR(64) NULL COMMENT '预留：关联Agent ID，当前可为空',
 
   name VARCHAR(255) NOT NULL COMMENT '规划名称',
-  description TEXT NULL COMMENT '规划说明',
+  description VARCHAR(1024) NULL COMMENT '规划说明',
   source_label VARCHAR(32) NULL COMMENT '来源标签：我的关注/行长关注/分行中台（按创建人角色派生）',
   period_start VARCHAR(16) NULL COMMENT '规划周期开始日期 YYYY-MM-DD',
   period_end VARCHAR(16) NULL COMMENT '规划周期结束日期 YYYY-MM-DD',
 
   status VARCHAR(32) NOT NULL DEFAULT 'publishing'
     COMMENT '发布编排状态：publishing/published/publish_failed',
-  publish_error TEXT NULL COMMENT '发布失败原因',
+  publish_error VARCHAR(2048) NULL COMMENT '发布失败原因',
 
   skill_dispatch_task_id VARCHAR(64) NULL COMMENT '技能/MCP 批量分发批次ID（batch_id，非任务ID）',
   skill_dispatch_status VARCHAR(32) NULL COMMENT '技能/MCP 分发状态',
-  skill_dispatch_error TEXT NULL COMMENT '技能/MCP 分发失败原因',
+  skill_dispatch_error VARCHAR(2048) NULL COMMENT '技能/MCP 分发失败原因',
 
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS swe_wealth_plan_scenes (
   start_date VARCHAR(16) NULL COMMENT '场景有效期开始日期 YYYY-MM-DD',
   end_date VARCHAR(16) NULL COMMENT '场景有效期结束日期 YYYY-MM-DD',
   cron_expr VARCHAR(64) NOT NULL COMMENT '由排程选择换算的cron表达式（建定时任务用）',
+  cron_example VARCHAR(2048) NULL COMMENT '场景技能自带的cron示例文本（定时任务请求内容来源）',
   mcp_relations VARCHAR(512) NULL COMMENT 'MCP依赖列表，逗号分隔存储',
 
   cron_job_id VARCHAR(64) NULL COMMENT '发布后回填：定时任务ID',
@@ -70,3 +71,7 @@ CREATE TABLE IF NOT EXISTS swe_wealth_plan_targets (
   INDEX idx_plan (plan_id),
   INDEX idx_sap (sap_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='财富工作台规划分发目标表';
+
+-- 已导入旧版三表的环境，手动执行以下增量变更：
+-- ALTER TABLE swe_wealth_plan_scenes
+--   ADD COLUMN cron_example VARCHAR(2048) NULL COMMENT '场景技能自带的cron示例文本（定时任务请求内容来源）' AFTER cron_expr;
