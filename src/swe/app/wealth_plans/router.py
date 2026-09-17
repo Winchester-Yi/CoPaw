@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -296,32 +297,11 @@ async def _fetch_external_name_list(
         logger.warning("name-list rejected: %s", payload.get("code"))
         return []
     data = payload.get("data") or {}
-    skill_map = _skill_ids_by_customer(data.get("items") or [])
     items: list[NameListItem] = []
     for row in data.get("list") or []:
         if (item := _parse_name_list_item(row)) is not None:
-            item.skillIds = skill_map.get(item.custUid.lower(), [])
             items.append(item)
     return items
-
-
-def _skill_ids_by_customer(rows: Any) -> dict[str, list[str]]:
-    """从原始名单（data.items）提取 custuid → 命中技能列表的映射。
-
-    客户视角不按技能过滤，同一客户可能被多个技能命中；
-    前端标签列据此展示客户命中的场景。
-    """
-    mapping: dict[str, list[str]] = {}
-    for entry in rows:
-        if not isinstance(entry, dict):
-            continue
-        uid = str(entry.get("custuid") or "").strip().lower()
-        skill = str(entry.get("skillId") or "").strip()
-        if uid and skill:
-            bucket = mapping.setdefault(uid, [])
-            if skill not in bucket:
-                bucket.append(skill)
-    return mapping
 
 
 def _parse_name_list_item(row: Any) -> NameListItem | None:
@@ -338,12 +318,47 @@ def _parse_name_list_item(row: Any) -> NameListItem | None:
 # ---------------------------------------------------------------------------
 
 
+async def _validate_plan_scenes_for_branch(
+    request: Request,
+    body: PlanUpsertRequest,
+) -> None:
+    """仅允许规划使用当前登录用户所属分行的技能场景。"""
+    current_bbk_id = str(
+        getattr(request.state, "bbk_id", None) or "",
+    ).strip()
+    if not current_bbk_id:
+        raise HTTPException(status_code=403, detail="无法识别当前用户所属分行")
+
+    categories = list(dict.fromkeys(scene.category for scene in body.scenes))
+    scene_groups = await asyncio.gather(
+        *(
+            _fetch_external_scene_skills(request, category)
+            for category in categories
+        ),
+    )
+    allowed_scenes = {
+        (item.skillId, item.category)
+        for group in scene_groups
+        for item in group
+        if str(item.bbkId or "").strip() == current_bbk_id
+    }
+    if any(
+        (scene.scene_id, scene.category) not in allowed_scenes
+        for scene in body.scenes
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="所选经营场景不属于当前分行或已失效",
+        )
+
+
 @router.post("/plans", response_model=PlanCreateResponse)
 async def create_plan(
     request: Request,
     body: PlanUpsertRequest,
 ) -> PlanCreateResponse:
     """创建规划并异步发布：落库即返回，编排结果回写状态。"""
+    await _validate_plan_scenes_for_branch(request, body)
     store = _get_store(request)
     record = _build_record(request, body, plan_id=new_plan_id())
     await store.create(record)
@@ -394,6 +409,7 @@ async def update_plan(
     old = await _get_editable_plan(store, plan_id, viewer)
     if old.status == PUBLISH_STATUS_PUBLISHING:
         raise HTTPException(status_code=409, detail="规划发布中，请稍后再修改")
+    await _validate_plan_scenes_for_branch(request, body)
     record = _build_record(request, body, plan_id=plan_id)
     _carry_scene_links(old, record)
     await store.update(record)

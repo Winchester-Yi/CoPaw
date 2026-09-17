@@ -4,17 +4,19 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..agent_context import get_agent_for_request
 from ..crons.auth_state import (
+    append_user_profile_from_cookie,
     cleanup_cron_auth_except_source,
     extract_access_token_from_cookie,
     get_auth_snapshot,
+    resolve_auth_token_for_execution,
     save_user_info_from_access_token,
-    append_user_profile_from_cookie,
     sync_identity_envs_from_cookie,
 )
 from ..auth import (
@@ -134,6 +136,13 @@ class CronAuthConfigureRequest(BaseModel):
     cookie: str
 
 
+class CronAuthTokenResponse(BaseModel):
+    token: str
+    cookie: str
+    expires_at: datetime
+    reused: bool
+
+
 class CronAuthCleanupRequest(BaseModel):
     keep_source_id: str = "RMASSIST"
     force_delete_tenant_ids: list[str] = Field(default_factory=list)
@@ -189,6 +198,44 @@ async def configure_cron_auth(
         "has_auth_token": snapshot.has_auth_token,
         "env_synced_keys": env_synced_keys,
     }
+
+
+@router.post(
+    "/cron-auth/refresh-token",
+    response_model=CronAuthTokenResponse,
+)
+async def refresh_cron_auth_token(
+    request: Request,
+    response: Response,
+) -> CronAuthTokenResponse:
+    """Return a reusable or freshly issued cron auth token and cookie."""
+    workspace = await get_agent_for_request(request)
+    try:
+        resolved = resolve_auth_token_for_execution(
+            tenant_id=workspace.tenant_id,
+            workspace_dir=workspace.workspace_dir,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if (
+        not resolved.token
+        or not resolved.cookie_header
+        or not resolved.expires_at
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="cron auth is not configured",
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return CronAuthTokenResponse(
+        token=resolved.token,
+        cookie=resolved.cookie_header,
+        expires_at=resolved.expires_at,
+        reused=resolved.reused,
+    )
 
 
 @router.post("/cron-auth/cleanup")

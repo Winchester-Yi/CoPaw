@@ -34,6 +34,7 @@ from ...models.high_frequency_question import (
     HighFrequencyQuestionResultSaveRequest,
     HighFrequencyQuestionResultSaveResponse,
     HighFrequencyQuestionResultQueryResponse,
+    HighFrequencyQuestionScheduledTaskRequest,
     HighFrequencyQuestionTaskSubmitRequest,
     HighFrequencyQuestionTaskSubmitResponse,
     HighFrequencyQuestionTopic,
@@ -65,6 +66,8 @@ STALE_RESULT_MESSAGE = "最近一次更新失败，当前展示历史结果"
 SYSTEM_ACTOR_ID = "SYSTEM"
 SYSTEM_ACTOR_NAME = "系统定时任务"
 MAX_ERROR_MESSAGE_LENGTH = 512
+SKILL_GAP_COVERAGE_THRESHOLD_NUMERATOR = 1
+SKILL_GAP_COVERAGE_THRESHOLD_DENOMINATOR = 2
 
 
 @dataclass(frozen=True)
@@ -118,12 +121,10 @@ class HighFrequencyQuestionService:
 
         query = f"""
             SELECT
-                trace_id,
                 user_id,
-                session_id,
                 bbk_id,
                 user_message,
-                start_time
+                skills_used
             FROM swe_tracing_traces
             WHERE {where_sql}
             ORDER BY start_time ASC, trace_id ASC
@@ -152,8 +153,11 @@ class HighFrequencyQuestionService:
                 ),
             )
 
+        message_count = len(rows)
         return HighFrequencyQuestionMessageListResponse(
-            total=len(rows),
+            total=message_count,
+            message_count=message_count,
+            user_count=self._count_distinct_users(rows),
             data=[self._row_to_message(row) for row in rows],
         )
 
@@ -190,10 +194,14 @@ class HighFrequencyQuestionService:
                                 topic_name,
                                 message_count,
                                 valid_message_count,
+                                user_count,
+                                total_skill_used_count,
+                                skill_used_count,
+                                top_skill,
                                 bbk_dis,
                                 sample_questions
                             ) VALUES (
-                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                             )
                             """,
                             params_list,
@@ -290,6 +298,26 @@ class HighFrequencyQuestionService:
             actor_user_name=SYSTEM_ACTOR_NAME,
         )
 
+    async def submit_scheduled_task(
+        self,
+        request: HighFrequencyQuestionScheduledTaskRequest,
+    ) -> HighFrequencyQuestionTaskSubmitResponse:
+        """Submit a body-only scheduler task for the latest seven calendar days."""
+        today = datetime.now().date()
+        start_time = datetime.combine(today - timedelta(days=6), datetime_time.min)
+        end_time = datetime.combine(today, datetime_time.max).replace(microsecond=0)
+        return await self.submit_task(
+            HighFrequencyQuestionTaskSubmitRequest(
+                source_id=request.source_id,
+                start_time=start_time,
+                end_time=end_time,
+                bbk_id=request.bbk_id,
+                force=True,
+            ),
+            actor_user_id=SYSTEM_ACTOR_ID,
+            actor_user_name=SYSTEM_ACTOR_NAME,
+        )
+
     async def query_results(
         self,
         request: HighFrequencyQuestionCriteriaRequest,
@@ -359,12 +387,20 @@ class HighFrequencyQuestionService:
         row: dict[str, Any],
     ) -> HighFrequencyQuestionMessageResponse:
         return HighFrequencyQuestionMessageResponse(
-            message_id=str(row["trace_id"]),
             user_id=row.get("user_id"),
-            session_id=row.get("session_id"),
             bbk_id=row.get("bbk_id"),
             content=str(row.get("user_message") or ""),
-            message_time=row["start_time"],
+            skills_used=self._parse_string_list(row.get("skills_used")),
+        )
+
+    def _count_distinct_users(self, rows: list[dict[str, Any]]) -> int:
+        return len(
+            {
+                str(row.get("user_id")).strip()
+                for row in rows
+                if row.get("user_id") is not None
+                and str(row.get("user_id")).strip()
+            },
         )
 
     def _build_insert_params(
@@ -385,6 +421,10 @@ class HighFrequencyQuestionService:
                     result.topic_name,
                     result.message_count,
                     result.valid_message_count,
+                    result.user_count,
+                    result.total_skill_used_count,
+                    result.skill_used_count,
+                    result.top_skill,
                     json.dumps(result.bbk_dis, ensure_ascii=False),
                     json.dumps(result.sample_questions, ensure_ascii=False),
                 ),
@@ -482,7 +522,8 @@ class HighFrequencyQuestionService:
         rows = await self._db.fetch_all(
             """
             SELECT rank_no, topic_name, message_count, valid_message_count,
-                   bbk_dis, sample_questions
+                   user_count, total_skill_used_count, skill_used_count,
+                   top_skill, bbk_dis, sample_questions
             FROM swe_high_frequency_question_result
             WHERE source_id = %s
               AND batch_id = %s
@@ -497,6 +538,8 @@ class HighFrequencyQuestionService:
                 criteria.bbk_id,
             ),
         )
+        topics = [self._row_to_topic(row) for row in rows]
+        summary = self._build_result_summary(rows, topics)
         return HighFrequencyQuestionResultQueryResponse(
             state=state,
             task_id=batch.batch_id,
@@ -508,8 +551,9 @@ class HighFrequencyQuestionService:
             scope_type=criteria.scope_type,
             bbk_id=criteria.bbk_id,
             result_updated_at=batch.result_updated_at,
-            topics=[self._row_to_topic(row) for row in rows],
+            topics=topics,
             message=message,
+            **summary,
         )
 
     def _row_to_topic(self, row: dict[str, Any]) -> HighFrequencyQuestionTopic:
@@ -518,11 +562,50 @@ class HighFrequencyQuestionService:
             topic_name=str(row.get("topic_name") or ""),
             message_count=int(row.get("message_count") or 0),
             valid_message_count=int(row.get("valid_message_count") or 0),
+            skill_used_count=int(row.get("skill_used_count") or 0),
+            top_skill=self._parse_optional_text(row.get("top_skill")),
             bbk_dis=self._parse_bbk_distribution(row.get("bbk_dis")),
             sample_questions=self._parse_sample_questions(
                 row.get("sample_questions"),
             ),
         )
+
+    def _build_result_summary(
+        self,
+        rows: list[dict[str, Any]],
+        topics: list[HighFrequencyQuestionTopic],
+    ) -> dict[str, int]:
+        first_row = rows[0] if rows else {}
+        return {
+            "message_count": int(first_row.get("valid_message_count") or 0),
+            "user_count": int(first_row.get("user_count") or 0),
+            "total_skill_used_count": int(
+                first_row.get("total_skill_used_count") or 0,
+            ),
+            "topic_count": len(topics),
+            "skill_gap_topic_count": sum(
+                1
+                for topic in topics
+                if self._has_skill_coverage_gap(topic)
+            ),
+        }
+
+    def _has_skill_coverage_gap(
+        self,
+        topic: HighFrequencyQuestionTopic,
+    ) -> bool:
+        if topic.message_count <= 0:
+            return False
+        return (
+            topic.skill_used_count * SKILL_GAP_COVERAGE_THRESHOLD_DENOMINATOR
+            < topic.message_count * SKILL_GAP_COVERAGE_THRESHOLD_NUMERATOR
+        )
+
+    def _parse_optional_text(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        stripped = str(value).strip()
+        return stripped or None
 
     def _parse_bbk_distribution(self, value: Any) -> dict[str, Any]:
         if value is None or value == "":
@@ -539,6 +622,9 @@ class HighFrequencyQuestionService:
         return {str(key): item for key, item in value.items()}
 
     def _parse_sample_questions(self, value: Any) -> list[str]:
+        return self._parse_string_list(value)
+
+    def _parse_string_list(self, value: Any) -> list[str]:
         if value is None or value == "":
             return []
         if isinstance(value, (bytes, bytearray)):
@@ -659,7 +745,6 @@ class HighFrequencyQuestionService:
         payload = {
             "inputParams": {
                 "source_id": criteria.source_id,
-                "task_id": task_id,
                 "batch_id": task_id,
                 "start_time": criteria.start_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "end_time": criteria.end_time.strftime("%Y-%m-%d %H:%M:%S"),

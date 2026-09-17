@@ -8,6 +8,9 @@ MIGRATION_PATH = (
     REPO_ROOT / "scripts/sql/html_preview_event_dimensions_migration.sql"
 )
 BASELINE_PATH = REPO_ROOT / "scripts/sql/html_preview_click_events.sql"
+SOURCE_MIGRATION_PATH = (
+    REPO_ROOT / "scripts/sql/html_preview_source_dimensions_migration.sql"
+)
 
 
 def test_event_migration_uses_standard_mysql_alter_syntax():
@@ -55,3 +58,18 @@ def test_event_schema_documents_three_event_types():
         assert "button_click/preview_view/module_exposure" in sql
         assert "main_preview_view" not in sql
         assert "sub_preview_view" not in sql
+
+
+def test_source_dimension_migration_adds_nullable_varchar_50_columns():
+    """页面来源和平台来源应以可在线扩展的 nullable VARCHAR(50) 增加。"""
+    migration_sql = SOURCE_MIGRATION_PATH.read_text(encoding="utf-8")
+    baseline_sql = BASELINE_PATH.read_text(encoding="utf-8")
+    normalized_migration = " ".join(migration_sql.split())
+    normalized_baseline = " ".join(baseline_sql.split())
+
+    for sql in (normalized_migration, normalized_baseline):
+        assert "page_source VARCHAR(50) NULL" in sql
+        assert "platform_source VARCHAR(50) NULL" in sql
+
+    assert "ALGORITHM=INPLACE" in migration_sql
+    assert "LOCK=NONE" in migration_sql

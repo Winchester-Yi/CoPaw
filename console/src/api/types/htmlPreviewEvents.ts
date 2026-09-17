@@ -31,7 +31,7 @@ export interface HtmlTrackerPayloadType {
   event_target_id?: string | null;
   event_target_name?: string | null;
   page_source?: string | null;
-  plantform_source?: string | null;
+  platform_source?: string | null;
 }
 
 export interface HtmlPreviewClickSubmitResponse {
@@ -86,6 +86,8 @@ export interface HtmlPreviewClickEventItem {
   event_target_id?: string | null;
   event_target_name?: string | null;
   trace_id?: string | null;
+  page_source?: string | null;
+  platform_source?: string | null;
 }
 
 export interface HtmlPreviewClickEventListResponse {

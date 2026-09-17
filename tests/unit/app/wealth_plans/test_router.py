@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from swe.app.crons.broadcast_task_store import CronBroadcastTaskStore
 from swe.app.wealth_plans import router as wealth_router
+from swe.app.wealth_plans.models import PlanUpsertRequest, SceneSkillItem
 from swe.app.wealth_plans.store import WealthPlanStore
 
 VIEWER = {"X-User-Id": "zhangwl"}
@@ -35,6 +38,16 @@ def app(
 
     monkeypatch.setattr(wealth_router, "launch_publish", fake_launch)
     monkeypatch.setattr(wealth_router, "cascade_delete", fake_cascade)
+
+    async def allow_scenes_for_unrelated_tests(request, body) -> None:
+        return None
+
+    monkeypatch.setattr(
+        wealth_router,
+        "_validate_plan_scenes_for_branch",
+        allow_scenes_for_unrelated_tests,
+        raising=False,
+    )
 
     application = FastAPI()
     application.state.wealth_plan_store = store
@@ -97,6 +110,133 @@ def test_create_plan_persists_and_launches_publish(
     assert app.state.wealth_plan_launches == [body["id"]]
 
 
+def test_create_plan_applies_scene_branch_validation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject_cross_branch_scene(request, body) -> None:
+        raise HTTPException(
+            status_code=403,
+            detail="当前分行无权使用该经营场景",
+        )
+
+    monkeypatch.setattr(
+        wealth_router,
+        "_validate_plan_scenes_for_branch",
+        reject_cross_branch_scene,
+        raising=False,
+    )
+
+    resp = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers={**VIEWER, "X-Bbk-Id": "110"},
+    )
+
+    assert resp.status_code == 403
+
+
+async def test_scene_branch_validation_accepts_current_branch_skill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(state=SimpleNamespace(bbk_id="110"))
+    body = PlanUpsertRequest(**plan_payload())
+
+    async def fetch_current_branch_scenes(request, category):
+        return [
+            SceneSkillItem(
+                skillId="skill-wealth-insurance-1",
+                senceName="保障潜客经营",
+                category="insurance",
+                bbkId="110",
+            ),
+        ]
+
+    monkeypatch.setattr(
+        wealth_router,
+        "_fetch_external_scene_skills",
+        fetch_current_branch_scenes,
+    )
+
+    await wealth_router._validate_plan_scenes_for_branch(request, body)
+
+
+@pytest.mark.parametrize("skill_bbk_id", ["121", None])
+async def test_scene_branch_validation_rejects_cross_branch_or_unowned_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    skill_bbk_id: str | None,
+) -> None:
+    request = SimpleNamespace(state=SimpleNamespace(bbk_id="110"))
+    body = PlanUpsertRequest(**plan_payload())
+
+    async def fetch_other_branch_scenes(request, category):
+        return [
+            SceneSkillItem(
+                skillId="skill-wealth-insurance-1",
+                senceName="保障潜客经营",
+                category="insurance",
+                bbkId=skill_bbk_id,
+            ),
+        ]
+
+    monkeypatch.setattr(
+        wealth_router,
+        "_fetch_external_scene_skills",
+        fetch_other_branch_scenes,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await wealth_router._validate_plan_scenes_for_branch(request, body)
+
+    assert exc_info.value.status_code == 403
+
+
+async def test_scene_branch_validation_rejects_missing_request_branch() -> (
+    None
+):
+    request = SimpleNamespace(state=SimpleNamespace(bbk_id=None))
+    body = PlanUpsertRequest(**plan_payload())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await wealth_router._validate_plan_scenes_for_branch(request, body)
+
+    assert exc_info.value.status_code == 403
+
+
+async def test_update_plan_applies_scene_branch_validation(
+    client: TestClient,
+    store: WealthPlanStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers={**VIEWER, "X-Bbk-Id": "110"},
+    ).json()
+    await store.set_publish_status(created["id"], "published")
+
+    async def reject_cross_branch_scene(request, body) -> None:
+        raise HTTPException(
+            status_code=403,
+            detail="当前分行无权使用该经营场景",
+        )
+
+    monkeypatch.setattr(
+        wealth_router,
+        "_validate_plan_scenes_for_branch",
+        reject_cross_branch_scene,
+        raising=False,
+    )
+
+    resp = client.put(
+        f"/api/wealth/plans/{created['id']}",
+        json=plan_payload(),
+        headers={**VIEWER, "X-Bbk-Id": "110"},
+    )
+
+    assert resp.status_code == 403
+
+
 def test_list_visible_to_creator_and_target_only(client: TestClient) -> None:
     created = client.post(
         "/api/wealth/plans",
@@ -138,16 +278,22 @@ def test_list_branch_wide_for_president_and_middle(client: TestClient) -> None:
         "X-Bbk-Id": "100",
         "X-Position-Id": "RB1101",
     }
-    middle = {**president, "X-Position-Id": "RB0304"}
+    middle = {**president, "X-Position-Id": "RB0301"}
+    other_middle = {**president, "X-Position-Id": "RB0305"}
+    former_middle = {**president, "X-Position-Id": "RB0304"}
     rm = {**president, "X-Position-Id": "RB0101"}
     other_branch = {**president, "X-Bbk-Id": "200"}
 
-    for headers in (president, middle):
+    for headers in (president, middle, other_middle):
         items = client.get("/api/wealth/plans", headers=headers).json()[
             "items"
         ]
         assert [p["id"] for p in items] == [created["id"]]
         assert items[0]["editable"] is False  # 可见但只读
+    assert (
+        client.get("/api/wealth/plans", headers=former_middle).json()["items"]
+        == []
+    )
     assert client.get("/api/wealth/plans", headers=rm).json()["items"] == []
     assert (
         client.get("/api/wealth/plans", headers=other_branch).json()["items"]
@@ -355,7 +501,30 @@ def test_name_list_forwards_touch_filter_context(
 
     class FakeResponse:
         def json(self) -> dict:
-            return {"code": "200", "data": {"list": []}}
+            return {
+                "code": "200",
+                "message": "成功",
+                "data": {
+                    "list": [
+                        {
+                            "custUid": "PNCIF6571543777",
+                            "custNm": "王*",
+                            "sapId": "80280256",
+                            "bbkOrgId": "755480",
+                            "filename": "http://example.test/customer",
+                            "recomReason": "命中条件说明",
+                            "skillList": [
+                                {
+                                    "skillId": "SKILL0001",
+                                    "skillName": "贷款经营",
+                                },
+                            ],
+                            "strongContactTime": "2026-09-16 10:30:00",
+                            "touchMethod": "电话",
+                        },
+                    ],
+                },
+            }
 
     class FakeClient:
         def __init__(self, *args, **kwargs) -> None:
@@ -405,6 +574,19 @@ def test_name_list_forwards_touch_filter_context(
         "posId": "RB0101",
     }
     assert captured["headers"] == {"Cookie": "session=active"}
+    assert resp.json()["items"] == [
+        {
+            "custUid": "PNCIF6571543777",
+            "custNm": "王*",
+            "sapId": "80280256",
+            "bbkOrgId": "755480",
+            "filename": "http://example.test/customer",
+            "recomReason": "命中条件说明",
+            "skillList": [{"skillId": "SKILL0001", "skillName": "贷款经营"}],
+            "strongContactTime": "2026-09-16 10:30:00",
+            "touchMethod": "电话",
+        },
+    ]
 
 
 def test_skill_stats_empty_when_external_absent(client: TestClient) -> None:
@@ -623,19 +805,3 @@ async def test_board_status_distributing_while_running(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
 
     assert creator_view["items"][0]["board_status"] == "分发中"
-
-
-def test_skill_ids_by_customer_dedupes_and_skips_bad_rows() -> None:
-    """客户视角标签列的数据来源：custuid → 命中技能列表（去重、跳过脏行）。"""
-    rows = [
-        {"custuid": "CUST001", "skillId": "loan_verify"},
-        {"custuid": "cust001", "skillId": "loan_verify"},  # 大小写归一并去重
-        {"custuid": "CUST001", "skillId": "deposit_growth"},
-        {"custuid": "CUST002", "skillId": ""},  # 无技能，跳过
-        {"custuid": "", "skillId": "loan_verify"},  # 无客户，跳过
-        "not-a-dict",
-    ]
-
-    mapping = wealth_router._skill_ids_by_customer(rows)
-
-    assert mapping == {"cust001": ["loan_verify", "deposit_growth"]}

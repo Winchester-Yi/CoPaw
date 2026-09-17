@@ -52,6 +52,8 @@ class HtmlPreviewClickEventCreate(BaseModel):
     event_target_id: Optional[str] = Field(default=None, max_length=255)
     event_target_name: Optional[str] = Field(default=None, max_length=512)
     trace_id: Optional[str] = Field(default=None, max_length=128)
+    page_source: Optional[str] = Field(default=None, max_length=50)
+    platform_source: Optional[str] = Field(default=None, max_length=50)
 
     @model_validator(mode="after")
     def validate_event_context(self):
@@ -169,6 +171,8 @@ class HtmlPreviewClickEventItem(BaseModel):
     event_target_id: Optional[str] = None
     event_target_name: Optional[str] = None
     trace_id: Optional[str] = None
+    page_source: Optional[str] = None
+    platform_source: Optional[str] = None
 
 
 class HtmlPreviewClickEventListResponse(BaseModel):

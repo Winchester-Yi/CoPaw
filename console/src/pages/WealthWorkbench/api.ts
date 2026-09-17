@@ -1,13 +1,11 @@
 /**
- * 智能财富工作台 —— 数据访问层
- *
- * 规划、场景与客户名单走真实后端接口（/wealth/plans、/wealth/scene-skills、
- * /wealth/name-list），不做假数据回退：接口不可达时读路径返回空、写路径直接
- * 抛错，避免联调期被 mock 掩盖问题。
- * 草稿仍为会话级内存实现；触达登记功能已下线，待外部触达接口就绪后重新接入。
+ * ！！！！注意：此页面需要单独评估
+ * ！！！！！！！
  */
 import { parseCron, serializeCron } from "@/utils/parseCron";
 import { request } from "../../api/request";
+import { buildAuthHeaders } from "../../api/authHeaders";
+// import { Base64 } from "js-base64";
 import { SCENE_CATEGORIES } from "./mock/data";
 import { DEFAULT_SCHEDULE, sceneStatKey } from "./utils";
 import type {
@@ -89,6 +87,7 @@ interface SceneSkillItem {
   cronExample?: string | null;
   mcpRelationList: string[];
   skillBbkLabel?: string | null;
+  bbkId?: string | null;
 }
 
 interface SceneSkillListResponse {
@@ -260,6 +259,11 @@ export async function fetchSkillStats(
 // 客户名单查询：/wealth/name-list（外部接口代理）
 // ---------------------------------------------------------------------------
 
+interface NameListSkillView {
+  skillId: string;
+  skillName: string;
+}
+
 interface NameListItemView {
   custUid: string;
   custNm: string;
@@ -267,8 +271,9 @@ interface NameListItemView {
   bbkOrgId?: string | null;
   filename?: string | null;
   recomReason?: string | null;
-  /** 客户命中的技能列表（SWE 代理层从 data.items 关联补齐） */
-  skillIds?: string[];
+  skillList?: NameListSkillView[];
+  strongContactTime?: string | null;
+  touchMethod?: string | null;
 }
 
 interface NameListResponse {
@@ -312,12 +317,20 @@ export interface TodayTaskRef {
   skillId: string;
   sceneName: string;
   category: string;
+  /** 所属规划来源：我的关注 / 行长关注 / 分行关注 */
+  source: string;
 }
+
+const CUSTOMER_LABEL_BY_PLAN_SOURCE: Record<string, string> = {
+  行长关注: "行长指派",
+  分行关注: "分行重点",
+  我的关注: "我的关注",
+};
 
 /**
  * 拉取今日任务对应的客户经营清单。
  * 经营视角：按技能去重并发查询（skillId + sapId），同一客户在同一任务下只出现一次；
- * 客户视角：一次查询该经理名下全部技能客户（仅 sapId），同一客户聚合为一条。
+ * 客户视角：一次查询该经理名下全部技能客户（仅 sapId），直接使用外部已聚合名单。
  */
 export async function fetchTodayCustomers(
   tasks: TodayTaskRef[],
@@ -356,10 +369,11 @@ export async function fetchTodayCustomers(
         category: task.category,
         task: task.sceneName,
         done: false,
-        channel: "",
-        time: "",
+        channel: item.touchMethod ?? "",
+        time: item.strongContactTime ?? "",
         note: "",
         opportunities: reason ? [reason] : [],
+        bbkOrgId: item.bbkOrgId ?? undefined,
         link: item.filename ?? undefined,
       });
     }
@@ -380,10 +394,7 @@ export async function fetchPendingCustomers(
   return fetchCustomerViewCustomers(tasks, sapId, { touched: TOUCHED_PENDING });
 }
 
-/**
- * 已完成名单：客户视角口径（仅 sapId + touched=1），名单内客户均为已触达。
- * 接口暂不返回触达方式/完成时间/经营结果，对应列置空，待字段补齐。
- */
+/** 已完成名单：客户视角口径（仅 sapId + touched=1），名单内客户均为已触达。 */
 export async function fetchDoneCustomers(
   tasks: TodayTaskRef[],
   sapId?: string,
@@ -395,9 +406,9 @@ export async function fetchDoneCustomers(
 }
 
 /**
- * 客户视角名单：一次查询（不带 skillId），按客户聚合。
- * 重点标签列展示客户命中的场景名（skillId → 今日任务树场景名映射，
- * 不在今日树中的技能不产生标签）。
+ * 客户视角名单：一次查询（不带 skillId），直接映射外部已聚合的 data.list。
+ * 重点标签列按命中技能所属规划的创建角色展示；不在今日任务树中的
+ * 技能无法关联本地规划来源，因此不产生标签。
  */
 async function fetchCustomerViewCustomers(
   tasks: TodayTaskRef[],
@@ -406,43 +417,148 @@ async function fetchCustomerViewCustomers(
 ): Promise<Customer[]> {
   const sceneBySkill = new Map(tasks.map((t) => [t.skillId, t]));
   const list = await fetchNameList(undefined, sapId, opts.touched);
-  const byCust = new Map<string, NameListItemView[]>();
-  for (const item of list) {
-    const bucket = byCust.get(item.custUid) ?? [];
-    bucket.push(item);
-    byCust.set(item.custUid, bucket);
-  }
-  const customers: Customer[] = [];
-  for (const [custUid, entries] of byCust) {
-    const first = entries[0];
-    if (!first) continue;
-    const skillIds = [...new Set(entries.flatMap((e) => e.skillIds ?? []))];
+  return list.map((item) => {
+    const skillList = item.skillList ?? [];
+    const skillIds = [...new Set(skillList.map((s) => s.skillId))];
+    const skillNames = [
+      ...new Set(skillList.map((s) => s.skillName).filter(Boolean)),
+    ];
     const scenes = skillIds
       .map((sid) => sceneBySkill.get(sid))
       .filter((t): t is TodayTaskRef => Boolean(t));
-    const reasons = [
+    const labels = [
       ...new Set(
-        entries.map((e) => e.recomReason ?? "").filter((r) => r.length > 0),
+        scenes
+          .map((scene) => CUSTOMER_LABEL_BY_PLAN_SOURCE[scene.source])
+          .filter(Boolean),
       ),
     ];
-    customers.push({
-      id: custUid,
-      custUid,
+    const reason = item.recomReason ?? "";
+    return {
+      id: item.custUid,
+      custUid: item.custUid,
       skillId: scenes[0]?.skillId ?? skillIds[0] ?? "",
-      name: first.custNm,
-      label: scenes.map((t) => t.sceneName).join("、"),
-      reason: reasons[0] ?? "",
+      name: item.custNm,
+      label: labels.join("、"),
+      reason,
       category: scenes[0]?.category ?? "",
-      task: scenes.map((t) => t.sceneName).join("、"),
+      task: opts.done
+        ? skillNames.join("、")
+        : scenes.map((t) => t.sceneName).join("、"),
       done: opts.done ?? false,
-      channel: "",
-      time: "",
+      channel: item.touchMethod ?? "",
+      time: item.strongContactTime ?? "",
       note: "",
-      opportunities: reasons,
-      link: first.filename ?? undefined,
-    });
+      bbkOrgId: item.bbkOrgId ?? undefined,
+      opportunities: reason ? [reason] : [],
+      link: item.filename ?? undefined,
+    };
+  });
+};
+
+// ---------------------------------------------------------------------------
+// 电访 / 客户洞察外链（get-sign 签名 + base64 拼接）
+// ---------------------------------------------------------------------------
+
+interface GetSignResponse {
+  code?: string;
+  message?: string;
+  data?: string;
+  success?: boolean;
+}
+
+function isDevEnv(): boolean {
+  const href = typeof window !== "undefined" ? window.location.href : "";
+  return (
+    href.includes(".xxx.") ||
+    href.includes("localhost") ||
+    href.includes("127.0.0.1")
+  );
+}
+
+function signBaseUrl(): string {
+  return isDevEnv()
+    ? "https://xxx.st.xxxx.cn"
+    : "https://xxx.as.xxxx.cn";
+}
+
+function insightBaseUrl(): string {
+  return isDevEnv()
+    ? "https://xxx.st.xxxx.cn/#"
+    : "https://xxx.oa.xxxx.cn/#";
+}
+
+function telBaseUrl(): string {
+  return isDevEnv()
+    ? "https://xxx.st.xxxx.cn"
+    : "https://xxx.oa.xxxx.cn";
+}
+
+/**
+ * 调用 /expert/get-sign 获取签名校验串。
+ * header 通过自定义头 x-header-cookie 透传登录态 cookie（取 buildAuthHeaders 的
+ * x-header-cookie），入参为 bbkOrgId 与 custUid；出参 data 字段即为 signature。
+ *
+ * 注意：不能直接设置标准 Cookie 头——Cookie 属于浏览器禁止 JS 修改的
+ * forbidden header name，跨域请求中会被剥离。项目后端惯例是从
+ * `Cookie` 或 `x-header-cookie` 中读取，故这里用自定义头透传。
+ */
+export async function fetchSchemeSignature(
+  custUid: string,
+  bbkOrgId: string,
+): Promise<string> {
+  const auth = buildAuthHeaders();
+  console.log("auth", auth);
+  const resp = await fetch(`${signBaseUrl()}/expert/get-sign`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "x-header-cookie": auth["x-header-cookie"] ?? "",
+      "Cookie": auth["x-header-cookie"] ?? ""
+    },
+    body: JSON.stringify({ bbkOrgId, custUid }),
+  });
+  if (!resp.ok) {
+    throw new Error(`get-sign 接口请求失败：HTTP ${resp.status}`);
   }
-  return customers;
+  const json = (await resp.json()) as GetSignResponse;
+  if (!json.success) {
+    throw new Error(json.message || "get-sign 接口返回失败");
+  }
+  return json.data || "";
+}
+
+/**
+ * 构建电访外链：`{tel域名}?custUid=..&bbkOrgId=..&signature=../wpcontactpanelv2/`
+ * query 值经 URL 编码，结构便于对端按 custUid/bbkOrgId 解析。
+ */
+export function buildTelUrl(
+  custUid: string,
+  bbkOrgId: string,
+  signature: string,
+): string {
+  const params = new URLSearchParams({ custUid, bbkOrgId, signature });
+  return `${telBaseUrl()}?${params.toString()}#/wpcontactpanelv2`;
+}
+
+/**
+ * 构建客户洞察外链：query 串（key/value 均 URL 编码）整体 base64 后拼接到 `/homepage/`。
+ * base64 采用标准 Base64，与对端 atob 解码/示例格式一致。
+ */
+export function buildInsightUrl(
+  custUid: string,
+  bbkOrgId: string,
+  signature: string,
+): string {
+  const parts = [
+    encodeURIComponent("custUid") + "=" + encodeURIComponent(custUid),
+    encodeURIComponent("bbkOrgId") + "=" + encodeURIComponent(bbkOrgId),
+    encodeURIComponent("signature") + "=" + encodeURIComponent(signature),
+  ];
+  const queryString = parts.join("&");
+  // const base64Str = Base64.encode(queryString);
+  return `${insightBaseUrl()}/homepage/${queryString}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -51,11 +51,17 @@ export interface DialogButton {
 }
 
 export interface DialogState {
-  title: string;
+  /** 弹窗标题；传空串或省略时不渲染标题头部（如经营方案 iframe 预览） */
+  title?: string;
   body: ReactNode;
   buttons: DialogButton[];
   /** 宽弹窗（工作任务详情日历表） */
   wide?: boolean;
+  /**
+   * 无边框内容弹窗：隐去标题头部、正文区域不留内边距，
+   * 让内容（如 iframe）铺满整个弹窗（对应经营方案预览）。
+   */
+  plain?: boolean;
 }
 
 interface WealthState {
@@ -175,6 +181,7 @@ function todayTaskRefs(plans: Plan[]): api.TodayTaskRef[] {
       skillId: n.sceneId,
       sceneName: n.sceneName,
       category: g.category,
+      source: n.source,
     })),
   );
 }
@@ -436,9 +443,9 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
         items: draft.items.map((x) =>
           x.id === id
             ? {
-                ...x,
-                schedule: { ...(x.schedule ?? DEFAULT_SCHEDULE), ...patch },
-              }
+              ...x,
+              schedule: { ...(x.schedule ?? DEFAULT_SCHEDULE), ...patch },
+            }
             : x,
         ),
       },

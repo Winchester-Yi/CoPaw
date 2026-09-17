@@ -6,11 +6,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import cx from "classnames";
+import DOMPurify from "dompurify";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
+import { CustomerSchemePreview } from "../components/CustomerSchemePreview";
+import { buildInsightUrl, buildTelUrl, fetchSchemeSignature } from "../api";
 import { useCanAccess, useWealthStore } from "../store";
 import type { Customer } from "../types";
 import { buildTaskTree, dateKey } from "../utils";
+// import { htmlPreviewEventsApi } from "@/api/modules/htmlPreviewEvents";
+// import type { HtmlTrackerPayloadType } from "@/api/types/htmlPreviewEvents";
 
 /** 重点标签匹配：同一客户可能命中多个场景（标签以 "、" 分隔） */
 function matchLabel(label: string, selected: string) {
@@ -45,42 +50,146 @@ function sourceTagClass(source: string) {
   return source === "分行关注"
     ? styles.purple
     : source === "行长关注"
-    ? styles.orange
-    : "";
+      ? styles.orange
+      : "";
 }
 
-/** 经营机会单元格：多条时以列表展示（原型 opportunitiesHTML） */
-function Opportunities({
+function OpportunityHtml({ value }: { value: string }) {
+  const html = DOMPurify.sanitize(value, {
+    ALLOWED_ATTR: [],
+    FORBID_TAGS: [
+      "style",
+      "form",
+      "input",
+      "button",
+      "textarea",
+      "select",
+      "option",
+      "iframe",
+      "object",
+      "embed",
+    ],
+  });
+
+  if (/^\s*<li(?:\s|>)/i.test(html)) {
+    return (
+      <ul
+        className={styles.opportunityList}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  }
+
+  return (
+    <div
+      className={styles.opportunityHtml}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+/** 经营机会单元格：支持外部接口返回的简单 HTML 列表。 */
+export function Opportunities({
   customer,
   multiple,
 }: {
   customer: Customer;
   multiple?: boolean;
 }) {
-  const items = customer.opportunities ?? [customer.reason];
+  const items = (customer.opportunities ?? [customer.reason]).filter(
+    (item) => item.trim().length > 0,
+  );
+  if (!items.length) return <>--</>;
   if (multiple && items.length > 1) {
     return (
       <ul className={styles.opportunityList}>
         {items.map((t, i) => (
-          <li key={i}>{t}</li>
+          <li key={i}>
+            <OpportunityHtml value={t} />
+          </li>
         ))}
       </ul>
     );
   }
-  return <>{customer.reason}</>;
+  return <OpportunityHtml value={items[0]} />;
 }
 
-/** 电访 / 客户洞察外链占位：地址待外部系统提供，当前新窗口打开占位页 */
-function openOutboundLink(kind: "dial" | "insight", c: Customer) {
-  window.open(`https://example.com/${kind}?custUid=${c.custUid}`, "_blank");
+/**
+ * 电访 / 客户洞察外链：取 get-sign 签名后拼接外链并新窗口打开。
+ * signature 需异步获取，为避免弹窗被拦截，先同步打开空白窗口占位，
+ * 随后异步填充 location 指向最终外链。
+ */
+async function openOutboundLink(kind: "dial" | "insight", c: Customer) {
+  // 埋点：电访 button_id=phone，客户洞察 button_id=insight
+  // reportTaskClick(c, kind === "dial" ? "phone" : "insight");
+  const win = window.open("", "_blank");
+  try {
+    // bbkOrgId / custUid 均由 /wealth/name-list 接口直接返回
+    const bbkOrgId = c.bbkOrgId ?? "";
+    const signature = await fetchSchemeSignature(c.custUid, bbkOrgId);
+    const url =
+      kind === "dial"
+        ? buildTelUrl(c.custUid, bbkOrgId, signature)
+        : buildInsightUrl(c.custUid, bbkOrgId, signature);
+    if (win) {
+      win.location.href = url;
+    } else {
+      window.open(url, "_blank");
+    }
+  } catch (error) {
+    win?.close();
+    console.warn(`[Wealth] 打开${kind === "dial" ? "电访" : "客户洞察"}外链失败`, error);
+  }
 }
+
+/**
+ * 任务执行按钮埋点：与 htmlPreviewClickTracking.buildHtmlPreviewClickPayload
+ * 返回结构保持一致（event_type=button_click，template_type=main）。
+ * - button_id：plan 查看经营方案 / phone 电访 / insight 客户洞察
+ * - customer 信息取 /wealth/name-list 返回的 custUid、custNm（即 Customer.custUid / name）
+ * - page_source / platform_source 固定为工作台任务清单口径
+ */
+// function reportTaskClick(c: Customer, buttonId: "plan" | "phone" | "insight") {
+//   const meta: Record<"plan" | "phone" | "insight", { name: string; text: string }> = {
+//     plan: { name: "查看经营方案", text: "查看经营方案" },
+//     phone: { name: "电访", text: "电访" },
+//     insight: { name: "客户洞察", text: "客户洞察" },
+//   };
+//   const pageSource = "WP_AGENT_WORKSPACE_TASK_LIST";
+//   const payload: HtmlTrackerPayloadType = {
+//     cron_task_id: null,
+//     cron_task_name: null,
+//     file_url: "",
+//     file_name: null,
+//     list_key: "",
+//     list_name: "",
+//     trace_id: null,
+//     button_id: buttonId,
+//     button_name: meta[buttonId].name,
+//     button_text: meta[buttonId].text,
+//     button_type: buttonId,
+//     customer_id: c.custUid || null,
+//     customer_name: c.name || null,
+//     customer_info: {
+//       customer_id: c.custUid || "",
+//       name: c.name || "",
+//     },
+//     clicked_at: new Date().toISOString(),
+//     event_type: "button_click",
+//     page_source: pageSource,
+//     platform_source: "WP",
+//   };
+//   htmlPreviewEventsApi.recordClick(payload).catch(() => {
+//     // 埋点失败不影响主流程，静默丢弃
+//   });
+// }
 
 function labelTagClass(label: string) {
   return label === "总行重点"
     ? styles.red
     : label === "行长指派"
-    ? styles.orange
-    : "";
+      ? styles.orange
+      : "";
 }
 
 export default function Tasks({ page }: { page: TaskPageKind }) {
@@ -97,7 +206,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
   const navigate = useNavigate();
-
   const [view, setView] = useState<"business" | "customer">("business");
   const [taskLabel, setTaskLabel] = useState("全部");
   const [search, setSearch] = useState("");
@@ -107,6 +215,13 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const [tagFilterPos, setTagFilterPos] = useState({ left: 10, top: 10 });
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  /**
+   * 经营方案 iframe 自增序列：作为 _t 时间戳附加到 URL 强制刷新加载，
+   * 同时用作 <CustomerSchemePreview> 的 key 强制重挂载，从而重置内部的
+   * retryCountRef / loading 状态（对齐 RM CustPlanCard 的 iframeKeyRef 机制，
+   * 解决同一方案关闭后再点开不触发 iframe load 的问题）。
+   */
+  const schemeOpenSeqRef = useRef(0);
 
   const isBiz = view === "business" && page === "today";
   const doneView = page === "done";
@@ -135,8 +250,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     page === "done"
       ? doneCustomers
       : page === "pending"
-      ? pendingCustomers
-      : customers;
+        ? pendingCustomers
+        : customers;
 
   /** 原型 customerList：ignoreLabel 用于标签浮层计数 */
   const buildList = (ignoreLabel: boolean) => {
@@ -252,23 +367,57 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       e.key === "Home"
         ? 0
         : e.key === "End"
-        ? choices.length - 1
-        : e.key === "ArrowDown"
-        ? (index + 1) % choices.length
-        : (index + choices.length - 1) % choices.length;
+          ? choices.length - 1
+          : e.key === "ArrowDown"
+            ? (index + 1) % choices.length
+            : (index + choices.length - 1) % choices.length;
     e.preventDefault();
     choices[next]?.focus();
   };
 
   const getCustomer = (id: string) => pool.find((c) => c.id === id);
 
-  /** 客户经营方案弹窗：内容待外部经营方案接口接入，当前为空白占位 */
+  /**
+   * 客户经营方案弹窗：优先以 iframe 渲染客户名单返回的 filename 链接
+   * （/wealth/name-list 的 filename 为 reportView 完整 URL）；无链接时回退空态。
+   */
   const showScheme = (id: string) => {
     const c = getCustomer(id);
     if (!c) return;
+    // 埋点：查看经营方案 button_id=plan
+    // reportTaskClick(c, "plan");
+    if (!c.link) {
+      openDialog({
+        title: "客户经营方案",
+        body: <div className={styles.empty}>暂无经营方案</div>,
+        buttons: [{ label: "关闭" }],
+      });
+      return;
+    }
+    // 自增序列：既附加为 _t 参数强制 iframe 刷新加载，
+    // 又作为组件 key 强制重挂载，重置内部重试/加载状态
+    schemeOpenSeqRef.current += 1;
+    const seq = schemeOpenSeqRef.current;
+    let previewUrl = c.link;
+    try {
+      const u = new URL(c.link);
+      u.searchParams.set("_t", String(seq));
+      previewUrl = u.toString();
+    } catch {
+      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}`;
+    }
+    // 经营方案以 iframe 铺满整个弹窗：不渲染标题头部、正文无内边距、
+    // iframe 无边框。plain 弹窗通过弹窗类专用宽度铺满可用区域。
     openDialog({
-      title: "客户经营方案",
-      body: <div className={styles.empty}>暂无内容</div>,
+      body: (
+        <CustomerSchemePreview
+          key={seq}
+          url={previewUrl}
+          custName={c.name}
+          title={c.task || "客户经营方案"}
+        />
+      ),
+      plain: true,
       buttons: [{ label: "关闭" }],
     });
   };
@@ -311,10 +460,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     page === "pending"
       ? "待触达客户清单"
       : doneView
-      ? "已完成任务"
-      : isBiz
-      ? "客户经营清单"
-      : "今日客户经营清单";
+        ? "已完成任务"
+        : isBiz
+          ? "客户经营清单"
+          : "今日客户经营清单";
 
   const filterActive = taskLabel !== "全部";
 
@@ -337,8 +486,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                     className={cx(
                       styles.treeItem,
                       selectedTask === n.sceneName &&
-                        selectedCategory === g.category &&
-                        styles.active,
+                      selectedCategory === g.category &&
+                      styles.active,
                     )}
                     title={`来源规划：${n.planName}`}
                     onClick={() => {
@@ -405,12 +554,12 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
               {doneView
                 ? "客户经营任务已完成"
                 : page === "pending"
-                ? "待处理：客户触达"
-                : isBiz
-                ? selectedTask
-                  ? "当前任务：" + selectedTask
-                  : "今日暂无排程中的任务"
-                : "今日任务：客户经营"}
+                  ? "待处理：客户触达"
+                  : isBiz
+                    ? selectedTask
+                      ? "当前任务：" + selectedTask
+                      : "今日暂无排程中的任务"
+                    : "今日任务：客户经营"}
             </h3>
             <div className={styles.summaryMetrics}>
               {doneView ? (
@@ -555,8 +704,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                               c.channel === "电话"
                                 ? "phone"
                                 : c.channel === "企微"
-                                ? "chat"
-                                : "user"
+                                  ? "chat"
+                                  : "user"
                             }
                           />
                           {"　"}
@@ -613,13 +762,13 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                         page === "pending"
                           ? pendingLoading
                           : page === "done"
-                          ? doneLoading
-                          : customersLoading
+                            ? doneLoading
+                            : customersLoading
                       )
                         ? "客户清单加载中…"
                         : isBiz && selectedTask && !search.trim()
-                        ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
-                        : "暂无符合条件的客户"}
+                          ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
+                          : "暂无符合条件的客户"}
                     </div>
                   </td>
                 </tr>

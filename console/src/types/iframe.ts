@@ -45,7 +45,7 @@ export interface AuthHeaderItem {
  *   - skipPreviewTracking: 是否跳过 HTML preview 埋点（支持 boolean 或字符串 "true"/"false"）
  *   - auth: 自定义 headers 数组
  *   - pageSource: "",  【必传】打开页面：商机中心-SJR、客户洞察-KHA、高级搜索-GJS、电访-GL6
- *   - plantformSource: "",  【必传】打开平台：W+
+ *   - platformSource: "",  【必传】打开平台：W+
  */
 export interface IframeUserDataMessage {
   type: "USER_DATA";
@@ -79,7 +79,7 @@ export interface IframeUserDataMessage {
     /** 打开页面 */
     pageSource?: string;
     /** 打开平台 */
-    plantformSource?: string;
+    platformSource?: string;
   };
 }
 
@@ -189,5 +189,5 @@ export interface IframeContext {
   /** 打开页面 */
   pageSource: string | null;
   /** 打开平台 */
-  plantformSource: string | null;
+  platformSource: string | null;
 }

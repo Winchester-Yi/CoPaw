@@ -2513,6 +2513,71 @@
   .calendarDialog .dialogBody {
     max-height: 70vh;
   }
+  // —— plain 弹窗（无标题、无正文内边距，内容铺满；经营方案 iframe 预览） ——
+  .plainDialog {
+    // 铺满可用屏幕宽高，让 iframe 有足够展示空间
+    width: min(1368px, calc(100vw - 40px));
+    height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .plainDialog .dialogBody {
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    max-height: none;
+    overflow: hidden;
+  }
+
+  // —— 客户经营方案 iframe 预览弹窗 ——
+  .schemePreviewWrap {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+  }
+
+  .schemePreviewWrap :global(.swe-spin-nested-loading) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .schemePreviewWrap :global(.swe-spin-container) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .schemePreviewFrame {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .schemePreviewFrame iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+
+  .schemePreviewEmpty {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+  }
+
+  .schemePreviewFrame {
+    box-sizing: border-box;
+  }
+
+  .schemePreviewEmpty {
+    font-size: 14px;
+  }
   .calendarDetailTable {
     width: 100%;
     min-width: 1040px;
@@ -2908,6 +2973,30 @@
   }
   .opportunityList li::marker {
     color: #7895bb;
+  }
+  .opportunityHtml {
+    white-space: normal;
+    line-height: 1.65;
+  }
+  .opportunityHtml h1,
+  .opportunityHtml h2,
+  .opportunityHtml h3,
+  .opportunityHtml h4,
+  .opportunityHtml h5,
+  .opportunityHtml h6 {
+    margin: 4px 0;
+    font-size: inherit;
+    line-height: inherit;
+    font-weight: 600;
+  }
+  .opportunityHtml p,
+  .opportunityHtml div {
+    margin: 3px 0;
+  }
+  .opportunityHtml ul,
+  .opportunityHtml ol {
+    margin: 4px 0;
+    padding-left: 18px;
   }
   .customerTable .reason .opportunityList {
     min-width: 0;

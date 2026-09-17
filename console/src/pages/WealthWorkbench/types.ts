@@ -120,7 +120,7 @@ export interface Customer {
   /** 所属经营场景的技能 ID（触达登记/名单接口入参） */
   skillId: string;
   name: string;
-  /** 重点标签：总行重点 / 分行重点 / 行长指派（真实名单暂无此概念，置空） */
+  /** 重点标签：行长指派 / 分行重点 / 我的关注，可多值 */
   label: string;
   /** 推荐理由（外部 name-list 的 recomReason） */
   reason: string;
@@ -131,6 +131,8 @@ export interface Customer {
   time: string;
   note: string;
   opportunities?: string[];
+  /** 机构编码（外部 name-list 的 bbkOrgId，用于电访/客户洞察外链签名） */
+  bbkOrgId?: string;
   /** 客户详情跳转链接（外部 name-list 的 filename，可直接 iframe 渲染） */
   link?: string;
 }

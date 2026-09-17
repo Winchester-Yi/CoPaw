@@ -40,10 +40,16 @@ export function DialogHost() {
     }
   };
 
+  const hasTitle = Boolean(dialog?.title);
+
   return (
     <dialog
       ref={ref}
-      className={cx(styles.dialog, dialog?.wide && styles.calendarDialog)}
+      className={cx(
+        styles.dialog,
+        dialog?.wide && styles.calendarDialog,
+        dialog?.plain && styles.plainDialog,
+      )}
       onClick={onClick}
       onClose={closeDialog}
       onCancel={(e) => {
@@ -53,18 +59,22 @@ export function DialogHost() {
     >
       {dialog && (
         <>
-          <div className={styles.dialogHead}>
-            <h2>{dialog.title}</h2>
-            <button
-              className={styles.iconbtn}
-              onClick={closeDialog}
-              aria-label="关闭"
-              disabled={acting}
-            >
-              <Icon name="close" />
-            </button>
+          {hasTitle && (
+            <div className={styles.dialogHead}>
+              <h2>{dialog.title}</h2>
+              <button
+                className={styles.iconbtn}
+                onClick={closeDialog}
+                aria-label="关闭"
+                disabled={acting}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          )}
+          <div className={cx(styles.dialogBody, !hasTitle && styles.plainBody)}>
+            {dialog.body}
           </div>
-          <div className={styles.dialogBody}>{dialog.body}</div>
           <div className={styles.dialogFooter}>
             {dialog.buttons.map((b) => {
               const isAction = Boolean(b.primary || b.danger);

@@ -25,7 +25,7 @@ const INSURANCE_2 = "skill-wealth-insurance-2";
 const FINANCE = "skill-wealth-finance-3";
 const LOAN = "skill-wealth-loan-4";
 
-/** 客户名单夹具：经营视角仅 LOAN 技能返回两个客户；客户视角（无 skill_id）返回全量并带 skillIds */
+/** 客户名单夹具：经营视角仅 LOAN 技能返回两个客户；客户视角使用外部聚合结果的 skillList */
 const NAME_LIST_FIXTURE = [
   {
     custUid: "CUST001",
@@ -33,7 +33,7 @@ const NAME_LIST_FIXTURE = [
     sapId: "10086",
     filename: "http://example/cust001",
     recomReason: "命中贷款核验规则",
-    skillIds: [LOAN],
+    skillList: [{ skillId: LOAN, skillName: "信贷需求挖掘" }],
   },
   {
     custUid: "CUST002",
@@ -41,7 +41,7 @@ const NAME_LIST_FIXTURE = [
     sapId: "10086",
     filename: "http://example/cust002",
     recomReason: "",
-    skillIds: [LOAN],
+    skillList: [{ skillId: LOAN, skillName: "信贷需求挖掘" }],
   },
 ];
 
@@ -562,7 +562,7 @@ describe("WealthWorkbench store", () => {
     expect(custCustomers).toHaveLength(2);
     expect(custCustomers[0]).toMatchObject({
       id: "CUST001",
-      label: "信贷需求挖掘",
+      label: "我的关注",
       task: "信贷需求挖掘",
     });
   });

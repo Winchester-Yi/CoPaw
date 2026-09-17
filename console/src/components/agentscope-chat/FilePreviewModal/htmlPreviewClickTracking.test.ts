@@ -413,6 +413,8 @@ describe("htmlPreviewClickTracking", () => {
         customer_id: "CUST-001",
         name: "张三",
       },
+      pageSource: "wealth_workbench",
+      platformSource: "wp",
     });
 
     expect(payload).toMatchObject({
@@ -427,6 +429,9 @@ describe("htmlPreviewClickTracking", () => {
         customer_id: "CUST-001",
         name: "张三",
       },
+      page_source: "wealth_workbench",
+      platform_source: "wp",
     });
+    expect(payload).not.toHaveProperty("plantform_source");
   });
 });

@@ -3288,7 +3288,7 @@ The per-scene firing rule of a Plan, expressed with the same frequency model as 
 _Avoid_: cronExample as schedule, validity dates inside the cron expression, the prototype's 每日/每周/隔天-only picker
 
 **Workbench Role (角色)**:
-One of 客户经理 / 支行行长 / 分行中台. It gates page access in the Wealth Workbench through the Role Permission Matrix (角色权限矩阵) — the task pages (today / pending / done) are reachable only by 客户经理 — and selects the data scope of every view. In embedded deployment the Role is resolved from the host-supplied positionId, never chosen in-page. The host's position codes map as: 客户经理 = RB0101, 支行行长 = RB1101 or RB0306, 分行中台 = RB0304. A missing or unmapped positionId resolves to the pseudo-role unknown under deny-by-default: no page permissions, the entry renders a full-page "no access" notice, and no business data is loaded.
+One of 客户经理 / 支行行长 / 分行中台. It gates page access in the Wealth Workbench through the Role Permission Matrix (角色权限矩阵) — the task pages (today / pending / done) are reachable only by 客户经理 — and selects the data scope of every view. In embedded deployment the Role is resolved from the host-supplied positionId, never chosen in-page. The host's position codes map as: 客户经理 = RB0101, 支行行长 = RB1101 or RB0306, 分行中台 = RB0301 or RB0305. A missing or unmapped positionId resolves to the pseudo-role unknown under deny-by-default: no page permissions, the entry renders a full-page "no access" notice, and no business data is loaded.
 _Avoid_: account type, user preference, switchable profile
 
 **Role Permission Matrix (角色权限矩阵)**:

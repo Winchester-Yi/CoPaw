@@ -100,7 +100,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     enableAnnotations = false,
   } = props;
   const iframeState = useIframeStore((state) => state);
-  const { userId, bbk, pageSource, plantformSource } = iframeState;
+  const { userId, bbk, pageSource, platformSource } = iframeState;
   const [copied, setCopied] = useState(false);
   const [fullscreen, setFullscreen] = useState(presentation === "modal");
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -502,11 +502,11 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         template_id: templateInfo?.templateId ?? null,
         result_id: effectiveResultId,
         page_source: pageSource || null,
-        plantform_source: plantformSource || null,
+        platform_source: platformSource || null,
       };
       htmlPreviewEventsApi.recordClick(payload);
     }
-  }, [templateResult, templateInfo, htmlPreviewEventsApi, effectiveResultId, pageSource, plantformSource]);
+  }, [templateResult, templateInfo, htmlPreviewEventsApi, effectiveResultId, pageSource, platformSource]);
 
   const handleCopy = useCallback(async () => {
     try {
@@ -657,7 +657,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       rootResultId,
       rootTemplateId,
       pageSource,
-      plantformSource,
+      platformSource,
     }),
     [
       fileName,
@@ -671,7 +671,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       effectiveResultId,
       effectiveTemplateId,
       pageSource,
-      plantformSource,
+      platformSource,
     ],
   );
 

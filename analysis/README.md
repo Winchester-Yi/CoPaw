@@ -13,6 +13,7 @@
 | [security-and-governance.md](security-and-governance.md) | 工具审批、技能扫描、路径边界与认证治理 |
 | [observability-and-supporting-systems.md](observability-and-supporting-systems.md) | Tracing、Token Usage、Cron、备份、运维支撑 |
 | [monitor-service.md](monitor-service.md) | Monitor 独立服务的 tracing、cron、sync、subtask 与数据查询链路 |
+| [high-frequency-question-current-state.md](../guidance/high-frequency-question-current-state.md) | Monitor 高频问题分析的接口、任务流、缓存、Console 入口与当前限制 |
 | [market-service.md](market-service.md) | Market 独立服务的技能市场、MCP 市场、版本与安全扫描 |
 
 ## 经验索引

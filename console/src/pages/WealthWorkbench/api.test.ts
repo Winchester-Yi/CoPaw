@@ -16,6 +16,7 @@ const TASK = {
   skillId: "skill-loan-1",
   sceneName: "信贷需求挖掘",
   category: "贷款",
+  source: "行长关注",
 };
 
 const NAME_LIST_FIXTURE = [
@@ -149,14 +150,24 @@ describe("WealthWorkbench api", () => {
     expect(String(nameListCalls[0]?.[0])).toContain("sap_id=10086");
   });
 
-  it("fetchTodayCustomers 客户视角：一次查询不带 skillId，按客户聚合并标注命中场景", async () => {
+  it("fetchTodayCustomers 客户视角：直接映射外部聚合名单并标注命中场景", async () => {
     mockRequest.mockImplementation(async (path: unknown) => {
       const p = String(path);
       if (p.startsWith("/wealth/name-list")) {
         return {
           items: [
-            { ...NAME_LIST_FIXTURE[0], skillIds: ["skill-loan-1"] },
-            { ...NAME_LIST_FIXTURE[1], skillIds: ["skill-unknown"] },
+            {
+              ...NAME_LIST_FIXTURE[0],
+              skillList: [
+                { skillId: "skill-loan-1", skillName: "信贷需求挖掘" },
+              ],
+              strongContactTime: "2026-09-16 10:30:00",
+              touchMethod: "电话",
+            },
+            {
+              ...NAME_LIST_FIXTURE[1],
+              skillList: [{ skillId: "skill-unknown", skillName: "未知技能" }],
+            },
           ],
         };
       }
@@ -175,15 +186,54 @@ describe("WealthWorkbench api", () => {
     expect(nameListCalls).toHaveLength(1);
     expect(String(nameListCalls[0]?.[0])).not.toContain("skill_id=");
     expect(String(nameListCalls[0]?.[0])).toContain("sap_id=10086");
-    // 以 custUid 为页面 id；今日树内的技能映射为场景名标签，树外技能不产生标签
+    // 以 custUid 为页面 id；重点标签按规划创建角色映射，树外技能不产生标签
     expect(customers[0]).toMatchObject({
       id: "CUST001",
       name: "张三",
-      label: "信贷需求挖掘",
+      label: "行长指派",
       task: "信贷需求挖掘",
       category: "贷款",
+      reason: "命中贷款核验规则",
+      opportunities: ["命中贷款核验规则"],
+      channel: "电话",
+      time: "2026-09-16 10:30:00",
     });
-    expect(customers[1]).toMatchObject({ id: "CUST002", label: "", task: "" });
+    expect(customers[1]).toMatchObject({
+      id: "CUST002",
+      label: "",
+      task: "",
+      reason: "",
+      opportunities: [],
+    });
+  });
+
+  it("客户命中多个规划来源时展示去重后的角色重点标签", async () => {
+    mockRequest.mockResolvedValueOnce({
+      items: [
+        {
+          ...NAME_LIST_FIXTURE[0],
+          skillList: [
+            { skillId: "skill-president", skillName: "行长任务" },
+            { skillId: "skill-middle", skillName: "分行任务" },
+            { skillId: "skill-rm", skillName: "客户经理任务" },
+            { skillId: "skill-president-2", skillName: "另一行长任务" },
+          ],
+        },
+      ],
+    });
+
+    const customers = await api.fetchTodayCustomers(
+      [
+        { ...TASK, skillId: "skill-president", source: "行长关注" },
+        { ...TASK, skillId: "skill-middle", source: "分行关注" },
+        { ...TASK, skillId: "skill-rm", source: "我的关注" },
+        { ...TASK, skillId: "skill-president-2", source: "行长关注" },
+      ],
+      "10086",
+      "customer",
+    );
+
+    expect(customers[0]?.label).toBe("行长指派、分行重点、我的关注");
   });
 
   it("fetchPendingCustomers / fetchDoneCustomers 以 touched 区分名单口径", async () => {
@@ -199,11 +249,26 @@ describe("WealthWorkbench api", () => {
     }
   });
 
-  it("fetchDoneCustomers 名单全部为已触达，触达方式/时间置空待接口补字段", async () => {
+  it("fetchDoneCustomers 使用 skillName 作为经营任务", async () => {
+    mockRequest.mockResolvedValueOnce({
+      items: [
+        {
+          ...NAME_LIST_FIXTURE[0],
+          skillList: [
+            { skillId: "skill-loan-1", skillName: "外部经营任务名称" },
+          ],
+        },
+      ],
+    });
     const done = await api.fetchDoneCustomers([TASK], "10086");
-    expect(done).toHaveLength(2);
+    expect(done).toHaveLength(1);
     expect(done.every((c) => c.done)).toBe(true);
-    expect(done[0]).toMatchObject({ channel: "", time: "", note: "" });
+    expect(done[0]).toMatchObject({
+      task: "外部经营任务名称",
+      channel: "",
+      time: "",
+      note: "",
+    });
   });
 
   it("resetMockDb 后草稿恢复初始（模拟刷新）", async () => {

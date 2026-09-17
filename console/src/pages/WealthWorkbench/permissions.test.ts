@@ -36,11 +36,19 @@ describe("WealthWorkbench permissions", () => {
     ]);
   });
 
-  it("resolveRole 命中映射表：RB0101 客户经理 / RB1101、RB0306 行长 / RB0304 中台", () => {
+  it("resolveRole 命中映射表：RB0101 客户经理 / RB1101、RB0306 行长 / RB0301、RB0305 中台", () => {
     expect(resolveRole("RB0101")).toBe("rm");
     expect(resolveRole("RB1101")).toBe("president");
     expect(resolveRole("RB0306")).toBe("president");
-    expect(resolveRole("RB0304")).toBe("middle");
+    expect(resolveRole("RB0301")).toBe("middle");
+    expect(resolveRole("RB0305")).toBe("middle");
+  });
+
+  it("resolveRole 不再将旧编码 RB0304 识别为分行中台", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(resolveRole("RB0304")).toBe(FALLBACK_ROLE);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 
   it("仅行长/中台需要选择分发目标，客户经理发给自己", () => {

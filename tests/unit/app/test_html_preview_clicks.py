@@ -94,6 +94,25 @@ def test_event_model_validates_event_type_and_template_association():
         )
 
 
+def test_event_model_limits_page_and_platform_sources_to_50_characters():
+    """页面和平台来源均应限制为 VARCHAR(50) 对应的长度。"""
+    event = HtmlPreviewClickEventCreate(
+        file_url="https://example.com/a.html",
+        page_source="wealth_workbench",
+        platform_source="wp",
+    )
+
+    assert event.page_source == "wealth_workbench"
+    assert event.platform_source == "wp"
+
+    for field_name in ("page_source", "platform_source"):
+        with pytest.raises(ValidationError):
+            HtmlPreviewClickEventCreate(
+                file_url="https://example.com/a.html",
+                **{field_name: "x" * 51},
+            )
+
+
 @pytest.fixture
 def mock_db():
     """构造一个可编排返回值的数据库桩。"""
@@ -125,6 +144,8 @@ async def test_create_event_writes_click_detail(mock_db):
             button_text="立即跟进",
             customer_info={"客户姓名": "祝话", "到期金额": "18.00万元"},
             clicked_at=clicked_at,
+            page_source="wealth_workbench",
+            platform_source="wp",
         ),
     )
 
@@ -158,7 +179,24 @@ async def test_create_event_writes_click_detail(mock_db):
         None,
         None,
         None,
+        "wealth_workbench",
+        "wp",
     )
+
+
+def test_event_item_maps_page_and_platform_sources():
+    """查询事件明细时应返回页面和平台来源。"""
+    item = HtmlPreviewClickStore._to_event_item(
+        {
+            "id": 1,
+            "file_url": "https://example.com/a.html",
+            "page_source": "wealth_workbench",
+            "platform_source": "wp",
+        },
+    )
+
+    assert item.page_source == "wealth_workbench"
+    assert item.platform_source == "wp"
 
 
 @pytest.mark.asyncio
@@ -192,7 +230,7 @@ async def test_create_event_writes_view_event_metadata(mock_db):
     assert "parent_target_name" not in query
     assert "trace_id" in query
     assert params[13] is None
-    assert params[-7:] == (
+    assert params[-9:-2] == (
         "module_exposure",
         "sub",
         12,

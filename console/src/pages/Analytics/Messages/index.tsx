@@ -16,7 +16,18 @@ import {
   Segmented,
   Spin,
 } from "antd";
-import { BarChart3, Clock3, Download, RefreshCw } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  BarChart3,
+  Clock3,
+  Download,
+  Eye,
+  EyeOff,
+  FileText,
+  RefreshCw,
+  Users,
+} from "lucide-react";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
@@ -38,9 +49,117 @@ import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
 const HIGH_FREQUENCY_QUESTION_TASK_TYPE = "monitor.high.freq.question";
+const USE_HFQ_MODAL_MOCK_RESULT = true;
 
 function getDefaultAnalysisRange(): [Dayjs, Dayjs] {
   return [dayjs().subtract(6, "day").startOf("day"), dayjs().endOf("day")];
+}
+
+function buildMockHighFrequencyQuestionResult(
+  range: [Dayjs, Dayjs],
+  bbkId?: string,
+): HighFrequencyQuestionResult {
+  const scopeType = bbkId ? "ORG" : "ALL";
+
+  return {
+    state: "AVAILABLE",
+    batch_id: "HFQ_MOCK_20260910_001",
+    status: "SUCCESS",
+    source_id: "RMASSIST",
+    stat_start_time: range[0].startOf("day").format("YYYY-MM-DD HH:mm:ss"),
+    stat_end_time: range[1].endOf("day").format("YYYY-MM-DD HH:mm:ss"),
+    scope_type: scopeType,
+    bbk_id: bbkId || "ALL",
+    result_updated_at: "2026-09-01 09:27:01",
+    message_count: 876,
+    user_count: 243,
+    total_skill_used_count: 536,
+    topic_count: 4,
+    skill_gap_topic_count: 2,
+    topics: [
+      {
+        rank_no: 1,
+        topic_name: "生成保险营销话术与方案",
+        message_count: 76,
+        valid_message_count: 876,
+        skill_used_count: 63,
+        top_skill: "保险营销助手",
+        bbk_dis: {
+          "100": 60,
+          "110": 10,
+          "121": 2,
+          "130": 1,
+          "140": 1,
+        },
+        sample_questions: [
+          "帮我营销张兴客户保险，都会长盈2026年金10w3年缴",
+          "我要营销客户陈艺保险，建议客户增加配置年金产品",
+          "帮我写需要找哪些目标客户，产品亮点、市场分析、沟通的话术",
+        ],
+      },
+      {
+        rank_no: 2,
+        topic_name: "生成客户沟通与异议应对话术",
+        message_count: 61,
+        valid_message_count: 876,
+        skill_used_count: 20,
+        top_skill: "客户异议助手",
+        bbk_dis: {
+          "100": 40,
+          "110": 14,
+          "121": 4,
+          "150": 1,
+          "160": 1,
+        },
+        sample_questions: [
+          "客户说买的理财都没亏，这个就亏了，不赞同2年周期就是保本",
+          "针对一个经常联系不上的客户该怎么办",
+          "客户觉得保险5年时间有点久怎么办",
+        ],
+      },
+      {
+        rank_no: 3,
+        topic_name: "产品收益对比与选择建议",
+        message_count: 54,
+        valid_message_count: 876,
+        skill_used_count: 3,
+        top_skill: null,
+        bbk_dis: {
+          "170": 24,
+          "100": 15,
+          "180": 7,
+          "190": 4,
+          "140": 4,
+        },
+        sample_questions: [
+          "这两款保险产品有什么区别，哪个收益更高",
+          "年金和增额终身寿险哪个好",
+          "帮我对比一下同业的类似产品",
+        ],
+      },
+      {
+        rank_no: 4,
+        topic_name: "客户画像总结与分析",
+        message_count: 50,
+        valid_message_count: 876,
+        skill_used_count: 31,
+        top_skill: "客户分析助手",
+        bbk_dis: {
+          "100": 26,
+          "110": 12,
+          "121": 6,
+          "160": 3,
+          "140": 3,
+        },
+        sample_questions: [
+          "帮我总结这个客户的特点和需求",
+          "根据历史对话，分析客户的风险偏好",
+          "生成客户画像，并给出后续跟进建议",
+        ],
+      },
+    ],
+    message: null,
+  };
 }
 
 function toHighFrequencyCriteria(
@@ -69,6 +188,45 @@ function getTopicMetricText(
   return `${topic.message_count.toLocaleString("zh-CN")}条（${getTopicPercent(
     topic,
   )}）`;
+}
+
+function formatAnalysisCount(value?: number | null) {
+  return (value || 0).toLocaleString("zh-CN");
+}
+
+function formatAnalysisPercent(
+  numerator?: number | null,
+  denominator?: number | null,
+) {
+  if (!denominator || denominator <= 0) {
+    return "0.0%";
+  }
+  return `${(((numerator || 0) / denominator) * 100).toFixed(1)}%`;
+}
+
+function getAnalysisSkillCoverage(result: HighFrequencyQuestionResult) {
+  if (!result.message_count || result.message_count <= 0) {
+    return 0;
+  }
+  return Math.min(
+    Math.max(result.total_skill_used_count / result.message_count, 0),
+    1,
+  );
+}
+
+function getTopicSkillCoverage(
+  topic: HighFrequencyQuestionResult["topics"][number],
+) {
+  if (!topic.message_count || topic.message_count <= 0) {
+    return 0;
+  }
+  return Math.min(Math.max(topic.skill_used_count / topic.message_count, 0), 1);
+}
+
+function getTopicSkillMetricText(
+  topic: HighFrequencyQuestionResult["topics"][number],
+) {
+  return formatAnalysisPercent(topic.skill_used_count, topic.message_count);
 }
 
 function getTopicBbkDistribution(
@@ -202,6 +360,7 @@ export default function MessagesPage() {
     [dayjs().subtract(7, "day"), dayjs()],
   );
   const [exporting, setExporting] = useState(false);
+  const [showIdColumns, setShowIdColumns] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analysisRange, setAnalysisRange] = useState<[Dayjs, Dayjs]>(
     getDefaultAnalysisRange,
@@ -288,6 +447,7 @@ export default function MessagesPage() {
         start_date: dateRange?.[0]?.format("YYYY-MM-DD"),
         end_date: dateRange?.[1]?.format("YYYY-MM-DD"),
         query: searchQuery || undefined,
+        exclude_cron_task_sessions: true,
       });
       setMessages(data.items || []);
       setTotal(data.total || 0);
@@ -309,6 +469,7 @@ export default function MessagesPage() {
           start_date: dateRange?.[0]?.format("YYYY-MM-DD"),
           end_date: dateRange?.[1]?.format("YYYY-MM-DD"),
           query: searchQuery || undefined,
+          exclude_cron_task_sessions: true,
         },
         "xlsx",
       );
@@ -347,6 +508,15 @@ export default function MessagesPage() {
       setAnalysisTaskStatus("idle");
       try {
         const criteria = toHighFrequencyCriteria(range, bbkId);
+        if (USE_HFQ_MODAL_MOCK_RESULT) {
+          const data = buildMockHighFrequencyQuestionResult(range, bbkId);
+          if (querySeq !== analysisQuerySeqRef.current) {
+            return;
+          }
+          setAnalysisResult(data);
+          setAnalysisQueried(true);
+          return;
+        }
         const data = await monitorApi.getHighFrequencyQuestionResults(criteria);
         if (querySeq !== analysisQuerySeqRef.current) {
           return;
@@ -535,6 +705,12 @@ export default function MessagesPage() {
       analysisResult?.state === "AVAILABLE" ||
       analysisResult?.state === "AVAILABLE_STALE"
     ) {
+      const skillCoverage = getAnalysisSkillCoverage(analysisResult);
+      const skillCoveragePercent = formatAnalysisPercent(
+        analysisResult.total_skill_used_count,
+        analysisResult.message_count,
+      );
+
       return (
         <>
           <div className={styles.analysisStatusBar}>
@@ -551,11 +727,69 @@ export default function MessagesPage() {
               </div>
             </div>
           </div>
+          <section className={styles.analysisSummaryGrid}>
+            <div className={styles.analysisSummaryCard}>
+              <span className={styles.analysisSummaryIcon}>
+                <FileText size={24} />
+              </span>
+              <div>
+                <strong>
+                  {formatAnalysisCount(analysisResult.message_count)} 条
+                </strong>
+                <span>参与统计消息</span>
+              </div>
+            </div>
+            <div className={styles.analysisSummaryCard}>
+              <span className={styles.analysisSummaryIcon}>
+                <Users size={24} />
+              </span>
+              <div>
+                <strong>
+                  {formatAnalysisCount(analysisResult.user_count)} 人
+                </strong>
+                <span>参与用户</span>
+              </div>
+            </div>
+            <div className={styles.analysisSummaryCard}>
+              <span className={styles.analysisSummaryIcon}>
+                <Activity size={24} />
+              </span>
+              <div className={styles.analysisSummarySkill}>
+                <div className={styles.analysisSummarySkillHeader}>
+                  <strong>{skillCoveragePercent}</strong>
+                  <span>
+                    {formatAnalysisCount(analysisResult.total_skill_used_count)}{" "}
+                    / {formatAnalysisCount(analysisResult.message_count)} 条
+                  </span>
+                </div>
+                <div className={styles.analysisSummaryTrack}>
+                  <div
+                    className={styles.analysisSummaryBar}
+                    style={{ width: `${skillCoverage * 100}%` }}
+                  />
+                </div>
+                <span>技能承载率</span>
+              </div>
+            </div>
+            <div className={styles.analysisSummaryCard}>
+              <span className={styles.analysisSummaryIcon}>
+                <AlertTriangle size={24} />
+              </span>
+              <div>
+                <strong>
+                  {formatAnalysisCount(analysisResult.skill_gap_topic_count)} /{" "}
+                  {formatAnalysisCount(analysisResult.topic_count)}
+                </strong>
+                <span>高频问题技能承载缺口</span>
+              </div>
+            </div>
+          </section>
           <section className={styles.analysisResults}>
             <h3>高频问题 TOP10</h3>
             <div className={styles.analysisTopicList}>
               {analysisResult.topics.map((topic) => {
                 const bbkDistribution = getTopicBbkDistribution(topic);
+                const skillCoverage = getTopicSkillCoverage(topic);
 
                 return (
                   <article
@@ -620,6 +854,30 @@ export default function MessagesPage() {
                         ></span>
                       )}
                     </div>
+                    <div className={styles.analysisSkillCoverage}>
+                      <span className={styles.analysisSkillTitle}>
+                        技能承载情况
+                      </span>
+                      <div className={styles.analysisSkillMetric}>
+                        <div className={styles.analysisSkillTrack}>
+                          <div
+                            className={styles.analysisSkillBar}
+                            style={{ width: `${skillCoverage * 100}%` }}
+                          />
+                        </div>
+                        <span>{getTopicSkillMetricText(topic)}</span>
+                      </div>
+                      <div className={styles.analysisTopSkill}>
+                        <span>主要承载技能：</span>
+                        {topic.top_skill ? (
+                          <Tooltip title={topic.top_skill}>
+                            <b>{topic.top_skill}</b>
+                          </Tooltip>
+                        ) : (
+                          <em>暂无</em>
+                        )}
+                      </div>
+                    </div>
                     <span
                       className={`${
                         styles.analysisPercent
@@ -668,9 +926,9 @@ export default function MessagesPage() {
     return msg.slice(0, maxLen) + "...";
   };
 
-  const columns: ColumnsType<UserMessageItem> = [
+  const allColumns: ColumnsType<UserMessageItem> = [
     {
-      title: t("analytics.traceId"),
+      title: t("analytics.traceId", "对话ID"),
       dataIndex: "trace_id",
       key: "trace_id",
       width: 140,
@@ -703,7 +961,7 @@ export default function MessagesPage() {
       render: (v) => getBbkDisplayName(v),
     },
     {
-      title: t("analytics.sessionId", "Session ID"),
+      title: t("analytics.sessionId", "会话ID"),
       dataIndex: "session_id",
       key: "session_id",
       width: 120,
@@ -753,6 +1011,11 @@ export default function MessagesPage() {
       render: (v) => formatDuration(v),
     },
   ];
+  const columns = showIdColumns
+    ? allColumns
+    : allColumns.filter(
+        (column) => column.key !== "trace_id" && column.key !== "session_id",
+      );
 
   return (
     <div className={styles.messagesPage}>
@@ -770,6 +1033,12 @@ export default function MessagesPage() {
               }
               allowClear
             />
+            <Button
+              icon={showIdColumns ? <EyeOff size={16} /> : <Eye size={16} />}
+              onClick={() => setShowIdColumns((visible) => !visible)}
+            >
+              {showIdColumns ? "隐藏ID列" : "显示ID列"}
+            </Button>
             <Button
               type="primary"
               icon={<BarChart3 size={16} />}

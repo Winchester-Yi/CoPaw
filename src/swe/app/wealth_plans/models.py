@@ -223,6 +223,7 @@ class SceneSkillItem(BaseModel):
     cronExample: str | None = None
     mcpRelationList: list[str] = Field(default_factory=list)
     skillBbkLabel: str | None = None
+    bbkId: str | None = None
 
 
 class SceneSkillListResponse(BaseModel):
@@ -255,12 +256,15 @@ class SkillStatsResponse(BaseModel):
     items: list[SkillStatItem] = Field(default_factory=list)
 
 
-class NameListItem(BaseModel):
-    """客户名单明细，字段与外部 name-list 接口 data.list 保持一致。
+class NameListSkill(BaseModel):
+    """客户命中的技能，直接来自外部 name-list 的 skillList。"""
 
-    skillIds 由 SWE 代理层从 data.items 关联补齐：客户视角（不限技能）下
-    同一客户可能被多个技能命中，前端标签列据此展示命中场景。
-    """
+    skillId: str
+    skillName: str
+
+
+class NameListItem(BaseModel):
+    """客户名单明细，字段与外部 name-list 接口 data.list 保持一致。"""
 
     custUid: str
     custNm: str
@@ -268,7 +272,9 @@ class NameListItem(BaseModel):
     bbkOrgId: str | None = None
     filename: str | None = None
     recomReason: str | None = None
-    skillIds: list[str] = Field(default_factory=list)
+    skillList: list[NameListSkill] = Field(default_factory=list)
+    strongContactTime: str | None = None
+    touchMethod: str | None = None
 
 
 class NameListResponse(BaseModel):

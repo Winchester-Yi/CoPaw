@@ -20,7 +20,8 @@ POSITION_ROLE_MAP: dict[str, str] = {
     "RB0101": ROLE_RM,
     "RB1101": ROLE_PRESIDENT,
     "RB0306": ROLE_PRESIDENT,
-    "RB0304": ROLE_MIDDLE,
+    "RB0301": ROLE_MIDDLE,
+    "RB0305": ROLE_MIDDLE,
 }
 
 # 可看本行全部规划的角色

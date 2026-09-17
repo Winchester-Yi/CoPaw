@@ -428,6 +428,8 @@ export interface HighFrequencyQuestionTopic {
   topic_name: string;
   message_count: number;
   valid_message_count: number;
+  skill_used_count: number;
+  top_skill?: string | null;
   bbk_dis?: Record<string, number>;
   sample_questions: string[];
 }
@@ -443,6 +445,11 @@ export interface HighFrequencyQuestionResult {
   scope_type?: "ALL" | "ORG" | null;
   bbk_id?: string | null;
   result_updated_at?: string | null;
+  message_count: number;
+  user_count: number;
+  total_skill_used_count: number;
+  topic_count: number;
+  skill_gap_topic_count: number;
   topics: HighFrequencyQuestionTopic[];
   message?: string | null;
 }

@@ -37,14 +37,15 @@ export const FALLBACK_ROLE: WealthRole = "unknown";
 
 /**
  * positionId → 角色映射表（父系统岗位编号清单）：
- * - RB0101 客户经理；RB1101 / RB0306 均为支行行长；RB0304 分行中台。
+ * - RB0101 客户经理；RB1101 / RB0306 均为支行行长；RB0301 / RB0305 均为分行中台。
  * 新增岗位类型时在此登记；未知编号由 resolveRole 回退 FALLBACK_ROLE 并留痕。
  */
 export const POSITION_ROLE_MAP: Record<string, WealthRole> = {
   RB0101: "rm",
   RB1101: "president",
   RB0306: "president",
-  RB0304: "middle",
+  RB0301: "middle",
+  RB0305: "middle",
 };
 
 /**
