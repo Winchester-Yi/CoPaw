@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Excel presentation of the existing branch behavior statistics."""
 
 from decimal import Decimal, ROUND_HALF_UP
@@ -36,14 +37,14 @@ BRANCH_COLUMNS = (
         "insightManagerRate",
         "查看结果的RM中点击去洞察的比例",
         "insight_managers",
-        "plan_managers",
+        "result_view_managers",
     ),
     ("phoneManagers", "点击去电访的用户数", "phone_managers", None),
     (
         "phoneManagerRate",
         "查看结果的RM中点击去电访的比例",
         "phone_managers",
-        "plan_managers",
+        "result_view_managers",
     ),
     (
         "recommendedCustomers",
@@ -80,7 +81,7 @@ def branch_values(item: CronBranchRankingItem) -> list[int | float]:
                 Decimal.from_float(value * 100).quantize(
                     Decimal("0.01"),
                     rounding=ROUND_HALF_UP,
-                )
+                ),
             )
         values.append(value)
     return values
@@ -111,7 +112,7 @@ def export_branch_dimension(
         ("P1:V1", "by客户"),
     ):
         sheet.merge_cells(cell_range)
-        sheet[cell_range.split(":")[0]] = title
+        sheet[cell_range.split(":", maxsplit=1)[0]] = title
     for column, (_, title, _, _) in enumerate(BRANCH_COLUMNS, 3):
         sheet.cell(2, column, title)
     for row in sheet.iter_rows(min_row=1, max_row=2, max_col=22):
@@ -119,7 +120,9 @@ def export_branch_dimension(
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="4472C4")
             cell.alignment = Alignment(
-                horizontal="center", vertical="center", wrap_text=True
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
             )
     sheet.row_dimensions[1].height = 24
     sheet.row_dimensions[2].height = 65
@@ -133,11 +136,14 @@ def export_branch_dimension(
         name = sheet.cell(rank + 2, 2, item.bbk_name or item.bbk_id or "-")
         name.data_type = "s"
         for column, (value, definition) in enumerate(
-            zip(values, BRANCH_COLUMNS), 3
+            zip(values, BRANCH_COLUMNS),
+            3,
         ):
             percentage = definition[3] or definition[0] == "contactRate"
             cell = sheet.cell(
-                rank + 2, column, value / 100 if percentage else value
+                rank + 2,
+                column,
+                value / 100 if percentage else value,
             )
             cell.number_format = "0.00%" if percentage else "#,##0"
     output = BytesIO()
