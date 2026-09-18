@@ -770,6 +770,45 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
         assert tool_name not in scheduled_goal_tools
 
 
+def test_publish_annotated_html_is_registered_only_for_validated_main_turn(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "media" / "source.html"
+    source.parent.mkdir()
+    source.write_text("<html></html>", encoding="utf-8")
+    context = {
+        "source_path": str(source),
+        "expected_annotation_ids": ["ann-1"],
+    }
+    ordinary = _bare_agent(tmp_path, request_context={"agent_role": "main"})
+    annotated = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "_document_annotation_context": context,
+        },
+    )
+    subagent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "subagent",
+            "_document_annotation_context": context,
+        },
+    )
+
+    assert (
+        "publish_annotated_html"
+        not in SWEAgent._create_toolkit(ordinary).tools
+    )
+    assert (
+        "publish_annotated_html" in SWEAgent._create_toolkit(annotated).tools
+    )
+    assert (
+        "publish_annotated_html"
+        not in SWEAgent._create_toolkit(subagent).tools
+    )
+
+
 def test_background_subagent_tools_require_explicit_intent(
     tmp_path: Path,
 ) -> None:

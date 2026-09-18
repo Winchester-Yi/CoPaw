@@ -188,6 +188,14 @@ async function handleUserDataMessage(
     hideChat: toBoolean(message.data.hideChat),
   });
 
+  // 消息监听器来源的 pageSource/platformSource 通过统一优先级写入，
+  // 不覆盖 URL 参数（最高优先级）来源的值，避免异步并发写入的竞态。
+  store.applyEntrySource(
+    message.data.pageSource || null,
+    message.data.platformSource || null,
+    "message",
+  );
+
   // 等待 userName 获取完成后再标记初始化完成
   // 确保 X-User-Name header 在后续请求中可用
   await fetchAndSetUserName();
@@ -339,6 +347,28 @@ export async function handleUrlOriginParam(): Promise<void> {
   const isOriginY = urlParams.get("origin") === "Y";
   const store = useIframeStore.getState();
   store.setOriginY(isOriginY);
+
+  // URL 参数来源优先级最高，无论 origin 是否为 Y 都先解析 URL 参数。
+  // applyEntrySource 内部同步基于 store 当前状态判断，避免与消息监听器异步写入竞态。
+  const urlPageSource = urlParams.get("pageSource");
+  const urlPlatformSource = urlParams.get("platformSource");
+  if (urlPageSource || urlPlatformSource) {
+    store.applyEntrySource(urlPageSource, urlPlatformSource, "url");
+  }
+  // origin=Y 且当前 store 中 pageSource/platformSource 均为空时，套用默认值。
+  // 走最低优先级 "origin"，不会覆盖消息监听器来源或 URL 来源已有的值。
+  if (isOriginY) {
+    const current = useIframeStore.getState();
+    const needPageDefault = current.pageSource == null;
+    const needPlatformDefault = current.platformSource == null;
+    if (needPageDefault || needPlatformDefault) {
+      store.applyEntrySource(
+        needPageDefault ? "CLAW" : current.pageSource,
+        needPlatformDefault ? "WP" : current.platformSource,
+        "origin",
+      );
+    }
+  }
 
   if (!isOriginY) {
     return;

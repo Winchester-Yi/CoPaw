@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
+import time
 
 import httpx
 import pytest
@@ -263,6 +265,13 @@ async def test_command_shell_field_selects_requested_shell(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    workspace_dir = tmp_path / "tenant-a" / "workspaces" / "default"
+    workspace_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "swe.security.tenant_path_boundary.WORKING_DIR",
+        tmp_path,
+    )
+    monkeypatch.setattr("swe.config.utils.WORKING_DIR", tmp_path)
     observed = {}
 
     class FakeProcess:
@@ -291,11 +300,15 @@ async def test_command_shell_field_selects_requested_shell(
         shell="bash",
     )
 
-    result = await execute_handler(
-        handler,
-        _context(),
-        workspace_dir=tmp_path,
-    )
+    with tenant_context(
+        tenant_id="tenant-a",
+        workspace_dir=workspace_dir,
+    ):
+        result = await execute_handler(
+            handler,
+            _context(),
+            workspace_dir=workspace_dir,
+        )
 
     assert result.failed is False
     assert observed["kwargs"]["executable"] == "/tenant/bin/bash"
@@ -1795,8 +1808,11 @@ async def test_runtime_stop_finalization_stops_when_last_transformer_exceeds_bud
         fake_execute_handler,
     )
     monkeypatch.setattr(
-        "swe.agents.hook_runtime.runtime.time.monotonic",
-        fake_monotonic,
+        "swe.agents.hook_runtime.runtime.time",
+        SimpleNamespace(
+            monotonic=fake_monotonic,
+            perf_counter=time.perf_counter,
+        ),
     )
     runtime = HookRuntime(
         tenant_config=HookConfig(

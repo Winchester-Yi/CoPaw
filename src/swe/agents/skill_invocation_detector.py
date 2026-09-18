@@ -278,8 +278,22 @@ class SkillInvocationDetector:
         if metadata_by_name is not None:
             self._cache_skill_metadata(skills, metadata_by_name)
 
-        # 技能启用集变化后，立即清理已经失效的 SKILL.md 锁定状态，
-        # 避免后续工具调用继续被已禁用技能短路归因。
+        self._clear_disabled_skill_state()
+
+        removed_contexts = self._context_manager.prune_disabled_skills(
+            self._enabled_skills,
+        )
+        if removed_contexts:
+            logger.info(
+                "Pruned disabled skill contexts after enabled skills update: %s",
+                [context.skill_name for context in removed_contexts],
+            )
+            self._schedule_pruned_context_finalization(removed_contexts)
+
+        self._load_manifest_skill_metadata(skills, metadata_by_name)
+
+    def _clear_disabled_skill_state(self) -> None:
+        """Clear detector state that cannot outlive its enabled skill."""
         if (
             self._locked_skill_from_md
             and self._locked_skill_from_md not in self._enabled_skills
@@ -300,71 +314,67 @@ class SkillInvocationDetector:
             self._message_detected_skill = None
             self._message_detected_confidence = 0.0
 
-        removed_contexts = self._context_manager.prune_disabled_skills(
-            self._enabled_skills,
+    def _load_manifest_skill_metadata(
+        self,
+        skills: list[str],
+        metadata_by_name: dict[str, Any] | None,
+    ) -> None:
+        """Pre-cache enabled Skill metadata from the workspace manifest."""
+        if metadata_by_name is not None or not self._workspace_dir:
+            return
+
+        manifest_path = get_workspace_skill_manifest_path(
+            self._workspace_dir,
         )
-        if removed_contexts:
-            logger.info(
-                "Pruned disabled skill contexts after enabled skills update: %s",
-                [context.skill_name for context in removed_contexts],
-            )
-            self._schedule_pruned_context_finalization(removed_contexts)
 
-        # Pre-cache descriptions from workspace manifest
-        if metadata_by_name is None and self._workspace_dir:
-            manifest_path = get_workspace_skill_manifest_path(
-                self._workspace_dir,
-            )
+        if not manifest_path.exists():
+            return
 
-            if manifest_path.exists():
-                try:
-                    with open(manifest_path, "r", encoding="utf-8") as f:
-                        manifest = json.load(f)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
 
-                    for skill_name in skills:
-                        skill_entry = manifest.get("skills", {}).get(
-                            skill_name,
-                            {},
-                        )
-                        metadata = skill_entry.get("metadata", {})
-                        description = metadata.get("description", "") or ""
-                        if description:
-                            self._skill_descriptions[skill_name] = str(
-                                description,
-                            )
-                            logger.debug(
-                                "Cached description for skill '%s'",
-                                skill_name,
-                            )
-                        # Cache skill_id and cn_name
-                        skill_id = metadata.get("skill_id", "")
-                        cn_name = metadata.get("cn_name", "")
-                        if skill_id:
-                            self._skill_ids[skill_name] = str(skill_id)
-                            logger.debug(
-                                "Cached skill_id for '%s': %s",
-                                skill_name,
-                                skill_id,
-                            )
-                        else:
-                            logger.debug(
-                                "No skill_id in metadata for '%s'",
-                                skill_name,
-                            )
-                        if cn_name:
-                            self._skill_cn_names[skill_name] = str(cn_name)
-                            logger.debug(
-                                "Cached cn_name for '%s': %s",
-                                skill_name,
-                                cn_name,
-                            )
-                        else:
-                            logger.debug(
-                                "No cn_name in metadata for '%s'",
-                                skill_name,
-                            )
-                except Exception as e:
-                    logger.warning("Failed to read skill manifest: %s", e)
+            for skill_name in skills:
+                skill_entry = manifest.get("skills", {}).get(
+                    skill_name,
+                    {},
+                )
+                metadata = skill_entry.get("metadata", {})
+                description = metadata.get("description", "") or ""
+                if description:
+                    self._skill_descriptions[skill_name] = str(description)
+                    logger.debug(
+                        "Cached description for skill '%s'",
+                        skill_name,
+                    )
+                skill_id = metadata.get("skill_id", "")
+                cn_name = metadata.get("cn_name", "")
+                if skill_id:
+                    self._skill_ids[skill_name] = str(skill_id)
+                    logger.debug(
+                        "Cached skill_id for '%s': %s",
+                        skill_name,
+                        skill_id,
+                    )
+                else:
+                    logger.debug(
+                        "No skill_id in metadata for '%s'",
+                        skill_name,
+                    )
+                if cn_name:
+                    self._skill_cn_names[skill_name] = str(cn_name)
+                    logger.debug(
+                        "Cached cn_name for '%s': %s",
+                        skill_name,
+                        cn_name,
+                    )
+                else:
+                    logger.debug(
+                        "No cn_name in metadata for '%s'",
+                        skill_name,
+                    )
+        except Exception as e:
+            logger.warning("Failed to read skill manifest: %s", e)
 
     def _cache_skill_metadata(
         self,

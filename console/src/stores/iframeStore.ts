@@ -58,7 +58,6 @@ interface IframeStore extends IframeContext {
    * @param authHeaders - 自定义 header 数组
    */
   setAuthHeaders: (authHeaders: AuthHeaderItem[]) => void;
-
   /**
    * ==================== URL 导航参数 (Kun He, 2026-04-15) ====================
    * 设置导航参数（sessionId 和 taskId）
@@ -71,6 +70,33 @@ interface IframeStore extends IframeContext {
    * 清除导航参数（导航完成后调用，防止重复）
    */
   clearNavigationParams: () => void;
+
+  // ==================== 页面来源优先级 (2026-09-15) ====================
+  /**
+   * 标记 pageSource/platformSource 已由 URL 参数（最高优先级）写入。
+   * 内存级标记，不持久化；设置后消息监听器来源不得覆盖 URL 来源值。
+   * @param pageSource - 页面来源
+   * @param platformSource - 平台来源
+   */
+  setEntrySourceFromUrl: (
+    pageSource: string | null,
+    platformSource: string | null,
+  ) => void;
+
+
+  /**
+   * 按优先级写入 pageSource/platformSource。
+   * 优先级：URL 参数 > 消息监听器 > origin 逻辑。
+   * 同步执行，基于 store 当前状态判断是否允许覆盖，避免异步写入竞态。
+   * @param pageSource - 页面来源
+   * @param platformSource - 平台来源
+   * @param priority - 本次写入的来源优先级
+   */
+  applyEntrySource: (
+    pageSource: string | null,
+    platformSource: string | null,
+    priority: "url" | "message" | "origin",
+  ) => void;
 }
 
 /** 初始状态 */
@@ -100,33 +126,71 @@ const initialState: IframeContext = {
   sessionId: null,
   taskId: null,
   hideChat: false,
+  pageSource: null,
+  platformSource: null,
+  pageSourceFromUrl: false,
+  platformSourceFromUrl: false,
 };
 
 export const useIframeStore = create<IframeStore>()(
   persist(
     (set) => ({
       ...initialState,
-
       setContext: (context) =>
         set((state) => ({
           ...state,
           ...context,
           receivedAt: Date.now(),
         })),
-
       markInitialized: () => set({ initialized: true }),
-
       clearContext: () => set(initialState),
-
       setOriginY: (isOriginY) => set({ isOriginY }),
-
       setAuthHeaders: (authHeaders) => set({ authHeaders }),
-
-      // ==================== URL 导航参数 (Kun He, 2026-04-15) ====================
       setNavigationParams: (sessionId, taskId) =>
         set({ sessionId, taskId }),
-
       clearNavigationParams: () => set({ sessionId: null, taskId: null }),
+      setEntrySourceFromUrl: (pageSource, platformSource) =>
+        set({
+          pageSource,
+          platformSource,
+          pageSourceFromUrl: pageSource != null,
+          platformSourceFromUrl: platformSource != null,
+        }),
+      applyEntrySource: (pageSource, platformSource, priority) =>
+        set((state) => {
+          // 判断每个字段当前是否允许写入
+          let nextPageSource = state.pageSource;
+          let nextPlatformSource = state.platformSource;
+
+          // URL 来源为最高优先级，始终可写并锁定
+          const pageLockedByUrl = state.pageSourceFromUrl;
+          const platformLockedByUrl = state.platformSourceFromUrl;
+
+          if (priority === "url") {
+            // URL 参数来源：直接覆盖并锁定，防止后续消息监听器来源覆盖
+            nextPageSource = pageSource;
+            nextPlatformSource = platformSource;
+          } else if (priority === "message") {
+            // 消息监听器来源可写入，但不能覆盖已锁定的 URL 值
+            if (!pageLockedByUrl) nextPageSource = pageSource;
+            if (!platformLockedByUrl) nextPlatformSource = platformSource;
+          } else {
+            // origin 逻辑（最低优先级），仅在当前无任何来源值时写入
+            if (state.pageSource == null) nextPageSource = pageSource;
+            if (state.platformSource == null) {
+              nextPlatformSource = platformSource;
+            }
+          }
+          return {
+            pageSource: nextPageSource,
+            platformSource: nextPlatformSource,
+            // 仅 URL 来源且成功写入对应字段时锁定；消息/origin 来源保持原锁定状态
+            pageSourceFromUrl:
+              priority === "url" ? pageSource != null : pageLockedByUrl,
+            platformSourceFromUrl:
+              priority === "url" ? platformSource != null : platformLockedByUrl,
+          };
+        }),
     }),
     {
       name: "swe-iframe-context",
@@ -151,7 +215,9 @@ export const useIframeStore = create<IframeStore>()(
         positionId: state.positionId,
         userChange: state.userChange,
         hideChat: state.hideChat,
-        // isOriginY 仅描述本次页面入口，不持久化到后续访问。
+        pageSource: state.pageSource,
+        platformSource: state.platformSource,
+        // isOriginY 仅描述本次页面入口，不持久化到后续访问
         // 导航参数不需要持久化，只在首次加载时使用
       }),
       storage: {

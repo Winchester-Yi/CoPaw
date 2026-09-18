@@ -185,7 +185,7 @@
   gap: 12px;
   min-width: 0;
 
-  >div {
+  > div {
     min-width: 0;
 
     strong,
@@ -234,6 +234,113 @@
   }
 }
 
+.analysisSummaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.analysisSummaryCard {
+  min-width: 0;
+  min-height: 78px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #ffffff;
+
+  > div {
+    min-width: 0;
+  }
+
+  > div > strong,
+  > div > span {
+    display: block;
+  }
+
+  > div > strong {
+    color: #111827;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 28px;
+    white-space: nowrap;
+  }
+
+  > div > span {
+    color: #64748b;
+    font-size: 13px;
+    line-height: 20px;
+  }
+}
+
+.analysisSummaryIcon {
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  line-height: 0;
+  color: #2563eb;
+  background: #eaf2ff;
+
+  svg {
+    display: block;
+  }
+}
+
+.analysisSummaryCard:nth-child(2) .analysisSummaryIcon {
+  color: #16a34a;
+  background: #e8f8ef;
+}
+
+.analysisSummaryCard:nth-child(3) .analysisSummaryIcon {
+  color: #2563eb;
+  background: #eaf2ff;
+}
+
+.analysisSummaryCard:nth-child(4) .analysisSummaryIcon {
+  color: #ea580c;
+  background: #fff1e6;
+}
+
+.analysisSummarySkill {
+  width: 100%;
+}
+
+.analysisSummarySkillHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+
+  > span {
+    overflow: hidden;
+    color: #52637a;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.analysisSummaryTrack {
+  height: 8px;
+  overflow: hidden;
+  margin: 6px 0 2px;
+  border-radius: 999px;
+  background: #e7edf5;
+}
+
+.analysisSummaryBar {
+  height: 100%;
+  border-radius: inherit;
+  background: #2563eb;
+}
+
 .analysisResults {
   margin-top: 20px;
 
@@ -254,7 +361,9 @@
 
 .analysisTopic {
   display: grid;
-  grid-template-columns: 40px minmax(100px, 1fr) minmax(320px, 1fr) auto;
+  grid-template-columns:
+    40px minmax(200px, 1.2fr) minmax(260px, 1fr)
+    minmax(240px, 0.85fr) minmax(116px, auto);
   align-items: center;
   gap: 14px;
   padding: 16px 20px;
@@ -329,18 +438,19 @@
 
 .analysisBbkDistribution {
   min-width: 0;
+  padding-left: 12px;
+  border-left: 1px solid #e5e7eb;
 }
 
 .analysisBbkDistributionList {
   display: grid;
   flex-direction: column;
   gap: 8px;
-
 }
 
 .analysisBbkDistributionRow {
   display: grid;
-  grid-template-columns: 72px minmax(0, 0.4fr) 52px;
+  grid-template-columns: 72px minmax(80px, 1fr) 52px;
   align-items: center;
   gap: 8px;
 }
@@ -384,7 +494,97 @@
   line-height: 20px;
 }
 
+.analysisSkillCoverage {
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 1px solid #e5e7eb;
+}
+
+.analysisSkillTitle {
+  display: block;
+  margin-bottom: 6px;
+  color: #344256;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.analysisSkillMetric {
+  display: grid;
+  grid-template-columns: minmax(92px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+
+  > span {
+    color: #52637a;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 22px;
+    white-space: nowrap;
+  }
+}
+
+.analysisSkillTrack {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e7edf5;
+}
+
+.analysisSkillBar {
+  height: 100%;
+  border-radius: inherit;
+  background: #18a957;
+}
+
+.analysisTopSkill {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 10px;
+  color: #52637a;
+  font-size: 13px;
+  line-height: 21px;
+
+  span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  b {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    max-width: min(100%, 180px);
+    overflow: hidden;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: #2563eb;
+    background: #eaf2ff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 18px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  em {
+    color: #64748b;
+    font-style: normal;
+  }
+}
+
 .analysisPercent {
+  min-height: 52px;
+  display: inline-flex;
+  align-items: center;
+  padding-left: 22px;
+  border-left: 1px solid #e5e7eb;
   font-size: 16px;
   font-weight: 600;
   line-height: 24px;
@@ -435,6 +635,10 @@
     grid-template-columns: 1fr;
   }
 
+  .analysisSummaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .analysisStatusBar {
     align-items: flex-start;
     flex-direction: column;
@@ -446,11 +650,37 @@
   }
 
   .analysisBbkDistribution,
+  .analysisSkillCoverage,
   .analysisPercent {
     grid-column: 2;
   }
 
+  .analysisBbkDistribution {
+    width: 100%;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .analysisSkillCoverage {
+    width: 100%;
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .analysisPercent {
+    min-height: 0;
+    padding-left: 0;
+    border-left: 0;
     justify-self: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .analysisSummaryGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .analysisSummaryCard {
+    min-height: 72px;
   }
 }

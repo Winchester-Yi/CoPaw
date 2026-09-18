@@ -272,6 +272,8 @@ class HtmlPreviewClickStore:
             event_target_id=row.get("event_target_id"),
             event_target_name=row.get("event_target_name"),
             trace_id=row.get("trace_id"),
+            page_source=row.get("page_source"),
+            platform_source=row.get("platform_source"),
         )
 
     async def create_event(
@@ -309,12 +311,14 @@ class HtmlPreviewClickStore:
                 result_id,
                 event_target_id,
                 event_target_name,
-                trace_id
+                trace_id,
+                page_source,
+                platform_source
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
         """
         await self.db.execute(
@@ -345,6 +349,8 @@ class HtmlPreviewClickStore:
                 self._clean_text(event.event_target_id),
                 self._clean_text(event.event_target_name),
                 self._clean_text(event.trace_id),
+                self._clean_text(event.page_source),
+                self._clean_text(event.platform_source),
             ),
         )
 
@@ -491,6 +497,8 @@ class HtmlPreviewClickStore:
                 event_target_id,
                 event_target_name,
                 trace_id,
+                page_source,
+                platform_source,
                 clicked_at
             FROM swe_html_preview_click_events
             {where_sql}

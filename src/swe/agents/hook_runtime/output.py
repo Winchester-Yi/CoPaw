@@ -107,6 +107,66 @@ def _parse_prompt_judgment_json(text: str) -> Any:
             ) from repair_exc
 
 
+def _validate_hook_output_contract(
+    output: HookOutput,
+    *,
+    is_stop: bool,
+    output_transform: bool,
+) -> str | None:
+    if output_transform and not is_stop:
+        raise ValueError("outputTransform is supported on Stop only")
+    if not is_stop:
+        return None
+    if output_transform:
+        return _validate_stop_transform_output(output)
+    _validate_stop_hook_output(output)
+    return None
+
+
+def _resolve_hook_decision(
+    output: HookOutput,
+    *,
+    is_stop: bool,
+) -> tuple[HookDecision, str]:
+    reason = output.reason or ""
+    if is_stop and output.decision == "allow":
+        return HookDecision.ALLOW, reason
+    if output.continue_ is False:
+        return HookDecision.STOP, output.stop_reason or reason or (
+            "Hook requested stop"
+        )
+    if output.decision == "stop":
+        return HookDecision.STOP, reason or "Hook requested stop"
+    if output.decision == "block":
+        return HookDecision.BLOCK, reason or "Hook blocked the event"
+    return HookDecision.NONE, reason
+
+
+def _override_permission_decision(
+    output: HookOutput,
+    *,
+    decision: HookDecision,
+    reason: str,
+    output_transform: bool,
+) -> tuple[HookDecision, str]:
+    if output_transform:
+        return decision, reason
+
+    specific = output.hook_specific_output or {}
+    permission_decision = specific.get("permissionDecision")
+    permission_reason = specific.get("permissionDecisionReason")
+    if permission_decision in {"allow", "deny", "ask"}:
+        return HookDecision(permission_decision), str(
+            permission_reason or reason or "",
+        )
+    if permission_decision == "defer":
+        return (
+            HookDecision.BLOCK,
+            "Hook permissionDecision=defer is not supported",
+        )
+    return decision, reason
+
+
 def normalize_hook_output(
     *,
     handler_id: str,
@@ -117,39 +177,18 @@ def normalize_hook_output(
 ) -> HookHandlerResult:
     output = HookOutput.model_validate(raw_output)
     is_stop = _event_name_value(event_name) == HookEventName.STOP.value
-    if output_transform and not is_stop:
-        raise ValueError("outputTransform is supported on Stop only")
-    replacement_text = None
-    if is_stop and output_transform:
-        replacement_text = _validate_stop_transform_output(output)
-    elif is_stop:
-        _validate_stop_hook_output(output)
-
-    decision = HookDecision.NONE
-    reason = output.reason or ""
-
-    if is_stop and output.decision == "allow":
-        decision = HookDecision.ALLOW
-    elif output.continue_ is False:
-        decision = HookDecision.STOP
-        reason = output.stop_reason or reason or "Hook requested stop"
-    elif output.decision == "stop":
-        decision = HookDecision.STOP
-        reason = reason or "Hook requested stop"
-    elif output.decision == "block":
-        decision = HookDecision.BLOCK
-        reason = reason or "Hook blocked the event"
-
-    if not output_transform:
-        specific = output.hook_specific_output or {}
-        permission_decision = specific.get("permissionDecision")
-        permission_reason = specific.get("permissionDecisionReason")
-        if permission_decision in {"allow", "deny", "ask"}:
-            decision = HookDecision(permission_decision)
-            reason = str(permission_reason or reason or "")
-        elif permission_decision == "defer":
-            decision = HookDecision.BLOCK
-            reason = "Hook permissionDecision=defer is not supported"
+    replacement_text = _validate_hook_output_contract(
+        output,
+        is_stop=is_stop,
+        output_transform=output_transform,
+    )
+    decision, reason = _resolve_hook_decision(output, is_stop=is_stop)
+    decision, reason = _override_permission_decision(
+        output,
+        decision=decision,
+        reason=reason,
+        output_transform=output_transform,
+    )
 
     return HookHandlerResult(
         handler_id=handler_id,

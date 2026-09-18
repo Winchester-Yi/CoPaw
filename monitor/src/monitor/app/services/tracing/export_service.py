@@ -64,6 +64,7 @@ class TracingExportService:
         end_date: Optional[datetime] = None,
         query_text: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> StreamingResponse:
         """导出用户消息为 CSV 格式.
 
@@ -88,6 +89,7 @@ class TracingExportService:
             query_text=query_text,
             export=True,
             bbk_ids=bbk_id,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
 
         output = io.StringIO()
@@ -115,6 +117,7 @@ class TracingExportService:
         end_date: Optional[datetime] = None,
         query_text: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> StreamingResponse:
         """导出用户消息为 JSON 格式.
 
@@ -139,6 +142,7 @@ class TracingExportService:
             query_text=query_text,
             export=True,
             bbk_ids=bbk_id,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
 
         data = [message.model_dump() for message in messages]
@@ -165,6 +169,7 @@ class TracingExportService:
         end_date: Optional[datetime] = None,
         query_text: Optional[str] = None,
         bbk_id: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> StreamingResponse:
         """导出用户消息为 XLSX 格式.
 
@@ -207,6 +212,7 @@ class TracingExportService:
             query_text=query_text,
             export=True,
             bbk_ids=bbk_id,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
 
         wb = Workbook()

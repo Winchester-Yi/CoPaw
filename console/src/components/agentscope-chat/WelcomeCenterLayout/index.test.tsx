@@ -145,6 +145,14 @@ describe("WelcomeCenterLayout", () => {
     });
   });
 
+  it("temporarily hides dictation from the welcome input", () => {
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("button", { name: "语音输入" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps the selector width stable when the scenario catalog finishes loading", async () => {
     let resolveCatalog!: (catalog: {
       domains: Array<{

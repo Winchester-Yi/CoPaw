@@ -1033,6 +1033,15 @@ _Avoid_: one-shot plan flag, global plan switch
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
 
+**Scheduled Job Enablement**:
+The permission for a particular **Scheduled Job** to execute. Disabling a broadcast source job, manually or through unread-result protection, does not itself pause batch dispatch for its other recipients.
+
+**Batch Dispatch Mode**:
+The choice to dispatch a broadcast source job and its recipients through the **Cron Scheduling Service** instead of their ordinary timers. This choice is distinct from **Batch Dispatch Run State**.
+
+**Batch Dispatch Run State**:
+The independently controlled running or paused state of batch dispatch for one broadcast source job. It is distinct from both that job's **Scheduled Job Enablement** and the execution status of any individual **Dispatch Batch**.
+
 **Scheduled Firing Count**:
 The number of planned firing occurrences produced by enabled, active **Scheduled Job** definitions within a selected time range. One Scheduled Job contributes once for every matching cron occurrence. A **Scheduled Firing Count** describes planned schedule density only; it does not prove that runs are queued, delayed, executing, or backlogged.
 _Avoid_: backlog count, running task count, execution count
@@ -1098,7 +1107,13 @@ A bounded priority signal for a user or tenant, derived from recent **Scheduled 
 _Avoid_: total read count, user importance, notification priority
 
 **Batch Dispatch Order**:
-The stable child-intent order computed for a **Dispatch Batch** after viewer heat, due time, retry penalty, and deterministic tie-breakers are applied. Waiting does not reshuffle the order; later claims continue from this ordered queue.
+The stable intent order within a **Dispatch Batch**, with explicitly ranked users preceding ranked primary branches, followed by viewer heat and deterministic tie-breakers. Waiting and manual retry do not reshuffle this order, and it does not impose priority across batches.
+
+**Batch Priority Policy**:
+The ordered user and primary-branch preference lists belonging to a broadcast source **Scheduled Job**. A **Dispatch Batch** retains the preferences that applied when it was created; preferences never add recipients.
+
+**Manual Intent Retry**:
+An administrator-authorized additional execution of one failed **Scheduled Run Intent**, including its Agent and subtasks. It preserves earlier attempts and waits for shared dispatch capacity; each authorization grants only one additional attempt.
 _Avoid_: fairness aging, dynamic reprioritization, starvation compensation
 
 **Scheduled Run Boundary**:
@@ -3339,3 +3354,47 @@ Domain Expert: "It exposes a Shared Conversation Snapshot made from at least one
 Developer: "Can the owner revoke or expire the link?"
 
 Domain Expert: "No. It is a Permanent Share Link: every generation creates a new opaque Share Token, and the link remains valid without time expiry or owner revocation."
+
+## Wealth Workbench Language
+
+Console-side domain language for the standalone-route Wealth Workbench page (ported from the single-file prototype 智能财富工作台.html).
+
+**Plan Draft (草稿)**:
+The unsubmitted form state of the Create Plan page. It is session-scoped and never persisted in the mock phase; durability is a concern of the later API-integration phase, not of the client.
+_Avoid_: localStorage draft, persisted draft, auto-saved artifact
+
+**Plan (规划)**:
+A wealth-domain work plan owned by its creator's sapId, composed of selected 经营场景 — each with its own Execution Schedule — and distributed to its Distribution Targets upon Plan Publication. A Plan is visible on the board both to its creator and to every Distribution Target; modification and removal are creator-only, recipients get a read-only view. A Plan comes into existence only through publication: there is no "saved but unpublished" Plan.
+_Avoid_: task, campaign, saved-unpublished plan, draft
+
+**Plan Publication (规划发布)**:
+The asynchronous server-side orchestration triggered when a Plan is created or a published Plan is modified: one scheduled job per selected scene, each broadcast to every Distribution Target, followed by skill/MCP distribution. The caller receives success once the Plan record is accepted; the board's status column reflects the aggregated distribution progress of these legs (and, for a recipient, the leg addressed to that recipient specifically).
+_Avoid_: synchronous publish, one job per plan, client-orchestrated fan-out
+
+**Execution Schedule (执行排程)**:
+The per-scene firing rule of a Plan, expressed with the same frequency model as the console's scheduled-task form (hourly / daily at a chosen time / weekly on chosen weekdays at a chosen time / custom cron). It is distinct from the scene's validity window (任务周期 + 起止日期), which bounds the campaign period and travels in the job's task text rather than in the firing rule.
+_Avoid_: cronExample as schedule, validity dates inside the cron expression, the prototype's 每日/每周/隔天-only picker
+
+**Workbench Role (角色)**:
+One of 客户经理 / 支行行长 / 分行中台. It gates page access in the Wealth Workbench through the Role Permission Matrix (角色权限矩阵) — the task pages (today / pending / done) are reachable only by 客户经理 — and selects the data scope of every view. In embedded deployment the Role is resolved from the host-supplied positionId, never chosen in-page. The host's position codes map as: 客户经理 = RB0101, 支行行长 = RB1101 or RB0306, 分行中台 = RB0301 or RB0305. A missing or unmapped positionId resolves to the pseudo-role unknown under deny-by-default: no page permissions, the entry renders a full-page "no access" notice, and no business data is loaded.
+_Avoid_: account type, user preference, switchable profile
+
+**Role Permission Matrix (角色权限矩阵)**:
+The single decision point for page access in the Wealth Workbench: each Workbench Role maps to the page groups it may open (board / create / tasks). Route guards, navigation, and top-bar affordances all read the Matrix; they never inspect account fields directly. Operation-level permissions are deliberately out of scope for now.
+_Avoid_: per-component role checks, boolean flags on accounts
+
+**Role Preview (角色预览)**:
+A mock-phase-only aid inside the Wealth Workbench that temporarily overrides the effective Workbench Role so a developer can confirm which pages each Role may access. It is not an identity source and never says "switch account": in production the host system's External Identity decides the Role, and the preview entry is hidden once real identity and APIs go live.
+_Avoid_: account switcher, identity provider, user selection feature, production role picker
+
+**sapId (用户工号)**:
+The single user-identity term of the Wealth Workbench domain: the employee id supplied by the host system for the current user. It is the same value the SWE runtime carries as X-User-Id / tenant_id, and it identifies both a Plan's creator and its Distribution Targets. Wealth-domain prose and schema columns say sapId; tenant_id and user_id are reserved for the infrastructure layer that transports the same value.
+_Avoid_: account id, employee number, switching identities
+
+**Distribution Target (分发目标)**:
+The set of 客户经理 who receive a published Plan. For 支行行长 and 分行中台 the creator picks them in a dedicated wizard step from the branch's user pool (the tenants-by-source API filtered client-side by the operator's own branch id), and the chosen sapId list travels with the publish request. A 客户经理 never picks targets: their Plan is distributed to themselves by default.
+_Avoid_: plan audience, CC list, sharing recipients
+
+**Plan Visibility Scope (规划可见范围)**:
+Which Plans a viewer can see on the board, decided by Workbench Role on the server. A 客户经理 sees the Plans they created plus the Plans whose Distribution Targets include them. A 支行行长 or 分行中台 sees every Plan created within their own branch (same bbkId), whoever the targets are; the source labels (分行关注 / 行长关注 / 我的关注) distinguish origin, not access. Visibility never implies edit rights: only the creator may edit or remove a Plan.
+_Avoid_: filtering by distribution list for managers, label-based access control, edit rights from visibility

@@ -1,0 +1,12 @@
+{
+  "id": "ann-runtime",
+  "comment": "把动态状态标签改成蓝色",
+  "target": {
+    "runtime_generated": true,
+    "tag_name": "span",
+    "stable_attributes": {"data-status": "active"},
+    "selector": "#app > span[data-status=\"active\"]",
+    "text_quote": {"exact": "运行中"},
+    "rendered_html": "<span data-status=\"active\">运行中</span>"
+  }
+}

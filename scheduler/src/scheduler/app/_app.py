@@ -26,6 +26,10 @@ from .services.cron.scheduling_service import (
     cron_scheduling_runtime_enabled,
     get_cron_scheduling_service,
 )
+from .services.cron.batch_run_state import (
+    assert_run_state_schema_ready,
+    initialize_missing_controls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,10 @@ async def lifespan(fastapi_app: FastAPI):
     db_initialized = False
     if DB_HOST:
         try:
-            await init_db_connection(get_scheduler_database_config())
+            db = await init_db_connection(get_scheduler_database_config())
+            if cron_scheduling_runtime_enabled():
+                await assert_run_state_schema_ready(db)
+                await initialize_missing_controls(db)
             db_initialized = True
             logger.info("Scheduler database initialized successfully")
         except Exception as exc:  # pylint: disable=broad-except

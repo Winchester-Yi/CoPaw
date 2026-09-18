@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   event_target_id VARCHAR(255) NULL COMMENT '模块的稳定标识',
   event_target_name VARCHAR(512) NULL COMMENT '模块的展示名称',
   trace_id VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识',
+  page_source VARCHAR(50) NULL COMMENT '打开 HTML 的页面来源',
+  platform_source VARCHAR(50) NULL COMMENT '打开 HTML 的平台来源',
 
   clicked_at DATETIME NOT NULL COMMENT '前端点击时间',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',

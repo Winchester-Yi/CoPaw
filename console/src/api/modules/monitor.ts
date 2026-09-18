@@ -222,6 +222,7 @@ export interface CronDispatchBatchStats {
   completed_intents: number;
   failed_intents: number;
   pending_intents: number;
+  skipped_intents?: number;
 }
 
 export interface CronDispatchBatchItem {
@@ -242,6 +243,8 @@ export interface CronDispatchBatchItem {
   total_count: number;
   completed_count: number;
   failed_count: number;
+  skipped_count?: number;
+  dispatch_paused?: boolean | null;
   error_message: string;
   completed_at: string | null;
   created_at: string | null;
@@ -249,6 +252,12 @@ export interface CronDispatchBatchItem {
 }
 
 export interface CronDispatchIntentItem {
+  priority?: {
+    basis: string;
+    user_rank: number | null;
+    branch_rank: number | null;
+    branch_id: string;
+  } | null;
   id: number;
   batch_id: string;
   intent_role: string;
@@ -349,6 +358,7 @@ export interface CronDispatchCapacityItem {
 }
 
 export interface CronDispatchWorkersResponse {
+  capacity_events_next_cursor?: string | null;
   source_id: string;
   policies: CronDispatchPolicyItem[];
   current_capacity: CronDispatchCapacityItem[];
@@ -418,6 +428,8 @@ export interface HighFrequencyQuestionTopic {
   topic_name: string;
   message_count: number;
   valid_message_count: number;
+  skill_used_count: number;
+  top_skill?: string | null;
   bbk_dis?: Record<string, number>;
   sample_questions: string[];
 }
@@ -433,6 +445,11 @@ export interface HighFrequencyQuestionResult {
   scope_type?: "ALL" | "ORG" | null;
   bbk_id?: string | null;
   result_updated_at?: string | null;
+  message_count: number;
+  user_count: number;
+  total_skill_used_count: number;
+  topic_count: number;
+  skill_gap_topic_count: number;
   topics: HighFrequencyQuestionTopic[];
   message?: string | null;
 }
@@ -541,6 +558,20 @@ export interface CronJobOverviewDateFilters {
   end_date?: string;
   bbk_ids?: string;
 }
+
+export type CronBranchDimensionSortKey = Exclude<
+  keyof CronJobOverviewBranchRankingRow,
+  "rank" | "bbkId" | "branchName"
+>;
+
+export type CronBranchDimensionExportFilters = {
+  start_date: string;
+  end_date: string;
+  bbk_ids?: string;
+} & (
+  | { sort_by: CronBranchDimensionSortKey; sort_order: "asc" | "desc" }
+  | { sort_by?: never; sort_order?: never }
+);
 
 export interface CronOverviewStatsResponse {
   start_date: string;
@@ -808,6 +839,16 @@ export function mapCronJobOverviewPageData(
   branchError: CronBranchErrorResponse,
 ): CronJobOverviewPageData {
   return {
+    ...mapCronOverviewStats(stats),
+    ...mapCronBranchRanking(behavior),
+    ...mapCronBranchError(branchError),
+  };
+}
+
+export function mapCronOverviewStats(
+  stats: CronOverviewStatsResponse,
+): Pick<CronJobOverviewPageData, "summaryMetrics"> {
+  return {
     summaryMetrics: [
       { key: "branches", value: formatInteger(stats.branch_count) },
       { key: "managers", value: formatInteger(stats.tenant_count) },
@@ -837,6 +878,13 @@ export function mapCronJobOverviewPageData(
       { key: "insight_count", value: formatInteger(stats.insight_count) },
       { key: "phone_count", value: formatInteger(stats.phone_count) },
     ],
+  };
+}
+
+export function mapCronBranchRanking(
+  behavior: CronBranchRankingResponse,
+): Pick<CronJobOverviewPageData, "branchRankingRows"> {
+  return {
     branchRankingRows: behavior.items.map((item, index) => ({
       rank: index + 1,
       bbkId: item.bbk_id || "",
@@ -877,6 +925,16 @@ export function mapCronJobOverviewPageData(
       insightCustomers: formatInteger(item.insight_customers),
       phoneCustomers: formatInteger(item.phone_customers),
     })),
+  };
+}
+
+export function mapCronBranchError(
+  branchError: CronBranchErrorResponse,
+): Pick<
+  CronJobOverviewPageData,
+  "failureReasons" | "anomalySummary" | "anomalyRankRows"
+> {
+  return {
     failureReasons: branchError.error_reasons.map((item, index) => ({
       name: item.reason || "其他",
       count: Number(item.count || 0),
@@ -989,7 +1047,9 @@ export const monitorApi = {
   },
 
   getCronDispatchWorkers: async (
-    filters?: Omit<CronDispatchDateFilters, "status">,
+    filters?: Omit<CronDispatchDateFilters, "status"> & {
+      capacity_cursor?: string;
+    },
   ): Promise<CronDispatchWorkersResponse> => {
     return request(`/monitor/cron/dispatch/workers${buildQuery(filters)}`);
   },
@@ -1269,6 +1329,33 @@ export const monitorApi = {
         // Ignore JSON parse error
       }
       throw new Error(errorMessage);
+    }
+    return response.blob();
+  },
+
+  exportBranchDimension: async (
+    filters: CronBranchDimensionExportFilters,
+  ): Promise<Blob> => {
+    const response = await fetch(
+      getApiUrl(`/monitor/cron/export-branch-dimension${buildQuery(filters)}`),
+      { headers: new Headers(buildAuthHeaders()) },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      throw new Error(
+        typeof errorData?.detail === "string"
+          ? errorData.detail
+          : `导出失败（HTTP ${response.status}），请稍后重试`,
+      );
+    }
+    if (
+      !response.headers
+        .get("content-type")
+        ?.includes(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    ) {
+      throw new Error("导出接口未返回 Excel 文件，请稍后重试");
     }
     return response.blob();
   },

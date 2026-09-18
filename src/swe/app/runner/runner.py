@@ -1858,9 +1858,39 @@ def _goal_matches_runtime_scope(
     agent_id: str | None,
 ) -> bool:
     """Reject a Goal id injected from a different Chat or frozen scope."""
+    if not _goal_scope_matches_runtime_identity(
+        goal,
+        runtime,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+    ):
+        return False
+    return _goal_scope_matches_runtime_model(goal, runtime)
+
+
+def _goal_scope_matches_runtime_identity(
+    goal: Any,
+    runtime: _QueryRuntime,
+    *,
+    tenant_id: str | None,
+    agent_id: str | None,
+) -> bool:
     chat_id = str(getattr(getattr(runtime, "chat", None), "id", "") or "")
     request_context = getattr(runtime.agent, "_request_context", {}) or {}
     source_id = str(request_context.get("source_id") or "default")
+    return (
+        bool(chat_id)
+        and goal.scope.chat_id == chat_id
+        and goal.scope.tenant_id == str(tenant_id or "default")
+        and goal.scope.agent_profile_id == str(agent_id or "default")
+        and goal.scope.source_id == source_id
+    )
+
+
+def _goal_scope_matches_runtime_model(
+    goal: Any,
+    runtime: _QueryRuntime,
+) -> bool:
     resolved_model = str(
         (getattr(runtime.agent, "_resolved_model_slot", {}) or {}).get("model")
         or "",
@@ -1875,20 +1905,12 @@ def _goal_matches_runtime_scope(
         getattr(goal.scope, "effective_model_provider_id", "") or "",
     )
     return (
-        bool(chat_id)
-        and goal.scope.chat_id == chat_id
-        and goal.scope.tenant_id == str(tenant_id or "default")
-        and goal.scope.agent_profile_id == str(agent_id or "default")
-        and goal.scope.source_id == source_id
-        and (
-            not resolved_model
-            or goal.scope.effective_model in {"default", resolved_model}
-        )
-        and (
-            not frozen_provider_id
-            or not resolved_provider_id
-            or frozen_provider_id == resolved_provider_id
-        )
+        not resolved_model
+        or goal.scope.effective_model in {"default", resolved_model}
+    ) and (
+        not frozen_provider_id
+        or not resolved_provider_id
+        or frozen_provider_id == resolved_provider_id
     )
 
 
@@ -2586,23 +2608,37 @@ def _scenario_snapshot_frozen_mcp_tools(
         return {}
     frozen: dict[str, list[dict[str, Any]]] = {}
     for resource in (snapshot or {}).get("resources", []):
-        if (
-            not isinstance(resource, dict)
-            or resource.get("type") != "mcp_service"
-            or resource.get("status") not in {"temporary", "persistent"}
-            or not isinstance(resource.get("tools"), list)
-        ):
+        if not _is_frozen_scenario_mcp_resource(resource):
             continue
         key = str(resource.get("mcp_client_key") or resource.get("id") or "")
-        source = f"marketplace:{resource.get('id') or ''}"
-        if not key or not any(
-            str(getattr(client, "source", "") or "") == source
-            and str(getattr(client, "market_client_key", "") or key) == key
-            for client in clients.values()
-        ):
+        if not _scenario_mcp_client_matches_resource(clients, key, resource):
             continue
         frozen[key] = resource["tools"]
     return frozen
+
+
+def _is_frozen_scenario_mcp_resource(resource: Any) -> bool:
+    return (
+        isinstance(resource, dict)
+        and resource.get("type") == "mcp_service"
+        and resource.get("status") in {"temporary", "persistent"}
+        and isinstance(resource.get("tools"), list)
+    )
+
+
+def _scenario_mcp_client_matches_resource(
+    clients: dict[str, Any],
+    key: str,
+    resource: dict[str, Any],
+) -> bool:
+    if not key:
+        return False
+    source = f"marketplace:{resource.get('id') or ''}"
+    return any(
+        str(getattr(client, "source", "") or "") == source
+        and str(getattr(client, "market_client_key", "") or key) == key
+        for client in clients.values()
+    )
 
 
 def _request_file_url_network(request: AgentRequest) -> str:
@@ -3871,6 +3907,83 @@ class AgentRunner(Runner):
             msg.metadata = {"trace_id": trace_id}
         return msg
 
+    async def _get_requested_chat(
+        self,
+        requested_chat_id: Any,
+        *,
+        session_id: str,
+        user_id: str,
+        channel: str,
+    ) -> Any:
+        if not isinstance(requested_chat_id, str) or not requested_chat_id:
+            return None
+        candidate = await self._chat_manager.get_chat(requested_chat_id)
+        if (
+            candidate is None
+            or candidate.session_id != session_id
+            or candidate.user_id != user_id
+            or candidate.channel != channel
+        ):
+            return None
+
+        merged_meta = {**(candidate.meta or {}), "agent_id": self.agent_id}
+        if merged_meta != (candidate.meta or {}):
+            candidate.meta = merged_meta
+            candidate.updated_at = datetime.now(timezone.utc)
+            await self._chat_manager.update_chat(candidate)
+        return candidate
+
+    async def _update_chat_request_metadata(
+        self,
+        *,
+        request: AgentRequest,
+        chat: Any,
+        channel_meta: dict[str, Any],
+        turn_id: str,
+    ) -> None:
+        scheduled_request = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
+        plan_mode_enabled = (
+            False
+            if scheduled_request
+            else _resolve_plan_mode_enabled(channel_meta, chat)
+        )
+        requested_plan_mode = (
+            None
+            if scheduled_request
+            else _requested_plan_mode_update(channel_meta)
+        )
+        if requested_plan_mode is not None:
+            chat.meta = {
+                **(getattr(chat, "meta", None) or {}),
+                _PLAN_MODE_META_KEY: requested_plan_mode,
+            }
+            await self._chat_manager.update_chat(chat)
+        request.channel_meta = {
+            **channel_meta,
+            "chat_id": chat.id,
+            "turn_id": turn_id,
+            _PLAN_MODE_META_KEY: plan_mode_enabled,
+        }
+        self._restore_chat_scenario_snapshot(request, chat)
+
+    @staticmethod
+    def _restore_chat_scenario_snapshot(
+        request: AgentRequest,
+        chat: Any,
+    ) -> None:
+        from ..scenario_preset.runtime import get_scenario_snapshot
+
+        scenario_snapshot = get_scenario_snapshot(getattr(chat, "meta", None))
+        if scenario_snapshot is not None:
+            request.channel_meta["scenario_preset_snapshot"] = (
+                scenario_snapshot
+            )
+            request.channel_meta["scenario_preset_snapshot_source"] = (
+                "chat_meta"
+            )
+
     async def _get_or_create_chat(
         self,
         *,
@@ -3898,25 +4011,12 @@ class AgentRunner(Runner):
         channel_meta = _without_request_scenario_snapshot(
             getattr(request, "channel_meta", None) or {},
         )
-        chat = None
-        requested_chat_id = channel_meta.get("chat_id")
-        if isinstance(requested_chat_id, str) and requested_chat_id:
-            candidate = await self._chat_manager.get_chat(requested_chat_id)
-            if (
-                candidate is not None
-                and candidate.session_id == session_id
-                and candidate.user_id == user_id
-                and candidate.channel == channel
-            ):
-                chat = candidate
-                merged_meta = {
-                    **(candidate.meta or {}),
-                    "agent_id": self.agent_id,
-                }
-                if merged_meta != (candidate.meta or {}):
-                    chat.meta = merged_meta
-                    chat.updated_at = datetime.now(timezone.utc)
-                    await self._chat_manager.update_chat(chat)
+        chat = await self._get_requested_chat(
+            channel_meta.get("chat_id"),
+            session_id=session_id,
+            user_id=user_id,
+            channel=channel,
+        )
         if chat is None:
             logger.debug(
                 f"Runner: Calling get_or_create_chat for "
@@ -3931,41 +4031,12 @@ class AgentRunner(Runner):
                 meta={"agent_id": self.agent_id},
             )
         logger.debug(f"Runner: Got chat: {chat.id}")
-        scheduled_request = (
-            getattr(request, "execution_origin", None) == "scheduled"
+        await self._update_chat_request_metadata(
+            request=request,
+            chat=chat,
+            channel_meta=channel_meta,
+            turn_id=turn_id,
         )
-        plan_mode_enabled = (
-            False
-            if scheduled_request
-            else _resolve_plan_mode_enabled(channel_meta, chat)
-        )
-        requested_plan_mode = (
-            None
-            if scheduled_request
-            else _requested_plan_mode_update(channel_meta)
-        )
-        if requested_plan_mode is not None:
-            chat.meta = {
-                **(getattr(chat, "meta", None) or {}),
-                _PLAN_MODE_META_KEY: requested_plan_mode,
-            }
-            await self._chat_manager.update_chat(chat)
-        request.channel_meta = {
-            **channel_meta,
-            "chat_id": chat.id,
-            "turn_id": turn_id,
-            _PLAN_MODE_META_KEY: plan_mode_enabled,
-        }
-        from ..scenario_preset.runtime import get_scenario_snapshot
-
-        scenario_snapshot = get_scenario_snapshot(getattr(chat, "meta", None))
-        if scenario_snapshot is not None:
-            request.channel_meta["scenario_preset_snapshot"] = (
-                scenario_snapshot
-            )
-            request.channel_meta["scenario_preset_snapshot_source"] = (
-                "chat_meta"
-            )
         return chat
 
     async def _emit_session_start_hook(
@@ -4029,29 +4100,76 @@ class AgentRunner(Runner):
         workspace_skill_snapshot: Any | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
-        request_enable_subagents = getattr(request, "enable_subagents", False)
-        if isinstance(request_enable_subagents, str):
-            request_enable_subagents = (
-                request_enable_subagents.strip().lower()
-                in {
-                    "true",
-                    "1",
-                    "yes",
-                }
-            )
-        request_context = {
+        request_details = {
             "session_id": session_id,
             "user_id": user_id,
             "channel": channel,
             "chat_id": chat.id if chat is not None else "",
             "turn_id": turn_id,
+            "current_user_text": current_user_text,
+            "transcript_path": (
+                self.session._get_save_path(session_id, user_id)
+                if hasattr(self.session, "_get_save_path")
+                else ""
+            ),
+        }
+        request_context = self._build_query_request_context(
+            request=request,
+            request_details=request_details,
+            hook_overlay=hook_overlay,
+        )
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        selected_expert_id = self._apply_query_mode_context(
+            request_context=request_context,
+            request=request,
+            channel_meta=channel_meta,
+        )
+        self._apply_selected_expert_context(
+            request_context=request_context,
+            selected_expert_id=selected_expert_id,
+            chat=chat,
+            objective=current_user_text,
+            approved_tool_call=approved_tool_call,
+        )
+        if auth_token:
+            request_context["auth_token"] = auth_token
+        if (
+            approved_tool_call
+            and "forced_tool_call_json" not in request_context
+        ):
+            request_context["forced_tool_call_json"] = json.dumps(
+                approved_tool_call,
+                ensure_ascii=False,
+            )
+        source_tool_versions = self._source_tool_versions(request_context)
+        return SWEAgent(
+            agent_config=agent_config,
+            env_context=env_context,
+            mcp_clients=mcp_clients,
+            memory_manager=self.memory_manager,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
+            task_tracker=self._task_tracker,
+            source_tool_versions=source_tool_versions,
+        )
+
+    def _build_query_request_context(
+        self,
+        *,
+        request: AgentRequest,
+        request_details: dict[str, Any],
+        hook_overlay: HookSessionOverlay,
+    ) -> dict[str, Any]:
+        return {
+            **request_details,
             "msgid": (getattr(request, "channel_meta", None) or {}).get(
                 "msgid",
             ),
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
             "agent_role": "main",
-            "enable_subagents": bool(request_enable_subagents),
+            "enable_subagents": self._request_allows_subagents(request),
             "source_id": _request_source_id(request),
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
@@ -4069,16 +4187,10 @@ class AgentRunner(Runner):
                 None,
             ),
             "cron_job_id": getattr(request, "cron_job_id", None),
-            "current_user_text": current_user_text,
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
                 "channel_manager",
                 None,
-            ),
-            "transcript_path": (
-                self.session._get_save_path(session_id, user_id)
-                if hasattr(self.session, "_get_save_path")
-                else ""
             ),
             "hook_overlay": hook_overlay.model_dump(
                 mode="json",
@@ -4086,13 +4198,32 @@ class AgentRunner(Runner):
             ),
             "_hook_overlay_model": hook_overlay,
         }
-        channel_meta = getattr(request, "channel_meta", None) or {}
-        goal_id = channel_meta.get("goal_id")
-        goal_mode_enabled = bool(channel_meta.get("goal_mode_enabled", False))
-        goal_request = bool(goal_id) or goal_mode_enabled
-        if isinstance(goal_id, str) and goal_id:
-            request_context["goal_id"] = goal_id
-        request_context["goal_mode_enabled"] = goal_mode_enabled
+
+    @staticmethod
+    def _request_allows_subagents(request: AgentRequest) -> bool:
+        enabled = getattr(request, "enable_subagents", False)
+        if isinstance(enabled, str):
+            return enabled.strip().lower() in {"true", "1", "yes"}
+        return bool(enabled)
+
+    def _apply_query_mode_context(
+        self,
+        *,
+        request_context: dict[str, Any],
+        request: AgentRequest,
+        channel_meta: dict[str, Any],
+    ) -> str | None:
+        annotation_context = channel_meta.get(
+            "_document_annotation_context",
+        )
+        if isinstance(annotation_context, dict):
+            request_context["_document_annotation_context"] = (
+                annotation_context
+            )
+        goal_request = self._apply_goal_request_context(
+            request_context,
+            channel_meta,
+        )
         plan_mode_enabled = (
             False
             if (
@@ -4118,90 +4249,112 @@ class AgentRunner(Runner):
             request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
                 _ACCEPTED_PLAN_SERVER_SOURCE
             )
-        selected_expert_id = (
-            None if goal_request else _request_selected_expert_id(request)
-        )
-        if plan_mode_enabled:
-            selected_expert_id = None
-        if selected_expert_id is not None:
-            request_context["selected_expert_id"] = selected_expert_id
-            try:
-                dependency_view_root = (
-                    _initialize_selected_expert_dependency_view(
-                        workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                        tenant_id=self.tenant_id,
-                        agent_id=self.agent_id,
-                        selected_expert_id=selected_expert_id,
-                        chat_id=chat.id if chat is not None else "",
-                    )
-                )
-            except OSError as exc:
-                dependency_view_root = None
-                request_context["selected_expert_execution_error"] = str(exc)
-            if dependency_view_root is not None:
-                request_context["_expert_dependency_view_root"] = str(
-                    dependency_view_root,
-                )
-            selected_expert_call = _selected_expert_start_tool_call(
-                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+        selected_expert_id = None
+        if not goal_request and not plan_mode_enabled:
+            selected_expert_id = _request_selected_expert_id(request)
+        return selected_expert_id
+
+    @staticmethod
+    def _apply_goal_request_context(
+        request_context: dict[str, Any],
+        channel_meta: dict[str, Any],
+    ) -> bool:
+        goal_id = channel_meta.get("goal_id")
+        goal_mode_enabled = bool(channel_meta.get("goal_mode_enabled", False))
+        if isinstance(goal_id, str) and goal_id:
+            request_context["goal_id"] = goal_id
+        request_context["goal_mode_enabled"] = goal_mode_enabled
+        return bool(goal_id) or goal_mode_enabled
+
+    def _apply_selected_expert_context(
+        self,
+        *,
+        request_context: dict[str, Any],
+        selected_expert_id: str | None,
+        chat: Any,
+        objective: str,
+        approved_tool_call: dict[str, Any] | None,
+    ) -> None:
+        if selected_expert_id is None:
+            return
+        request_context["selected_expert_id"] = selected_expert_id
+        workspace_dir = Path(self.workspace_dir or WORKING_DIR)
+        try:
+            dependency_view_root = _initialize_selected_expert_dependency_view(
+                workspace_dir=workspace_dir,
                 tenant_id=self.tenant_id,
                 agent_id=self.agent_id,
                 selected_expert_id=selected_expert_id,
-                objective=current_user_text,
+                chat_id=chat.id if chat is not None else "",
             )
-            if selected_expert_call is not None:
-                request_context["selected_expert_execution"] = True
-                approved_selected_start = (
-                    approved_tool_call
-                    if _is_selected_expert_start_approval(
-                        approved_tool_call,
-                        selected_expert_call,
-                    )
-                    else None
-                )
-                request_context["forced_tool_call_json"] = json.dumps(
-                    approved_selected_start or selected_expert_call,
-                    ensure_ascii=False,
-                )
-            elif "selected_expert_execution_error" not in request_context:
+        except OSError as exc:
+            dependency_view_root = None
+            request_context["selected_expert_execution_error"] = str(exc)
+        if dependency_view_root is not None:
+            request_context["_expert_dependency_view_root"] = str(
+                dependency_view_root,
+            )
+        self._set_selected_expert_tool_call(
+            request_context=request_context,
+            workspace_dir=workspace_dir,
+            selected_expert_id=selected_expert_id,
+            objective=objective,
+            approved_tool_call=approved_tool_call,
+        )
+
+    def _set_selected_expert_tool_call(
+        self,
+        *,
+        request_context: dict[str, Any],
+        workspace_dir: Path,
+        selected_expert_id: str,
+        objective: str,
+        approved_tool_call: dict[str, Any] | None,
+    ) -> None:
+        selected_expert_call = _selected_expert_start_tool_call(
+            workspace_dir=workspace_dir,
+            tenant_id=self.tenant_id,
+            agent_id=self.agent_id,
+            selected_expert_id=selected_expert_id,
+            objective=objective,
+        )
+        if selected_expert_call is None:
+            if "selected_expert_execution_error" not in request_context:
                 request_context["selected_expert_execution_error"] = (
                     "The selected expert is unavailable or disabled. "
                     "Choose an enabled expert and try again."
                 )
-        if auth_token:
-            request_context["auth_token"] = auth_token
-        if (
+            return
+        request_context["selected_expert_execution"] = True
+        approved_start = (
             approved_tool_call
-            and "forced_tool_call_json" not in request_context
-        ):
-            request_context["forced_tool_call_json"] = json.dumps(
+            if _is_selected_expert_start_approval(
                 approved_tool_call,
-                ensure_ascii=False,
+                selected_expert_call,
             )
+            else None
+        )
+        request_context["forced_tool_call_json"] = json.dumps(
+            approved_start or selected_expert_call,
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _source_tool_versions(request_context: dict[str, Any]) -> Any:
         from ..source_tools.service import get_source_tool_service
 
-        source_tool_versions = ()
         source_tool_service = get_source_tool_service()
-        if source_tool_service is not None and request_context["source_id"]:
-            try:
-                source_tool_versions = source_tool_service.get_active_catalog(
-                    request_context["source_id"],
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Source tool catalogue unavailable; source tools fail closed",
-                )
-        return SWEAgent(
-            agent_config=agent_config,
-            env_context=env_context,
-            mcp_clients=mcp_clients,
-            memory_manager=self.memory_manager,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            workspace_skill_snapshot=workspace_skill_snapshot,
-            task_tracker=self._task_tracker,
-            source_tool_versions=source_tool_versions,
-        )
+        if source_tool_service is None or not request_context["source_id"]:
+            return ()
+        try:
+            return source_tool_service.get_active_catalog(
+                request_context["source_id"],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Source tool catalogue unavailable; source tools fail closed",
+            )
+            return ()
 
     def _create_goal_finalization_agent(
         self,
@@ -6638,6 +6791,38 @@ class AgentRunner(Runner):
                 return
             yield msg, last
 
+    @staticmethod
+    def _stream_terminal_status(event: Any) -> str | None:
+        if getattr(event, "object", None) != "response":
+            return None
+        status = getattr(event, "status", None)
+        if status == RunStatus.Completed:
+            return "completed"
+        if status == RunStatus.Failed:
+            return "failed"
+        if status == RunStatus.Canceled:
+            return "cancelled"
+        return None
+
+    async def _stream_task_progress(
+        self,
+        request: Any,
+        *,
+        enabled: bool,
+    ) -> Any:
+        if not enabled:
+            return None
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        chat_id = channel_meta.get("chat_id")
+        if not chat_id and self._chat_manager is not None:
+            chat_id = await self._chat_manager.get_chat_id_by_session(
+                getattr(request, "session_id", "") or "",
+                getattr(request, "channel", DEFAULT_CHANNEL),
+            )
+        if chat_id and self._task_tracker is not None:
+            return await self._task_tracker.get_task_progress(chat_id)
+        return None
+
     async def stream_query(
         self,
         request,
@@ -6665,32 +6850,16 @@ class AgentRunner(Runner):
             async for event in normalize_reasoning_boundary_stream(
                 super().stream_query(request, **kwargs),
             ):
-                if getattr(event, "object", None) == "response":
-                    status = getattr(event, "status", None)
-                    if status == RunStatus.Completed:
-                        terminal_status = "completed"
-                    elif status == RunStatus.Failed:
-                        terminal_status = "failed"
-                    elif status == RunStatus.Canceled:
-                        terminal_status = "cancelled"
+                terminal_status = self._stream_terminal_status(event) or (
+                    terminal_status
+                )
 
                 trace_id = getattr(request, "trace_id", None)
                 event = self._attach_trace_id_to_event(event, trace_id)
-                progress = None
-                if task_progress_enabled:
-                    channel_meta = getattr(request, "channel_meta", None) or {}
-                    chat_id = channel_meta.get("chat_id")
-                    if not chat_id and self._chat_manager is not None:
-                        chat_id = (
-                            await self._chat_manager.get_chat_id_by_session(
-                                getattr(request, "session_id", "") or "",
-                                getattr(request, "channel", DEFAULT_CHANNEL),
-                            )
-                        )
-                    if chat_id and self._task_tracker is not None:
-                        progress = await self._task_tracker.get_task_progress(
-                            chat_id,
-                        )
+                progress = await self._stream_task_progress(
+                    request,
+                    enabled=task_progress_enabled,
+                )
                 yield attach_task_progress(
                     event,
                     progress,

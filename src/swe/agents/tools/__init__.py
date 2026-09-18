@@ -26,6 +26,7 @@ from .memory_search import create_memory_search_tool
 from .recover_evidence import create_recover_evidence_tool
 from .get_current_time import get_current_time
 from .copy_file_to_static import copy_file_to_static
+from .publish_annotated_html import create_publish_annotated_html_tool
 from .update_task_progress import update_task_progress
 from .emit_wplus_sop_event import emit_wplus_sop_event
 from .planning import ask_plan_clarification, create_submit_proposed_plan_tool
@@ -55,6 +56,7 @@ __all__ = [
     "create_recover_evidence_tool",
     "get_current_time",
     "copy_file_to_static",
+    "create_publish_annotated_html_tool",
     "update_task_progress",
     "emit_wplus_sop_event",
     "ask_plan_clarification",

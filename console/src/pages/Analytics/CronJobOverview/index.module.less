@@ -384,7 +384,8 @@
 }
 
 .behaviorPanel {
-  --behavior-header-row-height: 48px;
+  --behavior-group-header-row-height: 48px;
+  --behavior-column-header-row-height: 96px;
   --behavior-body-row-height: 42px;
 
   overflow: hidden;
@@ -392,7 +393,9 @@
 
 .behaviorPanel .tableScroller {
   max-height: calc(
-    var(--behavior-header-row-height) + var(--behavior-body-row-height) * 5
+    var(--behavior-group-header-row-height) +
+      var(--behavior-column-header-row-height) +
+      var(--behavior-body-row-height) * 4
   );
   overflow: auto;
 }

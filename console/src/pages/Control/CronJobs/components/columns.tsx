@@ -5,7 +5,7 @@ import { Popover, Tag } from "antd";
 import type { CronJobSpecOutput } from "../../../../api/types";
 import { CopyOutlined, MoreOutlined } from "@ant-design/icons";
 import { TFunction } from "i18next";
-import { parseCron } from "./parseCron";
+import { parseCron } from "../../../../utils/parseCron";
 import { copyToClipboard } from "../../../../utils/clipboard";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { formatExecutionModelLabel } from "@/hooks/useExecutionModelOptions";
@@ -27,6 +27,7 @@ interface ColumnHandlers {
   onExecuteNow: (job: CronJob) => void;
   onBroadcast: (job: CronJob) => void;
   onManageChildren: (job: CronJob) => void;
+  onBatchConfigure: (job: CronJob) => void;
   onEdit: (job: CronJob) => void;
   onDelete: (jobId: string) => void;
   onCopySuccess: () => void;
@@ -432,6 +433,8 @@ export const createColumns = (
       fixed: "right",
       render: (_: unknown, record: CronJob) => {
         const broadcastChild = isBroadcastChildJob(record);
+        const batchConfigurationDisabled =
+          broadcastChild || !isBatchDispatchJob(record);
         const menuItems: MenuProps["items"] = [
           {
             key: "broadcast",
@@ -452,6 +455,16 @@ export const createColumns = (
             onClick: () => {
               if (!broadcastChild) {
                 handlers.onManageChildren(record);
+              }
+            },
+          },
+          {
+            key: "batch_configuration",
+            label: "批调度配置",
+            disabled: batchConfigurationDisabled,
+            onClick: () => {
+              if (!batchConfigurationDisabled) {
+                handlers.onBatchConfigure(record);
               }
             },
           },

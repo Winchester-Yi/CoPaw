@@ -10,36 +10,30 @@
   }
 }
 
-
 /* 客户多模板 Tab 切换栏 */
 .tabsWrapper {
   padding: 0px 16px 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   align-self: flex-start;
 
-
   :global {
     .swe-tabs-nav {
       margin-bottom: 0;
     }
 
-
     .swe-tabs-tab:hover {
-      color: #7B6FE0;
+      color: #7b6fe0;
     }
-
 
     .swe-tabs-tab.swe-tabs-tab-active .swe-tabs-tab-btn {
-      color: #7B6FE0;
+      color: #7b6fe0;
     }
 
-
     .swe-tabs-ink-bar {
-      background: #7B6FE0;
+      background: #7b6fe0;
     }
   }
 }
-
 
 /* 客户报告模板列表加载中 */
 .tabsLoadingWrapper {
@@ -49,7 +43,6 @@
   padding: 16px 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
-
 
 /* 客户报告空状态 */
 .emptyWrapper {
@@ -62,7 +55,6 @@
   padding: 24px;
 }
 
-
 .emptyIcon {
   width: 72px;
   height: 72px;
@@ -73,22 +65,19 @@
   justify-content: center;
   margin-bottom: 20px;
 
-
   .emptyIconSvg {
     width: 36px;
     height: 36px;
-    color: #7B6FE0;
+    color: #7b6fe0;
   }
 }
-
 
 .emptyTitle {
   font-size: 16px;
   font-weight: 500;
-  color: #7B6FE0;
+  color: #7b6fe0;
   margin-bottom: 8px;
 }
-
 
 .emptyDesc {
   font-size: 13px;
@@ -97,31 +86,28 @@
   line-height: 1.5;
 }
 
-
 /* 暗黑模式适配 */
 :global(.dark-mode) {
   .emptyIcon {
     background: rgba(123, 111, 224, 0.15);
   }
 
-
   .emptyDesc {
     color: rgba(255, 255, 255, 0.45);
   }
 }
 
-
 .previewDrawerRoot {
   :global {
     .swe-drawer-content-wrapper {
-      border-left: 1px solid #E5E7EB;
+      border-left: 1px solid #e5e7eb;
       box-shadow: -8px 0 24px rgba(17, 24, 39, 0.08);
     }
 
     .swe-drawer-header {
       min-height: 56px;
       padding: 12px 16px;
-      border-bottom-color: #E5E7EB;
+      border-bottom-color: #e5e7eb;
     }
 
     .swe-drawer-title {
@@ -178,11 +164,104 @@
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  background: #FFFFFF;
+  background: #ffffff;
 
   > div {
     min-height: 0;
   }
+}
+
+.annotatablePreview {
+  position: relative;
+}
+
+.annotationOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.annotationHover {
+  position: absolute;
+  border: 2px solid #3769fc;
+  border-radius: 4px;
+  background: rgba(55, 105, 252, 0.08);
+  box-sizing: border-box;
+}
+
+.annotationMarker {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #3769fc;
+  box-shadow: 0 2px 8px rgba(17, 24, 39, 0.24);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.annotationPanel {
+  flex: 0 0 auto;
+  max-height: 240px;
+  padding: 12px 16px;
+  overflow: auto;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.annotationInstruction {
+  margin-bottom: 8px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.annotationWarning {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border-top: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.annotationListItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+
+  button {
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: #374151;
+    text-align: left;
+    cursor: pointer;
+  }
+}
+
+.annotationEditor {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(55, 105, 252, 0.3);
+  border-radius: 8px;
+  background: #f8faff;
+}
+
+.annotationEditorActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 :global(html.copaw-file-preview-drawer-open) {

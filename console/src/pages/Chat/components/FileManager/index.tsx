@@ -54,6 +54,7 @@ type FileManagerApi = typeof chatApi.fileManager;
 
 interface FileManagerProps {
   fileManagerApi?: FileManagerApi;
+  enableSessionAnnotations?: boolean;
 }
 
 const virtualAnchorPrefix = "__file_manager_anchor__:";
@@ -164,6 +165,7 @@ function isListingConflict(error: unknown): error is RequestError {
 
 export default function FileManager({
   fileManagerApi = chatApi.fileManager,
+  enableSessionAnnotations = false,
 }: FileManagerProps) {
   const { message } = App.useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1147,6 +1149,7 @@ export default function FileManager({
                     fileUrl={sessionPreview.fileUrl}
                     fileName={sessionPreview.fileName}
                     enableClickTracking={sessionPreview.enableClickTracking}
+                    enableAnnotations={enableSessionAnnotations}
                     presentation="workspace"
                     nestedPreviewMode="replace"
                   />

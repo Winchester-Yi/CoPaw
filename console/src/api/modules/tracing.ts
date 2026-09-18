@@ -630,6 +630,7 @@ export const tracingApi = {
       end_date?: string;
       query?: string;
       bbk_ids?: string;
+      exclude_cron_task_sessions?: boolean;
     },
   ): Promise<{
     items: UserMessageItem[];
@@ -642,7 +643,7 @@ export const tracingApi = {
     params.append("page_size", pageSize.toString());
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
-        if (value) params.append(key, value);
+        if (value) params.append(key, String(value));
       });
     }
     return request(`/monitor/tracing/user-messages?${params.toString()}`);
@@ -656,6 +657,7 @@ export const tracingApi = {
       end_date?: string;
       query?: string;
       bbk_ids?: string;
+      exclude_cron_task_sessions?: boolean;
     },
     format: string = "xlsx",
   ): Promise<Blob> => {
@@ -663,7 +665,7 @@ export const tracingApi = {
     params.append("format", format);
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
-        if (value) params.append(key, value);
+        if (value) params.append(key, String(value));
       });
     }
     // Use the proper API URL and include authorization token

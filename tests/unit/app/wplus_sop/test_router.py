@@ -802,6 +802,53 @@ async def test_active_session_snapshot_contains_runtime_status(
     }
 
 
+@pytest.mark.parametrize(
+    ("chat_user", "expected_status"),
+    [("user-1", 200), ("other-user", 404), (None, 404)],
+)
+def test_active_session_empty_http_contract(
+    tmp_path,
+    monkeypatch,
+    chat_user,
+    expected_status,
+) -> None:
+    async def get_chat(_chat_id):
+        if chat_user is None:
+            return None
+        return SimpleNamespace(
+            id="chat-1",
+            session_id="logical-1",
+            user_id=chat_user,
+        )
+
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path,
+        agent_id="agent-1",
+        chat_manager=SimpleNamespace(get_chat=get_chat),
+    )
+
+    async def get_workspace(_request):
+        return workspace
+
+    monkeypatch.setattr(wplus_router, "get_agent_for_request", get_workspace)
+    app = FastAPI()
+    app.include_router(wplus_router.router)
+
+    @app.middleware("http")
+    async def add_identity(request: Request, call_next):
+        request.state.tenant_id = "tenant-1"
+        request.state.source_id = "console"
+        request.state.user_id = "user-1"
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        response = client.get("/wplus-sop/chats/chat-1/active-session")
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert response.json() is None
+
+
 @pytest.mark.asyncio
 async def test_command_snapshot_contains_runtime_status(monkeypatch) -> None:
     record = SimpleNamespace(

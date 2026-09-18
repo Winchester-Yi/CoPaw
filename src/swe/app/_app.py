@@ -610,6 +610,24 @@ async def _initialize_cron_broadcast_task_store(
         )
 
 
+async def _register_wealth_plan_store(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """注册财富工作台规划存储（建表 SQL 见 scripts/sql/wealth_plan_tables.sql，手动导入）。"""
+    try:
+        from .wealth_plans.store import WealthPlanStore
+
+        wealth_plan_store = WealthPlanStore(db_connection)
+        app.state.wealth_plan_store = wealth_plan_store
+        if wealth_plan_store.is_available:
+            logger.info("Wealth plan storage registered")
+        else:
+            logger.warning("Wealth plan storage uses memory fallback")
+    except Exception as e:
+        logger.warning("Failed to register wealth plan storage: %s", e)
+
+
 async def _initialize_skill_readiness(
     app: FastAPI,
     db_connection: Any | None,
@@ -932,6 +950,7 @@ async def lifespan(
     await _initialize_skill_scan_history(app, db_connection)
     await _initialize_cron_broadcast_children_store(app, db_connection)
     await _initialize_cron_broadcast_task_store(app, db_connection)
+    await _register_wealth_plan_store(app, db_connection)
 
     # --- 初始化技能就绪检查存储 ---
     await _initialize_skill_readiness(

@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HtmlPreviewTrackingProvider } from "../HtmlPreviewTrackingContext";
 import FilePreviewDrawer from "../FilePreviewDrawer";
 import FilePreviewModal from "./index";
+import { HtmlAnnotationProvider } from "../HtmlAnnotations/context";
+import HtmlAnnotationComposerSummary from "../HtmlAnnotations/ComposerSummary";
 
 type AttachHtmlPreviewClickTracker =
   typeof import("./htmlPreviewClickTracking").attachHtmlPreviewClickTracker;
@@ -121,6 +123,9 @@ vi.mock("antd", () => ({
     ) : null,
   Spin: ({ tip }: { tip?: string }) => <div>{tip || "loading"}</div>,
   Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
+  Input: {
+    TextArea: (props: Record<string, unknown>) => <textarea {...props} />,
+  },
   message: {
     error: vi.fn(),
     success: vi.fn(),
@@ -129,6 +134,8 @@ vi.mock("antd", () => ({
 
 vi.mock("@ant-design/icons", () => ({
   ArrowLeftOutlined: () => <span data-testid="back-icon" />,
+  CloseOutlined: () => <span data-testid="annotation-close-icon" />,
+  CommentOutlined: () => <span data-testid="annotation-comment-icon" />,
   FullscreenOutlined: () => <span data-testid="fullscreen-icon" />,
 }));
 
@@ -177,6 +184,630 @@ afterEach(() => {
 });
 
 describe("FilePreviewModal HTML preview recording", () => {
+  it("reloads a changed HTML URL without letting an older response overwrite it", async () => {
+    let resolveFirst!: (response: Response) => void;
+    let resolveSecond!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondResponse = new Promise<Response>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(firstResponse)
+      .mockReturnValueOnce(secondResponse);
+    const createObjectURL = vi.fn<typeof URL.createObjectURL>(
+      () => "blob:preview",
+    );
+    const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
+      URL,
+      "createObjectURL",
+    );
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectURL,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const { rerender } = render(
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report-a.html"
+          fileName="report.html"
+        />,
+      );
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          "https://example.test/report-a.html",
+        ),
+      );
+
+      rerender(
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report-b.html"
+          fileName="report.html"
+        />,
+      );
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          "https://example.test/report-b.html",
+        ),
+      );
+
+      await act(async () => {
+        resolveSecond(
+          new Response("<!doctype html><main>second</main>", { status: 200 }),
+        );
+      });
+      await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+
+      await act(async () => {
+        resolveFirst(
+          new Response("<!doctype html><main>first</main>", { status: 200 }),
+        );
+      });
+      await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+      const latestBlob = createObjectURL.mock.calls[
+        createObjectURL.mock.calls.length - 1
+      ]?.[0] as Blob;
+      expect(await latestBlob.text()).toContain("second");
+    } finally {
+      vi.unstubAllGlobals();
+      if (originalCreateObjectURL) {
+        Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+      } else {
+        Reflect.deleteProperty(URL, "createObjectURL");
+      }
+    }
+  });
+
+  it("preserves the original bytes used by ordinary HTML previews", async () => {
+    const sourceBytes = new Uint8Array([0x3c, 0x80, 0x3e]);
+    const createObjectURL = vi.fn<typeof URL.createObjectURL>(
+      () => "blob:preview",
+    );
+    const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
+      URL,
+      "createObjectURL",
+    );
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectURL,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(sourceBytes)),
+    );
+
+    try {
+      render(
+        <FilePreviewModal
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/legacy.html"
+          fileName="legacy.html"
+        />,
+      );
+
+      await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+      const previewBlob = createObjectURL.mock.calls[0]?.[0] as Blob;
+      expect(
+        Array.from(new Uint8Array(await previewBlob.arrayBuffer())),
+      ).toEqual(Array.from(sourceBytes));
+    } finally {
+      vi.unstubAllGlobals();
+      if (originalCreateObjectURL) {
+        Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+      } else {
+        Reflect.deleteProperty(URL, "createObjectURL");
+      }
+    }
+  });
+
+  it("does not decode canonical HTML for previews that did not enable annotations", async () => {
+    const previewBlob = new Blob(["<!doctype html><main>report</main>"], {
+      type: "text/html",
+    });
+    const readCanonicalText = vi.spyOn(previewBlob, "text");
+    const createObjectURL = vi.fn<typeof URL.createObjectURL>(
+      () => "blob:preview",
+    );
+    const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
+      URL,
+      "createObjectURL",
+    );
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectURL,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue({
+        ok: true,
+        blob: async () => previewBlob,
+      } as Response),
+    );
+
+    try {
+      render(
+        <FilePreviewModal
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report.html"
+          fileName="report.html"
+        />,
+      );
+
+      await waitFor(() => expect(createObjectURL).toHaveBeenCalledOnce());
+      expect(readCanonicalText).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      if (originalCreateObjectURL) {
+        Object.defineProperty(URL, "createObjectURL", originalCreateObjectURL);
+      } else {
+        Reflect.deleteProperty(URL, "createObjectURL");
+      }
+    }
+  });
+
+  it("keeps the latest dynamic HTML when an older request resolves last", async () => {
+    type DynamicResponse = {
+      code: string;
+      data: Record<string, unknown>;
+    };
+    let resolveFirst!: (response: DynamicResponse) => void;
+    let resolveSecond!: (response: DynamicResponse) => void;
+    const firstResponse = new Promise<DynamicResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondResponse = new Promise<DynamicResponse>((resolve) => {
+      resolveSecond = resolve;
+    });
+    getRecordDataMock
+      .mockReturnValueOnce(firstResponse)
+      .mockReturnValueOnce(secondResponse);
+    renderTemplateMock.mockImplementation(
+      async (_templateId: number, data: { marker: string }) =>
+        `<html><body>${data.marker}</body></html>`,
+    );
+
+    const { rerender } = render(
+      <FilePreviewDrawer
+        open
+        onClose={vi.fn()}
+        fileUrl="https://example.test/report[auto-preview].html?resultId=result-a&templateId=1"
+        fileName="report.html"
+      />,
+    );
+    await waitFor(() =>
+      expect(getRecordDataMock).toHaveBeenCalledWith("result-a", "1"),
+    );
+
+    rerender(
+      <FilePreviewDrawer
+        open
+        onClose={vi.fn()}
+        fileUrl="https://example.test/report[auto-preview].html?resultId=result-b&templateId=2"
+        fileName="report.html"
+      />,
+    );
+    await waitFor(() =>
+      expect(getRecordDataMock).toHaveBeenCalledWith("result-b", "2"),
+    );
+
+    await act(async () => {
+      resolveSecond({ code: "200", data: { marker: "second" } });
+    });
+    const iframe = await waitFor(() => {
+      const current = document.querySelector("iframe") as HTMLIFrameElement;
+      expect(current.srcdoc).toContain("second");
+      return current;
+    });
+
+    await act(async () => {
+      resolveFirst({ code: "200", data: { marker: "first" } });
+    });
+    expect(renderTemplateMock).toHaveBeenCalledTimes(1);
+    expect(iframe.srcdoc).toContain("second");
+    expect(iframe.srcdoc).not.toContain("first");
+  });
+
+  it("does not restart polling for an obsolete dynamic request", async () => {
+    type DynamicResponse = {
+      code: string;
+      data: Record<string, unknown>;
+    };
+    let resolveFirst!: (response: DynamicResponse) => void;
+    const firstResponse = new Promise<DynamicResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    getRecordDataMock
+      .mockReturnValueOnce(firstResponse)
+      .mockResolvedValueOnce({ code: "200", data: { marker: "second" } });
+    renderTemplateMock.mockResolvedValue(
+      "<html><body>second</body></html>",
+    );
+
+    const { rerender } = render(
+      <FilePreviewDrawer
+        open
+        onClose={vi.fn()}
+        fileUrl="https://example.test/report[auto-preview].html?resultId=result-a&templateId=1"
+        fileName="report.html"
+      />,
+    );
+    await waitFor(() =>
+      expect(getRecordDataMock).toHaveBeenCalledWith("result-a", "1"),
+    );
+
+    rerender(
+      <FilePreviewDrawer
+        open
+        onClose={vi.fn()}
+        fileUrl="https://example.test/report[auto-preview].html?resultId=result-b&templateId=2"
+        fileName="report.html"
+      />,
+    );
+    await waitFor(() =>
+      expect(document.querySelector("iframe")?.getAttribute("srcdoc"))
+        .toContain("second"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        resolveFirst({ code: "202", data: {} });
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows annotation for a legacy HTML drawer with a writable composer", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "添加批注" }),
+    ).toBeVisible();
+  });
+
+  it("shows annotation for an explicitly enabled HTML workspace preview", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewModal
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+          presentation="workspace"
+          enableAnnotations
+        />
+        <HtmlAnnotationComposerSummary />
+      </HtmlAnnotationProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "添加批注" }));
+    await screen.findByText("选择页面元素并描述修改；批注不会改变当前页面。");
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    iframe.contentDocument!.body.innerHTML =
+      '<button id="workspace-target" type="button">打开详情</button>';
+    fireEvent.click(
+      iframe.contentDocument!.querySelector("#workspace-target")!,
+    );
+    const editor = await screen.findByRole("textbox", { name: "批注内容" });
+    fireEvent.change(editor, { target: { value: "修改工作区按钮文字" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存批注" }));
+    fireEvent.click(screen.getByRole("button", { name: /完成批注/ }));
+
+    expect(await screen.findByText("1 条批注")).toBeVisible();
+  });
+
+  it("selects a DOM target without activating it and stages the saved comment", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+        <HtmlAnnotationComposerSummary />
+      </HtmlAnnotationProvider>,
+    );
+    const addButton = await screen.findByRole("button", { name: "添加批注" });
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    act(() => addButton.click());
+    await screen.findByText("选择页面元素并描述修改；批注不会改变当前页面。");
+    iframe.contentDocument!.body.innerHTML =
+      '<button id="target" type="button">打开详情</button>';
+    const target = iframe.contentDocument!.querySelector("#target")!;
+    let activated = false;
+    target.addEventListener("click", () => {
+      activated = true;
+    });
+
+    await waitFor(() => {
+      target.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      expect(screen.getByRole("textbox", { name: "批注内容" })).toBeVisible();
+    });
+    expect(activated).toBe(false);
+    const editor = screen.getByRole("textbox", { name: "批注内容" });
+    act(() => {
+      editor.dispatchEvent(
+        new InputEvent("input", { bubbles: true, data: "修改按钮文字" }),
+      );
+    });
+    // React's controlled textarea needs the testing-library change helper.
+    fireEvent.change(editor, { target: { value: "修改按钮文字" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存批注" }));
+    fireEvent.click(screen.getByRole("button", { name: /完成批注/ }));
+
+    expect(await screen.findByText("1 条批注")).toBeVisible();
+  });
+
+  it("suppresses pre-click target handlers while selecting an annotation", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "添加批注" }));
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    iframe.contentDocument!.body.innerHTML =
+      '<button id="target" type="button">打开详情</button>';
+    const target = iframe.contentDocument!.querySelector("#target")!;
+    const onMouseDown = vi.fn();
+    target.addEventListener("mousedown", onMouseDown);
+
+    target.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    );
+
+    expect(onMouseDown).not.toHaveBeenCalled();
+  });
+
+  it("rejects canvas content before resolving a meaningful ancestor", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "添加批注" }));
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    iframe.contentDocument!.body.innerHTML =
+      '<main><section><canvas id="chart"></canvas></section></main>';
+
+    fireEvent.click(iframe.contentDocument!.querySelector("#chart")!);
+
+    expect(
+      await screen.findByText(
+        "该位置没有可寻址的 DOM 内容，无法创建可靠批注。",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("textbox", { name: "批注内容" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not record another preview view when annotation mode exits", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    const addButton = await screen.findByRole("button", { name: "添加批注" });
+    const previewViewCount = () =>
+      recordClickMock.mock.calls.filter(
+        ([payload]) => payload?.event_type === "preview_view",
+      ).length;
+    await waitFor(() => expect(previewViewCount()).toBeGreaterThan(0));
+    const beforeToggle = previewViewCount();
+
+    fireEvent.click(addButton);
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    act(() => {
+      iframe.contentDocument!.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await screen.findByRole("button", { name: "添加批注" });
+
+    expect(previewViewCount()).toBe(beforeToggle);
+  });
+
+  it("exits annotation mode when Escape is pressed in the comment editor", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "添加批注" }));
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    iframe.contentDocument!.body.innerHTML =
+      '<button id="target" type="button">打开详情</button>';
+    const target = iframe.contentDocument!.querySelector("#target")!;
+    target.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    const editor = await screen.findByRole("textbox", { name: "批注内容" });
+
+    fireEvent.keyDown(editor, { key: "Escape" });
+
+    expect(screen.getByRole("button", { name: "添加批注" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "批注内容" })).toBeNull();
+  });
+
+  it("repositions a saved marker after iframe scrolling and DOM replacement", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "添加批注" }));
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    iframe.contentDocument!.body.innerHTML =
+      '<button id="target" type="button">打开详情</button>';
+    const target = iframe.contentDocument!.querySelector("#target")!;
+    vi.spyOn(target, "getBoundingClientRect").mockReturnValue({
+      left: 10,
+      top: 20,
+      width: 100,
+      height: 30,
+    } as DOMRect);
+
+    await waitFor(() => {
+      target.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      expect(screen.getByRole("textbox", { name: "批注内容" })).toBeVisible();
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), {
+      target: { value: "修改按钮" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存批注" }));
+    const marker = document.querySelector(
+      'button[aria-label="编辑批注 1"]',
+    ) as HTMLButtonElement;
+    expect(marker).toBeTruthy();
+    expect(marker).toHaveStyle({ left: "10px", top: "20px" });
+
+    target.remove();
+    const replacement = iframe.contentDocument!.createElement("button");
+    replacement.id = "target";
+    replacement.textContent = "打开详情";
+    vi.spyOn(replacement, "getBoundingClientRect").mockReturnValue({
+      left: 45,
+      top: 80,
+      width: 100,
+      height: 30,
+    } as DOMRect);
+    iframe.contentDocument!.body.append(replacement);
+    fireEvent.scroll(iframe.contentDocument!);
+
+    await waitFor(() => {
+      expect(marker).toHaveStyle({ left: "45px", top: "80px" });
+    });
+  });
+
+  it("keeps interactive annotation markers exposed to assistive technology", async () => {
+    render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "添加批注" }));
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    iframe.contentDocument!.body.innerHTML =
+      '<button id="target" type="button">打开详情</button>';
+    const target = iframe.contentDocument!.querySelector("#target")!;
+
+    await waitFor(() => {
+      target.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      expect(screen.getByRole("textbox", { name: "批注内容" })).toBeVisible();
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), {
+      target: { value: "修改按钮" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存批注" }));
+
+    const marker = document.querySelector(
+      'button[aria-label="编辑批注 1"]',
+    ) as HTMLButtonElement;
+    expect(marker).toBeTruthy();
+    expect(marker.closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it("keeps modal, non-HTML and unavailable-composer previews annotation free", async () => {
+    const { rerender } = render(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable={false}>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    await waitFor(() => expect(renderTemplateMock).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "添加批注" })).toBeNull();
+
+    rerender(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewModal
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
+          fileName="report.html"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    expect(screen.queryByRole("button", { name: "添加批注" })).toBeNull();
+
+    rerender(
+      <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
+        <FilePreviewDrawer
+          open
+          onClose={vi.fn()}
+          fileUrl="https://example.test/report.pdf"
+          fileName="report.pdf"
+        />
+      </HtmlAnnotationProvider>,
+    );
+    expect(screen.queryByRole("button", { name: "添加批注" })).toBeNull();
+  });
   it("renders a non-blocking right-side preview drawer with the file name", () => {
     render(
       <FilePreviewDrawer

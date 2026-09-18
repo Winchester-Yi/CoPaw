@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
 
 from ...database import DatabaseConnection, get_db_connection
+from .capacity_history import read_capacity_page
 from ...models.cron import (
     CronOverviewBranchExecutionItem,
     CronOverviewBranchReadItem,
@@ -118,7 +119,6 @@ DISPATCH_INTENT_TIME_FIELDS = [
 DISPATCH_EVENT_TIME_FIELDS = ["created_at"]
 DISPATCH_CAPACITY_TIME_FIELDS = ["created_at"]
 DISPATCH_POLICY_TIME_FIELDS = ["created_at", "updated_at"]
-DISPATCH_CAPACITY_EVENT_LIMIT = 100
 SCHEDULE_BUCKET_MINUTES = frozenset({5, 10, 15, 30, 60})
 SCHEDULE_RANGE_LIMIT = timedelta(days=7)
 SCHEDULE_OCCURRENCE_LIMIT = 100_000
@@ -1018,6 +1018,7 @@ class QueryService:
 
     def _map_dispatch_intent(self, row: dict) -> CronDispatchIntentItem:
         item = convert_row_times_direct(row, DISPATCH_INTENT_TIME_FIELDS)
+        item["priority"] = _parse_json_field(item.get("priority"))
         item["viewer_heat_score"] = _to_float(item.get("viewer_heat_score"))
         return CronDispatchIntentItem.model_validate(item)
 
@@ -1176,30 +1177,14 @@ class QueryService:
         source_id: str,
         start_time: Optional[datetime],
         end_time: Optional[datetime],
-    ) -> List[dict]:
-        conditions = ["source_id = %s"]
-        params: List[Any] = [source_id]
-        if start_time:
-            conditions.append("created_at >= %s")
-            params.append(start_time)
-        if end_time:
-            conditions.append("created_at <= %s")
-            params.append(end_time)
-
-        return await db.fetch_all(
-            f"""
-            SELECT
-                id, worker_id, source_id, provider_id, model_id, strategy_id,
-                previous_workers, baseline_workers, min_workers, max_workers,
-                effective_workers, pending_count, claimed_count, running_count,
-                success_count, failure_count, error_rate, matched_rule,
-                avg_latency_ms, decision_reason, created_at
-            FROM swe_cron_dispatch_worker_capacity
-            WHERE {" AND ".join(conditions)}
-            ORDER BY created_at DESC, id DESC
-            LIMIT {DISPATCH_CAPACITY_EVENT_LIMIT}
-            """,
-            tuple(params),
+        capacity_cursor: Optional[str] = None,
+    ) -> tuple[List[dict], Optional[str]]:
+        return await read_capacity_page(
+            db,
+            source_id,
+            start_time,
+            end_time,
+            capacity_cursor,
         )
 
     async def get_dispatch_batches(
@@ -1233,7 +1218,8 @@ class QueryService:
                     AS failed_batches,
                 COALESCE(SUM(b.total_count), 0) AS total_intents,
                 COALESCE(SUM(b.completed_count), 0) AS completed_intents,
-                COALESCE(SUM(b.failed_count), 0) AS failed_intents
+                COALESCE(SUM(b.failed_count), 0) AS failed_intents,
+                COALESCE(SUM(b.skipped_count), 0) AS skipped_intents
             FROM swe_cron_dispatch_batches b
             LEFT JOIN swe_cron_jobs j
                 ON b.parent_job_id = j.id
@@ -1244,6 +1230,7 @@ class QueryService:
         total_intents = int(stats_row.get("total_intents") or 0)
         completed_intents = int(stats_row.get("completed_intents") or 0)
         failed_intents = int(stats_row.get("failed_intents") or 0)
+        skipped_intents = int(stats_row.get("skipped_intents") or 0)
         stats = CronDispatchBatchStats(
             total_batches=int(stats_row.get("total_batches") or 0),
             running_batches=int(stats_row.get("running_batches") or 0),
@@ -1252,8 +1239,12 @@ class QueryService:
             total_intents=total_intents,
             completed_intents=completed_intents,
             failed_intents=failed_intents,
+            skipped_intents=skipped_intents,
             pending_intents=max(
-                total_intents - completed_intents - failed_intents,
+                total_intents
+                - completed_intents
+                - failed_intents
+                - skipped_intents,
                 0,
             ),
         )
@@ -1269,12 +1260,16 @@ class QueryService:
                 b.source_id, b.provider_id, b.model_id, b.agent_id,
                 b.scheduled_fire_at, b.callback_received_at, b.status,
                 b.lock_owner, b.locked_at, b.total_count, b.completed_count,
-                b.failed_count, b.error_message, b.completed_at,
+                b.failed_count, b.skipped_count, c.paused AS dispatch_paused,
+                b.error_message, b.completed_at,
                 b.created_at, b.updated_at
             FROM swe_cron_dispatch_batches b
             LEFT JOIN swe_cron_jobs j
                 ON b.parent_job_id = j.id
                 AND b.source_id = j.source_id
+            LEFT JOIN swe_cron_dispatch_controls c
+                ON c.source_id=b.source_id AND c.tenant_id=b.tenant_id
+                AND c.parent_job_id=b.parent_job_id
             WHERE {where_clause}
             ORDER BY b.scheduled_fire_at DESC, b.created_at DESC
             LIMIT %s OFFSET %s
@@ -1311,12 +1306,16 @@ class QueryService:
                 b.source_id, b.provider_id, b.model_id, b.agent_id,
                 b.scheduled_fire_at, b.callback_received_at, b.status,
                 b.lock_owner, b.locked_at, b.total_count, b.completed_count,
-                b.failed_count, b.error_message, b.completed_at,
+                b.failed_count, b.skipped_count, c.paused AS dispatch_paused,
+                b.error_message, b.completed_at,
                 b.created_at, b.updated_at
             FROM swe_cron_dispatch_batches b
             LEFT JOIN swe_cron_jobs j
                 ON b.parent_job_id = j.id
                 AND b.source_id = j.source_id
+            LEFT JOIN swe_cron_dispatch_controls c
+                ON c.source_id=b.source_id AND c.tenant_id=b.tenant_id
+                AND c.parent_job_id=b.parent_job_id
             WHERE b.source_id = %s AND b.batch_id = %s
             """,
             (source_id, batch_id),
@@ -1365,12 +1364,12 @@ class QueryService:
                 id, batch_id, intent_role, status, source_id, provider_id,
                 model_id, tenant_id, agent_id, job_id, parent_job_id,
                 scheduled_fire_at, due_at, dispatch_order, viewer_heat_score,
+                JSON_EXTRACT(payload, '$.dispatch_priority') AS priority,
                 attempt_count, max_attempts, lock_owner, locked_at, acked_at,
                 completed_at, error_message, created_at, updated_at
             FROM swe_cron_dispatch_intents
             WHERE {intent_where}
             ORDER BY
-                CASE intent_role WHEN 'parent' THEN 0 ELSE 1 END,
                 dispatch_order,
                 id
             LIMIT %s OFFSET %s
@@ -1416,22 +1415,34 @@ class QueryService:
         source_id: str,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        capacity_cursor: Optional[str] = None,
     ) -> CronDispatchWorkersResponse:
         """查询当前渠道下模型策略和 worker capacity 变动。"""
         db = get_db_connection()
-        policy_rows = await self._fetch_dispatch_worker_policy_rows(
-            db,
-            source_id,
+        policy_rows = (
+            []
+            if capacity_cursor
+            else await self._fetch_dispatch_worker_policy_rows(
+                db,
+                source_id,
+            )
         )
-        latest_rows = await self._fetch_current_dispatch_capacity_rows(
-            db,
-            source_id,
+        latest_rows = (
+            []
+            if capacity_cursor
+            else await self._fetch_current_dispatch_capacity_rows(
+                db,
+                source_id,
+            )
         )
-        event_rows = await self._fetch_dispatch_capacity_event_rows(
-            db,
-            source_id=source_id,
-            start_time=start_time,
-            end_time=end_time,
+        event_rows, next_cursor = (
+            await self._fetch_dispatch_capacity_event_rows(
+                db,
+                source_id=source_id,
+                start_time=start_time,
+                end_time=end_time,
+                capacity_cursor=capacity_cursor,
+            )
         )
         return CronDispatchWorkersResponse(
             source_id=source_id,
@@ -1442,6 +1453,7 @@ class QueryService:
             capacity_events=[
                 self._map_dispatch_capacity(row) for row in event_rows
             ],
+            capacity_events_next_cursor=next_cursor,
         )
 
     async def list_jobs(

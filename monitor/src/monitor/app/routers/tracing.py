@@ -592,6 +592,10 @@ async def get_user_messages(
         description="搜索用户消息内容",
     ),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    exclude_cron_task_sessions: bool = Query(
+        False,
+        description="是否排除 session_id 以 cron-task 开头的会话",
+    ),
 ) -> dict:
     """获取用户消息列表（含 Token 信息）.
 
@@ -626,6 +630,7 @@ async def get_user_messages(
         query_text=query,
         export=False,
         bbk_ids=bbk_ids,
+        exclude_cron_task_sessions=exclude_cron_task_sessions,
     )
     return {
         "items": [m.model_dump() for m in messages],
@@ -658,6 +663,10 @@ async def export_user_messages(
         alias="format",
     ),
     bbk_ids: Optional[str] = Query(None, description="按分行号筛选"),
+    exclude_cron_task_sessions: bool = Query(
+        False,
+        description="是否排除 session_id 以 cron-task 开头的会话",
+    ),
 ) -> StreamingResponse:
     """导出用户消息.
 
@@ -687,6 +696,7 @@ async def export_user_messages(
             end_date=end,
             query_text=query,
             bbk_id=bbk_ids,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
     if export_format == "xlsx":
         return await export_service.export_user_messages_xlsx(
@@ -697,6 +707,7 @@ async def export_user_messages(
             end_date=end,
             query_text=query,
             bbk_id=bbk_ids,
+            exclude_cron_task_sessions=exclude_cron_task_sessions,
         )
     return await export_service.export_user_messages_csv(
         source_id=actual_source_id,
@@ -706,6 +717,7 @@ async def export_user_messages(
         end_date=end,
         query_text=query,
         bbk_id=bbk_ids,
+        exclude_cron_task_sessions=exclude_cron_task_sessions,
     )
 
 

@@ -87,6 +87,31 @@ async def test_rejects_content_length_before_reading(
 
 
 @pytest.mark.asyncio
+async def test_ignores_invalid_content_length_and_streams_response(
+    tmp_path: Path,
+    mock_client,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-length": "unknown"},
+            content=b"hello",
+        )
+
+    await mock_client(handler)
+    destination = tmp_path / ".invalid-length.part"
+
+    await async_download.download_http_to_path(
+        "https://example.test/file.bin",
+        destination,
+        deadline=async_download.time.monotonic() + 5,
+        max_bytes=10,
+    )
+
+    assert destination.read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
 async def test_rejects_chunked_response_after_limit(
     tmp_path: Path,
     mock_client,

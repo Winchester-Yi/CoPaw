@@ -2,6 +2,24 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## Cron callback 报 Job not found
+
+- 症状：外部调度调用 `/api/internal/cron/callback`，收到 HTTP 500 和
+  `"detail":"'Job not found: <job_id>'"`。
+- 原因：`CronManager.run_job()` 从当前租户工作区读取不到任务时抛出
+  `KeyError`，原回调入口将它作为通用异常返回 500。任务可能已经被删除，
+  也可能是回调携带的租户、来源或 Agent 与任务归属不一致。
+- 处理：回调只对当前 `job_id` 的这类异常返回 HTTP 200，响应为
+  `{"status":"ok","skipped":"job_not_found","job_id":"<job_id>"}`。
+  这表示本次未执行；包括查询后、执行前任务被删除的情况。其他执行错误仍然
+  返回 500，缺少必填参数仍然返回 400。
+- Scheduler 识别该标记为明确未接受执行，沿用既有失败/重试处理；不会将其
+  标记为已接受或结果未知。发布时应同步更新 SWE 与 Scheduler。
+- 排查入口：[回调路由](../../src/swe/app/routers/internal.py)、
+  [CronManager](../../src/swe/app/crons/manager.py)、
+  [Scheduler 回调客户端](../../scheduler/src/scheduler/app/services/cron/scheduling_service.py)。
+  对照日志中的 `tenant/source/agent/job` 检查任务归属和外部平台残留的调度记录。
+
 ## 定时任务显示成功但聊天窗口没有模型结果
 
 ### 症状
@@ -726,3 +744,9 @@
 - 分享栏通过 Portal 挂到 `document.body`，宽度取自 `[data-chat-messages-area]`。响应式排布应按分享栏自身容器宽度切换，不能只按浏览器视口判断嵌入区域的可用空间；固定宽度包含 padding，需使用 `box-sizing: border-box`。
 - 回归覆盖：无可分享内容、全选、部分选择、取消全选、退出分享模式、键盘焦点，以及 375px 窄容器与 768/1024/1440px 布局。禁用按钮的图标应跟随禁用文字颜色，半选框保留白底与蓝色短横。
 - 分享模式需要隐藏输入框时，保留 Input 挂载以维持草稿和附件状态；整体隐藏还要覆盖编辑器子层显式声明的可见性。输入框提交入口在异步 `beforeSubmit` 前后检查当前分享状态，防止校验期间进入分享仍发出消息。回归位于 Runtime `core/Chat/Input/index.test.tsx`，覆盖隐藏、恢复草稿与延迟提交拦截。
+
+## 聊天附件在切换会话后消失
+
+- **现象**：文字和附件一起发送时首屏正常，切换到其他会话再返回后只剩文字。
+- **典型来源**：持久化的 AgentScope 消息使用 `file_url`、`image_url`、`audio_url` 或 `video_url` 等扁平字段，而聊天历史转换只读取 `source.url`，导致恢复出的附件 URL 为空。
+- **第一落点**：检查 `src/swe/app/runner/utils.py` 的 `agentscope_msg_to_message` 是否同时兼容扁平字段和 `source` 结构，并验证 `/chats/{id}` 返回的用户消息仍包含附件 URL。

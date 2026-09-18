@@ -78,11 +78,14 @@ failed.
 The workflow payload includes:
 
 - `source_id`
-- `task_id`
 - `batch_id`
 - `start_time`
 - `end_time`
 - `bbk_id`
+
+The internal async-task `task_id` is not sent to the external workflow. Monitor
+uses the generated task id as the workflow `batch_id` and keeps `task_id` only
+for internal task status updates.
 
 ## Failure Handling
 

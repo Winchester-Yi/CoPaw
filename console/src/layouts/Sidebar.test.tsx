@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 
@@ -74,5 +74,34 @@ describe("Sidebar skill config visibility", () => {
     );
 
     expect(screen.queryByText("Skill 配置")).not.toBeInTheDocument();
+  });
+});
+
+function LocationProbe() {
+  return <output data-testid="location">{useLocation().pathname}</output>;
+}
+
+describe("Sidebar Claw report navigation", () => {
+  it("places the Claw dashboard after operations and navigates to its route", () => {
+    iframeState.source = "OTHER";
+    render(
+      <MemoryRouter>
+        <Sidebar selectedKey="analytics-business-overview" />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    const operations = screen.getByText("运营看板");
+    const claw = screen.getByText("Claw技能运行看板");
+    expect(
+      operations.compareDocumentPosition(claw) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(claw);
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/analytics/claw-data-overview",
+    );
+    expect(screen.getAllByText("Claw技能运行看板")).toHaveLength(1);
   });
 });

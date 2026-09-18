@@ -45,6 +45,35 @@ describe("FollowUpSubmitCoordinator", () => {
     expect(notifyFailure).not.toHaveBeenCalled();
   });
 
+  it("preserves the HTML annotation payload while stopping an active run", async () => {
+    let generating = true;
+    const submit = vi.fn(async () => {});
+    const coordinator = new FollowUpSubmitCoordinator({
+      stop: vi.fn(async () => {
+        generating = false;
+      }),
+      submit,
+      isGenerating: async () => generating,
+      restoreInput: vi.fn(),
+      notifyFailure: vi.fn(),
+      sleepMs: vi.fn(async () => {}),
+    });
+    const annotationSubmission = {
+      query: "处理页面批注",
+      fileList: [],
+      biz_params: {
+        document_annotations: {
+          schema_version: 1,
+          source: { attachment_url: "/source.html" },
+        },
+      },
+    };
+
+    await coordinator.enqueue(annotationSubmission);
+
+    expect(submit).toHaveBeenCalledWith(annotationSubmission);
+  });
+
   it("keeps only the latest pending follow-up message while stop is in progress", async () => {
     let generating = true;
     let releaseStop: (() => void) | null = null;
@@ -87,7 +116,9 @@ describe("FollowUpSubmitCoordinator", () => {
     const restoreInput = vi.fn();
     const notifyFailure = vi.fn();
     const sleepMs = vi.fn(async () => {});
-    const fileList = [{ uid: "1", name: "demo.txt", response: { url: "/demo" } }];
+    const fileList = [
+      { uid: "1", name: "demo.txt", response: { url: "/demo" } },
+    ];
     const biz_params = {
       user_prompt_params: {
         source: "follow-up",

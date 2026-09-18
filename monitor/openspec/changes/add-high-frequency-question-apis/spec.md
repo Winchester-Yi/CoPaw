@@ -25,13 +25,11 @@ Returns source user messages for offline high-frequency question analysis.
 - The database query MUST use parameter binding.
 - The query MUST read from `swe_tracing_traces`.
 - The query MUST use these fields:
-  - `trace_id` as `message_id`
   - `source_id`
   - `user_id`
-  - `session_id`
   - `bbk_id`
   - `user_message` as `content`
-  - `start_time` as `message_time`
+  - `skills_used`
   - `status`
 - The query MUST filter:
   - `source_id = request.source_id`
@@ -44,6 +42,9 @@ Returns source user messages for offline high-frequency question analysis.
   - `TRIM(user_message)` not in the configured meaningless-text blacklist
   - optional `bbk_id = request.bbk_id`
 - Results MUST be ordered by `start_time ASC, trace_id ASC`.
+- The response MUST include `message_count` as the returned message row count.
+- The response MUST include `user_count` as the count of distinct non-empty
+  `user_id` values in the returned rows.
 - The endpoint MUST return an explicit error if more than 10000 messages match.
 - Logs MUST NOT include full `user_message` content.
 
@@ -52,14 +53,14 @@ Returns source user messages for offline high-frequency question analysis.
 ```json
 {
   "total": 4000,
+  "message_count": 4000,
+  "user_count": 210,
   "data": [
     {
-      "message_id": "trace-001",
       "user_id": "136807",
-      "session_id": "session-001",
       "bbk_id": "110",
       "content": "帮我查询这个客户目前有哪些保险产品",
-      "message_time": "2026-07-29 10:20:00"
+      "skills_used": ["客户分析"]
     }
   ]
 }
@@ -83,8 +84,21 @@ Saves a complete AI-generated high-frequency question result batch.
       "rank_no": 1,
       "topic_name": "查询客户保险持仓",
       "message_count": 520,
-      "user_count": 210,
       "valid_message_count": 4000,
+      "user_count": 1200,
+      "total_skill_used_count": 2600,
+      "skill_used_count": 380,
+      "top_skill": "保险助手",
+      "bbk_dis": [
+        {
+          "bbk_id": 110,
+          "count": 300
+        },
+        {
+          "bbk_id": 121,
+          "count": 220
+        }
+      ],
       "sample_questions": [
         "查询客户目前有哪些保险产品"
       ]
@@ -104,7 +118,10 @@ Saves a complete AI-generated high-frequency question result batch.
 - `topic_name` MUST be non-empty after trimming.
 - Counts MUST be non-negative.
 - `message_count` MUST NOT exceed `valid_message_count`.
-- `user_count` MUST NOT exceed `message_count`.
+- `total_skill_used_count` MUST NOT exceed `valid_message_count`.
+- `skill_used_count` MUST NOT exceed `message_count`.
+- `valid_message_count`, `user_count`, and `total_skill_used_count` MUST be
+  consistent across all rows in the same request batch.
 - `sample_questions` MUST contain at most 4 items.
 - Each `sample_questions` item MUST be at most 1000 characters.
 - A single request MUST NOT contain duplicate `batch_id + scope_type + bbk_id + rank_no`.

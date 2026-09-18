@@ -302,10 +302,10 @@ def test_batch_enqueue_preserves_terminal_intents() -> None:
         CronDispatchIntentService.enqueue_batch_execution_intents,
     )
 
-    assert (
-        "status IN ('claimed', 'acknowledged', 'dispatched', 'completed', "
-        "'failed', 'cancelled')"
-    ) in source
+    duplicate_update = source.split("ON DUPLICATE KEY UPDATE", 1)[1].split(
+        '"""', 1
+    )[0]
+    assert duplicate_update.strip() == "id = LAST_INSERT_ID(id)"
     claim_source = inspect.getsource(
         CronDispatchIntentService._claimable_intent_ids_for_batch,
     )
@@ -380,7 +380,11 @@ async def test_stale_dispatch_requeues_retryable_and_fails_exhausted(
             executed.append((" ".join(str(sql).split()), tuple(params)))
 
         async def fetchall(self):
-            return stale_rows
+            return (
+                []
+                if executed[-1][0].startswith("SELECT id,batch_id")
+                else stale_rows
+            )
 
     class _Connection:
         async def begin(self):

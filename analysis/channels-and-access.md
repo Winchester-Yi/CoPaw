@@ -47,6 +47,9 @@
 `button_click`；`template_type` 区分 `main` 主模板与 `sub` 子模板，
 `template_id/result_id` 标识本条事件实际关联的模板和生成结果。模块通过
 `event_target_id/name` 标识，`trace_id` 串联生成与浏览链路。
+`page_source` 和 `platform_source` 分别记录打开 HTML 的页面与平台来源，
+两者均为最长 50 字符的可选维度；Console 从 iframe 上下文中的
+`pageSource/platformSource` 映射后上报。
 旧版按钮、名单和客户统计只聚合
 `button_click`，避免曝光事件污染原有点击口径。旧客户端查询事件明细时
 若不传 `event_type`，也只返回 `button_click`，保持原接口语义。

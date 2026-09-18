@@ -56,18 +56,18 @@ class HighFrequencyQuestionMessageQueryRequest(BaseModel):
 class HighFrequencyQuestionMessageResponse(BaseModel):
     """Single source message returned for analysis."""
 
-    message_id: str
     user_id: Optional[str] = None
-    session_id: Optional[str] = None
     bbk_id: Optional[str] = None
     content: str
-    message_time: datetime
+    skills_used: list[str] = Field(default_factory=list)
 
 
 class HighFrequencyQuestionMessageListResponse(BaseModel):
     """Message query response."""
 
     total: int
+    message_count: int
+    user_count: int
     data: list[HighFrequencyQuestionMessageResponse] = Field(
         default_factory=list,
     )
@@ -82,7 +82,11 @@ class HighFrequencyQuestionResultItem(BaseModel):
     topic_name: str = Field(..., min_length=1, max_length=255)
     message_count: int = Field(..., ge=0)
     valid_message_count: int = Field(..., ge=0)
-    bbk_dis: dict[str, Any] = Field(default_factory=dict)
+    user_count: int = Field(..., ge=0)
+    total_skill_used_count: int = Field(..., ge=0)
+    skill_used_count: int = Field(..., ge=0)
+    top_skill: Optional[str] = Field(default=None, max_length=255)
+    bbk_dis: Any = Field(default_factory=dict)
     sample_questions: list[str] = Field(default_factory=list)
 
     @field_validator("bbk_id", "topic_name")
@@ -111,6 +115,11 @@ class HighFrequencyQuestionResultItem(BaseModel):
             normalized.append(stripped)
         return normalized
 
+    @field_validator("top_skill")
+    @classmethod
+    def _strip_top_skill(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_optional(value)
+
     @model_validator(mode="after")
     def _validate_result_item(self) -> "HighFrequencyQuestionResultItem":
         if self.scope_type == "ALL" and self.bbk_id != "ALL":
@@ -121,6 +130,12 @@ class HighFrequencyQuestionResultItem(BaseModel):
             raise ValueError(
                 "message_count must not exceed valid_message_count",
             )
+        if self.total_skill_used_count > self.valid_message_count:
+            raise ValueError(
+                "total_skill_used_count must not exceed valid_message_count",
+            )
+        if self.skill_used_count > self.message_count:
+            raise ValueError("skill_used_count must not exceed message_count")
         return self
 
 
@@ -159,6 +174,7 @@ class HighFrequencyQuestionResultSaveRequest(BaseModel):
             )
 
         seen: set[tuple[str, str, str, str, int]] = set()
+        batch_counts: tuple[int, int, int] | None = None
         for result in self.results:
             key = (
                 self.source_id,
@@ -172,6 +188,18 @@ class HighFrequencyQuestionResultSaveRequest(BaseModel):
                     "duplicate source_id + batch_id + scope_type + bbk_id + rank_no",
                 )
             seen.add(key)
+            current_counts = (
+                result.valid_message_count,
+                result.user_count,
+                result.total_skill_used_count,
+            )
+            if batch_counts is None:
+                batch_counts = current_counts
+            elif current_counts != batch_counts:
+                raise ValueError(
+                    "valid_message_count, user_count, and total_skill_used_count "
+                    "must be consistent within the same batch",
+                )
         return self
 
 
@@ -258,6 +286,26 @@ class HighFrequencyQuestionPrewarmRequest(BaseModel):
         return self
 
 
+class HighFrequencyQuestionScheduledTaskRequest(BaseModel):
+    """Body-only request for scheduler-driven high-frequency question tasks."""
+
+    source_id: str = Field(..., min_length=1, max_length=64)
+    bbk_id: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("source_id")
+    @classmethod
+    def _strip_required_source_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("source_id must not be blank")
+        return stripped
+
+    @field_validator("bbk_id")
+    @classmethod
+    def _strip_optional_bbk_id(cls, value: Optional[str]) -> Optional[str]:
+        return _strip_optional(value)
+
+
 class HighFrequencyQuestionTopic(BaseModel):
     """Single high-frequency question topic returned to frontend."""
 
@@ -265,6 +313,8 @@ class HighFrequencyQuestionTopic(BaseModel):
     topic_name: str
     message_count: int
     valid_message_count: int
+    skill_used_count: int = 0
+    top_skill: Optional[str] = None
     bbk_dis: dict[str, Any] = Field(default_factory=dict)
     sample_questions: list[str] = Field(default_factory=list)
 
@@ -282,6 +332,11 @@ class HighFrequencyQuestionResultQueryResponse(BaseModel):
     scope_type: Optional[Literal["ALL", "ORG"]] = None
     bbk_id: Optional[str] = None
     result_updated_at: Optional[datetime] = None
+    message_count: int = 0
+    user_count: int = 0
+    total_skill_used_count: int = 0
+    topic_count: int = 0
+    skill_gap_topic_count: int = 0
     topics: list[HighFrequencyQuestionTopic] = Field(default_factory=list)
     message: Optional[str] = None
 

@@ -16,6 +16,7 @@ from ..models.high_frequency_question import (
     HighFrequencyQuestionResultQueryResponse,
     HighFrequencyQuestionResultSaveRequest,
     HighFrequencyQuestionResultSaveResponse,
+    HighFrequencyQuestionScheduledTaskRequest,
     HighFrequencyQuestionTaskSubmitRequest,
     HighFrequencyQuestionTaskSubmitResponse,
 )
@@ -143,6 +144,25 @@ async def prewarm_high_frequency_question_task(
         )
         service = HighFrequencyQuestionService.get_instance()
         return await service.submit_prewarm(resolved_body)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not available",
+        ) from exc
+
+
+@router.post(
+    "/scheduled-tasks",
+    response_model=HighFrequencyQuestionTaskSubmitResponse,
+    summary="提交调度平台高频问题分析任务",
+)
+async def submit_scheduled_high_frequency_question_task(
+    body: HighFrequencyQuestionScheduledTaskRequest,
+) -> HighFrequencyQuestionTaskSubmitResponse:
+    """Submit a body-only scheduler task without requiring custom headers."""
+    try:
+        service = HighFrequencyQuestionService.get_instance()
+        return await service.submit_scheduled_task(body)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,

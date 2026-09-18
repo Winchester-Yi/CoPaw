@@ -5494,6 +5494,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         query_text: Optional[str] = None,
         export: bool = False,
         bbk_ids: Optional[str] = None,
+        exclude_cron_task_sessions: bool = False,
     ) -> tuple[list[UserMessageItem], int]:
         """获取用户消息列表."""
         if start_date is None:
@@ -5521,6 +5522,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         if session_id:
             where_clauses.append("session_id = %s")
             params.append(session_id)
+        if exclude_cron_task_sessions:
+            where_clauses.append("(session_id IS NULL OR session_id NOT LIKE %s)")
+            params.append("cron-task%")
         if query_text:
             where_clauses.append("user_message LIKE %s")
             params.append(f"%{query_text}%")

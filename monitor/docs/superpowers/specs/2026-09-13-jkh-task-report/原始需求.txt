@@ -1,0 +1,308 @@
+分支行维度：
+
+字段1:task_type 任务类型
+推送(名单+方案)
+sql逻辑
+select '推送(名单+方案)' as task_type
+from swe_cron_executions e
+join swe_cron_subtasks s
+on e.trace_id = s.trace_id
+
+主动提问(名单+方案)
+sql逻辑
+select '主动提问(名单+方案)' as task_type
+from swe_tracing_spans sp
+join swe_cron_subtasks s
+on sp.trace_id = s.trace_id
+left join swe_cron_executions e
+sp.trace_id = e.trace_id
+where sp.skill_id is not null
+and sp.skill_id <> ''
+and e.trace_id is null
+
+
+推送(非名单方案)
+sql逻辑
+select '推送(非名单方案)' as task_type
+from swe_cron_executions e
+left join swe_cron_subtasks s
+on e.trace_id = s.trace_id
+where s.trace_id is null
+and e.status = 'success'
+and e.async_status = 'sucess'
+
+
+字段2:skill_count 技能总数
+sql逻辑
+SELECT COUNT(DISTINCT s.skill_id) AS skill_count
+FROM swe_cron_executions e
+JOIN swe_cron_jobs j
+  ON e.job_id = j.id
+JOIN (
+    SELECT
+        source_id,
+        skill_id,
+        MIN(cn_name) AS cn_name,
+        MIN(skill_name) AS skill_name
+    FROM swe_marketplace_skills
+    WHERE include_in_statistics = 1
+      AND skill_id IS NOT NULL
+      AND skill_id != ''
+    GROUP BY source_id, skill_id
+) s
+  ON FIND_IN_SET(s.skill_id, j.skill_ids)
+ AND s.source_id = j.source_id
+WHERE j.deleted_at IS NULL
+  AND j.status <> 'deleted'
+
+字段3：有权限客户经理数人数 permission_manager_count
+sql逻辑
+select
+count(distinct tenant_id) as permission_manager_count
+swe_tenant_init_source s
+join jkh_user_inf jkh
+on s.tenant_id = jkh.user_id
+where jkh.sync_date = {sync_date}
+
+字段4:当前活跃客户经理人数（任务正常推送） active_manager_count
+sql逻辑
+select count(distinct tenant_id) as active_manager_count
+from swe_cron_jobs j
+join jkh_user_inf jkh
+on s.tenant_id = jkh.user_id
+where j.status = 'active'
+and jkh.sync_date = {sync_date}
+
+
+字段5:成功执行任务数 suc_execute_job
+task_type = '推送(名单+方案)'  or  '推送(非名单方案) '
+sql逻辑
+select count(*) as suc_execute_job
+from swe_cron_executions e
+where e.status = 'success'
+and e.async_status = 'sucess'
+
+
+task_type = '主动(名单+方案)'
+sql逻辑
+select count(*) as suc_execute_job
+from swe_tracing_spans sp
+left join swe_cron_executions e
+sp.trace_id = e.trace_id
+where sp.skill_id is not null
+and sp.skill_id <> ''
+and e.trace_id is null
+and has_error = 0
+
+
+字段6:被客户经理实际查看的客户数 read_tasks
+task_type = '推送(名单+方案)'
+sql逻辑
+select count(*) as read_tasks
+from swe_cron_executions e
+where is_read = 1
+
+
+task_type = '主动(名单+方案)'
+sql逻辑
+?
+
+
+
+
+字段7:任务查看率 read_rate
+字段6/字段5 百分比
+
+字段8:任务中的客户级方案数
+task_type = '推送(名单+方案)'
+SELECT COUNT(DISTINCT s.custuid) AS recommended_customers
+FROM swe_cron_executions e
+JOIN swe_cron_jobs j
+  ON e.job_id = j.id
+JOIN swe_cron_subtasks s
+  ON e.trace_id = s.trace_id
+WHERE s.custuid IS NOT NULL
+  AND EXISTS (
+      SELECT 1
+      FROM swe_marketplace_skills stat_skill
+      WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+        AND stat_skill.source_id = j.source_id
+        AND stat_skill.include_in_statistics = 1
+  )
+
+task_type = '主动(名单+方案)'
+SELECT COUNT(DISTINCT s.custuid) AS recommended_customers
+from swe_tracing_spans sp
+join swe_cron_subtasks s
+on sp.trace_id = s.trace_id
+left join swe_cron_executions e
+sp.trace_id = e.trace_id
+where sp.skill_id is not null
+and sp.skill_id <> ''
+and e.trace_id is null
+
+字段9：被查看的客户级方案数  read_customer_count
+task_type = '推送(名单+方案)'
+SELECT
+    COUNT(DISTINCT c.customer_id) AS read_customer_count
+FROM swe_html_preview_click_events c
+JOIN swe_cron_jobs j
+  ON c.cron_task_id = j.id
+JOIN swe_cron_executions e
+on c.trace_id = e.trace_id
+WHERE c.customer_id IS NOT NULL
+  AND c.event_type = 'preview_view'
+   AND c.template_type = 'sub'
+  AND j.deleted_at IS NULL
+  AND j.status != 'deleted'
+  AND EXISTS (
+      SELECT 1
+      FROM swe_marketplace_skills stat_skill
+      WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+        AND stat_skill.source_id = j.source_id
+        AND stat_skill.include_in_statistics = 1
+  )
+
+task_type = '主动(名单+方案)'
+  SELECT
+      COUNT(DISTINCT c.customer_id) AS read_customer_count
+  FROM swe_html_preview_click_events c
+  JOIN swe_cron_jobs j
+    ON c.cron_task_id = j.id
+    LEFT JOIN swe_cron_executions e
+    on c.trace_id = e.trace_id
+  WHERE e.trace_id is null
+    AND c.customer_id IS NOT NULL
+    AND c.event_type = 'preview_view'
+     AND c.template_type = 'sub'
+    AND j.deleted_at IS NULL
+    AND j.status != 'deleted'
+    AND EXISTS (
+        SELECT 1
+        FROM swe_marketplace_skills stat_skill
+        WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+          AND stat_skill.source_id = j.source_id
+          AND stat_skill.include_in_statistics = 1
+    )
+
+
+字段10:客户级方案查看率 plan_read_rate
+字段9/字段8 百分比
+
+
+
+字段11:点击跳转客户洞察的客户数  insight_customer_count
+task_type = '推送(名单+方案)'
+SELECT
+    COUNT(DISTINCT c.customer_id) AS insight_customer_count
+FROM swe_html_preview_click_events c
+JOIN swe_cron_jobs j
+  ON c.cron_task_id = j.id
+JOIN swe_cron_executions e
+on c.trace_id = e.trace_id
+WHERE c.customer_id IS NOT NULL
+  AND c.event_type = 'button_click'
+          AND c.button_type = 'insight'
+  AND j.deleted_at IS NULL
+  AND j.status != 'deleted'
+  AND EXISTS (
+      SELECT 1
+      FROM swe_marketplace_skills stat_skill
+      WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+        AND stat_skill.source_id = j.source_id
+        AND stat_skill.include_in_statistics = 1
+  )
+
+task_type = '主动(名单+方案)'
+  SELECT
+      COUNT(DISTINCT c.customer_id) AS insight_customer_count
+  FROM swe_html_preview_click_events c
+  JOIN swe_cron_jobs j
+    ON c.cron_task_id = j.id
+    LEFT JOIN swe_cron_executions e
+    on c.trace_id = e.trace_id
+  WHERE e.trace_id is null
+    AND c.customer_id IS NOT NULL
+    AND c.event_type = 'button_click'
+    AND c.button_type = 'insight'
+    AND j.deleted_at IS NULL
+    AND j.status != 'deleted'
+    AND EXISTS (
+        SELECT 1
+        FROM swe_marketplace_skills stat_skill
+        WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+          AND stat_skill.source_id = j.source_id
+          AND stat_skill.include_in_statistics = 1
+    )
+
+字段12:点击跳转客户洞察的客户覆盖率 click_to_insight_rate
+字段11/字段8 百分比
+
+字段13:点击跳转电访的客户数  phone_customer_count
+task_type = '推送(名单+方案)'
+SELECT
+    COUNT(DISTINCT c.customer_id) AS phone_customer_count
+FROM swe_html_preview_click_events c
+JOIN swe_cron_jobs j
+  ON c.cron_task_id = j.id
+JOIN swe_cron_executions e
+on c.trace_id = e.trace_id
+WHERE c.customer_id IS NOT NULL
+  AND c.event_type = 'button_click'
+          AND c.button_type = 'phone'
+  AND j.deleted_at IS NULL
+  AND j.status != 'deleted'
+  AND EXISTS (
+      SELECT 1
+      FROM swe_marketplace_skills stat_skill
+      WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+        AND stat_skill.source_id = j.source_id
+        AND stat_skill.include_in_statistics = 1
+  )
+
+task_type = '主动(名单+方案)'
+  SELECT
+      COUNT(DISTINCT c.customer_id) AS phone_customer_count
+  FROM swe_html_preview_click_events c
+  JOIN swe_cron_jobs j
+    ON c.cron_task_id = j.id
+    LEFT JOIN swe_cron_executions e
+    on c.trace_id = e.trace_id
+  WHERE e.trace_id is null
+    AND c.customer_id IS NOT NULL
+    AND c.event_type = 'button_click'
+    AND c.button_type = 'phone'
+    AND j.deleted_at IS NULL
+    AND j.status != 'deleted'
+    AND EXISTS (
+        SELECT 1
+        FROM swe_marketplace_skills stat_skill
+        WHERE FIND_IN_SET(stat_skill.skill_id, j.skill_ids)
+          AND stat_skill.source_id = j.source_id
+          AND stat_skill.include_in_statistics = 1
+    )
+
+字段14:点击跳转客户洞察的客户覆盖率 click_to_insight_rate
+字段13/字段8 百分比
+
+
+最终报表效果
+
+根据字段1任务类型作为维度字段，分为3个维度视角下的数据
+
+其中，除了字段3是不受任务类型 影响，其余剩下的字段的值都是受到任务类型字段影响的
+
+特殊情况
+1.主动提问的任务类型，不需要计算活跃客户经理人数
+2.推送非名单方案任务类型，不需要计算字段8及后续的所有字段
+3.所有的报表指标，都需要匹配在jkh_user_inf表的客户经理，具体逻辑参看项目代码
+self._resolve_jkh_sync_date(db, end_time)
+self._build_jkh_filter
+4.报表还需要支持 jkh_user_inf的 first_bbk_id(分行号) + 任务类型字段 或者 org_id(支行号) + 任务类型字段进行group by
+5.报表筛选条件
+5.1需要支持时间筛选 swe_cron_executions.actual_time/ swe_html_preview_click_events.clicked_at 涉及这两个时间字段
+5.2 分行名称or支行名称  jkh_user_inf的first_bbk_name / jkh_user_inf的org_name ，转换为对应的first_bbk_id/org_id 查询
+
+任务：
+1.请帮我根据这些sql逻辑及需求，生成查询接口
+2.将能合并的sql尽可能合并sql，但是也要考虑到这些底表都是tdsql表，要考虑慢查询问题。

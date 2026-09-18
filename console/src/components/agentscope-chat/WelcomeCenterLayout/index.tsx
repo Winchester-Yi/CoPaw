@@ -16,7 +16,7 @@ import {
 } from "@/components/agentscope-chat";
 import { chatApi } from "@/api/modules/chat";
 import Style from "./style";
-import DictationControl from "../DictationControl";
+// import DictationControl from "../DictationControl";
 import dictationStyles from "../DictationControl/index.module.less";
 import FeaturedCases from "../FeaturedCases";
 import CaseDetailDrawer from "../CaseDetailDrawer";
@@ -99,7 +99,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [dictating, setDictating] = useState(false);
+  // const [dictating, setDictating] = useState(false);
+  const dictating = false;
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [selectedCase, setSelectedCase] = useState<FeaturedCase | null>(null);
   const [randomPlaceholder, setRandomPlaceholder] = useState("");
@@ -525,6 +526,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
                   </div>
                 )}
                 {!dictating && <span className={dictationStyles.prefix} />}
+                {/* 临时屏蔽语音输入 UI，保留控件实现以便后续重新开放。
                 <DictationControl
                   disabled={
                     inputDisabled || isSubmitting || voiceRecorder?.recording
@@ -535,7 +537,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
                       appendChatInputText(inputValueRef.current, text),
                     )
                   }
-                />
+                /> */}
                 <button
                   className={`welcome-input-send-btn ${dictationStyles.send}`}
                   onClick={handleSend}

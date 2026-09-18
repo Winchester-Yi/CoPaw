@@ -25,6 +25,23 @@ from scheduler.app.services.cron.scheduling_service import (
 
 
 class _DispatchStore:
+
+    async def prepare_handoff(self, row, worker_id, now_utc):
+        return "ready"
+
+    async def create_batch_with_intents(
+        self, *, batch, jobs, due_at, scheduled_fire_at
+    ):
+        await self.upsert_dispatch_batch(**batch)
+        ids = await self.enqueue_batch_execution_intents(
+            batch_id=batch["batch_id"],
+            parent_job_id=batch["parent_job_id"],
+            jobs=jobs,
+            due_at=due_at,
+            scheduled_fire_at=scheduled_fire_at,
+        )
+        return {"intent_ids": ids}
+
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = list(rows)
         self.claims: list[dict[str, Any]] = []
@@ -172,21 +189,17 @@ class _CallbackClient:
             raise RuntimeError("callback failed")
 
 
-def test_swe_callback_client_prefers_swe_internal_token(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("SWE_INTERNAL_TOKEN", "swe-token")
-    monkeypatch.setenv("SCHEDULER_SWE_INTERNAL_TOKEN", "scheduler-token")
-
-    client = SweCronCallbackClient(base_url="http://swe.local")
-
-    assert client._internal_token == "swe-token"
-
-
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tokens_configured", [False, True])
 async def test_swe_callback_client_forwards_passthrough_headers(
     monkeypatch,
+    tokens_configured,
 ) -> None:
+    for name in ("SWE_INTERNAL_TOKEN", "SCHEDULER_SWE_INTERNAL_TOKEN"):
+        if tokens_configured:
+            monkeypatch.setenv(name, "configured-but-unused")
+        else:
+            monkeypatch.delenv(name, raising=False)
     requests: list[dict[str, Any]] = []
 
     class _Response:
@@ -208,10 +221,7 @@ async def test_swe_callback_client_forwards_passthrough_headers(
             return _Response()
 
     monkeypatch.setattr(service_module.httpx, "AsyncClient", _AsyncClient)
-    client = SweCronCallbackClient(
-        base_url="http://fallback-swe.local",
-        internal_token="scheduler-token",
-    )
+    client = SweCronCallbackClient(base_url="http://fallback-swe.local")
 
     await client.dispatch_job(
         tenant_id="tenant-a",
@@ -234,7 +244,6 @@ async def test_swe_callback_client_forwards_passthrough_headers(
     assert requests[0]["headers"] == {
         "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
         "X-B3-Spanid": "32befd146889a61a",
-        "X-Internal-Token": "Bearer scheduler-token",
     }
     assert requests[0]["url"] == "http://swe.local/api/internal/cron/callback"
     assert requests[0]["json"]["scopeId"] == "tenant-a-source-a"

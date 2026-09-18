@@ -425,6 +425,9 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 "/api/runtime/memory-diagnostic",
                 "/api/runtime/memory-type-holders",
                 "/api/runtime/inotify-diagnostic",
+                # Read-only jobs list; identity/auth checks still apply.
+                "/api/external/cron/jobs",
+                "/api/external/cron/jobs/",
                 "/docs",
                 "/redoc",
                 "/openapi.json",

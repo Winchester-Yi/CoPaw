@@ -1,0 +1,7 @@
+{
+  "applied_annotation_ids": ["ann-001"],
+  "unresolved_annotation_ids": ["ann-runtime"],
+  "unresolved_reasons": {
+    "ann-runtime": "无法将运行时节点安全映射到源代码生成器"
+  }
+}

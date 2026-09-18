@@ -17,6 +17,8 @@ export interface HtmlPreviewClickMetadata {
   rootTemplateId?: string | null;
   rootResultId?: string | null;
   templateType?: 'sub' | 'main' | null;
+  pageSource?: string;
+  platformSource?: string;
 }
 
 export type HtmlPreviewClickReporter = (
@@ -343,6 +345,8 @@ export function buildHtmlPreviewClickPayload(
     result_id: metadata.resultId || null,
     event_type: "button_click",
     template_type: metadata.templateType || template_type,
+    page_source: metadata.pageSource || 'default',
+    platform_source: metadata.platformSource || 'default',
   };
 }
 
@@ -569,6 +573,8 @@ export function buildHtmlPreviewExposurePayload(
     event_target_id: metadata.sectionId || null,
     event_target_name: metadata.sectionName || null,
     template_type: metadata.templateType || template_type,
+    page_source: metadata.pageSource || 'default',
+    platform_source: metadata.platformSource || 'default',
   };
 }
 
@@ -686,6 +692,8 @@ export function buildHtmlPreviewLoadPayload(
     template_id: metadata.templateId ? parseInt(metadata.templateId, 10) : null,
     result_id: metadata.resultId || null,
     template_type: metadata.templateType || template_type,
+    page_source: metadata.pageSource || 'default',
+    platform_source: metadata.platformSource || 'default',
   };
 }
 
