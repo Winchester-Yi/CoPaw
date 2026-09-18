@@ -54,6 +54,7 @@ from ...marketplace.version_service import SkillVersionService
 from ...security import SkillScanError
 from ..async_tasks import AsyncTaskStore
 from ..deps import decode_user_name, require_source_id
+from ...utils.logging_utils import log_params
 from .skills_browse import (
     _decode_zip_filename,
     _extract_zip_skills,
@@ -835,6 +836,19 @@ async def publish_skill_upload(
 
     svc = request.app.state.marketplace
     user_name = decode_user_name(x_user_name) or x_user_id
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        category_id=category_id,
+        overwrite=overwrite,
+        cn_name=cn_name,
+        skill_id=skill_id,
+        bbk_ids=bbk_ids,
+        include_in_statistics=include_in_statistics,
+        file_size=file.size,
+    )
 
     # 解析 bbk_ids（逗号分隔）
     parsed_bbk_ids = []
@@ -1793,22 +1807,25 @@ async def get_skill_distributions(
 
 
 class _UpdateSkillRequest(BaseModel):
-    """更新技能中文名请求体."""
+    """更新技能市场元数据请求体."""
 
     skill_id: str
     chinese_name: str
+    category_id: int | None = None
+    bbk_ids: list[str] | None = None
     sync_to_users: bool = False
     target_user_ids: list[str] = Field(default_factory=list)
 
 
 class _UpdateSkillResponse(BaseModel):
-    """更新技能中文名响应体."""
+    """更新技能市场元数据响应体."""
 
     success: bool
     market_updated: bool
     synced_users: int
     skipped_users: int
     errors: list[dict]
+    synced_category_users: int = 0
 
 
 @router.patch("/market/skills/{item_id}")
@@ -1819,7 +1836,7 @@ async def update_skill_cn_name(
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
 ):
-    """更新市场技能中文名，可选同步用户空间."""
+    """更新市场技能元数据，可选同步用户空间名称和分类."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
@@ -1833,12 +1850,18 @@ async def update_skill_cn_name(
     if item is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    result = await svc.update_skill_cn_name(
+    result = await svc.update_skill_metadata(
         source_id=source_id,
         item_id=item_id,
         skill_id=req.skill_id,
         skill_name=item.name,
         chinese_name=req.chinese_name,
+        category_id=(
+            req.category_id
+            if req.category_id is not None
+            else item.category_id
+        ),
+        bbk_ids=req.bbk_ids if req.bbk_ids is not None else item.bbk_ids,
         sync_to_users=req.sync_to_users,
         target_user_ids=req.target_user_ids,
     )
@@ -2222,6 +2245,145 @@ async def init_market_skills(
     )
 
     return results
+
+
+class _InitMissingSkillFieldsRequest(BaseModel):
+    """初始化缺失分类和分行请求参数."""
+
+    source_id: str = Field(..., description="来源ID")
+    category_id: int = Field(..., description="要设置的分类ID")
+    bbk_ids: list[str] = Field(
+        default_factory=list,
+        description="要设置的分行ID列表，默认为 ['100']",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="试运行模式，仅预览不实际写入",
+    )
+
+
+class _SkillMissingFieldsItem(BaseModel):
+    """缺失字段的技能条目."""
+
+    item_id: str
+    name: str
+    chinese_name: str
+    category_id: int | None
+    bbk_ids: list[str]
+    missing_category: bool
+    missing_bbk: bool
+
+
+class _InitMissingSkillFieldsResult(BaseModel):
+    """初始化缺失分类和分行返回结果."""
+
+    dry_run: bool
+    source_id: str
+    category_id: int
+    bbk_ids: list[str]
+    total_skills: int
+    missing_category_count: int
+    missing_bbk_count: int
+    skills: list[_SkillMissingFieldsItem]
+
+
+@router.post(
+    "/market/skills/init-missing-fields",
+    response_model=_InitMissingSkillFieldsResult,
+)
+async def init_missing_skill_fields(
+    request: Request,
+    payload: _InitMissingSkillFieldsRequest,
+):
+    """初始化缺失分类和分行的技能.
+
+    扫描 index.json 中 category_id 为空或 bbk_ids 为空的技能，
+    预览或更新这些技能的 category_id 和 bbk_ids。
+
+    Args:
+        payload.source_id: 来源ID
+        payload.category_id: 要设置的分类ID
+        payload.bbk_ids: 要设置的分行ID列表，默认为 ["100"]
+        payload.dry_run: 试运行模式，仅预览不实际写入
+    """
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        source_id=payload.source_id,
+        category_id=payload.category_id,
+        bbk_ids=payload.bbk_ids,
+        dry_run=payload.dry_run,
+    )
+
+    svc = request.app.state.marketplace
+    items = load_index(svc.marketplace_root, payload.source_id)
+
+    # 默认分行为 ["100"]（总行）
+    bbk_ids_to_set = payload.bbk_ids if payload.bbk_ids else ["100"]
+
+    skills: list[_SkillMissingFieldsItem] = []
+    missing_category_count = 0
+    missing_bbk_count = 0
+
+    for item in items:
+        if item.item_type != "skill":
+            continue
+
+        missing_category = item.category_id is None
+        missing_bbk = not item.bbk_ids
+
+        if missing_category or missing_bbk:
+            skills.append(
+                _SkillMissingFieldsItem(
+                    item_id=item.item_id,
+                    name=item.name,
+                    chinese_name=item.chinese_name,
+                    category_id=item.category_id,
+                    bbk_ids=item.bbk_ids,
+                    missing_category=missing_category,
+                    missing_bbk=missing_bbk,
+                ),
+            )
+            if missing_category:
+                missing_category_count += 1
+            if missing_bbk:
+                missing_bbk_count += 1
+
+    # 非 dry_run 模式：实际更新
+    if not payload.dry_run:
+        for item in items:
+            if item.item_type != "skill":
+                continue
+            if item.category_id is None:
+                item.category_id = payload.category_id
+            if not item.bbk_ids:
+                item.bbk_ids = bbk_ids_to_set.copy()
+            item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(svc.marketplace_root, payload.source_id, items)
+
+    logger.info(
+        "初始化缺失字段完成: dry_run=%s, source_id=%s, category_id=%s, "
+        "bbk_ids=%s, total_skills=%d, missing_category=%d, missing_bbk=%d",
+        payload.dry_run,
+        payload.source_id,
+        payload.category_id,
+        bbk_ids_to_set,
+        len(skills),
+        missing_category_count,
+        missing_bbk_count,
+    )
+
+    return _InitMissingSkillFieldsResult(
+        dry_run=payload.dry_run,
+        source_id=payload.source_id,
+        category_id=payload.category_id,
+        bbk_ids=bbk_ids_to_set,
+        total_skills=len(skills),
+        missing_category_count=missing_category_count,
+        missing_bbk_count=missing_bbk_count,
+        skills=skills,
+    )
 
 
 @router.post(

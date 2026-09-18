@@ -173,7 +173,7 @@ class MySkillItem(BaseModel):
     updated_at: Optional[str] = None  # 技能最后更新时间
     # 新增字段
     skill_id: str = ""  # 唯一标识符，跨租户共享
-    cn_name: str = Field(default="", max_length=50)  # 中文展示名
+    cn_name: str = Field(default="", max_length=256)  # 中文展示名
 
 
 class BatchOperationRequest(BaseModel):
@@ -516,3 +516,46 @@ class SkillQueryResponse(BaseModel):
     )
     total_requested: int = Field(description="请求查询的技能数量")
     total_found: int = Field(description="找到的技能数量")
+
+
+class BranchCount(BaseModel):
+    """分行计数."""
+
+    bbk_id: str = Field(description="分行 ID")
+    skill_count: int = Field(description="技能数量")
+    mcp_count: int = Field(description="MCP 数量")
+    total_unique_skill_count: int = Field(description="唯一技能总数（去重）")
+    total_unique_mcp_count: int = Field(description="唯一MCP总数（去重）")
+
+
+class BranchCountsResponse(BaseModel):
+    """分行列表及计数响应."""
+
+    branches: list[BranchCount] = Field(description="分行列表及计数")
+
+
+class MarketBrowseCategory(BaseModel):
+    """统一市场浏览的分类 facet."""
+
+    id: int
+    name: str
+    count: int = 0
+
+
+class MarketBrowseBranch(BaseModel):
+    """统一市场浏览的分行 facet."""
+
+    bbk_id: str
+    count: int = 0
+
+
+class MarketBrowseResponse(BaseModel):
+    """统一市场浏览结果及两侧 facet 统计."""
+
+    resource_type: str
+    items: list[dict] = Field(default_factory=list)
+    total: int = 0
+    category_total: int = 0
+    branch_total: int = 0
+    categories: list[MarketBrowseCategory] = Field(default_factory=list)
+    branches: list[MarketBrowseBranch] = Field(default_factory=list)

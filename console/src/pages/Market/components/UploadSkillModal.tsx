@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { Modal, Upload, Select, Input, message, Spin, Button, Tooltip, Alert, Popover, Checkbox } from "antd";
-import { InboxOutlined, PlusOutlined, InfoCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
-import type { UploadProps } from "antd";
+import { Modal, Upload, Select, Input, message, Spin, Tooltip, Alert, Popover, Checkbox } from "antd";
+import { InboxOutlined, InfoCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
+import type { UploadFile, UploadProps } from "antd";
 import { marketApi, type Category } from "../../../api/modules/market";
 import { BBK_ID_MAP } from "../../../constants/bbk";
 
@@ -9,7 +9,6 @@ interface UploadSkillModalProps {
   open: boolean;
   onClose: () => void;
   onSuccess: () => void;
-  onCategoryAdded?: () => void;
   sourceId: string;
 }
 
@@ -19,7 +18,6 @@ export default function UploadSkillModal({
   open,
   onClose,
   onSuccess,
-  onCategoryAdded,
   sourceId,
 }: UploadSkillModalProps) {
   const [categories, setCategories] = useState<Category[]>([]);
@@ -36,9 +34,6 @@ export default function UploadSkillModal({
   const [uploading, setUploading] = useState(false);
   const [loadingCategories, setLoadingCategories] = useState(false);
   const [skillExists, setSkillExists] = useState(false);  // 同名技能已存在（允许覆盖）
-  const [addCategoryModalOpen, setAddCategoryModalOpen] = useState(false);
-  const [newCategoryName, setNewCategoryName] = useState("");
-  const [addingCategory, setAddingCategory] = useState(false);
   const [includeInStatistics, setIncludeInStatistics] = useState(false);  // 是否纳入统计，默认不纳入
 
   const loadCategories = async () => {
@@ -98,29 +93,6 @@ export default function UploadSkillModal({
       message.error(errorMsg);
     } finally {
       setParsingZip(false);
-    }
-  };
-
-  const handleAddCategory = async () => {
-    const trimmed = newCategoryName.trim();
-    if (!trimmed) {
-      message.error("请输入分类名称");
-      return;
-    }
-    setAddingCategory(true);
-    try {
-      const newCat = await marketApi.createCategory(sourceId, trimmed);
-      message.success(`分类 "${newCat.name}" 创建成功`);
-      setAddCategoryModalOpen(false);
-      setNewCategoryName("");
-      await loadCategories();
-      setSelectedCategory(newCat.id);
-      onCategoryAdded?.();
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "创建失败";
-      message.error(errorMsg);
-    } finally {
-      setAddingCategory(false);
     }
   };
 
@@ -206,7 +178,15 @@ export default function UploadSkillModal({
       setSkillIdUsedCount(0);
       setSkillIdUsedBy([]);
     },
-    fileList: file ? [file as any] : [],
+    fileList: file
+      ? [
+          {
+            uid: "market-upload",
+            name: file.name,
+            status: "done",
+          } satisfies UploadFile,
+        ]
+      : [],
   };
 
   return (
@@ -278,20 +258,13 @@ export default function UploadSkillModal({
         {loadingCategories ? (
           <Spin size="small" />
         ) : (
-          <div style={{ display: "flex", gap: 8 }}>
-            <Select
-              style={{ flex: 1 }}
-              value={selectedCategory}
-              onChange={setSelectedCategory}
-              placeholder="选择分类"
-              options={categories.map((c) => ({ label: c.name, value: c.id }))}
-            />
-            <Button
-              icon={<PlusOutlined />}
-              onClick={() => setAddCategoryModalOpen(true)}
-              title="新增分类"
-            />
-          </div>
+          <Select
+            style={{ width: "100%" }}
+            value={selectedCategory}
+            onChange={setSelectedCategory}
+            placeholder="选择分类"
+            options={categories.map((c) => ({ label: c.name, value: c.id }))}
+          />
         )}
       </div>
 
@@ -357,29 +330,6 @@ export default function UploadSkillModal({
         </div>
       )}
 
-      {/* 新增分类弹窗 */}
-      <Modal
-        title="新增分类"
-        open={addCategoryModalOpen}
-        onOk={handleAddCategory}
-        onCancel={() => {
-          setAddCategoryModalOpen(false);
-          setNewCategoryName("");
-        }}
-        confirmLoading={addingCategory}
-        okText="创建"
-        cancelText="取消"
-        destroyOnHidden
-      >
-        <Input
-          placeholder="请输入分类名称"
-          value={newCategoryName}
-          onChange={(e) => setNewCategoryName(e.target.value)}
-          onPressEnter={handleAddCategory}
-          maxLength={128}
-          autoFocus
-        />
-      </Modal>
       <div style={{ color: "#8c8c8c", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
         <Popover
           trigger="click"

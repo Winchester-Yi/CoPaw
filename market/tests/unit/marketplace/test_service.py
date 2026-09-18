@@ -941,7 +941,7 @@ async def test_unpublish_skill_sets_inactive(tmp_path):
     )
     item, _ = await svc.publish_skill("src_a", req)
     await svc.unpublish_skill("src_a", item.item_id, "u1", "User One")
-    items = await svc.list_skills("src_a", user_bbk_id="100")
+    items = await svc.list_skills("src_a", user_bbk_id="100", is_manager=False)
     assert all(
         i.status == "inactive" for i in items if i.item_id == item.item_id
     )
@@ -974,16 +974,74 @@ async def test_list_skills_filters_by_explicit_bbk_ids(tmp_path):
     )
     await svc.publish_skill("src_a", req_all)
     await svc.publish_skill("src_a", req_200)
-    # user_bbk_id is compatibility metadata; explicit bbk_ids controls filtering.
-    items_all = await svc.list_skills("src_a", user_bbk_id="100")
-    assert len(items_all) == 2
-    items_200 = await svc.list_skills(
+    # user_bbk_id filters by visibility; explicit bbk_ids narrows further.
+    # With user_bbk_id=200 (non-manager), sees skill_all ([]) + skill_200 (["200"]).
+    items_200_all = await svc.list_skills(
+        "src_a",
+        user_bbk_id="200",
+        is_manager=False,
+    )
+    assert len(items_200_all) == 2
+    # user_bbk_id=300 (non-manager) only sees HQ skill (bbk_ids=[]).
+    # Even if bbk_ids=["200"] is passed, visibility filter blocks skill_200 first.
+    items_300 = await svc.list_skills(
         "src_a",
         user_bbk_id="300",
         bbk_ids=["200"],
+        is_manager=False,
     )
-    assert len(items_200) == 1
-    assert items_200[0].name == "skill_200"
+    assert len(items_300) == 0  # bbk_ids=200 is not visible to bbk 300
+
+
+@pytest.mark.asyncio
+async def test_list_skills_tiered_visibility(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    # skill visible to all (bbk_ids=[])
+    req_hq = PublishSkillRequest(
+        name="skill_hq",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+        bbk_ids=[],
+    )
+    # skill visible only to bbk_id=200
+    req_200 = PublishSkillRequest(
+        name="skill_200",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+        bbk_ids=["200"],
+    )
+    await svc.publish_skill("src_a", req_hq)
+    await svc.publish_skill("src_a", req_200)
+    # Manager sees all skills
+    items_manager = await svc.list_skills(
+        "src_a",
+        user_bbk_id="200",
+        is_manager=True,
+    )
+    assert len(items_manager) == 2
+    # Non-manager (bbk 300) sees only HQ skill (bbk_ids=[])
+    items_300 = await svc.list_skills(
+        "src_a",
+        user_bbk_id="300",
+        is_manager=False,
+    )
+    assert len(items_300) == 1
+    assert items_300[0].name == "skill_hq"
+    # Non-manager (bbk 200) sees HQ + bbk_200 skills
+    items_200 = await svc.list_skills(
+        "src_a",
+        user_bbk_id="200",
+        is_manager=False,
+    )
+    assert len(items_200) == 2
 
 
 @pytest.mark.asyncio

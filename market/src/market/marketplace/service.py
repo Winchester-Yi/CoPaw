@@ -58,6 +58,8 @@ from .fs import (
 from .skill_registry import SkillRegistry
 from ..runtime.context import decode_scope_id
 from ..runtime.config_store import MCPClientConfig
+from .mcp_registry import MCPRegistry
+from .browse import filter_market_items, is_orphaned_item
 from .models import MarketItem
 from .schemas import (
     DistributeRequest,
@@ -292,6 +294,20 @@ FROM swe_skills
 WHERE skill_name = %s AND source_id = %s AND source LIKE 'marketplace:%%'
 """
 
+# 查询已分发 MCP 客户端（从 swe_mcp_clients 表，获取当前实际持有的）
+_QUERY_DISTRIBUTED_MCP_CLIENTS_SQL = """
+SELECT tenant_id, tenant_name, bbk_id
+FROM swe_mcp_clients
+WHERE source_id = %s AND mcp_name = %s
+"""
+
+# 通过 source 字段查询已分发 MCP 客户端（当 index 中找不到 item 时使用）
+_QUERY_DISTRIBUTED_MCP_CLIENTS_BY_SOURCE_SQL = """
+SELECT tenant_id, tenant_name, bbk_id
+FROM swe_mcp_clients
+WHERE source = %s AND enabled = TRUE
+"""
+
 
 def _sort_items_by_updated_at_desc(
     items: list[MarketItem],
@@ -489,6 +505,175 @@ def _decode_creator_name(value: str) -> str:
 def _item_visible(item: MarketItem, user_bbk_id: str) -> bool:
     """Return True if item is active (bbk_ids is for attribution, not visibility)."""
     return item.status == "active"
+
+
+def _is_visible_market_skill(
+    item: MarketItem,
+    visible_category_ids: set[int] | None,
+) -> bool:
+    if (
+        item.item_type == "skill"
+        and visible_category_ids is not None
+        and item.category_id is not None
+    ):
+        return item.category_id in visible_category_ids
+    return True
+
+
+def _filter_skill_category(
+    items: list[MarketItem],
+    category_id: Optional[int],
+    selected_uncategorized: bool,
+    selected_orphaned: bool,
+    known_category_ids: set[int] | None,
+) -> list[MarketItem]:
+    if selected_uncategorized:
+        return [item for item in items if item.category_id is None]
+    if selected_orphaned:
+        return [
+            item
+            for item in items
+            if known_category_ids is not None
+            and is_orphaned_item(item, known_category_ids)
+        ]
+    if category_id is not None:
+        return [item for item in items if item.category_id == category_id]
+    return items
+
+
+def _filter_skill_scope(
+    items: list[MarketItem],
+    is_manager: bool,
+    user_bbk_id: str,
+    bbk_ids: Optional[list[str]],
+    visible_category_ids: set[int] | None,
+) -> list[MarketItem]:
+    if is_manager:
+        return items
+    visible = items
+    if visible_category_ids is not None:
+        visible = [
+            item
+            for item in visible
+            if _is_visible_market_skill(item, visible_category_ids)
+        ]
+    if not bbk_ids:
+        visible = [
+            item
+            for item in visible
+            if (
+                item.bbk_ids == []
+                or user_bbk_id in item.bbk_ids
+                or "100" in item.bbk_ids
+            )
+        ]
+    return visible
+
+
+def _filter_market_bbk_scope(
+    items: list[MarketItem],
+    bbk_ids: Optional[list[str]],
+) -> list[MarketItem]:
+    if not bbk_ids:
+        return items
+    return [
+        item
+        for item in items
+        if item.bbk_ids == []
+        or (item.bbk_ids and any(b in item.bbk_ids for b in bbk_ids))
+    ]
+
+
+def _filter_mcp_items_for_request(
+    items: list[MarketItem],
+    user_bbk_id: str,
+    bbk_ids: Optional[list[str]],
+    category_id: Optional[int],
+    is_head_office: bool,
+    visible_category_ids: set[int] | None,
+    selected_uncategorized: bool,
+    selected_orphaned: bool,
+    known_category_ids: set[int] | None,
+) -> list[MarketItem]:
+    if not bbk_ids or len(bbk_ids) == 1:
+        return filter_market_items(
+            items,
+            "mcp",
+            user_bbk_id,
+            bbk_ids[0] if bbk_ids else None,
+            category_id,
+            is_head_office,
+            visible_category_ids,
+            selected_uncategorized,
+            selected_orphaned,
+            known_category_ids,
+        )
+    mcp_items = [
+        item
+        for item in items
+        if item.item_type == "mcp" and item.status == "active"
+    ]
+    mcp_items = _filter_skill_category(
+        mcp_items,
+        category_id,
+        selected_uncategorized,
+        selected_orphaned,
+        known_category_ids,
+    )
+    return _filter_market_bbk_scope(mcp_items, bbk_ids)
+
+
+def _accumulate_branch_counts(
+    item: MarketItem,
+    all_bbk_ids: set[str],
+    skill_counts: dict[str, int],
+    mcp_counts: dict[str, int],
+    unique_skill_ids: set[str],
+    unique_mcp_ids: set[str],
+) -> None:
+    all_bbk_ids.update(item.bbk_ids)
+    for bbk_id in item.bbk_ids:
+        if item.item_type == "skill":
+            skill_counts[bbk_id] = skill_counts.get(bbk_id, 0) + 1
+        elif item.item_type == "mcp":
+            mcp_counts[bbk_id] = mcp_counts.get(bbk_id, 0) + 1
+    if item.item_type == "skill":
+        unique_skill_ids.add(item.item_id)
+    elif item.item_type == "mcp":
+        unique_mcp_ids.add(item.item_id)
+
+
+def _filter_market_skills(
+    items: list[MarketItem],
+    category_id: Optional[int],
+    bbk_ids: Optional[list[str]],
+    is_manager: bool,
+    user_bbk_id: str,
+    visible_category_ids: set[int] | None,
+    selected_uncategorized: bool = False,
+    selected_orphaned: bool = False,
+    known_category_ids: set[int] | None = None,
+) -> list[MarketItem]:
+    visible = [
+        item
+        for item in items
+        if item.item_type == "skill" and item.status == "active"
+    ]
+    visible = _filter_skill_category(
+        visible,
+        category_id,
+        selected_uncategorized,
+        selected_orphaned,
+        known_category_ids,
+    )
+    visible = _filter_skill_scope(
+        visible,
+        is_manager,
+        user_bbk_id,
+        bbk_ids,
+        visible_category_ids,
+    )
+    return _filter_market_bbk_scope(visible, bbk_ids)
 
 
 def _preview_sort_key(path: Path) -> tuple[int, str]:
@@ -831,7 +1016,6 @@ class MarketplaceService:
                             user_id,
                             source_id,
                         )
-                        return True
                     logger.warning(
                         "Agent reload failed on attempt %s: %s - %s",
                         attempt + 1,
@@ -2816,27 +3000,104 @@ class MarketplaceService:
 
         return True
 
+    def list_all_bbk_ids(
+        self,
+        source_id: str,
+        visible_category_ids: set[int] | None = None,
+    ) -> list[dict]:
+        """获取所有有数据的分行 ID 列表（含技能和 MCP 数量，去重、排序）。
+
+        从 index.json 中提取所有活跃条目的 bbk_ids 字段，
+        同时统计每个分行的 skill 和 MCP 数量，
+        用于前端分行菜单的固定渲染。
+
+        ``visible_category_ids`` 仅用于普通用户的技能可见性过滤；
+        MCP 和未分类技能不受该参数影响。
+        """
+        items = load_index(self.marketplace_root, source_id)
+        all_bbk_ids: set[str] = set()
+        skill_counts: dict[str, int] = {}
+        mcp_counts: dict[str, int] = {}
+        unique_skill_ids: set[str] = set()
+        unique_mcp_ids: set[str] = set()
+
+        # 第一遍：统计分行数量（受 visible_category_ids 过滤），与 list_skills 口径一致
+        for item in items:
+            if (
+                item.status != "active"
+                or not item.bbk_ids
+                or not _is_visible_market_skill(item, visible_category_ids)
+            ):
+                continue
+            _accumulate_branch_counts(
+                item,
+                all_bbk_ids,
+                skill_counts,
+                mcp_counts,
+                unique_skill_ids,
+                unique_mcp_ids,
+            )
+
+        result: list[dict] = []
+        for bbk_id in sorted(all_bbk_ids):
+            result.append(
+                {
+                    "bbk_id": bbk_id,
+                    "skill_count": skill_counts.get(bbk_id, 0),
+                    "mcp_count": mcp_counts.get(bbk_id, 0),
+                    "total_unique_skill_count": len(unique_skill_ids),
+                    "total_unique_mcp_count": len(unique_mcp_ids),
+                },
+            )
+        return result
+
     async def list_skills(
         self,
         source_id: str,
         user_bbk_id: str,
         category_id: Optional[int] = None,
         bbk_ids: Optional[list[str]] = None,
+        is_manager: bool = False,
+        visible_category_ids: set[int] | None = None,
+        selected_uncategorized: bool = False,
+        selected_orphaned: bool = False,
+        known_category_ids: set[int] | None = None,
     ) -> list[MarketSkillResponse]:
-        """列出市场技能，可选按分类和分行过滤。"""
+        """列出市场技能，可选按分类和分行过滤。
+
+        Args:
+            source_id: 来源 ID。
+            user_bbk_id: 用户分行 ID（非管理员时用于可见性过滤）。
+            category_id: 可选的分类 ID 过滤。
+            bbk_ids: 可选的分行 ID 过滤（交集匹配）。
+            is_manager: 是否为管理员，管理员可查看所有技能。
+        """
         items = load_index(self.marketplace_root, source_id)
-        visible = [
-            i for i in items if i.item_type == "skill" and i.status == "active"
-        ]
-        if category_id is not None:
-            visible = [i for i in visible if i.category_id == category_id]
-        # 按 bbk_ids 过滤（技能的 bbk_ids 与请求的 bbk_ids 有交集）
-        if bbk_ids is not None and len(bbk_ids) > 0:
-            visible = [
-                i
-                for i in visible
-                if i.bbk_ids and any(b in i.bbk_ids for b in bbk_ids)
-            ]
+        if not bbk_ids or len(bbk_ids) == 1:
+            visible = filter_market_items(
+                items,
+                "skill",
+                user_bbk_id,
+                bbk_ids[0] if bbk_ids else None,
+                category_id,
+                is_manager,
+                visible_category_ids,
+                selected_uncategorized,
+                selected_orphaned,
+                known_category_ids,
+            )
+        else:
+            visible = _filter_market_skills(
+                items,
+                category_id,
+                bbk_ids,
+                is_manager,
+                user_bbk_id,
+                visible_category_ids,
+                selected_uncategorized,
+                selected_orphaned,
+                known_category_ids,
+            )
 
         result = []
         for item in visible:
@@ -2871,9 +3132,17 @@ class MarketplaceService:
         source_id: str,
         item_id: str,
         user_bbk_id: str,
+        is_manager: bool = False,
+        visible_category_ids: set[int] | None = None,
     ) -> Optional[MarketSkillDetail]:
         """获取技能详情（含调用客户明细）。"""
-        item = self._get_visible_skill_item(source_id, item_id, user_bbk_id)
+        item = self._get_visible_skill_item(
+            source_id,
+            item_id,
+            user_bbk_id,
+            is_manager=is_manager,
+            visible_category_ids=visible_category_ids,
+        )
         if item is None:
             return None
 
@@ -2905,6 +3174,8 @@ class MarketplaceService:
         source_id: str,
         item_id: str,
         user_bbk_id: str,
+        is_manager: bool = False,
+        visible_category_ids: set[int] | None = None,
     ) -> MarketItem | None:
         """获取当前用户可见的市场技能条目。"""
         items = load_index(self.marketplace_root, source_id)
@@ -2917,6 +3188,13 @@ class MarketplaceService:
             None,
         )
         if item is None or not _item_visible(item, user_bbk_id):
+            return None
+        if (
+            not is_manager
+            and visible_category_ids is not None
+            and item.category_id is not None
+            and item.category_id not in visible_category_ids
+        ):
             return None
         return item
 
@@ -2972,6 +3250,7 @@ class MarketplaceService:
                     version=item.version,
                     skill_id=skill_id,
                     cn_name=cn_name,
+                    category_id=item.category_id,
                 )
 
                 if result.get("status") == "conflict":
@@ -4631,43 +4910,13 @@ class MarketplaceService:
 
         return item, version_unchanged
 
-    async def list_mcp_items(
+    async def _build_market_mcp_items(
         self,
+        items: list[MarketItem],
         source_id: str,
-        user_bbk_id: str,
-        category_id: Optional[int] = None,
-        bbk_ids: Optional[list[str]] = None,
     ) -> list[MarketMCPItem]:
-        """列出市场 MCP 条目。
-
-        Args:
-            source_id: 来源 ID。
-            user_bbk_id: 用户 bbk_id（保留参数兼容性，不再用于过滤）。
-            category_id: 可选的分类 ID 过滤。
-            bbk_ids: 可选的分行 ID 过滤（交集匹配）。
-
-        Returns:
-            MCP 条目列表（含调用统计）。
-        """
-        items = load_index(self.marketplace_root, source_id)
-        mcp_items = [
-            i for i in items if i.item_type == "mcp" and i.status == "active"
-        ]
-        mcp_items = _sort_items_by_updated_at_desc(mcp_items)
-
-        if category_id is not None:
-            mcp_items = [i for i in mcp_items if i.category_id == category_id]
-
-        # 按 bbk_ids 过滤（MCP 的 bbk_ids 与请求的 bbk_ids 有交集）
-        if bbk_ids is not None and len(bbk_ids) > 0:
-            mcp_items = [
-                i
-                for i in mcp_items
-                if i.bbk_ids and any(b in i.bbk_ids for b in bbk_ids)
-            ]
-
         result = []
-        for item in mcp_items:
+        for item in items:
             call_count, user_count = await self._get_mcp_stats(
                 item.client_key,
                 source_id,
@@ -4693,11 +4942,54 @@ class MarketplaceService:
             )
         return result
 
+    async def list_mcp_items(
+        self,
+        source_id: str,
+        user_bbk_id: str,
+        category_id: Optional[int] = None,
+        bbk_ids: Optional[list[str]] = None,
+        is_manager: bool = False,
+        visible_category_ids: set[int] | None = None,
+        selected_uncategorized: bool = False,
+        selected_orphaned: bool = False,
+        known_category_ids: set[int] | None = None,
+    ) -> list[MarketMCPItem]:
+        """列出市场 MCP 条目。
+
+        Args:
+            source_id: 来源 ID。
+            user_bbk_id: 用户分行 ID（非管理员时用于可见性过滤）。
+            category_id: 可选的分类 ID 过滤。
+            bbk_ids: 可选的分行 ID 过滤（交集匹配）。
+            is_manager: 是否为管理员，管理员可查看所有 MCP。
+
+        Returns:
+            MCP 条目列表（含调用统计）。
+        """
+        items = load_index(self.marketplace_root, source_id)
+        is_head_office = is_manager or user_bbk_id == "100"
+        mcp_items = _filter_mcp_items_for_request(
+            items,
+            user_bbk_id,
+            bbk_ids,
+            category_id,
+            is_head_office,
+            visible_category_ids,
+            selected_uncategorized,
+            selected_orphaned,
+            known_category_ids,
+        )
+        return await self._build_market_mcp_items(
+            _sort_items_by_updated_at_desc(mcp_items),
+            source_id,
+        )
+
     async def get_mcp_detail(
         self,
         source_id: str,
         item_id: str,
         user_bbk_id: str,
+        visible_category_ids: set[int] | None = None,
     ) -> Optional[MarketMCPDetail]:
         """获取 MCP 详情（含配置和用户统计）。
 
@@ -4719,6 +5011,19 @@ class MarketplaceService:
             None,
         )
         if item is None or not _item_visible(item, user_bbk_id):
+            return None
+        if (
+            user_bbk_id != "100"
+            and item.bbk_ids
+            and user_bbk_id not in item.bbk_ids
+            and "100" not in item.bbk_ids
+        ):
+            return None
+        if (
+            visible_category_ids is not None
+            and item.category_id is not None
+            and item.category_id not in visible_category_ids
+        ):
             return None
 
         # 加载 MCP 配置
@@ -4951,6 +5256,37 @@ class MarketplaceService:
                             "Failed to log MCP distribute operation: %s",
                             e,
                         )
+
+                    # 写入 swe_mcp_clients 表（追踪用户当前持有的 MCP）
+                    try:
+                        registry = MCPRegistry(self.db)
+                        # 从 MCP 配置文件中读取 transport 和 url
+                        mcp_config = load_mcp_config(
+                            self.marketplace_root,
+                            source_id,
+                            item_id,
+                        )
+                        config_data = (
+                            mcp_config.get("config", {}) if mcp_config else {}
+                        )
+                        await registry.upsert_mcp_client(
+                            client_key=effective_client_key,
+                            mcp_name=item.name,
+                            tenant_id=tenant_id,
+                            tenant_name=tenant_name,
+                            bbk_id=bbk_id,
+                            source=f"marketplace:{item_id}",
+                            source_id=source_id,
+                            transport=config_data.get("transport"),
+                            url=config_data.get("url"),
+                            enabled=True,
+                            cn_name=item.chinese_name or "",
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to upsert swe_mcp_clients: %s",
+                            e,
+                        )
                 results.append(
                     MCPDistributionTenantResult(
                         tenant_id=tenant_id,
@@ -5052,7 +5388,7 @@ class MarketplaceService:
         guidance: str | None,
         bbk_ids: list[str],
     ) -> MarketItem:
-        """仅更新 MCP 市场条目的展示元数据。"""
+        """仅更新 MCP 市场条目的展示元数据（同步更新 index.json）。"""
         items = load_index(self.marketplace_root, source_id)
         item = next(
             (
@@ -5071,6 +5407,47 @@ class MarketplaceService:
         item.bbk_ids = bbk_ids
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
+        return item
+
+    async def update_mcp_metadata_and_sync_db(
+        self,
+        *,
+        source_id: str,
+        item_id: str,
+        chinese_name: str | None,
+        description: str | None,
+        guidance: str | None,
+        bbk_ids: list[str],
+    ) -> MarketItem:
+        """更新 MCP 市场条目的展示元数据，并同步更新数据库中所有已分发用户的 cn_name。"""
+        item = self.update_mcp_metadata(
+            source_id=source_id,
+            item_id=item_id,
+            chinese_name=chinese_name,
+            description=description,
+            guidance=guidance,
+            bbk_ids=bbk_ids,
+        )
+        # 同步 cn_name 到所有已分发用户的数据库记录
+        if self.db.is_connected and item.chinese_name is not None:
+            try:
+                registry = MCPRegistry(self.db)
+                updated = await registry.update_cn_name_by_marketplace_item(
+                    source_id=source_id,
+                    marketplace_item_id=item_id,
+                    cn_name=item.chinese_name,
+                )
+                logger.info(
+                    "Synced cn_name to %d distributed MCP records: item_id=%s, cn_name=%s",
+                    updated,
+                    item_id,
+                    item.chinese_name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to sync cn_name to swe_mcp_clients: %s",
+                    e,
+                )
         return item
 
     def _update_market_item_cn_name(
@@ -5322,6 +5699,137 @@ class MarketplaceService:
             "errors": errors,
         }
 
+    async def _sync_skill_category_to_user(
+        self,
+        user_id: str,
+        skill_name: str,
+        category_id: int | None,
+        source_id: str,
+    ) -> bool:
+        """更新已分发用户 manifest 中的市场分类，不触碰技能文件。"""
+
+        def _update(payload: dict) -> bool:
+            entry = payload.get("skills", {}).get(skill_name)
+            if not isinstance(entry, dict):
+                return False
+            metadata = entry.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if category_id is None:
+                metadata.pop("category_id", None)
+            else:
+                metadata["category_id"] = category_id
+            entry["metadata"] = metadata
+            return True
+
+        return mutate_user_skill_manifest(
+            self.swe_root,
+            user_id,
+            "default",
+            _update,
+            source_id,
+        )
+
+    async def update_skill_metadata(
+        self,
+        *,
+        source_id: str,
+        item_id: str,
+        skill_id: str,
+        skill_name: str,
+        chinese_name: str,
+        category_id: int | None,
+        bbk_ids: list[str],
+        sync_to_users: bool = False,
+        target_user_ids: list[str] | None = None,
+    ) -> dict:
+        """更新技能市场元数据，并按需同步已分发用户。"""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                candidate
+                for candidate in items
+                if candidate.item_id == item_id
+                and candidate.item_type == "skill"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Skill item '{item_id}' not found")
+        item.chinese_name = chinese_name
+        item.category_id = category_id
+        item.bbk_ids = bbk_ids
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(self.marketplace_root, source_id, items)
+
+        if self.db.is_connected:
+            await self.db.execute(
+                """UPDATE swe_marketplace_skills
+                SET cn_name = %s, updated_at = NOW()
+                WHERE source_id = %s AND item_id = %s""",
+                (chinese_name, source_id, item_id),
+            )
+
+        distributions = await self.get_distributions(
+            source_id,
+            item_id,
+            "skill",
+            skill_name=skill_name,
+        )
+        synced = 0
+        synced_names = 0
+        errors: list[dict[str, str]] = []
+        for distribution in distributions:
+            user_id = distribution.target_user_id
+            try:
+                if await self._sync_skill_category_to_user(
+                    user_id,
+                    skill_name,
+                    category_id,
+                    source_id,
+                ):
+                    synced += 1
+                else:
+                    errors.append(
+                        {
+                            "user_id": user_id,
+                            "reason": "workspace sync failed",
+                        },
+                    )
+                if sync_to_users and (
+                    not target_user_ids or user_id in target_user_ids
+                ):
+                    if self.skill_registry.is_connected():
+                        await self.skill_registry.update_cn_name_by_skill_id(
+                            skill_id,
+                            user_id,
+                            chinese_name,
+                        )
+                    if self._sync_cn_name_to_user_workspace(
+                        user_id,
+                        skill_name,
+                        chinese_name,
+                        source_id,
+                    ):
+                        synced_names += 1
+                    else:
+                        errors.append(
+                            {"user_id": user_id, "reason": "name sync failed"},
+                        )
+            except Exception as exc:
+                errors.append({"user_id": user_id, "reason": str(exc)})
+
+        return {
+            "success": True,
+            "market_updated": True,
+            "synced_category_users": synced,
+            "synced_users": synced_names,
+            "skipped_users": (
+                len(distributions) - synced_names if sync_to_users else 0
+            ),
+            "errors": errors,
+        }
+
     async def _get_mcp_stats(
         self,
         client_key: str,
@@ -5397,55 +5905,27 @@ class MarketplaceService:
         item_type: str,
         skill_name: str | None = None,
     ) -> list[DistributionRecord]:
-        """查询分发记录.
-
-        Args:
-            source_id: 来源 ID.
-            item_id: 条目 ID.
-            item_type: 条目类型（skill 或 mcp）.
-            skill_name: 技能名称（可选，用于查询当前实际持有的用户）.
-
-        Returns:
-            分发记录列表.
-        """
+        """查询分发记录."""
         if not self.db.is_connected:
             return []
         try:
-            # 如果提供了 skill_name，查询 swe_skills 表获取当前实际持有技能的用户
             if skill_name and item_type == "skill":
-                # 规范化 skill_name，与 swe_skills 表存储格式一致
-                normalized_skill_name = normalize_skill_name(skill_name)
-                rows = await self.db.fetch_all(
-                    _QUERY_DISTRIBUTED_USERS_SQL,
-                    (normalized_skill_name, source_id),
+                return await self._get_skill_distributions(
+                    source_id,
+                    skill_name,
                 )
-                return [
-                    DistributionRecord(
-                        target_user_id=r["tenant_id"],
-                        target_user_name=r.get("tenant_name") or "",
-                        target_bbk_id=r.get("bbk_id") or "",
-                        distributed_at=None,
-                    )
-                    for r in rows
-                ]
-            # 否则查询操作日志表
-            rows = await self.db.fetch_all(
-                _QUERY_DISTRIBUTIONS_SQL,
-                (source_id, item_id, item_type),
+            if item_type == "mcp":
+                mcp_result = await self._get_mcp_distributions(
+                    source_id,
+                    item_id,
+                )
+                if mcp_result is not None:
+                    return mcp_result
+            return await self._get_log_distributions(
+                source_id,
+                item_id,
+                item_type,
             )
-            return [
-                DistributionRecord(
-                    target_user_id=r["target_user_id"],
-                    target_user_name=r.get("target_user_name") or "",
-                    target_bbk_id=r.get("target_bbk_id") or "",
-                    distributed_at=(
-                        r.get("created_at").isoformat()
-                        if r.get("created_at")
-                        else None
-                    ),
-                )
-                for r in rows
-            ]
         except Exception as e:
             logger.warning(
                 "Failed to get distributions for %s: %s",
@@ -5453,6 +5933,90 @@ class MarketplaceService:
                 e,
             )
         return []
+
+    async def _get_skill_distributions(
+        self,
+        source_id: str,
+        skill_name: str,
+    ) -> list[DistributionRecord]:
+        """从 swe_skills 表查询技能分发记录."""
+        normalized = normalize_skill_name(skill_name)
+        rows = await self.db.fetch_all(
+            _QUERY_DISTRIBUTED_USERS_SQL,
+            (normalized, source_id),
+        )
+        return [
+            DistributionRecord(
+                target_user_id=r["tenant_id"],
+                target_user_name=r.get("tenant_name") or "",
+                target_bbk_id=r.get("bbk_id") or "",
+                distributed_at=None,
+            )
+            for r in rows
+        ]
+
+    async def _get_mcp_distributions(
+        self,
+        source_id: str,
+        item_id: str,
+    ) -> list[DistributionRecord] | None:
+        """从 swe_mcp_clients 表查询 MCP 分发记录，找不到返回 None."""
+        items = load_index(self.marketplace_root, source_id)
+        mcp_item = next(
+            (
+                i
+                for i in items
+                if i.item_id == item_id and i.item_type == "mcp"
+            ),
+            None,
+        )
+        if mcp_item:
+            rows = await self.db.fetch_all(
+                _QUERY_DISTRIBUTED_MCP_CLIENTS_SQL,
+                (source_id, mcp_item.name),
+            )
+        else:
+            source_prefix = f"marketplace:{item_id}"
+            rows = await self.db.fetch_all(
+                _QUERY_DISTRIBUTED_MCP_CLIENTS_BY_SOURCE_SQL,
+                (source_prefix,),
+            )
+        if not rows:
+            return None
+        return [
+            DistributionRecord(
+                target_user_id=r["tenant_id"],
+                target_user_name=r.get("tenant_name") or "",
+                target_bbk_id=r.get("bbk_id") or "",
+                distributed_at=None,
+            )
+            for r in rows
+        ]
+
+    async def _get_log_distributions(
+        self,
+        source_id: str,
+        item_id: str,
+        item_type: str,
+    ) -> list[DistributionRecord]:
+        """从操作日志表查询分发记录（兜底）."""
+        rows = await self.db.fetch_all(
+            _QUERY_DISTRIBUTIONS_SQL,
+            (source_id, item_id, item_type),
+        )
+        return [
+            DistributionRecord(
+                target_user_id=r["target_user_id"],
+                target_user_name=r.get("target_user_name") or "",
+                target_bbk_id=r.get("target_bbk_id") or "",
+                distributed_at=(
+                    r.get("created_at").isoformat()
+                    if r.get("created_at")
+                    else None
+                ),
+            )
+            for r in rows
+        ]
 
     def _build_recall_response(
         self,
@@ -5795,6 +6359,22 @@ class MarketplaceService:
             "default",
             reload_source_id,
         )
+
+        # 从 swe_mcp_clients 表中删除记录
+        if self.db.is_connected:
+            try:
+                registry = MCPRegistry(self.db)
+                await registry.delete_mcp_by_name(
+                    tenant_id=user_id,
+                    source_id=source_id,
+                    mcp_name=mcp_name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete from swe_mcp_clients: %s",
+                    e,
+                )
+
         return None
 
     def _require_market_item(

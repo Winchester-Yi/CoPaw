@@ -37,6 +37,7 @@ from ...security.skill_scanner.safe_unpack import safe_unpack_skill_zip
 from ...marketplace.schemas import (
     BatchOperationRequest,
     BatchOperationResponse,
+    BranchCountsResponse,
     FileContentResponse,
     FileTreeNode,
     MarketSkillDetail,
@@ -52,6 +53,7 @@ from ...utils.skill_md import (
     parse_frontmatter,
 )
 from ...utils.skill_utils import clean_skill_name
+from ...utils.logging_utils import log_params
 from ..deps import decode_user_name, require_source_id
 
 logger = logging.getLogger(__name__)
@@ -645,6 +647,48 @@ def _import_skill_from_zip(
     return result
 
 
+@router.get("/market/bbk-ids", response_model=BranchCountsResponse)
+async def list_bbk_ids(
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
+):
+    """获取所有有数据的分行 ID 列表及技能/MCP 数量（用于前端分行菜单固定渲染）。
+
+    总行用户(X-Bbk-Id=100): 返回所有有数据的分行
+    分行用户: 返回总行(100) + 当前分行
+    """
+    source_id = require_source_id(x_source_id)
+    svc = request.app.state.marketplace
+    is_head_office = x_bbk_id == "100"
+    visible_category_ids = None
+    if not is_head_office:
+        if not svc.db.is_connected:
+            raise HTTPException(status_code=503, detail="Database unavailable")
+        category_rows = await svc.db.fetch_all(
+            "SELECT id FROM swe_marketplace_categories "
+            "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",
+            (source_id,),
+        )
+        visible_category_ids = {int(row["id"]) for row in category_rows}
+    all_branches = svc.list_all_bbk_ids(
+        source_id,
+        visible_category_ids=visible_category_ids,
+    )
+
+    # 总行用户: 返回所有分行
+    if is_head_office:
+        return BranchCountsResponse(branches=all_branches)
+
+    # 分行用户: 只返回总行(100) + 当前分行
+    branch_ids = {"100"}
+    if x_bbk_id and x_bbk_id != "100":
+        branch_ids.add(x_bbk_id)
+
+    filtered = [b for b in all_branches if b["bbk_id"] in branch_ids]
+    return BranchCountsResponse(branches=filtered)
+
+
 @router.get("/market/skills", response_model=list[MarketSkillResponse])
 async def list_skills(
     request: Request,
@@ -656,19 +700,41 @@ async def list_skills(
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_bbk_id: Optional[str] = Header(default=None, alias="X-Bbk-Id"),
 ):
-    """浏览市场技能列表（按 source_id + category_id + bbk_ids 过滤）."""
+    """浏览市场技能列表（按 source_id + category_id + bbk_ids 过滤）。"""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+    is_head_office = x_bbk_id == "100"
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        category_id=category_id,
+        bbk_ids=bbk_ids,
+    )
+
     # 解析 bbk_ids 参数（逗号分隔）
     parsed_bbk_ids = None
     if bbk_ids:
         parsed_bbk_ids = [b.strip() for b in bbk_ids.split(",") if b.strip()]
     svc = request.app.state.marketplace
+    visible_category_ids = None
+    if not is_head_office:
+        if not svc.db.is_connected:
+            raise HTTPException(status_code=503, detail="Database unavailable")
+        category_rows = await svc.db.fetch_all(
+            "SELECT id FROM swe_marketplace_categories "
+            "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",
+            (source_id,),
+        )
+        visible_category_ids = {int(row["id"]) for row in category_rows}
     return await svc.list_skills(
         source_id,
         user_bbk_id,
         category_id=category_id,
         bbk_ids=parsed_bbk_ids,
+        is_manager=is_head_office,
+        visible_category_ids=visible_category_ids,
     )
 
 
@@ -687,6 +753,15 @@ async def get_my_skills(
             detail="X-User-Id header is required",
         )
     svc = request.app.state.marketplace
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        source_id=source_id,
+        user_id=x_user_id,
+        agent_id=agent_id,
+    )
     all_skills = await svc.get_my_skills(source_id, x_user_id, agent_id)
     return [s for s in all_skills if not s.is_received]
 
@@ -706,6 +781,15 @@ async def get_received_skills(
             detail="X-User-Id header is required",
         )
     svc = request.app.state.marketplace
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        source_id=source_id,
+        user_id=x_user_id,
+        agent_id=agent_id,
+    )
     all_skills = await svc.get_my_skills(source_id, x_user_id, agent_id)
     return [s for s in all_skills if s.is_received]
 
@@ -720,8 +804,26 @@ async def get_skill_detail(
     """预览技能详情."""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = request.app.state.marketplace
-    detail = await svc.get_skill_detail(source_id, item_id, user_bbk_id)
+    is_head_office = x_bbk_id == "100"
+    visible_category_ids = None
+    if not is_head_office and svc.db.is_connected:
+        category_rows = await svc.db.fetch_all(
+            "SELECT id FROM swe_marketplace_categories "
+            "WHERE source_id = %s AND COALESCE(branch_visible, 1) = 1",
+            (source_id,),
+        )
+        visible_category_ids = {int(row["id"]) for row in category_rows}
+    detail = await svc.get_skill_detail(
+        source_id,
+        item_id,
+        user_bbk_id,
+        is_manager=is_head_office,
+        visible_category_ids=visible_category_ids,
+    )
     if detail is None:
         raise HTTPException(status_code=404, detail="Skill not found")
     return detail
@@ -740,6 +842,9 @@ async def list_market_skill_files(
     """获取市场技能详情页文件树。"""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = request.app.state.marketplace
     files = svc.list_market_skill_files(source_id, item_id, user_bbk_id)
     if files is None:
@@ -761,6 +866,15 @@ async def read_market_skill_file(
     """读取市场技能详情页文件内容。"""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        file_path=file_path,
+    )
+
     svc = request.app.state.marketplace
     content, file_type = svc.read_market_skill_file(
         source_id,
@@ -922,6 +1036,14 @@ async def parse_skill_zip(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        market_mode=market_mode,
+        file_size=file.size,
+    )
 
     svc = request.app.state.marketplace
     swe_root = svc.swe_root
@@ -1255,6 +1377,19 @@ async def upload_skill_to_workspace(
             detail="X-User-Id header is required",
         )
 
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        enable=enable,
+        overwrite=overwrite,
+        target_name=target_name,
+        rename_map=rename_map,
+        category_id=category_id,
+        cn_name=cn_name,
+        file_size=file.size,
+    )
+
     # 解析 rename_map JSON
     parsed_rename_map: dict[str, str] = {}
     if rename_map:
@@ -1367,6 +1502,15 @@ async def list_skill_files(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     return svc.list_skill_files(x_user_id, skill_name, agent_id, source_id)
 
@@ -1386,6 +1530,14 @@ async def download_my_skill(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        agent_id=agent_id,
+    )
 
     svc = request.app.state.marketplace
     skills = await svc.get_my_skills(source_id, x_user_id, agent_id)
@@ -1445,6 +1597,9 @@ async def download_market_skill(
     """下载市场当前版本技能 ZIP。"""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = request.app.state.marketplace
 
     detail = await svc.get_skill_detail(source_id, item_id, user_bbk_id)
@@ -1500,6 +1655,16 @@ async def read_skill_file(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        file_path=file_path,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     content, file_type = svc.read_skill_file(
         x_user_id,
@@ -1541,6 +1706,15 @@ async def save_skill_file(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        file_path=file_path,
+        agent_id=agent_id,
+    )
 
     svc = request.app.state.marketplace
     skills = await svc.get_my_skills(source_id, x_user_id, agent_id)
@@ -1624,6 +1798,14 @@ async def delete_my_skill(
             detail="X-User-Id header is required",
         )
 
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     ok = await svc.delete_skill(x_user_id, skill_name, agent_id, source_id)
     if not ok:
@@ -1678,6 +1860,15 @@ async def enable_my_skill(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     result = await svc.enable_skill(
         x_user_id,
@@ -1718,6 +1909,15 @@ async def disable_my_skill(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_name=skill_name,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     result = await svc.disable_skill(
         x_user_id,
@@ -1751,6 +1951,15 @@ async def batch_delete_my_skills(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skills=body.skills,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     results = await svc.batch_delete_skills(
         x_user_id,
@@ -1785,6 +1994,15 @@ async def batch_enable_my_skills(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skills=body.skills,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     results = await svc.batch_enable_skills(
         x_user_id,
@@ -1824,6 +2042,15 @@ async def batch_disable_my_skills(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skills=body.skills,
+        agent_id=agent_id,
+    )
+
     svc = request.app.state.marketplace
     results = await svc.batch_disable_skills(
         x_user_id,
