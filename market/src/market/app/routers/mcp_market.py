@@ -155,6 +155,7 @@ async def _run_mcp_distribution_task(
                 task_id=task_id,
                 target_id=item.tenant_id,
                 success=item.success,
+                item_status="skipped" if item.skipped else None,
                 result={
                     **item.model_dump(),
                     "item_id": item_id,

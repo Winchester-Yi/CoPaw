@@ -1440,16 +1440,23 @@ class MarketplaceService:
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
 
-        # 同步删除 swe_marketplace_skills 表中的记录
+        # 同步软下架 swe_marketplace_skills 表中的记录
         if self.db.is_connected:
             try:
                 await self.db.execute(
-                    "DELETE FROM swe_marketplace_skills WHERE source_id = %s AND item_id = %s",
-                    (source_id, item_id),
+                    """
+                    UPDATE swe_marketplace_skills
+                    SET is_unpublished = 1,
+                        updator_id = %s,
+                        updator_name = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE source_id = %s AND item_id = %s
+                    """,
+                    (operator_id, operator_name, source_id, item_id),
                 )
             except Exception as e:
                 logger.warning(
-                    "Failed to delete from swe_marketplace_skills: %s",
+                    "Failed to soft unpublish swe_marketplace_skills: %s",
                     e,
                 )
 
@@ -2781,16 +2788,23 @@ class MarketplaceService:
         items = [i for i in items if i.item_id != item_id]
         save_index(self.marketplace_root, source_id, items)
 
-        # 同步删除 swe_marketplace_skills 表中的记录
+        # 同步软删除 swe_marketplace_skills 表中的记录
         if self.db.is_connected:
             try:
                 await self.db.execute(
-                    "DELETE FROM swe_marketplace_skills WHERE source_id = %s AND item_id = %s",
-                    (source_id, item_id),
+                    """
+                    UPDATE swe_marketplace_skills
+                    SET is_deleted = 1,
+                        updator_id = %s,
+                        updator_name = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE source_id = %s AND item_id = %s
+                    """,
+                    (operator_id, operator_name, source_id, item_id),
                 )
             except Exception as e:
                 logger.warning(
-                    "Failed to delete from swe_marketplace_skills: %s",
+                    "Failed to soft delete swe_marketplace_skills: %s",
                     e,
                 )
 
@@ -4901,12 +4915,25 @@ class MarketplaceService:
                     item.name,
                 )
                 if conflict_client_key is not None:
+                    if not req.overwrite:
+                        results.append(
+                            MCPDistributionTenantResult(
+                                tenant_id=tenant_id,
+                                tenant_name=tenant_name,
+                                success=False,
+                                error=(f"用户已有同名 MCP " f'"{item.name}"'),
+                            ),
+                        )
+                        continue
                     results.append(
                         MCPDistributionTenantResult(
                             tenant_id=tenant_id,
                             tenant_name=tenant_name,
-                            success=False,
-                            error=(f"用户已有同名 MCP " f'"{item.name}"'),
+                            success=True,
+                            skipped=True,
+                            error=(
+                                f'用户已有同名自建 MCP "{item.name}"，已跳过'
+                            ),
                         ),
                     )
                     continue

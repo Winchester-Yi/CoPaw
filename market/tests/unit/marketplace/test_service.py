@@ -948,6 +948,58 @@ async def test_unpublish_skill_sets_inactive(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unpublish_skill_soft_marks_marketplace_skill(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    req = PublishSkillRequest(
+        name="skill_soft_unpublish",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = await svc.publish_skill("src_a", req)
+    svc.db.execute.reset_mock()
+
+    await svc.unpublish_skill("src_a", item.item_id, "u1", "User One")
+
+    sql_text = "\n".join(
+        call.args[0] for call in svc.db.execute.await_args_list
+    )
+    assert "DELETE FROM swe_marketplace_skills" not in sql_text
+    assert "UPDATE swe_marketplace_skills" in sql_text
+    assert "is_unpublished = 1" in sql_text
+
+
+@pytest.mark.asyncio
+async def test_delete_market_skill_soft_marks_marketplace_skill(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    req = PublishSkillRequest(
+        name="skill_soft_delete",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = await svc.publish_skill("src_a", req)
+    svc.db.execute.reset_mock()
+
+    await svc.delete_market_skill("src_a", item.item_id, "u1", "User One")
+
+    sql_text = "\n".join(
+        call.args[0] for call in svc.db.execute.await_args_list
+    )
+    assert "DELETE FROM swe_marketplace_skills" not in sql_text
+    assert "UPDATE swe_marketplace_skills" in sql_text
+    assert "is_deleted = 1" in sql_text
+
+
+@pytest.mark.asyncio
 async def test_list_skills_filters_by_explicit_bbk_ids(tmp_path):
     from market.marketplace.schemas import PublishSkillRequest
 
@@ -1648,6 +1700,246 @@ async def test_publish_mcp_appends_for_different_user(tmp_path):
     assert current["version_id"] == "1.0.1"
     assert current["source_user_id"] == "bob"
     assert current["source_user_version"] == "2.0.0"
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_overwrite_skips_same_name_custom_mcp(
+    tmp_path,
+):
+    """显式 overwrite 时，目标租户有同名自建 MCP 应跳过且不改配置。"""
+    from market.marketplace.fs import resolve_effective_user_id
+    from market.marketplace.schemas import (
+        MCPDistributionRequest,
+        PublishMCPRequest,
+    )
+
+    svc = _make_service(tmp_path)
+    item, _ = await svc.publish_mcp(
+        "source-1",
+        PublishMCPRequest(
+            client_key="market-mcp",
+            name="shared-mcp",
+            description="market",
+            creator_id="publisher",
+            creator_name="Publisher",
+            config={
+                "name": "shared-mcp",
+                "transport": "stdio",
+                "command": "/market-mcp",
+            },
+            version="1.0.0",
+        ),
+    )
+
+    user_id = "tenant-1"
+    config_path = (
+        tmp_path
+        / "swe"
+        / resolve_effective_user_id(user_id, "source-1")
+        / "workspaces"
+        / "default"
+        / "agent.json"
+    )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "clients": {
+                        "custom-mcp": {
+                            "name": "shared-mcp",
+                            "transport": "stdio",
+                            "command": "/custom-mcp",
+                            "creator_id": "tenant-1",
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.distribute_mcp(
+        "source-1",
+        item.item_id,
+        operator_id="admin",
+        operator_name="Admin",
+        req=MCPDistributionRequest(
+            target_tenant_ids=[user_id],
+            overwrite=True,
+        ),
+    )
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    clients = saved["mcp"]["clients"]
+    assert result.results[0].success is True
+    assert result.results[0].skipped is True
+    assert clients == {
+        "custom-mcp": {
+            "name": "shared-mcp",
+            "transport": "stdio",
+            "command": "/custom-mcp",
+            "creator_id": "tenant-1",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_overwrite_skips_multiple_same_name_custom_mcps(
+    tmp_path,
+):
+    """存在多个同名自建 MCP 时，overwrite 也应整体跳过并保留配置。"""
+    from market.marketplace.fs import resolve_effective_user_id
+    from market.marketplace.schemas import (
+        MCPDistributionRequest,
+        PublishMCPRequest,
+    )
+
+    svc = _make_service(tmp_path)
+    item, _ = await svc.publish_mcp(
+        "source-1",
+        PublishMCPRequest(
+            client_key="market-mcp",
+            name="shared-mcp",
+            description="market",
+            creator_id="publisher",
+            creator_name="Publisher",
+            config={
+                "name": "shared-mcp",
+                "transport": "stdio",
+                "command": "/market-mcp",
+            },
+            version="1.0.0",
+        ),
+    )
+
+    user_id = "tenant-1"
+    config_path = (
+        tmp_path
+        / "swe"
+        / resolve_effective_user_id(user_id, "source-1")
+        / "workspaces"
+        / "default"
+        / "agent.json"
+    )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "clients": {
+                        "custom-a": {
+                            "name": "shared-mcp",
+                            "transport": "stdio",
+                            "command": "/custom-a",
+                        },
+                        "custom-b": {
+                            "name": "shared-mcp",
+                            "transport": "stdio",
+                            "command": "/custom-b",
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.distribute_mcp(
+        "source-1",
+        item.item_id,
+        operator_id="admin",
+        operator_name="Admin",
+        req=MCPDistributionRequest(
+            target_tenant_ids=[user_id],
+            overwrite=True,
+        ),
+    )
+
+    clients = json.loads(config_path.read_text(encoding="utf-8"))["mcp"][
+        "clients"
+    ]
+    assert result.results[0].success is True
+    assert result.results[0].skipped is True
+    assert set(clients) == {"custom-a", "custom-b"}
+    assert [cfg["command"] for cfg in clients.values()] == [
+        "/custom-a",
+        "/custom-b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_overwrite_skip_does_not_require_market_config(
+    tmp_path,
+):
+    """同名自建 MCP 跳过时，不读取缺失的市场配置，也不改用户配置。"""
+    from market.marketplace.fs import get_mcp_dir, resolve_effective_user_id
+    from market.marketplace.schemas import (
+        MCPDistributionRequest,
+        PublishMCPRequest,
+    )
+
+    svc = _make_service(tmp_path)
+    item, _ = await svc.publish_mcp(
+        "source-1",
+        PublishMCPRequest(
+            client_key="market-mcp",
+            name="shared-mcp",
+            description="market",
+            creator_id="publisher",
+            creator_name="Publisher",
+            config={
+                "name": "shared-mcp",
+                "transport": "stdio",
+                "command": "/market-mcp",
+            },
+            version="1.0.0",
+        ),
+    )
+    shutil.rmtree(get_mcp_dir(tmp_path / "market", "source-1", item.item_id))
+
+    user_id = "tenant-1"
+    config_path = (
+        tmp_path
+        / "swe"
+        / resolve_effective_user_id(user_id, "source-1")
+        / "workspaces"
+        / "default"
+        / "agent.json"
+    )
+    original_config = {
+        "mcp": {
+            "clients": {
+                "custom-mcp": {
+                    "name": "shared-mcp",
+                    "transport": "stdio",
+                    "command": "/custom-mcp",
+                },
+            },
+        },
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(original_config),
+        encoding="utf-8",
+    )
+
+    result = await svc.distribute_mcp(
+        "source-1",
+        item.item_id,
+        operator_id="admin",
+        operator_name="Admin",
+        req=MCPDistributionRequest(
+            target_tenant_ids=[user_id],
+            overwrite=True,
+        ),
+    )
+
+    assert result.results[0].success is True
+    assert result.results[0].skipped is True
+    assert json.loads(config_path.read_text(encoding="utf-8")) == (
+        original_config
+    )
 
 
 @pytest.mark.asyncio

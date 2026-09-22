@@ -351,6 +351,7 @@ class MCPDistributionTenantResult(BaseModel):
     success: bool
     bootstrapped: bool = False
     default_agent_updated: list[str] = Field(default_factory=list)
+    skipped: bool = False
     error: Optional[str] = None
 
 

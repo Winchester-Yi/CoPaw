@@ -151,6 +151,32 @@ function getItemStatusRank(status: string) {
   return ITEM_STATUS_ORDER[status] ?? Number.MAX_SAFE_INTEGER;
 }
 
+function readResultText(
+  value: unknown,
+  key: "error" | "skip_reason",
+): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  const resultValue = (value as Record<string, unknown>)[key];
+  return typeof resultValue === "string" && resultValue.trim()
+    ? resultValue.trim()
+    : "";
+}
+
+function formatTaskItemMessage(record: AsyncTaskDetailRecord["items"][number]) {
+  if (record.error_message) {
+    return record.error_message;
+  }
+  if (record.status === "skipped") {
+    return (
+      readResultText(record.result_json, "skip_reason") ||
+      readResultText(record.result_json, "error")
+    );
+  }
+  return "";
+}
+
 export default function TaskCenterPage() {
   const { t } = useTranslation();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
@@ -463,7 +489,8 @@ export default function TaskCenterPage() {
                         title: "错误信息",
                         dataIndex: "error_message",
                         key: "error_message",
-                        render: (value) => value || "-",
+                        render: (_value, record) =>
+                          formatTaskItemMessage(record) || "-",
                       },
                     ]}
                   />

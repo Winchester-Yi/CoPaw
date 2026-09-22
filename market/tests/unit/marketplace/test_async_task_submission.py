@@ -406,6 +406,68 @@ async def test_mcp_distribution_records_failed_item_target_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_distribution_records_skipped_item_status() -> None:
+    """MCP 跳过明细应写入 skipped 状态，便于批次查询区分。"""
+
+    class FakeStore:
+        """记录后台任务写入参数的任务表替身。"""
+
+        def __init__(self) -> None:
+            self.items: list[dict[str, Any]] = []
+            self.finished: dict[str, Any] | None = None
+
+        async def mark_running(self, task_id: str) -> None:
+            assert task_id == "task-1"
+
+        async def record_item_result(self, **kwargs: Any) -> None:
+            self.items.append(kwargs)
+
+        async def finish_task(self, **kwargs: Any) -> None:
+            self.finished = kwargs
+
+    class FakeService:
+        """返回跳过的 MCP 分发结果。"""
+
+        async def distribute_mcp(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> MCPDistributionResponse:
+            del args, kwargs
+            return MCPDistributionResponse(
+                source_agent_id="mcp-a",
+                results=[
+                    MCPDistributionTenantResult(
+                        tenant_id="tenant-a",
+                        tenant_name="用户A",
+                        success=True,
+                        skipped=True,
+                        error="用户已有同名自建 MCP，已跳过",
+                    ),
+                ],
+            )
+
+    store = FakeStore()
+
+    await mcp_router._run_mcp_distribution_task(  # noqa: SLF001
+        task_id="task-1",
+        store=store,
+        svc=FakeService(),
+        source_id="src1",
+        item_id="mcp-a",
+        operator_id="admin",
+        operator_name="admin",
+        req=MCPDistributionRequest(target_tenant_ids=["tenant-a"]),
+    )
+
+    assert store.items[0]["item_status"] == "skipped"
+    assert store.items[0]["success"] is True
+    assert store.items[0]["result"]["skipped"] is True
+    assert store.finished is not None
+    assert store.finished["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_mcp_distribution_exception_keeps_item_id_in_task_result() -> (
     None
 ):
