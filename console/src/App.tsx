@@ -138,14 +138,7 @@ function AppInner() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/chat-share/:token" element={<ChatSharePage />} />
             {/* 智能财富工作台：独立骨架，不挂 MainLayout，样式与原型自包含 */}
-            <Route
-              path="/wealth/*"
-              element={
-                <AuthGuard>
-                  <WealthWorkbench />
-                </AuthGuard>
-              }
-            />
+            <Route path="/wealth/*" element={<WealthWorkbench />} />
             <Route
               path="/*"
               element={

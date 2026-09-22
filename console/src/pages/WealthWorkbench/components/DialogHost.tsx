@@ -41,6 +41,9 @@ export function DialogHost() {
   };
 
   const hasTitle = Boolean(dialog?.title);
+  const actionButtons = dialog?.buttons.filter(
+    (button) => button.label !== "关闭",
+  );
 
   return (
     <dialog
@@ -59,41 +62,43 @@ export function DialogHost() {
     >
       {dialog && (
         <>
+          <button
+            className={cx(styles.iconbtn, styles.dialogClose)}
+            onClick={closeDialog}
+            aria-label="关闭"
+            disabled={acting}
+          >
+            <Icon name="close" />
+          </button>
           {hasTitle && (
             <div className={styles.dialogHead}>
               <h2>{dialog.title}</h2>
-              <button
-                className={styles.iconbtn}
-                onClick={closeDialog}
-                aria-label="关闭"
-                disabled={acting}
-              >
-                <Icon name="close" />
-              </button>
             </div>
           )}
           <div className={cx(styles.dialogBody, !hasTitle && styles.plainBody)}>
             {dialog.body}
           </div>
-          <div className={styles.dialogFooter}>
-            {dialog.buttons.map((b) => {
-              const isAction = Boolean(b.primary || b.danger);
-              return (
-                <button
-                  key={b.label}
-                  className={cx(
-                    styles.btn,
-                    b.primary && styles.primary,
-                    b.danger && styles.danger,
-                  )}
-                  disabled={acting || b.disabled}
-                  onClick={() => (b.onClick ? b.onClick() : closeDialog())}
-                >
-                  {acting && isAction ? "处理中…" : b.label}
-                </button>
-              );
-            })}
-          </div>
+          {actionButtons && actionButtons.length > 0 && (
+            <div className={styles.dialogFooter}>
+              {actionButtons.map((b) => {
+                const isAction = Boolean(b.primary || b.danger);
+                return (
+                  <button
+                    key={b.label}
+                    className={cx(
+                      styles.btn,
+                      b.primary && styles.primary,
+                      b.danger && styles.danger,
+                    )}
+                    disabled={acting || b.disabled}
+                    onClick={() => (b.onClick ? b.onClick() : closeDialog())}
+                  >
+                    {acting && isAction ? "处理中…" : b.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </>
       )}
     </dialog>

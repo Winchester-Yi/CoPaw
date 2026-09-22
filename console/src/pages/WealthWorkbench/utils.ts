@@ -3,6 +3,7 @@
  * 排程模型与控制台定时任务一致（@/utils/parseCron 的 CronParts）。
  */
 import type { CronParts } from "@/utils/parseCron";
+import type { WealthRole } from "./permissions";
 import type { Draft, Plan, PlanItem, SkillStatQuery } from "./types";
 
 export function calendarDate(value: string): Date {
@@ -225,8 +226,28 @@ export interface SceneConflict {
   planName: string;
 }
 
+const RESERVING_SOURCES_BY_ROLE: Record<WealthRole, readonly string[]> = {
+  middle: ["分行关注"],
+  president: ["分行关注", "行长关注"],
+  rm: ["分行关注", "行长关注"],
+  unknown: [],
+};
+
+/** 按发布角色筛选会占用经营场景的规划。客户经理另受本人规划约束。 */
+export function filterSceneConflictPlans(
+  plans: Plan[],
+  role: WealthRole,
+): Plan[] {
+  const sources = RESERVING_SOURCES_BY_ROLE[role];
+  return plans.filter(
+    (plan) =>
+      sources.includes(plan.source) ||
+      (role === "rm" && plan.editable === true),
+  );
+}
+
 /**
- * 发布前置冲突检查（行长/中台）：草稿中的场景若已被其他
+ * 发布前置冲突检查：草稿中的场景若已被其他
  * 已发布/发布中的规划占用，则不允许重复新建发布，应去编辑原规划。
  * 发布失败的规划不产生占用；编辑模式排除正在编辑的规划本身。
  */
@@ -235,6 +256,11 @@ export function findSceneConflicts(
   draft: Draft,
   editingId: string | null,
 ): SceneConflict[] {
+  const retainedSceneIds = new Set(
+    plans
+      .find((plan) => plan.id === editingId)
+      ?.items?.map((item) => item.id) ?? [],
+  );
   const ownerBySceneId = new Map<string, string>();
   for (const p of plans) {
     if (p.id === editingId) continue;
@@ -246,7 +272,9 @@ export function findSceneConflicts(
     }
   }
   return draft.items
-    .filter((x) => ownerBySceneId.has(x.id))
+    .filter(
+      (item) => !retainedSceneIds.has(item.id) && ownerBySceneId.has(item.id),
+    )
     .map((x) => ({
       scene: x,
       planName: ownerBySceneId.get(x.id) ?? "",

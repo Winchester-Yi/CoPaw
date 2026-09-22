@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS `swe_cron_jobs` (
     `creator_user_id` VARCHAR(64) DEFAULT '' COMMENT '创建者用户ID',
     `task_chat_id` VARCHAR(64) DEFAULT '' COMMENT '关联聊天ID',
     `task_session_id` VARCHAR(64) DEFAULT '' COMMENT '关联会话ID',
+    `plan_id` VARCHAR(255) DEFAULT NULL COMMENT '关联计划ID',
     `meta` VARCHAR(4096) DEFAULT '' COMMENT '扩展元数据',
     `status` VARCHAR(16) DEFAULT 'active' COMMENT '状态: active/paused/deleted',
     `pause_reason` VARCHAR(32) DEFAULT '' COMMENT '暂停原因',

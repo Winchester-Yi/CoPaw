@@ -9,6 +9,7 @@ import {
   collectSkillStatQueries,
   cycleRange,
   DEFAULT_SCHEDULE,
+  filterSceneConflictPlans,
   findSceneConflicts,
   planItemScheduledOn,
 } from "./utils";
@@ -203,11 +204,57 @@ describe("findSceneConflicts", () => {
     expect(findSceneConflicts([self], draft, "p2")).toEqual([]);
   });
 
+  it("编辑时仅检查新增场景，保留的历史场景不因其他规划占用而阻断", () => {
+    const retained = makeItem({ id: "scene-retained" });
+    const added = makeItem({ id: "scene-added" });
+    const self = makePlan({ id: "self", items: [retained] });
+    const other = makePlan({
+      id: "other",
+      name: "其他规划",
+      items: [retained, added],
+    });
+    const draft = { name: "编辑规划", items: [retained, added] };
+
+    expect(findSceneConflicts([self, other], draft, "self")).toEqual([
+      { scene: added, planName: "其他规划" },
+    ]);
+  });
+
   it("场景均未被占用时无冲突", () => {
     const plan = makePlan({ items: [makeItem({ id: "skill-other" })] });
     const draft = { name: "x", items: [makeItem()] };
 
     expect(findSceneConflicts([plan], draft, null)).toEqual([]);
+  });
+});
+
+describe("filterSceneConflictPlans", () => {
+  const middle = makePlan({ id: "middle", source: "分行关注" });
+  const president = makePlan({ id: "president", source: "行长关注" });
+  const ownRm = makePlan({
+    id: "own-rm",
+    source: "我的关注",
+    editable: true,
+  });
+  const otherRm = makePlan({
+    id: "other-rm",
+    source: "我的关注",
+    editable: false,
+  });
+
+  it("按中台、行长、客户经理的逐级规则筛选占用规划", () => {
+    const plans = [middle, president, ownRm, otherRm];
+
+    expect(filterSceneConflictPlans(plans, "middle")).toEqual([middle]);
+    expect(filterSceneConflictPlans(plans, "president")).toEqual([
+      middle,
+      president,
+    ]);
+    expect(filterSceneConflictPlans(plans, "rm")).toEqual([
+      middle,
+      president,
+      ownRm,
+    ]);
   });
 });
 

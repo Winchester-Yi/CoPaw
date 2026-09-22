@@ -279,6 +279,125 @@ def test_distribute_skill_writes_workspace_manifest(tmp_path):
     assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
+def test_distribute_skill_writes_market_category_to_workspace_manifest(
+    tmp_path,
+):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.schemas import (
+        DistributeRequest,
+        PublishSkillRequest,
+    )
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="categorized_skill",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                category_id=7,
+                bbk_ids=["200"],
+                skill_json={},
+                skill_md="",
+            ),
+        ),
+    )
+    svc.db.fetch_all = AsyncMock(
+        return_value=[
+            {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
+        ],
+    )
+
+    result = asyncio.run(
+        svc.distribute_skill(
+            "src_a",
+            item.item_id,
+            operator_id="u1",
+            operator_name="User",
+            req=DistributeRequest(target_type="all"),
+        ),
+    )
+
+    assert result.distributed_count == 1
+    workspace_dir = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "default",
+        "src_a",
+    ).parent
+    manifest = json.loads((workspace_dir / "skill.json").read_text())
+    assert (
+        manifest["skills"]["categorized_skill"]["metadata"]["category_id"] == 7
+    )
+
+
+def test_update_skill_metadata_updates_category_and_branch_without_recall(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace.fs import load_index, save_index
+    from market.marketplace.models import MarketItem
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    save_index(
+        svc.marketplace_root,
+        "src_a",
+        [
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="skill",
+                skill_id="skill-1",
+                chinese_name="旧名",
+                category_id=1,
+                bbk_ids=["100"],
+                creator_id="u1",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_distributions",
+        AsyncMock(
+            return_value=[
+                type(
+                    "Distribution",
+                    (),
+                    {"target_user_id": "user-1"},
+                )(),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_sync_skill_category_to_user",
+        AsyncMock(return_value=True),
+    )
+
+    result = asyncio.run(
+        svc.update_skill_metadata(
+            source_id="src_a",
+            item_id="item-1",
+            skill_id="skill-1",
+            skill_name="skill",
+            chinese_name="新名",
+            category_id=2,
+            bbk_ids=["200"],
+        ),
+    )
+
+    assert result["market_updated"] is True
+    assert result["synced_category_users"] == 1
+    item = load_index(svc.marketplace_root, "src_a")[0]
+    assert item.category_id == 2
+    assert item.bbk_ids == ["200"]
+    svc.get_distributions.assert_awaited_once()
+
+
 def test_publish_skill_missing_source_id_returns_400(tmp_path):
     app = _make_app(tmp_path)
     client = TestClient(app)

@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -181,6 +182,12 @@ class CronJobSpec(BaseModel):
     id: str
     name: str
     enabled: bool = True
+    plan_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        validation_alias=AliasChoices("planId", "plan_id"),
+        description="关联计划ID",
+    )
 
     # Tenant isolation: each job belongs to a tenant
     tenant_id: Optional[str] = Field(

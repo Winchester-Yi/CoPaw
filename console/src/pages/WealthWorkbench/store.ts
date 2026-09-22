@@ -73,6 +73,8 @@ interface WealthState {
   /** 场景查询进行中（按分类点击懒加载） */
   scenesLoading: boolean;
   plans: Plan[];
+  /** 规划基础数据已完成首次加载（失败时也会以空列表完成） */
+  plansLoaded: boolean;
   customers: Customer[];
   /** 客户名单查询中（今日任务视角切换时重新拉取） */
   customersLoading: boolean;
@@ -209,7 +211,7 @@ function validateSchedule(item: PlanItem): string | null {
     return `请选择「${item.sceneName}」的每周执行日`;
   }
   if (schedule.type === "custom" && !validCronExpr(schedule.rawCron)) {
-    return `请填写「${item.sceneName}」的正确 cron 表达式（5 段式）`;
+    return `请重新配置「${item.sceneName}」的自定义执行规则`;
   }
   return null;
 }
@@ -251,6 +253,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
   scenesByCategory: {},
   scenesLoading: false,
   plans: [],
+  plansLoaded: false,
   customers: [],
   customersLoading: false,
   pendingCustomers: [],
@@ -273,11 +276,13 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     // 生效角色由父系统 positionId 解析；未识别身份（unknown）整页拦截，不加载业务数据
     const accountId = resolveRole(useIframeStore.getState().positionId);
     if (accountId === FALLBACK_ROLE) {
-      set({ initialized: true, accountId });
+      set({ initialized: true, accountId, plansLoaded: true });
       return;
     }
+    // 身份已经解析完成即可渲染工作台框架；规划数据在后台加载并随后填充。
+    set({ initialized: true, accountId, plansLoaded: false });
     const data = await api.fetchBootstrap(accountId);
-    set({ initialized: true, accountId, ...data });
+    set({ ...data, plansLoaded: true });
   },
 
   refreshPlans: async () => {

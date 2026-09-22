@@ -45,6 +45,7 @@ function statusClass(status: string) {
 export default function Board() {
   const account = useWealthStore(selectCurrentAccount);
   const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const openDialog = useWealthStore((s) => s.openDialog);
   const closeDialog = useWealthStore((s) => s.closeDialog);
   const editPlan = useWealthStore((s) => s.editPlan);
@@ -325,15 +326,15 @@ export default function Board() {
   const stats = [
     {
       icon: "list",
-      n: String(all.length),
+      n: plansLoaded ? String(all.length) : "--",
       title: "当前规划",
       detail: "本期经营方向",
-      val: `${all.length} 项`,
+      val: plansLoaded ? `${all.length} 项` : "加载中",
       up: false,
     },
     {
       icon: "layer",
-      n: String(sceneCount),
+      n: plansLoaded ? String(sceneCount) : "--",
       title: "覆盖经营场景",
       detail: "可用能力",
       val: availableScenes == null ? "--" : `${availableScenes} 个`,
@@ -341,7 +342,10 @@ export default function Board() {
     },
     {
       icon: "check",
-      n: generatedTotal == null ? "--" : generatedTotal.toLocaleString(),
+      n:
+        plansLoaded && generatedTotal != null
+          ? generatedTotal.toLocaleString()
+          : "--",
       title: "已生成任务",
       detail: "定时任务",
       val: "",
@@ -386,9 +390,10 @@ export default function Board() {
           <Icon name="calendar" />
           {range.map((x) => x.replace(/-/g, ".")).join(" — ")}
         </div>
-        <div className={styles.role}>
+        {/* 暂不需要展示岗位 */}
+        {/* <div className={styles.role}>
           当前角色：{account?.role} <Icon name="building" />
-        </div>
+        </div> */}
       </div>
 
       <section className={`${styles.panel} ${styles.overview}`}>
@@ -423,9 +428,11 @@ export default function Board() {
                 onClick={() => setBoardTab(t)}
               >
                 {t}（
-                {t === "全部"
-                  ? all.length
-                  : all.filter((p) => p.source === t).length}
+                {plansLoaded
+                  ? t === "全部"
+                    ? all.length
+                    : all.filter((p) => p.source === t).length
+                  : "--"}
                 ）
               </button>
             ))}
@@ -452,7 +459,11 @@ export default function Board() {
             </button>
           </div>
         </div>
-        {boardMode === "calendar" ? (
+        {!plansLoaded ? (
+          <div className={styles.boardLoading} role="status">
+            正在加载规划数据…
+          </div>
+        ) : boardMode === "calendar" ? (
           <Calendar
             visible={visible}
             dimension={dimension}

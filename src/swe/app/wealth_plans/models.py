@@ -34,6 +34,7 @@ CATEGORY_CODE_BY_LABEL: dict[str, str] = {
     "理财": "finance",
     "基金": "fund",
     "代发": "payroll",
+    "其他": "other",
 }
 CATEGORY_LABEL_BY_CODE: dict[str, str] = {
     code: label for label, code in CATEGORY_CODE_BY_LABEL.items()

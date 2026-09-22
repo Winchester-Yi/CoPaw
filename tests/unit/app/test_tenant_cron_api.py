@@ -341,6 +341,37 @@ def _build_client(
     return TestClient(app)
 
 
+@pytest.mark.parametrize("plan_id", [None, "plan-001"])
+def test_create_and_broadcast_preserve_plan_id(plan_id):
+    manager = _Manager()
+    with _build_client(manager) as client:
+        payload = _job_spec(task_type="text")
+        if plan_id is not None:
+            payload["planId"] = plan_id
+        response = client.post("/cron/jobs", json=payload)
+    assert response.status_code == 200
+    source = manager.created[0]
+    assert source.plan_id == plan_id
+    assert response.json()["plan_id"] == plan_id
+    child = api_module._build_broadcast_job(
+        source,
+        job_id="child-1",
+        target_tenant_id="tenant-b",
+        target_tenant_name="Bob",
+        target_bbk_id="1002",
+        source_id="source-a",
+        cron=source.schedule.cron,
+        timezone_name=source.schedule.timezone,
+        offset_minutes=0,
+        model_slot=None,
+        model_slot_fallback_reason="",
+    )
+    assert child.plan_id == plan_id
+    existing = child.model_copy(update={"plan_id": "old-plan"})
+    refreshed = api_module._merge_existing_child_with_source(existing, child)
+    assert refreshed.plan_id == plan_id
+
+
 def test_create_job_injects_request_tenant_id():
     manager = _Manager()
     client = _build_client(manager)

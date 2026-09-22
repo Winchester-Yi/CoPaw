@@ -750,3 +750,10 @@
 - **现象**：文字和附件一起发送时首屏正常，切换到其他会话再返回后只剩文字。
 - **典型来源**：持久化的 AgentScope 消息使用 `file_url`、`image_url`、`audio_url` 或 `video_url` 等扁平字段，而聊天历史转换只读取 `source.url`，导致恢复出的附件 URL 为空。
 - **第一落点**：检查 `src/swe/app/runner/utils.py` 的 `agentscope_msg_to_message` 是否同时兼容扁平字段和 `source` 结构，并验证 `/chats/{id}` 返回的用户消息仍包含附件 URL。
+
+## 财富规划看板「已生成任务」数量不准确
+
+- **口径**：单个规划按各场景对应日期区间查询外部 `skill-stats`，累加响应中的 `generatedTaskCount`；规划概览再累加当前周期内各规划的结果。
+- **角色参数**：客户经理（`RB0101`）调用外部统计接口时必须附带本人 `sapId`；行长和分行中台不传 `sapId`，沿用机构范围统计。
+- **第一落点**：检查 `src/swe/app/wealth_plans/router.py` 的 `_fetch_external_skill_stats()` 是否按角色组装外部请求体，以及前端看板是否仍按 `skillId + startDate + endDate` 汇总。
+- **不可用处理**：外部统计接口不可用时返回空结果，前端显示 `--`，不要回退为规划分发记录或本地估算值。

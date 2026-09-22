@@ -12,4 +12,5 @@ export const SCENE_CATEGORIES = [
   { label: "理财", code: "finance" },
   { label: "基金", code: "fund" },
   { label: "代发", code: "payroll" },
+  { label: "其他", code: "other" },
 ] as const;

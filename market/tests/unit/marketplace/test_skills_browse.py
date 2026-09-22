@@ -113,6 +113,137 @@ def test_list_skills_filters_by_category(tmp_path):
     assert data[0]["name"] == "skill_cat1"
 
 
+def test_branch_admin_cannot_see_hidden_category_skills(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    for name, category_id in (("visible_skill", 1), ("hidden_skill", 2)):
+        asyncio.run(
+            svc.publish_skill(
+                "src_a",
+                PublishSkillRequest(
+                    name=name,
+                    description="",
+                    creator_id="u1",
+                    creator_name="",
+                    skill_json={},
+                    skill_md="",
+                    category_id=category_id,
+                    bbk_ids=[],
+                ),
+            ),
+        )
+    svc.db.is_connected = True
+    svc.db.fetch_all = AsyncMock(return_value=[{"id": 1}])
+    svc.db.fetch_one = AsyncMock(return_value=None)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/market/skills",
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Bbk-Id": "110",
+            "X-User-Role": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+    assert [skill["name"] for skill in response.json()] == ["visible_skill"]
+
+
+def test_head_office_sees_hidden_category_skills_regardless_of_role(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="hidden_skill",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                skill_json={},
+                skill_md="",
+                category_id=2,
+                bbk_ids=[],
+            ),
+        ),
+    )
+    svc.db.is_connected = True
+    svc.db.fetch_all = AsyncMock(return_value=[])
+    svc.db.fetch_one = AsyncMock(return_value=None)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/market/skills",
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Bbk-Id": "100",
+            "X-User-Role": "user",
+        },
+    )
+
+    assert response.status_code == 200
+    assert [skill["name"] for skill in response.json()] == ["hidden_skill"]
+
+
+def test_branch_user_bbk_counts_exclude_hidden_category_skills(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+
+    visible_skill = PublishSkillRequest(
+        name="visible_skill",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+        category_id=1,
+        bbk_ids=["200"],
+    )
+    hidden_skill = PublishSkillRequest(
+        name="hidden_skill",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+        category_id=2,
+        bbk_ids=["200"],
+    )
+    asyncio.run(app.state.marketplace.publish_skill("src_a", visible_skill))
+    asyncio.run(app.state.marketplace.publish_skill("src_a", hidden_skill))
+
+    app.state.marketplace.db.is_connected = True
+    app.state.marketplace.db.fetch_all = AsyncMock(
+        return_value=[{"id": 1}],
+    )
+    client = TestClient(app)
+    response = client.get(
+        "/api/market/bbk-ids",
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Bbk-Id": "200",
+            "X-User-Role": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["branches"] == [
+        {
+            "bbk_id": "200",
+            "skill_count": 1,
+            "mcp_count": 0,
+            "total_unique_skill_count": 1,
+            "total_unique_mcp_count": 0,
+        },
+    ]
+
+
 def test_get_skill_detail_returns_200(tmp_path):
     app = _make_app(tmp_path)
     item = _publish(app.state.marketplace, "src_a", "skill_d")
@@ -133,6 +264,43 @@ def test_get_skill_detail_not_found_returns_404(tmp_path):
         headers={"X-Source-Id": "src_a", "X-Bbk-Id": "100"},
     )
     assert resp.status_code == 404
+
+
+def test_branch_admin_cannot_bypass_hidden_category_skill_detail(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="hidden_skill",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                skill_json={},
+                skill_md="",
+                category_id=2,
+                bbk_ids=[],
+            ),
+        ),
+    )
+    svc.db.is_connected = True
+    svc.db.fetch_all = AsyncMock(return_value=[])
+    svc.db.fetch_one = AsyncMock(return_value=None)
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/market/skills/{item.item_id}",
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Bbk-Id": "110",
+            "X-User-Role": "admin",
+        },
+    )
+
+    assert response.status_code == 404
 
 
 def test_get_my_skills_returns_list(tmp_path):

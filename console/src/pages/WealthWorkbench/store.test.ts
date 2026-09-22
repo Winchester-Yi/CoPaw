@@ -324,6 +324,33 @@ describe("WealthWorkbench store", () => {
     expect(s.draft).toEqual({ name: "", items: [] });
   });
 
+  it("init 在规划请求完成前就完成身份初始化，允许工作台先渲染", async () => {
+    let resolvePlans!: (value: { items: FixturePlanView[] }) => void;
+    const pendingPlans = new Promise<{ items: FixturePlanView[] }>(
+      (resolve) => {
+        resolvePlans = resolve;
+      },
+    );
+    mockRequest.mockImplementationOnce(() => pendingPlans as never);
+    useWealthStore.setState({
+      initialized: false,
+      accountId: "unknown",
+      plans: [],
+    });
+
+    const initialization = useWealthStore.getState().init();
+
+    expect(useWealthStore.getState().initialized).toBe(true);
+    expect(useWealthStore.getState().accountId).toBe("rm");
+    expect(useWealthStore.getState().plans).toEqual([]);
+    expect(useWealthStore.getState().plansLoaded).toBe(false);
+
+    resolvePlans({ items: fixturePlanViews() });
+    await initialization;
+    expect(useWealthStore.getState().plans).toHaveLength(6);
+    expect(useWealthStore.getState().plansLoaded).toBe(true);
+  });
+
   it("loadScenes 按大类查询且每次都取最新；toggleScene 选择/移除场景", async () => {
     const sceneCalls = () =>
       mockRequest.mock.calls.filter(([p]) =>
@@ -419,7 +446,7 @@ describe("WealthWorkbench store", () => {
     ).toContain("请设置");
   });
 
-  it("validateDraft 校验每周执行日与自定义 cron 表达式", () => {
+  it("validateDraft 校验每周执行日与自定义执行规则", () => {
     expect(
       validateDraft({
         name: "x",
@@ -431,7 +458,7 @@ describe("WealthWorkbench store", () => {
         name: "x",
         items: [makeItem({ schedule: { type: "custom", rawCron: "abc" } })],
       }),
-    ).toContain("cron");
+    ).toContain("自定义执行规则");
   });
 
   it("publishPlan 校验失败时不发请求并提示", async () => {

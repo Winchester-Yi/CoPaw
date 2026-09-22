@@ -6,8 +6,11 @@ import asyncio
 import logging
 import uuid
 import re
-from typing import Annotated, Optional
+from pathlib import Path
+from typing import Annotated, Optional, TypedDict
 from urllib.parse import unquote
+
+from pydantic import BaseModel, Field
 
 from fastapi import (
     APIRouter,
@@ -42,6 +45,7 @@ from ...marketplace.fs import (
 )
 from ...runtime.config_store import MCPClientConfig
 from ...runtime.context import tenant_context
+from ...utils.logging_utils import log_params
 from ..deps import require_source_id
 from .my_mcp import _test_mcp_connection
 
@@ -345,6 +349,19 @@ async def publish_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        client_key=req.client_key,
+        name=req.name,
+        chinese_name=req.chinese_name,
+        category_id=req.category_id,
+        bbk_ids=req.bbk_ids,
+        version=req.version,
+        overwrite=req.overwrite,
+    )
     try:
         item, version_unchanged = await svc.publish_mcp(source_id, req)
     except MCPNameConflictError as exc:
@@ -503,6 +520,19 @@ async def upload_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
 
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        name=form.name,
+        chinese_name=form.chinese_name,
+        description=form.description,
+        guidance=form.guidance,
+        bbk_ids=form.bbk_ids,
+        raw_json=form.raw_json,
+        file_size=file.size if file else None,
+    )
+
     file_data, source_filename, error = await _parse_upload_json(file, form)
     if error is not None:
         return UploadMCPResponse(success=False, error=error)
@@ -548,6 +578,15 @@ async def distribute_mcp(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        target_tenant_ids=req.target_tenant_ids,
+        overwrite=req.overwrite,
+    )
 
     # 前端可能传市场 item_id，也可能传业务侧 client_key 或名称。
     item = _find_market_mcp_item(svc, source_id, item_id)
@@ -611,6 +650,8 @@ async def delete_mcp(
     _require_manager(x_manager)
     svc = request.app.state.marketplace
 
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     # 检查条目是否存在
     items = load_index(svc.marketplace_root, source_id)
     item = next(
@@ -647,8 +688,20 @@ async def update_market_mcp_metadata(
     _require_manager(x_manager)
     user_bbk_id = x_bbk_id or "100"
     svc = request.app.state.marketplace
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        chinese_name=payload.chinese_name,
+        description=payload.description,
+        guidance=payload.guidance,
+        bbk_ids=payload.bbk_ids,
+    )
+
     try:
-        svc.update_mcp_metadata(
+        await svc.update_mcp_metadata_and_sync_db(
             source_id=source_id,
             item_id=item_id,
             chinese_name=payload.chinese_name,
@@ -675,6 +728,8 @@ async def test_market_mcp(
     """测试市场 MCP 连接。"""
     source_id = require_source_id(x_source_id)
     svc = request.app.state.marketplace
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
 
     # 获取 MCP 配置
     items = load_index(svc.marketplace_root, source_id)
@@ -724,6 +779,8 @@ async def get_mcp_distributions(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
     distributions = await svc.get_distributions(source_id, item_id, "mcp")
     return distributions
 
@@ -749,6 +806,15 @@ async def recall_mcp_by_name(
     body = await request.json()
     target_user_ids = body.get("target_user_ids")
     mcp_name = body.get("mcp_name")
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        mcp_name=mcp_name,
+        target_user_ids=target_user_ids,
+    )
+
     req = RecallRequest(
         target_user_ids=target_user_ids,
         mcp_name=mcp_name,
@@ -785,6 +851,8 @@ async def recall_mcp(
     _require_manager(x_manager)
     svc = request.app.state.marketplace
 
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     # 解析请求体
     body = await request.json()
     target_user_ids = body.get("target_user_ids")
@@ -805,3 +873,190 @@ async def recall_mcp(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return result.model_dump()
+
+
+class _InitSweMCPClientsRequest(BaseModel):
+    """初始化 swe_mcp_clients 表请求参数."""
+
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="租户 source_id 列表",
+    )
+    user_ids: list[str] = Field(
+        default_factory=list,
+        description="用户 user_id 列表，不传或为空时初始化所有用户，否则只初始化指定用户",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="试运行模式，true=仅统计不实际写入",
+    )
+
+
+class _InitSweMCPClientsResult(TypedDict):
+    """初始化 swe_mcp_clients 表返回结果."""
+
+    dry_run: bool
+    source_ids: list[str]
+    user_ids: list[str]
+    total_users: int
+    total_mcp_clients: int
+    processed: int
+    inserted_db: int
+    errors: list[dict]
+    details: list[dict]
+
+
+def _find_tenant_dirs_for_source_id(
+    swe_root: Path,
+    source_id: str,
+    user_ids: list[str] | None = None,
+) -> list[Path]:
+    """查找指定 source_id 下的租户目录.
+
+    Args:
+        swe_root: SWE 根目录
+        source_id: 租户 source_id
+        user_ids: 可选，用户 user_id 列表，为空时返回所有匹配的用户
+
+    Returns:
+        租户目录列表
+    """
+    from ...runtime.context import encode_scope_id
+    from ...marketplace.fs import resolve_effective_user_id
+
+    tenant_dirs = []
+
+    if user_ids:
+        for user_id in user_ids:
+            effective_user_id = resolve_effective_user_id(user_id, source_id)
+            tenant_dir = swe_root / effective_user_id
+            logger.debug(
+                "查找用户目录: user_id=%s, source_id=%s, effective_user_id=%s, path=%s",
+                user_id,
+                source_id,
+                effective_user_id,
+                tenant_dir,
+            )
+            if tenant_dir.exists() and tenant_dir.is_dir():
+                tenant_dirs.append(tenant_dir)
+        return tenant_dirs
+
+    default_dir = swe_root / f"default_{source_id}"
+    if default_dir.exists() and default_dir.is_dir():
+        tenant_dirs.append(default_dir)
+
+    for user_dir in swe_root.iterdir():
+        if not user_dir.is_dir():
+            continue
+        dir_name = user_dir.name
+        if dir_name.startswith("default_"):
+            continue
+        if "." not in dir_name:
+            continue
+        try:
+            from ...runtime.context import decode_scope_id
+
+            _, decoded_source = decode_scope_id(dir_name)
+            if decoded_source == source_id:
+                tenant_dirs.append(user_dir)
+        except ValueError:
+            pass
+
+    return tenant_dirs
+
+
+@router.post(
+    "/market/admin/mcp/init-swe-mcp-clients",
+)
+async def init_swe_mcp_clients(
+    request: Request,
+    payload: _InitSweMCPClientsRequest,
+):
+    """初始化 swe_mcp_clients 表，将现有 MCP 客户端写入数据库.
+
+    实际扫描 + upsert 逻辑已下沉到 marketplace.mcp_sync.process_tenant_mcp。
+    """
+    from ...marketplace.mcp_registry import MCPRegistry
+    from ...marketplace.mcp_sync import process_tenant_mcp
+
+    svc = request.app.state.marketplace
+    swe_root = svc.swe_root
+    registry = MCPRegistry(svc.db)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        source_ids=payload.source_ids,
+        user_ids=payload.user_ids,
+        dry_run=payload.dry_run,
+    )
+
+    results: _InitSweMCPClientsResult = {
+        "dry_run": payload.dry_run,
+        "source_ids": payload.source_ids,
+        "user_ids": payload.user_ids,
+        "total_users": 0,
+        "total_mcp_clients": 0,
+        "processed": 0,
+        "inserted_db": 0,
+        "errors": [],
+        "details": [],
+    }
+
+    if not payload.source_ids:
+        logger.warning("source_ids 为空，无数据需要初始化")
+        return results
+
+    logger.info(
+        "开始初始化 swe_mcp_clients 表，dry_run=%s, source_ids=%s, user_ids=%s",
+        payload.dry_run,
+        payload.source_ids,
+        payload.user_ids or "(all)",
+    )
+
+    for source_id in payload.source_ids:
+        tenant_dirs = _find_tenant_dirs_for_source_id(
+            swe_root,
+            source_id,
+            payload.user_ids,
+        )
+        results["total_users"] += len(tenant_dirs)
+
+        for tenant_dir in tenant_dirs:
+            try:
+                result = await process_tenant_mcp(
+                    tenant_dir,
+                    source_id=source_id,
+                    registry=registry,
+                    dry_run=payload.dry_run,
+                )
+                results["total_mcp_clients"] += result["total_mcp_clients"]
+                results["processed"] += result["total_mcp_clients"]
+                results["details"].extend(result["details"])
+                results["errors"].extend(result["errors"])
+                if not payload.dry_run:
+                    results["inserted_db"] += result["synced"]
+            except Exception as exc:
+                logger.exception(
+                    "处理租户目录失败: dir=%s err=%s",
+                    tenant_dir,
+                    exc,
+                )
+                results["errors"].append(
+                    {
+                        "tenant_id": str(tenant_dir),
+                        "error": str(exc),
+                    },
+                )
+
+    logger.info(
+        "初始化完成: total_users=%d, total_mcp_clients=%d, processed=%d, inserted=%d, errors=%d",
+        results["total_users"],
+        results["total_mcp_clients"],
+        results["processed"],
+        results["inserted_db"],
+        len(results["errors"]),
+    )
+
+    return results

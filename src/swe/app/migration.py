@@ -343,6 +343,297 @@ def _do_migrate_legacy_skills(
         return _do_migrate_legacy_skills_locked(wd)
 
 
+def _has_legacy_skill_root(root: Path) -> bool:
+    """Return whether a root contains either legacy skill directory."""
+    return any(
+        (root / name).exists()
+        for name in ("active_skills", "customized_skills")
+    )
+
+
+def _discover_legacy_skill_dirs(root: Path) -> dict[str, Path]:
+    """Discover valid legacy skill directories in deterministic order."""
+    if not root.exists() or not root.is_dir():
+        return {}
+    return {
+        path.name: path
+        for path in sorted(root.iterdir())
+        if path.is_dir() and (path / "SKILL.md").exists()
+    }
+
+
+def _register_legacy_skill_workspace(
+    workspace_dir: Path,
+    workspaces: list[Path],
+    seen: set[str],
+) -> None:
+    """Append a workspace once while preserving discovery order."""
+    text = str(workspace_dir.expanduser())
+    if text in seen:
+        return
+    seen.add(text)
+    workspaces.append(Path(text))
+
+
+def _copy_legacy_skill_if_missing(
+    source_dir: Path,
+    target_dir: Path,
+    build_signature,
+    copy_skill_dir,
+) -> bool:
+    """Copy a legacy skill without overwriting an existing destination."""
+    if target_dir.exists():
+        try:
+            if build_signature(source_dir) == build_signature(target_dir):
+                return False
+        except Exception:
+            pass
+        logger.debug(
+            (
+                "Skipping legacy skill copy from %s to %s "
+                "because target exists"
+            ),
+            source_dir,
+            target_dir,
+        )
+        return False
+    copy_skill_dir(source_dir, target_dir)
+    return True
+
+
+def _discover_legacy_skill_workspaces(
+    config,
+    wd: Path,
+    default_workspace: Path,
+) -> list[Path]:
+    """Collect configured and on-disk workspaces in legacy order."""
+    workspace_dirs: list[Path] = []
+    seen_workspaces: set[str] = set()
+    for profile in config.agents.profiles.values():
+        _register_legacy_skill_workspace(
+            Path(profile.workspace_dir).expanduser(),
+            workspace_dirs,
+            seen_workspaces,
+        )
+
+    workspaces_root = wd / "workspaces"
+    if workspaces_root.exists():
+        for workspace_dir in sorted(workspaces_root.iterdir()):
+            if workspace_dir.is_dir():
+                _register_legacy_skill_workspace(
+                    workspace_dir.expanduser(),
+                    workspace_dirs,
+                    seen_workspaces,
+                )
+
+    _register_legacy_skill_workspace(
+        default_workspace,
+        workspace_dirs,
+        seen_workspaces,
+    )
+    return workspace_dirs
+
+
+def _workspace_has_skills(
+    workspace_dir: Path,
+    get_workspace_skills_dir,
+) -> bool:
+    """Return whether a workspace already has a valid skill package."""
+    skills_dir = get_workspace_skills_dir(workspace_dir)
+    return skills_dir.exists() and any(
+        path.is_dir() and (path / "SKILL.md").exists()
+        for path in skills_dir.iterdir()
+    )
+
+
+def _plan_legacy_skill_migration_sources(
+    workspace_dirs: list[Path],
+    wd: Path,
+    default_workspace: Path,
+    get_workspace_skills_dir,
+) -> list[tuple[Path, Path, str]]:
+    """Build de-duplicated workspace and root migration sources."""
+    migration_sources: list[tuple[Path, Path, str]] = []
+    seen_sources: set[tuple[str, str, str]] = set()
+    workspaces_with_existing_skills: set[str] = set()
+
+    for workspace_dir in workspace_dirs:
+        key = (str(workspace_dir), str(workspace_dir), "workspace")
+        if key not in seen_sources:
+            seen_sources.add(key)
+            migration_sources.append(
+                (workspace_dir, workspace_dir, "workspace"),
+            )
+            if _workspace_has_skills(workspace_dir, get_workspace_skills_dir):
+                workspaces_with_existing_skills.add(str(workspace_dir))
+
+    legacy_root = wd
+    if (
+        legacy_root != default_workspace
+        and _has_legacy_skill_root(legacy_root)
+        and not _has_legacy_skill_root(default_workspace)
+        and str(default_workspace) not in workspaces_with_existing_skills
+    ):
+        key = (str(legacy_root), str(default_workspace), "legacy_root")
+        if key not in seen_sources:
+            migration_sources.append(
+                (legacy_root, default_workspace, "legacy_root"),
+            )
+
+    return migration_sources
+
+
+def _find_legacy_skill_conflicts(
+    customized: dict[str, Path],
+    active: dict[str, Path],
+    build_signature,
+) -> set[str]:
+    """Find matching legacy names whose source packages differ."""
+    return {
+        skill_name
+        for skill_name in set(customized) & set(active)
+        if build_signature(customized[skill_name])
+        != build_signature(active[skill_name])
+    }
+
+
+def _copy_customized_legacy_skills(
+    customized: dict[str, Path],
+    active: dict[str, Path],
+    conflicting_names: set[str],
+    workspace_skills_dir: Path,
+    active_names: set[str],
+    copy_if_missing,
+) -> int:
+    """Copy customized skills and mark only matching active copies enabled."""
+    copied_skills = 0
+    for skill_name, skill_dir in customized.items():
+        target_name = (
+            f"{skill_name}-customize"
+            if skill_name in conflicting_names
+            else skill_name
+        )
+        if copy_if_missing(skill_dir, workspace_skills_dir / target_name):
+            copied_skills += 1
+        if skill_name not in conflicting_names and skill_name in active:
+            active_names.add(skill_name)
+    return copied_skills
+
+
+def _copy_active_legacy_skills(
+    active: dict[str, Path],
+    customized: dict[str, Path],
+    conflicting_names: set[str],
+    workspace_skills_dir: Path,
+    active_names: set[str],
+    copy_if_missing,
+) -> int:
+    """Copy active-only and active conflict skills, preserving enablement."""
+    copied_skills = 0
+    for skill_name, skill_dir in active.items():
+        if skill_name in conflicting_names:
+            target_name = f"{skill_name}-active"
+        elif skill_name not in customized:
+            target_name = skill_name
+        else:
+            continue
+        if copy_if_missing(skill_dir, workspace_skills_dir / target_name):
+            copied_skills += 1
+        active_names.add(target_name)
+    return copied_skills
+
+
+def _copy_legacy_skill_source(
+    source_root: Path,
+    target_workspace: Path,
+    source_kind: str,
+    workspace_active_names: dict[Path, set[str]],
+    get_workspace_skills_dir,
+    build_signature,
+    copy_if_missing,
+) -> int:
+    """Copy one source root into its target workspace skill directory."""
+    workspace_skills_dir = get_workspace_skills_dir(target_workspace)
+    workspace_skills_dir.mkdir(parents=True, exist_ok=True)
+    customized = _discover_legacy_skill_dirs(source_root / "customized_skills")
+    active = _discover_legacy_skill_dirs(source_root / "active_skills")
+    if not customized and not active:
+        return 0
+
+    logger.debug(
+        "Found legacy skills in %s (%s): %d customized, %d active",
+        source_root,
+        source_kind,
+        len(customized),
+        len(active),
+    )
+    active_names = workspace_active_names.setdefault(target_workspace, set())
+    conflicting_names = _find_legacy_skill_conflicts(
+        customized,
+        active,
+        build_signature,
+    )
+    return _copy_customized_legacy_skills(
+        customized,
+        active,
+        conflicting_names,
+        workspace_skills_dir,
+        active_names,
+        copy_if_missing,
+    ) + _copy_active_legacy_skills(
+        active,
+        customized,
+        conflicting_names,
+        workspace_skills_dir,
+        active_names,
+        copy_if_missing,
+    )
+
+
+def _enable_migrated_legacy_skills(
+    workspace_dir: Path,
+    active_names: set[str],
+    get_workspace_skill_manifest_path,
+    default_workspace_manifest,
+    mutate_json,
+    timestamp,
+) -> None:
+    """Mark copied legacy active skills enabled in a workspace manifest."""
+
+    def _update(payload: dict) -> int:
+        payload.setdefault("skills", {})
+        changed = 0
+        for skill_name in sorted(active_names):
+            entry = payload["skills"].get(skill_name)
+            if entry is None:
+                continue
+            if not entry.get("enabled", False):
+                entry["enabled"] = True
+                entry["updated_at"] = timestamp()
+                changed += 1
+        return changed
+
+    mutate_json(
+        get_workspace_skill_manifest_path(workspace_dir),
+        default_workspace_manifest(),
+        _update,
+    )
+
+
+def _reconcile_legacy_skill_workspaces(
+    workspace_dirs: list[Path],
+    workspace_active_names: dict[Path, set[str]],
+    reconcile_workspace_manifest,
+    enable_migrated_skills,
+) -> None:
+    """Reconcile all workspaces, then apply legacy active-name state."""
+    for workspace_dir in workspace_dirs:
+        reconcile_workspace_manifest(workspace_dir)
+        active_names = workspace_active_names.get(workspace_dir, set())
+        if active_names:
+            enable_migrated_skills(workspace_dir, active_names)
+
+
 def _do_migrate_legacy_skills_locked(
     wd: Path,
 ) -> bool:
@@ -366,53 +657,6 @@ def _do_migrate_legacy_skills_locked(
     if pool_manifest.exists():
         return False
 
-    def _has_legacy_skill_root(root: Path) -> bool:
-        return any(
-            (root / name).exists()
-            for name in ("active_skills", "customized_skills")
-        )
-
-    def _discover_skill_dirs(root: Path) -> dict[str, Path]:
-        if not root.exists() or not root.is_dir():
-            return {}
-        return {
-            path.name: path
-            for path in sorted(root.iterdir())
-            if path.is_dir() and (path / "SKILL.md").exists()
-        }
-
-    def _register_workspace(
-        workspace_dir: Path,
-        workspaces: list[Path],
-        seen: set[str],
-    ) -> None:
-        text = str(workspace_dir.expanduser())
-        if text in seen:
-            return
-        seen.add(text)
-        workspaces.append(Path(text))
-
-    def _copy_if_missing(source_dir: Path, target_dir: Path) -> bool:
-        if target_dir.exists():
-            try:
-                if _build_signature(source_dir) == _build_signature(
-                    target_dir,
-                ):
-                    return False
-            except Exception:
-                pass
-            logger.debug(
-                (
-                    "Skipping legacy skill copy from %s to %s "
-                    "because target exists"
-                ),
-                source_dir,
-                target_dir,
-            )
-            return False
-        _copy_skill_dir(source_dir, target_dir)
-        return True
-
     # --- Phase 1: Initialize pool ---
     try:
         ensure_skill_pool_initialized(working_dir=wd)
@@ -433,176 +677,50 @@ def _do_migrate_legacy_skills_locked(
     default_workspace = (wd / "workspaces" / "default").expanduser()
     default_workspace.mkdir(parents=True, exist_ok=True)
 
-    # --- Phase 1: Discover workspaces ---
-    workspace_dirs: list[Path] = []
-    seen_workspaces: set[str] = set()
-    for profile in config.agents.profiles.values():
-        _register_workspace(
-            Path(profile.workspace_dir).expanduser(),
-            workspace_dirs,
-            seen_workspaces,
-        )
-
-    workspaces_root = wd / "workspaces"
-    if workspaces_root.exists():
-        for workspace_dir in sorted(workspaces_root.iterdir()):
-            if workspace_dir.is_dir():
-                _register_workspace(
-                    workspace_dir.expanduser(),
-                    workspace_dirs,
-                    seen_workspaces,
-                )
-
-    _register_workspace(default_workspace, workspace_dirs, seen_workspaces)
-
-    # --- Phase 2: Build migration sources ---
-    migration_sources: list[tuple[Path, Path, str]] = []
-    seen_sources: set[tuple[str, str, str]] = set()
-
-    # Track which workspaces already have skills
-    workspaces_with_existing_skills: set[str] = set()
-
-    for workspace_dir in workspace_dirs:
-        key = (str(workspace_dir), str(workspace_dir), "workspace")
-        if key not in seen_sources:
-            seen_sources.add(key)
-            migration_sources.append(
-                (workspace_dir, workspace_dir, "workspace"),
-            )
-            # Check if workspace already has skills
-            ws_skills_dir = get_workspace_skills_dir(workspace_dir)
-            if ws_skills_dir.exists() and any(
-                p.is_dir() and (p / "SKILL.md").exists()
-                for p in ws_skills_dir.iterdir()
-            ):
-                workspaces_with_existing_skills.add(str(workspace_dir))
-
-    legacy_root = wd
-    if (
-        legacy_root != default_workspace
-        and _has_legacy_skill_root(legacy_root)
-        and not _has_legacy_skill_root(default_workspace)
-        and str(default_workspace) not in workspaces_with_existing_skills
-    ):
-        key = (str(legacy_root), str(default_workspace), "legacy_root")
-        if key not in seen_sources:
-            seen_sources.add(key)
-            migration_sources.append(
-                (legacy_root, default_workspace, "legacy_root"),
-            )
+    workspace_dirs = _discover_legacy_skill_workspaces(
+        config,
+        wd,
+        default_workspace,
+    )
+    migration_sources = _plan_legacy_skill_migration_sources(
+        workspace_dirs,
+        wd,
+        default_workspace,
+        get_workspace_skills_dir,
+    )
 
     workspace_active_names: dict[Path, set[str]] = {}
     copied_workspace_skills = 0
 
-    # --- Phase 3: Copy legacy skills into workspace skills/ dir ---
     for source_root, target_workspace, source_kind in migration_sources:
-        workspace_skills_dir = get_workspace_skills_dir(target_workspace)
-        workspace_skills_dir.mkdir(parents=True, exist_ok=True)
-
-        customized = _discover_skill_dirs(source_root / "customized_skills")
-        active = _discover_skill_dirs(source_root / "active_skills")
-
-        if not customized and not active:
-            continue
-
-        logger.debug(
-            "Found legacy skills in %s (%s): %d customized, %d active",
+        copied_workspace_skills += _copy_legacy_skill_source(
             source_root,
-            source_kind,
-            len(customized),
-            len(active),
-        )
-
-        active_names = workspace_active_names.setdefault(
             target_workspace,
-            set(),
+            source_kind,
+            workspace_active_names,
+            get_workspace_skills_dir,
+            _build_signature,
+            lambda source, target: _copy_legacy_skill_if_missing(
+                source,
+                target,
+                _build_signature,
+                _copy_skill_dir,
+            ),
         )
 
-        # Intra-workspace conflict: when active/ and customized/ both
-        # contain a skill with the same directory name but different file
-        # content, we suffix *both* copies ("-customize" and "-active")
-        # to avoid silently discarding either version.
-        same_name_diff_content: set[str] = set()
-        for skill_name in set(customized.keys()) & set(active.keys()):
-            custom_sig = _build_signature(customized[skill_name])
-            active_sig = _build_signature(active[skill_name])
-            if custom_sig != active_sig:
-                same_name_diff_content.add(skill_name)
-
-        # Process customized skills
-        for skill_name, skill_dir in customized.items():
-            if skill_name in same_name_diff_content:
-                # Same name but different content: add "-customize" suffix
-                target_name = f"{skill_name}-customize"
-                if _copy_if_missing(
-                    skill_dir,
-                    workspace_skills_dir / target_name,
-                ):
-                    copied_workspace_skills += 1
-                # NOT added to active_names, so will be disabled
-            else:
-                # Normal case: copy without suffix
-                if _copy_if_missing(
-                    skill_dir,
-                    workspace_skills_dir / skill_name,
-                ):
-                    copied_workspace_skills += 1
-                # If also in active with same content, mark as enabled
-                if skill_name in active:
-                    active_names.add(skill_name)
-
-        # Process active skills
-        for skill_name, skill_dir in active.items():
-            if skill_name in same_name_diff_content:
-                # Same name but different content: add "-active" suffix
-                target_name = f"{skill_name}-active"
-                if _copy_if_missing(
-                    skill_dir,
-                    workspace_skills_dir / target_name,
-                ):
-                    copied_workspace_skills += 1
-                active_names.add(target_name)  # Mark as enabled
-            elif skill_name not in customized:
-                # Different name: copy without suffix
-                if _copy_if_missing(
-                    skill_dir,
-                    workspace_skills_dir / skill_name,
-                ):
-                    copied_workspace_skills += 1
-                active_names.add(skill_name)  # Mark as enabled
-            # else: already handled in customized loop
-
-    # --- Phase 4: Reconcile workspace manifests ---
-    for workspace_dir in workspace_dirs:
-        # reconcile discovers on-disk skills and populates
-        # skill.json with correct source, metadata, and signature.
-        reconcile_workspace_manifest(workspace_dir)
-        active_names = workspace_active_names.get(workspace_dir, set())
-
-        if not active_names:
-            continue
-
-        def _update(
-            payload: dict,
-            active_names: set[str] = active_names,
-        ) -> int:
-            payload.setdefault("skills", {})
-            changed = 0
-            for skill_name in sorted(active_names):
-                entry = payload["skills"].get(skill_name)
-                if entry is None:
-                    continue
-                if not entry.get("enabled", False):
-                    entry["enabled"] = True
-                    entry["updated_at"] = _timestamp()
-                    changed += 1
-            return changed
-
-        _mutate_json(
-            get_workspace_skill_manifest_path(workspace_dir),
-            _default_workspace_manifest(),
-            _update,
-        )
+    _reconcile_legacy_skill_workspaces(
+        workspace_dirs,
+        workspace_active_names,
+        reconcile_workspace_manifest,
+        lambda workspace_dir, active_names: _enable_migrated_legacy_skills(
+            workspace_dir,
+            active_names,
+            get_workspace_skill_manifest_path,
+            _default_workspace_manifest,
+            _mutate_json,
+            _timestamp,
+        ),
+    )
 
     if copied_workspace_skills > 0:
         logger.info(

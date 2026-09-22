@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # market 服务基础地址：默认值在 src/swe/config/envs/{dev,prd}.json 维护，
 # 启动时由 load_env_defaults() 注入 os.environ；进程环境变量/K8s env 优先。
 MARKET_API_BASE_ENV = "SWE_MARKET_API_BASE_URL"
-_MARKET_DISTRIBUTIONS_PATH = "/api/market/distributions"
+_MARKET_DISTRIBUTIONS_PATH = "/market/distributions"
 _MARKET_TIMEOUT_SECONDS = 8
 
 # 批次状态（文档第 5 节）；前两个为非终态，列表查询时会继续刷新

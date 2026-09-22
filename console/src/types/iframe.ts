@@ -1,9 +1,6 @@
 /**
  * ============================================================
  * iframe postMessage 通信类型定义
- * Author: Kun He
- * Date: 2026-04-07
- * ============================================================
  *
  * 用于子应用与父级 iframe 应用之间的消息通信
  *
@@ -179,7 +176,6 @@ export interface IframeContext {
   positionId: string | null;
   /** 用户是否变更 */
   userChange: boolean;
-  /** ==================== URL 导航参数 (Kun He, 2026-04-15) ==================== **/
   /** 会话 ID，用于直接导航到 /chat/:sessionId */
   sessionId: string | null;
   /** 任务 ID，用于查找 task.chat_id 后导航 */
@@ -190,4 +186,8 @@ export interface IframeContext {
   pageSource: string | null;
   /** 打开平台 */
   platformSource: string | null;
+  /** 页面来源：是否已由 URL 参数（最高优先级）锁定 */
+  pageSourceFromUrl: boolean;
+  /** 平台来源：是否已由 URL 参数（最高优先级）锁定 */
+  platformSourceFromUrl: boolean;
 }

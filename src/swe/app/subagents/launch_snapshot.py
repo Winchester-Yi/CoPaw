@@ -26,6 +26,84 @@ class ModelLaunchSnapshotError(RuntimeError):
     """The worker cannot safely launch without a complete model snapshot."""
 
 
+def _capture_declared_skill_snapshots(
+    *,
+    metadata: Any,
+    frozen_root: Path | None,
+    snapshot_root: Path,
+    workspace_dir: Path,
+    effective_skill_names: list[str],
+    skill_snapshot_signatures: Mapping[str, str] | None,
+    skill_snapshot_dirs: Mapping[str, Path] | None,
+) -> tuple[list[str], list[str], dict[str, str]]:
+    loaded_skills: list[str] = []
+    skipped_skills: list[str] = []
+    freshness_tokens: dict[str, str] = {}
+    if metadata is None:
+        return loaded_skills, skipped_skills, freshness_tokens
+
+    available_skills = set(effective_skill_names)
+    for skill_name in metadata.declared_skills:
+        source = _resolve_launch_skill_source(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            frozen_root=frozen_root,
+            skill_snapshot_dirs=skill_snapshot_dirs,
+        )
+        if frozen_root is None and skill_name not in available_skills:
+            skipped_skills.append(skill_name)
+            continue
+        target = snapshot_root / skill_name
+        if (
+            source is None
+            or source.is_symlink()
+            or not skill_tree_is_regular(source)
+        ):
+            if frozen_root is not None:
+                raise OSError(
+                    f"frozen expert dependency is missing: skill {skill_name}",
+                )
+            skipped_skills.append(skill_name)
+            continue
+        try:
+            expected_signature = (skill_snapshot_signatures or {}).get(
+                skill_name,
+            )
+            if (
+                expected_signature is not None
+                and _build_signature(source) != expected_signature
+            ):
+                skipped_skills.append(skill_name)
+                continue
+            _copy_skill_tree_no_symlinks(source, target)
+            if (
+                expected_signature is not None
+                and _build_signature(target) != expected_signature
+            ):
+                _remove_snapshot_tree(target)
+                skipped_skills.append(skill_name)
+                continue
+            loaded_skills.append(skill_name)
+            freshness_tokens[skill_name] = get_skill_freshness_token(source)
+        except OSError:
+            skipped_skills.append(skill_name)
+    return loaded_skills, skipped_skills, freshness_tokens
+
+
+def _resolve_launch_skill_source(
+    *,
+    workspace_dir: Path,
+    skill_name: str,
+    frozen_root: Path | None,
+    skill_snapshot_dirs: Mapping[str, Path] | None,
+) -> Path | None:
+    if frozen_root is not None:
+        return frozen_root / "skills" / skill_name
+    if skill_snapshot_dirs is not None:
+        return skill_snapshot_dirs.get(skill_name)
+    return resolve_effective_skill_dir(workspace_dir, skill_name)
+
+
 def capture_launch_dependencies(
     *,
     run_store_dir: Path,
@@ -52,9 +130,6 @@ def capture_launch_dependencies(
         else None
     )
     snapshot_root = run_store_dir / f"{run_id}.skills"
-    loaded_skills: list[str] = []
-    skipped_skills: list[str] = []
-    freshness_tokens: dict[str, str] = {}
     if (
         frozen_root is not None
         and not frozen_root.is_dir()
@@ -64,56 +139,17 @@ def capture_launch_dependencies(
         )
     ):
         raise OSError("frozen expert dependency directory is missing")
-    if metadata is not None:
-        available_skills = set(effective_skill_names)
-        for skill_name in metadata.declared_skills:
-            if frozen_root is not None:
-                source = frozen_root / "skills" / skill_name
-            elif skill_snapshot_dirs is not None:
-                # A parent Query snapshot is authoritative.  Never silently
-                # resolve a missing entry from the mutable workspace.
-                source = skill_snapshot_dirs.get(skill_name)
-            else:
-                source = resolve_effective_skill_dir(workspace_dir, skill_name)
-            if frozen_root is None and skill_name not in available_skills:
-                skipped_skills.append(skill_name)
-                continue
-            target = snapshot_root / skill_name
-            if (
-                source is None
-                or source.is_symlink()
-                or not skill_tree_is_regular(source)
-            ):
-                if frozen_root is not None:
-                    raise OSError(
-                        f"frozen expert dependency is missing: skill {skill_name}",
-                    )
-                skipped_skills.append(skill_name)
-                continue
-            try:
-                expected_signature = (skill_snapshot_signatures or {}).get(
-                    skill_name,
-                )
-                if (
-                    expected_signature is not None
-                    and _build_signature(source) != expected_signature
-                ):
-                    skipped_skills.append(skill_name)
-                    continue
-                _copy_skill_tree_no_symlinks(source, target)
-                if (
-                    expected_signature is not None
-                    and _build_signature(target) != expected_signature
-                ):
-                    _remove_snapshot_tree(target)
-                    skipped_skills.append(skill_name)
-                    continue
-                loaded_skills.append(skill_name)
-                freshness_tokens[skill_name] = get_skill_freshness_token(
-                    source,
-                )
-            except OSError:
-                skipped_skills.append(skill_name)
+    loaded_skills, skipped_skills, freshness_tokens = (
+        _capture_declared_skill_snapshots(
+            metadata=metadata,
+            frozen_root=frozen_root,
+            snapshot_root=snapshot_root,
+            workspace_dir=workspace_dir,
+            effective_skill_names=effective_skill_names,
+            skill_snapshot_signatures=skill_snapshot_signatures,
+            skill_snapshot_dirs=skill_snapshot_dirs,
+        )
+    )
     try:
         if frozen_root is not None:
             mcp_payload, snapshotted_mcps, skipped_mcps = (

@@ -23,7 +23,7 @@ from swe.app.wealth_plans.models import (
 )
 from swe.app.wealth_plans.store import WealthPlanStore
 
-VIEWER = {"X-User-Id": "zhangwl"}
+VIEWER = {"X-User-Id": "zhangwl", "X-Bbk-Id": "100"}
 
 
 def make_scene(**overrides) -> PlanSceneRecord:
@@ -48,6 +48,7 @@ def make_plan(
         id="plan-abc123def456",
         sap_id="zhangwl",
         creator_name="张**",
+        bbk_id="100",
         source_id="RMASSIST",
         name="九月计划",
         scenes=scenes if scenes is not None else [make_scene()],
@@ -285,6 +286,12 @@ def make_app(
     )
     application = FastAPI()
     application.state.wealth_plan_store = store
+
+    @application.middleware("http")
+    async def _bbk_state(request, call_next):
+        request.state.bbk_id = request.headers.get("X-Bbk-Id")
+        return await call_next(request)
+
     application.include_router(wealth_router.router, prefix="/api")
     return application
 

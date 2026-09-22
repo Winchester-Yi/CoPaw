@@ -88,10 +88,7 @@ def _message_turn_status(message: Any) -> str | None:
     return None
 
 
-def _turn_statuses(
-    messages: list[Any],
-    state: dict[str, Any],
-) -> dict[str, str]:
+def _stored_turn_statuses(state: dict[str, Any]) -> dict[str, str]:
     raw_states = state.get("turn_states")
     statuses: dict[str, str] = {}
     for turn_id, turn in (raw_states or {}).items():
@@ -100,35 +97,51 @@ def _turn_statuses(
         status = turn.get("status")
         if isinstance(status, str):
             statuses[str(turn_id)] = status
+    return statuses
+
+
+def _preferred_output_status(output_statuses: list[str | None]) -> str:
+    if "failed" in output_statuses:
+        return "failed"
+    for status in ("stopping", "running"):
+        if status in output_statuses:
+            return status
+    return next(
+        (
+            status
+            for status in output_statuses
+            if status is not None and status != "completed"
+        ),
+        "completed",
+    )
+
+
+def _inferred_turn_status(
+    messages: list[Any],
+    turn_id: str,
+) -> str | None:
+    turn = _slice_answer_turn(messages, msgid=turn_id) or []
+    output = turn[1:]
+    if not output:
+        return None
+    output_statuses = [_message_turn_status(item) for item in output]
+    return _preferred_output_status(output_statuses)
+
+
+def _turn_statuses(
+    messages: list[Any],
+    state: dict[str, Any],
+) -> dict[str, str]:
+    statuses = _stored_turn_statuses(state)
     for message in messages:
         if getattr(message, "role", None) != "user":
             continue
         turn_id = _message_original_id(message)
         if not turn_id or turn_id in statuses:
             continue
-        turn = _slice_answer_turn(messages, msgid=turn_id) or []
-        output = turn[1:]
-        if not output:
-            continue
-        output_statuses = [_message_turn_status(item) for item in output]
-        if "failed" in output_statuses:
-            statuses[turn_id] = "failed"
-        elif "stopping" in output_statuses or "running" in output_statuses:
-            statuses[turn_id] = next(
-                status
-                for status in ("stopping", "running")
-                if status in output_statuses
-            )
-        else:
-            non_completed = next(
-                (
-                    status
-                    for status in output_statuses
-                    if status is not None and status != "completed"
-                ),
-                None,
-            )
-            statuses[turn_id] = non_completed or "completed"
+        status = _inferred_turn_status(messages, turn_id)
+        if status is not None:
+            statuses[turn_id] = status
     return statuses
 
 

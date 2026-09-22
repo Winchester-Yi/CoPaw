@@ -34,6 +34,7 @@ from .models import (
     PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_PUBLISHING,
     PUBLISH_STATUS_PUBLISHED,
+    SOURCE_LABEL_BY_ROLE,
     NameListItem,
     NameListResponse,
     PlanCreateResponse,
@@ -57,7 +58,7 @@ from .publish import (
     delete_removed_scene_jobs,
     launch_publish,
 )
-from .roles import can_view_branch_wide, resolve_role
+from .roles import ROLE_RM, can_view_branch_wide, resolve_role
 from .store import WealthPlanStore, new_plan_id
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,8 @@ async def _fetch_external_skill_stats(
         "bbkId": bbk_id,
         "skills": [s.model_dump() for s in skills],
     }
+    if _request_role(request) == ROLE_RM:
+        body["sapId"] = _request_sap_id(request)
     try:
         async with httpx.AsyncClient(
             timeout=_SKILL_CONFIG_TIMEOUT_SECONDS,
@@ -352,6 +355,40 @@ async def _validate_plan_scenes_for_branch(
         )
 
 
+async def _validate_scene_conflicts(
+    request: Request,
+    store: WealthPlanStore,
+    body: PlanUpsertRequest,
+    *,
+    exclude_plan_id: str | None = None,
+    scene_ids: set[str] | None = None,
+) -> None:
+    """按发布角色矩阵校验本行已被占用的经营场景。"""
+    checked_scene_ids = (
+        scene_ids
+        if scene_ids is not None
+        else {scene.scene_id for scene in body.scenes}
+    )
+    conflicts = await store.find_scene_conflicts(
+        _request_role(request),
+        _request_sap_id(request),
+        getattr(request.state, "bbk_id", None),
+        checked_scene_ids,
+        exclude_plan_id=exclude_plan_id,
+    )
+    if not conflicts:
+        return
+    scene_names = {scene.scene_id: scene.scene_name for scene in body.scenes}
+    items = "、".join(
+        f"「{scene_names[scene_id]}」（规划「{plan_name}」）"
+        for scene_id, plan_name in conflicts.items()
+    )
+    raise HTTPException(
+        status_code=409,
+        detail=f"以下经营场景已被选用：{items}，请调整后重新发布",
+    )
+
+
 @router.post("/plans", response_model=PlanCreateResponse)
 async def create_plan(
     request: Request,
@@ -360,6 +397,7 @@ async def create_plan(
     """创建规划并异步发布：落库即返回，编排结果回写状态。"""
     await _validate_plan_scenes_for_branch(request, body)
     store = _get_store(request)
+    await _validate_scene_conflicts(request, store, body)
     record = _build_record(request, body, plan_id=new_plan_id())
     await store.create(record)
     launch_publish(request, store, record.id)
@@ -371,7 +409,7 @@ async def create_plan(
 
 @router.get("/plans", response_model=PlanListResponse)
 async def list_plans(request: Request) -> PlanListResponse:
-    """看板列表：客户经理看自己创建 + 分发给自己的；行长/中台看本行全部。"""
+    """看板列表：先限定本行，再按角色和创建/分发关系确定可见范围。"""
     store = _get_store(request)
     viewer = _request_sap_id(request)
     records = await store.list_for_viewer(
@@ -410,6 +448,14 @@ async def update_plan(
     if old.status == PUBLISH_STATUS_PUBLISHING:
         raise HTTPException(status_code=409, detail="规划发布中，请稍后再修改")
     await _validate_plan_scenes_for_branch(request, body)
+    await _validate_scene_conflicts(
+        request,
+        store,
+        body,
+        exclude_plan_id=plan_id,
+        scene_ids={scene.scene_id for scene in body.scenes}
+        - {scene.scene_id for scene in old.scenes},
+    )
     record = _build_record(request, body, plan_id=plan_id)
     _carry_scene_links(old, record)
     await store.update(record)
@@ -454,13 +500,11 @@ async def _get_visible_plan(
     record = await store.get(plan_id)
     if record is None:
         raise HTTPException(status_code=404, detail="plan not found")
+    if not bbk_id or record.bbk_id != bbk_id:
+        raise HTTPException(status_code=403, detail="forbidden")
     is_creator = record.sap_id == viewer
-    is_target = any(t.sap_id == viewer for t in record.targets)
-    # 行长/中台可读本行（同 bbk_id）全部规划，但仍只读、不可编辑
-    is_branch_peer = (
-        can_view_branch_wide(role) and bool(bbk_id) and record.bbk_id == bbk_id
-    )
-    if not is_creator and not is_target and not is_branch_peer:
+    is_target = any(target.sap_id == viewer for target in record.targets)
+    if not can_view_branch_wide(role) and not is_creator and not is_target:
         raise HTTPException(status_code=403, detail="forbidden")
     return record
 
@@ -495,7 +539,10 @@ def _build_record(
         agent_id=getattr(state, "agent_id", None) or "default",
         name=body.name.strip(),
         description=body.description,
-        source_label=body.source_label,
+        source_label=(
+            SOURCE_LABEL_BY_ROLE.get(_request_role(request))
+            or body.source_label
+        ),
         period_start=starts[0] if starts else None,
         period_end=ends[-1] if ends else None,
         scenes=[

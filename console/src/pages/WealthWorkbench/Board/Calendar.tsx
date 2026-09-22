@@ -10,6 +10,7 @@ import {
   addCalendarDays,
   calendarDate,
   calendarRange,
+  planItemScheduledOn,
   planFrequency,
   planScheduledOn,
   todayKey,
@@ -17,6 +18,14 @@ import {
 import { Icon } from "../components/Icon";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+function scheduledSceneName(plan: Plan, day: string): string {
+  const sceneNames = (plan.items ?? [])
+    .filter((item) => planItemScheduledOn(plan, item, day))
+    .map((item) => item.sceneName)
+    .filter(Boolean);
+  return sceneNames.join(" / ") || "未命名场景";
+}
 
 export function Calendar({
   visible,
@@ -183,32 +192,35 @@ export function Calendar({
                     {today ? "今天" : items.length ? `${items.length} 项` : ""}
                   </span>
                 </div>
-                {shown.map((p) => (
-                  <button
-                    key={p.id}
-                    className={cx(
-                      styles.calendarEvent,
-                      p.source !== "分行关注" && styles.purple,
-                    )}
-                    title={`${p.name} · ${p.status} · 点击查看详情`}
-                    onClick={() => onShowDetails(day, p.id)}
-                  >
-                    <span className={styles.calendarEventTitle}>
-                      <strong>{p.name}</strong>
-                      <span className={styles.calendarFrequency}>
-                        {planFrequency(p)}
+                {shown.map((p) => {
+                  const sceneName = scheduledSceneName(p, day);
+                  return (
+                    <button
+                      key={p.id}
+                      className={cx(
+                        styles.calendarEvent,
+                        p.source !== "分行关注" && styles.purple,
+                      )}
+                      title={`${sceneName} · ${p.status} · 点击查看详情`}
+                      onClick={() => onShowDetails(day, p.id)}
+                    >
+                      <span className={styles.calendarEventTitle}>
+                        <strong>{sceneName}</strong>
+                        <span className={styles.calendarFrequency}>
+                          {planFrequency(p)}
+                        </span>
                       </span>
-                    </span>
-                    {dimension === "week" && (
-                      <small>
-                        {p.source} · {p.customers} 位目标客户
-                        <br />
-                        已生成 {p.tasks} 项任务 · {p.rate}%<br />
-                        {p.status}
-                      </small>
-                    )}
-                  </button>
-                ))}
+                      {dimension === "week" && (
+                        <small>
+                          {p.source} · {p.customers} 位目标客户
+                          <br />
+                          已生成 {p.tasks} 项任务 · {p.rate}%<br />
+                          {p.status}
+                        </small>
+                      )}
+                    </button>
+                  );
+                })}
                 {dimension === "month" && items.length > 3 && (
                   <button
                     className={styles.calendarMore}

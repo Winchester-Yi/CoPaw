@@ -130,6 +130,8 @@ def test_build_job_spec_maps_identity_and_schedule() -> None:
     assert job.schedule.cron == "30 8 * * mon,thu"
     assert job.schedule.timezone == "Asia/Shanghai"
     assert job.skill_ids == "skill-wealth-insurance-1"
+    assert job.plan_id == "plan-1"
+    assert job.model_dump()["plan_id"] == "plan-1"
     assert job.meta["wealth_plan_id"] == "plan-1"
     assert job.meta["wealth_item_id"] == ""
     assert job.meta["wealth_mcp_relations"] == ["mcp-customer"]

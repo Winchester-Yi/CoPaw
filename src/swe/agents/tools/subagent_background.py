@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
@@ -37,6 +38,22 @@ _RUN_ID_CONTEXT_KEYS = (
 )
 _FAILURE_SUMMARY_MAX_CHARS = 1024
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+
+
+@dataclass(frozen=True)
+class _BackgroundSubagentToolContext:
+    """Shared state captured by Background SubAgent tool closures."""
+
+    supervisor: BackgroundSubAgentSupervisor
+    parent_agent_config: AgentProfileConfig
+    workspace_dir: Path
+    request_context: dict[str, Any]
+    tool_scope: BackgroundSubAgentScope
+    definition_catalog: Any
+    effective_skill_names: list[str] | None
+    skill_snapshot_signatures: dict[str, str] | None
+    skill_snapshot_dirs: Mapping[str, Path] | None
+    selected_expert_id: str | None
 
 
 async def _wake_goal_after_subagent(
@@ -108,6 +125,315 @@ def build_background_subagent_scope(
     )
 
 
+def _parse_subagent_start_request(
+    name: str | None,
+    instruction: str | None,
+    objective: str | None,
+    background: str,
+    extra: dict[str, Any],
+) -> SubAgentStartRequest:
+    if extra:
+        raise ValueError("unexpected fields: " + ", ".join(sorted(extra)))
+    return SubAgentStartRequest.model_validate(
+        {
+            "name": name,
+            "instruction": instruction,
+            "objective": objective,
+            "background": background,
+        },
+    )
+
+
+def _resolve_subagent_start_definition(
+    *,
+    start_request: SubAgentStartRequest,
+    definition_catalog: Any,
+    selected_expert_id: str | None,
+    tool_scope: BackgroundSubAgentScope,
+) -> tuple[
+    SubAgentDefinition | None,
+    DefinitionMatchMetadata | None,
+    ToolResponse | None,
+]:
+    definition = (
+        definition_catalog.resolve_exact(start_request.name)
+        if definition_catalog is not None
+        else None
+    )
+    if selected_expert_id and definition is None:
+        return (
+            None,
+            None,
+            _json_response(
+                {
+                    "status": "not_found",
+                    "reason": "selected_expert_not_available",
+                    "name": start_request.name,
+                    "selected_expert_id": selected_expert_id,
+                },
+            ),
+        )
+    if selected_expert_id and start_request.name != definition.name:
+        return (
+            None,
+            None,
+            _json_response(
+                {
+                    "status": "failed",
+                    "reason": "selected_expert_name_mismatch",
+                    "name": start_request.name,
+                    "selected_expert_name": definition.name,
+                },
+            ),
+        )
+    if definition is not None:
+        return (
+            definition,
+            DefinitionMatchMetadata(
+                matched=True,
+                definition_name=definition.name,
+                definition_source=definition.source,
+                score=1.0,
+                reason="exact_name",
+            ),
+            None,
+        )
+    if start_request.instruction is None:
+        return (
+            None,
+            None,
+            _json_response(
+                {
+                    "status": "not_found",
+                    "reason": "subagent_definition_not_found",
+                    "name": start_request.name,
+                },
+            ),
+        )
+    return (
+        SubAgentDefinition(
+            name=start_request.name,
+            source="run_scoped",
+            owner_scope=f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}",
+            description="Temporary caller-defined SubAgent.",
+            instruction=start_request.instruction,
+        ),
+        DefinitionMatchMetadata(matched=False, reason="run_scoped"),
+        None,
+    )
+
+
+async def _link_goal_subagent_run(
+    *,
+    goal_id: str,
+    result: Any,
+    request_context: dict[str, Any],
+    supervisor: BackgroundSubAgentSupervisor,
+    scope: BackgroundSubAgentScope,
+) -> None:
+    run_id = getattr(result, "run_id", None)
+    if not goal_id or not run_id:
+        return
+    request_context["goal_subagent_run_ids"].append(run_id)
+    from ...app.goals.registry import get_goal_service
+
+    goal_service = get_goal_service()
+    if goal_service is not None:
+        await goal_service.link_subagent(goal_id, run_id)
+    asyncio.create_task(
+        _wake_goal_after_subagent(
+            supervisor=supervisor,
+            scope=scope,
+            goal_id=goal_id,
+            run_id=run_id,
+        ),
+    )
+
+
+def _create_start_subagent_tool(
+    context: _BackgroundSubagentToolContext,
+    directory: str,
+) -> Callable[..., Any]:
+    """Create the start tool bound to one Background SubAgent scope."""
+
+    async def start_subagent(
+        name: str | None = None,
+        instruction: str | None = None,
+        objective: str | None = None,
+        background: str = "",
+        **extra: Any,
+    ) -> ToolResponse:
+        """Start a Background SubAgent Run and return its run identity."""
+        try:
+            start_request = _parse_subagent_start_request(
+                name,
+                instruction,
+                objective,
+                background,
+                extra,
+            )
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
+        try:
+            definition, definition_match, failure = (
+                _resolve_subagent_start_definition(
+                    start_request=start_request,
+                    definition_catalog=context.definition_catalog,
+                    selected_expert_id=context.selected_expert_id,
+                    tool_scope=context.tool_scope,
+                )
+            )
+            if failure is not None:
+                return failure
+            spec = DelegationSpec(
+                parent_thread_id=str(
+                    context.request_context.get("session_id") or "",
+                ),
+                parent_chat_id=str(
+                    context.request_context.get("chat_id") or "",
+                ),
+                parent_msgid=str(
+                    context.request_context.get("msgid") or "",
+                ),
+                goal_id=str(context.request_context.get("goal_id") or ""),
+                name=start_request.name,
+                objective=start_request.objective,
+                background=start_request.background,
+            )
+            goal_id = str(context.request_context.get("goal_id") or "").strip()
+            if goal_id:
+                context.request_context.setdefault("goal_subagent_run_ids", [])
+            result = await context.supervisor.start(
+                scope=context.tool_scope,
+                spec=spec,
+                parent_agent_config=context.parent_agent_config,
+                workspace_dir=context.workspace_dir,
+                parent_policy=_parent_policy_from_config(
+                    context.parent_agent_config,
+                ),
+                request_context=context.request_context,
+                definition=definition,
+                start_request=start_request,
+                definition_match=definition_match,
+                effective_skill_names=(
+                    list(context.effective_skill_names or [])
+                    if (
+                        definition.skill_owned is not None
+                        or definition.agent_owned is not None
+                    )
+                    else []
+                ),
+                skill_snapshot_signatures=context.skill_snapshot_signatures,
+                skill_snapshot_dirs=context.skill_snapshot_dirs,
+            )
+            await _link_goal_subagent_run(
+                goal_id=goal_id,
+                result=result,
+                request_context=context.request_context,
+                supervisor=context.supervisor,
+                scope=context.tool_scope,
+            )
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
+        return _json_response(_serialize_start_result(result))
+
+    start_subagent.__doc__ = directory
+    return start_subagent
+
+
+def _create_wait_subagent_tool(
+    context: _BackgroundSubagentToolContext,
+) -> Callable[..., Any]:
+    """Create the wait tool bound to one Background SubAgent scope."""
+
+    async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
+        """Wait briefly and return current Background SubAgent statuses."""
+        snapshot = await context.supervisor.wait(
+            context.tool_scope,
+            timeout_ms=timeout_ms,
+        )
+        return _json_response(_serialize_wait_snapshot(snapshot))
+
+    return wait_subagent
+
+
+def _create_get_subagent_tool(
+    context: _BackgroundSubagentToolContext,
+) -> Callable[..., Any]:
+    """Create the get tool bound to one Background SubAgent scope."""
+
+    async def get_subagent(
+        run_id: str,
+        include_details: bool = False,
+    ) -> ToolResponse:
+        """Fetch one Background SubAgent Run in the current scope."""
+        try:
+            record = await context.supervisor.get(
+                context.tool_scope,
+                run_id,
+            )
+        except ValueError:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        if record is None:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        return _json_response(
+            _compact_record(
+                record,
+                include_details,
+                manageable=_is_manageable(
+                    context.supervisor,
+                    context.tool_scope,
+                    run_id,
+                ),
+                run_store_dir=context.tool_scope.run_store_dir,
+            ),
+        )
+
+    return get_subagent
+
+
+def _create_cancel_subagent_tool(
+    context: _BackgroundSubagentToolContext,
+) -> Callable[..., Any]:
+    """Create the cancel tool bound to one Background SubAgent scope."""
+
+    async def cancel_subagent(run_id: str) -> ToolResponse:
+        """Cancel one active Background SubAgent Run in the current scope."""
+        try:
+            result = await context.supervisor.cancel(
+                context.tool_scope,
+                run_id,
+            )
+        except ValueError:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        if result is None:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        if isinstance(result, BackgroundSubAgentNotManageable):
+            return _json_response(result.model_dump(mode="json"))
+        return _json_response(
+            _compact_record(
+                result,
+                include_details=False,
+                manageable=False,
+                run_store_dir=context.tool_scope.run_store_dir,
+            ),
+        )
+
+    return cancel_subagent
+
+
 def create_background_subagent_tools(
     *,
     supervisor: BackgroundSubAgentSupervisor,
@@ -132,213 +458,24 @@ def create_background_subagent_tools(
         selected_expert_id=selected_expert_id,
     )
     directory = _format_skill_definition_directory(definition_catalog)
-
-    async def start_subagent(
-        name: str | None = None,
-        instruction: str | None = None,
-        objective: str | None = None,
-        background: str = "",
-        **extra: Any,
-    ) -> ToolResponse:
-        """Start a Background SubAgent Run and return its run identity."""
-        try:
-            if extra:
-                raise ValueError(
-                    "unexpected fields: " + ", ".join(sorted(extra)),
-                )
-            start_request = SubAgentStartRequest.model_validate(
-                {
-                    "name": name,
-                    "instruction": instruction,
-                    "objective": objective,
-                    "background": background,
-                },
-            )
-        except Exception as exc:
-            return _json_response(
-                {
-                    "status": "failed",
-                    "reason": "invalid_request",
-                    "message": str(exc),
-                },
-            )
-        try:
-            definition = (
-                definition_catalog.resolve_exact(start_request.name)
-                if definition_catalog is not None
-                else None
-            )
-            if selected_expert_id:
-                if definition is None:
-                    return _json_response(
-                        {
-                            "status": "not_found",
-                            "reason": "selected_expert_not_available",
-                            "name": start_request.name,
-                            "selected_expert_id": selected_expert_id,
-                        },
-                    )
-                if start_request.name != definition.name:
-                    return _json_response(
-                        {
-                            "status": "failed",
-                            "reason": "selected_expert_name_mismatch",
-                            "name": start_request.name,
-                            "selected_expert_name": definition.name,
-                        },
-                    )
-            if definition is None:
-                if start_request.instruction is None:
-                    return _json_response(
-                        {
-                            "status": "not_found",
-                            "reason": "subagent_definition_not_found",
-                            "name": start_request.name,
-                        },
-                    )
-                definition_match = DefinitionMatchMetadata(
-                    matched=False,
-                    reason="run_scoped",
-                )
-                definition = SubAgentDefinition(
-                    name=start_request.name,
-                    source="run_scoped",
-                    owner_scope=(
-                        f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"
-                    ),
-                    description="Temporary caller-defined SubAgent.",
-                    instruction=start_request.instruction,
-                )
-            else:
-                definition_match = DefinitionMatchMetadata(
-                    matched=True,
-                    definition_name=definition.name,
-                    definition_source=definition.source,
-                    score=1.0,
-                    reason="exact_name",
-                )
-            spec = DelegationSpec(
-                parent_thread_id=str(request_context.get("session_id") or ""),
-                parent_chat_id=str(request_context.get("chat_id") or ""),
-                parent_msgid=str(request_context.get("msgid") or ""),
-                goal_id=str(request_context.get("goal_id") or ""),
-                name=start_request.name,
-                objective=start_request.objective,
-                background=start_request.background,
-            )
-            goal_id = str(request_context.get("goal_id") or "").strip()
-            if goal_id:
-                request_context.setdefault("goal_subagent_run_ids", [])
-            result = await supervisor.start(
-                scope=tool_scope,
-                spec=spec,
-                parent_agent_config=parent_agent_config,
-                workspace_dir=workspace_dir,
-                parent_policy=_parent_policy_from_config(
-                    parent_agent_config,
-                ),
-                request_context=request_context,
-                definition=definition,
-                start_request=start_request,
-                definition_match=definition_match,
-                effective_skill_names=(
-                    list(effective_skill_names or [])
-                    if (
-                        definition.skill_owned is not None
-                        or definition.agent_owned is not None
-                    )
-                    else []
-                ),
-                skill_snapshot_signatures=skill_snapshot_signatures,
-                skill_snapshot_dirs=skill_snapshot_dirs,
-            )
-            if goal_id:
-                run_id = getattr(result, "run_id", None)
-                if run_id:
-                    request_context["goal_subagent_run_ids"].append(run_id)
-                    from ...app.goals.registry import get_goal_service
-
-                    goal_service = get_goal_service()
-                    if goal_service is not None:
-                        await goal_service.link_subagent(goal_id, run_id)
-                    asyncio.create_task(
-                        _wake_goal_after_subagent(
-                            supervisor=supervisor,
-                            scope=tool_scope,
-                            goal_id=goal_id,
-                            run_id=run_id,
-                        ),
-                    )
-        except Exception as exc:
-            return _json_response(
-                {
-                    "status": "failed",
-                    "reason": "invalid_request",
-                    "message": str(exc),
-                },
-            )
-        return _json_response(_serialize_start_result(result))
-
-    start_subagent.__doc__ = directory
-
-    async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
-        """Wait briefly and return current Background SubAgent statuses."""
-        snapshot = await supervisor.wait(
-            tool_scope,
-            timeout_ms=timeout_ms,
-        )
-        return _json_response(_serialize_wait_snapshot(snapshot))
-
-    async def get_subagent(
-        run_id: str,
-        include_details: bool = False,
-    ) -> ToolResponse:
-        """Fetch one Background SubAgent Run in the current scope."""
-        try:
-            record = await supervisor.get(
-                tool_scope,
-                run_id,
-            )
-        except ValueError:
-            return _json_response({"status": "not_found", "run_id": run_id})
-        if record is None:
-            return _json_response({"status": "not_found", "run_id": run_id})
-        return _json_response(
-            _compact_record(
-                record,
-                include_details,
-                manageable=_is_manageable(supervisor, tool_scope, run_id),
-                run_store_dir=tool_scope.run_store_dir,
-            ),
-        )
-
-    async def cancel_subagent(run_id: str) -> ToolResponse:
-        """Cancel one active Background SubAgent Run in the current scope."""
-        try:
-            result = await supervisor.cancel(
-                tool_scope,
-                run_id,
-            )
-        except ValueError:
-            return _json_response({"status": "not_found", "run_id": run_id})
-        if result is None:
-            return _json_response({"status": "not_found", "run_id": run_id})
-        if isinstance(result, BackgroundSubAgentNotManageable):
-            return _json_response(result.model_dump(mode="json"))
-        return _json_response(
-            _compact_record(
-                result,
-                include_details=False,
-                manageable=False,
-                run_store_dir=tool_scope.run_store_dir,
-            ),
-        )
+    context = _BackgroundSubagentToolContext(
+        supervisor=supervisor,
+        parent_agent_config=parent_agent_config,
+        workspace_dir=workspace_dir,
+        request_context=request_context,
+        tool_scope=tool_scope,
+        definition_catalog=definition_catalog,
+        effective_skill_names=effective_skill_names,
+        skill_snapshot_signatures=skill_snapshot_signatures,
+        skill_snapshot_dirs=skill_snapshot_dirs,
+        selected_expert_id=selected_expert_id,
+    )
 
     tools: dict[str, Callable[..., Any]] = {
-        "start_subagent": start_subagent,
-        "wait_subagent": wait_subagent,
-        "get_subagent": get_subagent,
-        "cancel_subagent": cancel_subagent,
+        "start_subagent": _create_start_subagent_tool(context, directory),
+        "wait_subagent": _create_wait_subagent_tool(context),
+        "get_subagent": _create_get_subagent_tool(context),
+        "cancel_subagent": _create_cancel_subagent_tool(context),
     }
     return tools
 

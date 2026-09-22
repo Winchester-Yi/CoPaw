@@ -221,6 +221,14 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 排错注意：`MessageList` 会倒序挂载消息，不能用组件注册先后判断报告新旧。历史执行默认折叠规则在 `console/src/pages/Chat/sessionApi/index.ts`；最新执行没有报告时，不应回退到折叠的旧执行。加载期间不应消耗 5 秒候选等待窗口。
 - 回归验证：在 `console/` 运行 `npm run test:run -- src/components/agentscope-chat/ChatAutoPreviewHtmlProvider.test.tsx src/components/agentscope-chat/autoPreviewSelection.test.ts src/pages/Chat/components/TaskRunGroupCard/index.test.tsx src/components/agentscope-chat/DownloadFileCard/index.test.tsx`。
 
+## 定时任务关联计划 planId
+
+- 创建接口 `POST /cron/jobs` 接受可选字符串 `planId`（最长 255 字符）；内部字段、返回值和 `jobs.json` 使用 `plan_id`，也接受 snake_case 输入。省略或 null 保存为 SQL NULL。
+- 分发通过 `src/swe/app/crons/api.py` 的 `_build_broadcast_job` 复制任务；重复分发通过 `_merge_existing_child_with_source` 继承父任务当前的 `plan_id`。
+- 同步链路：`monitor_sync_client.py::_build_job_sync_data` → Monitor `CronJobSyncRequest` → `SyncService.sync_job`，INSERT/UPDATE 都写 `swe_cron_jobs.plan_id`。同步仍为异步，失败查 Monitor sync 日志。
+- 部署先在 Monitor 数据库执行 `deploy/migrations/2026_09_21_add_cron_plan_id.sql`，再部署 SWE/Monitor；脚本可重复执行，旧记录保持 NULL。`schema.py` 的初始化也覆盖新表与缺列升级，但当前服务启动路径不自动调用该初始化，不能只靠重启完成升级。
+- 回归：`tests/unit/app/test_cron_plan_id.py`、`tests/unit/app/test_tenant_cron_api.py`。
+
 ## Claw 技能运行看板
 
 - 页面：`/analytics/claw-data-overview`；组件：`console/src/pages/Analytics/ClawDataOverview/index.tsx`。

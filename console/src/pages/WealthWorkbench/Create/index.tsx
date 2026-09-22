@@ -2,16 +2,26 @@
  * 智能财富工作台 —— 创建计划页（新建 / 修改工作规划）
  * 对应原型 createHTML：场景选择、方向与排程配置、规划名称、
  * 分发目标（仅支行行长/分行中台）、发布确认。
- * 执行排程与控制台定时任务同一模型（每小时/每日/每周/自定义 cron）。
+ * 执行排程与控制台定时任务同一模型，自定义规则在提交前转换为 cron。
  */
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { DatePicker } from "antd";
 import cx from "classnames";
+import dayjs from "dayjs";
 import type { CronType } from "@/utils/parseCron";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import { TargetPicker } from "../components/TargetPicker";
 import { TimeField } from "../components/TimeField";
+import {
+  buildCustomCron,
+  customScheduleLabel,
+  DEFAULT_CUSTOM_SCHEDULE,
+  parseCustomSchedule,
+  type CustomScheduleConfig,
+  type CustomScheduleMode,
+} from "./customSchedule";
 import { SCENE_CATEGORIES } from "../mock/data";
 import { needsDistributeTargets } from "../permissions";
 import {
@@ -20,7 +30,7 @@ import {
   useWealthStore,
   validateDraft,
 } from "../store";
-import { findSceneConflicts } from "../utils";
+import { filterSceneConflictPlans, findSceneConflicts } from "../utils";
 import type { PlanItem, Scene } from "../types";
 
 const STEP_DEFS = [
@@ -54,12 +64,21 @@ const TARGET_STEP = {
 
 const CYCLES = ["本月", "本季", "今日", "T+1日", "自定义"];
 
-/** 执行频率选项：与控制台定时任务表单一致 */
+type CustomRepeatMode = "daily" | "weekly" | "monthly" | "yearly" | "frequency";
+
 const SCHEDULE_TYPES: { value: CronType; label: string }[] = [
   { value: "hourly", label: "每小时" },
   { value: "daily", label: "每日" },
   { value: "weekly", label: "每周" },
   { value: "custom", label: "自定义" },
+];
+
+const CUSTOM_REPEAT_OPTIONS: { value: CustomRepeatMode; label: string }[] = [
+  { value: "daily", label: "每日" },
+  { value: "weekly", label: "每周" },
+  { value: "monthly", label: "每月" },
+  { value: "yearly", label: "每年" },
+  { value: "frequency", label: "自定义频率" },
 ];
 
 const WEEKDAYS: { value: string; label: string }[] = [
@@ -132,11 +151,38 @@ function TargetNamesSummary({ sapIds }: { sapIds: string[] }) {
   );
 }
 
-/**
- * 单个场景的排程配置块：执行频率模型与控制台定时任务一致
- * （每小时 / 每日 / 每周 / 自定义 cron），序列化复用 @/utils/parseCron。
- */
-function ScheduleEditor({
+export function SceneDescription({ description }: { description: string }) {
+  return (
+    <p className={styles.sceneDescription} title={description}>
+      {description}
+    </p>
+  );
+}
+
+export function StepIndicator({
+  active,
+  completed,
+  number,
+}: {
+  active: boolean;
+  completed: boolean;
+  number: number;
+}) {
+  return (
+    <span
+      className={cx(
+        styles.stepNum,
+        active && styles.stepActive,
+        completed && styles.stepComplete,
+      )}
+    >
+      {completed ? "✓" : number}
+    </span>
+  );
+}
+
+/** 单个场景的排程配置块；仅自定义排程使用可读规则编辑并转换为 cron。 */
+export function ScheduleEditor({
   item,
   sceneName,
 }: {
@@ -146,20 +192,64 @@ function ScheduleEditor({
   const updateSchedule = useWealthStore((s) => s.updateSchedule);
   const schedule = item.schedule;
   const type = schedule.type;
+  const customConfig =
+    type === "custom" ? parseCustomSchedule(schedule.rawCron) : null;
+  const customRepeatMode: CustomRepeatMode | "" =
+    customConfig?.mode === "daily" || customConfig?.mode === "weekly"
+      ? customConfig.mode
+      : customConfig?.mode === "monthly" || customConfig?.mode === "yearly"
+      ? customConfig.mode
+      : customConfig
+      ? "frequency"
+      : "";
+
+  const updateCustomSchedule = (next: CustomScheduleConfig) => {
+    updateSchedule(item.id, {
+      type: "custom",
+      rawCron: buildCustomCron(next),
+    });
+  };
+
+  const selectCustomRepeatMode = (mode: CustomRepeatMode) => {
+    if (mode === "frequency") {
+      const intervalConfig =
+        customConfig?.mode === "minutes" || customConfig?.mode === "hours"
+          ? customConfig
+          : DEFAULT_CUSTOM_SCHEDULE;
+      updateCustomSchedule(intervalConfig);
+      return;
+    }
+    updateCustomSchedule({
+      ...(customConfig ?? DEFAULT_CUSTOM_SCHEDULE),
+      mode,
+    });
+  };
 
   return (
     <div className={styles.scheduleBlock}>
       <div className={styles.cycle}>
         <span>执行频率</span>
         <div className={styles.cycleGroup}>
-          {SCHEDULE_TYPES.map((t) => (
+          {SCHEDULE_TYPES.map((option) => (
             <button
-              key={t.value}
-              className={type === t.value ? styles.active : ""}
-              aria-pressed={type === t.value}
-              onClick={() => updateSchedule(item.id, { type: t.value })}
+              key={option.value}
+              className={type === option.value ? styles.active : ""}
+              aria-pressed={type === option.value}
+              onClick={() =>
+                updateSchedule(
+                  item.id,
+                  option.value === "custom"
+                    ? {
+                        type: "custom",
+                        rawCron:
+                          schedule.rawCron ??
+                          buildCustomCron(DEFAULT_CUSTOM_SCHEDULE),
+                      }
+                    : { type: option.value },
+                )
+              }
             >
-              {t.label}
+              {option.label}
             </button>
           ))}
         </div>
@@ -181,23 +271,23 @@ function ScheduleEditor({
         <div className={styles.scheduleField}>
           <span>执行日</span>
           <div className={styles.cycleGroup}>
-            {WEEKDAYS.map((d) => {
-              const active = schedule.daysOfWeek?.includes(d.value) ?? false;
+            {WEEKDAYS.map((day) => {
+              const active = schedule.daysOfWeek?.includes(day.value) ?? false;
               return (
                 <button
-                  key={d.value}
+                  key={day.value}
                   className={active ? styles.active : ""}
                   aria-pressed={active}
                   onClick={() => {
                     const current = schedule.daysOfWeek ?? [];
                     updateSchedule(item.id, {
                       daysOfWeek: active
-                        ? current.filter((x) => x !== d.value)
-                        : [...current, d.value],
+                        ? current.filter((value) => value !== day.value)
+                        : [...current, day.value],
                     });
                   }}
                 >
-                  {d.label}
+                  {day.label}
                 </button>
               );
             })}
@@ -205,33 +295,203 @@ function ScheduleEditor({
         </div>
       )}
       {type === "custom" && (
-        <label className={styles.scheduleField}>
-          <span>cron 表达式</span>
-          <input
-            aria-label={`${sceneName}cron表达式`}
-            placeholder="0 9 * * *"
-            value={schedule.rawCron ?? ""}
-            onChange={(e) =>
-              updateSchedule(item.id, { rawCron: e.target.value })
-            }
-          />
-        </label>
+        <div className={styles.customScheduleFields}>
+          <label className={styles.scheduleField}>
+            <span>重复规则</span>
+            <select
+              aria-label={`${sceneName}自定义重复规则`}
+              value={customRepeatMode}
+              onChange={(event) =>
+                selectCustomRepeatMode(event.target.value as CustomRepeatMode)
+              }
+            >
+              {customRepeatMode === "" && (
+                <option value="" disabled>
+                  旧版自定义规则
+                </option>
+              )}
+              {CUSTOM_REPEAT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {(customConfig?.mode === "daily" ||
+            customConfig?.mode === "weekly" ||
+            customConfig?.mode === "monthly" ||
+            customConfig?.mode === "yearly") && (
+            <div className={styles.scheduleField}>
+              <span>执行时刻</span>
+              <TimeField
+                hour={customConfig.hour}
+                minute={customConfig.minute}
+                onChange={(hour, minute) =>
+                  updateCustomSchedule({ ...customConfig, hour, minute })
+                }
+                ariaLabel={`${sceneName}自定义执行时刻`}
+              />
+            </div>
+          )}
+          {customConfig?.mode === "weekly" && (
+            <div className={styles.scheduleField}>
+              <span>执行日</span>
+              <div className={styles.cycleGroup}>
+                {WEEKDAYS.map((day) => {
+                  const active = customConfig.daysOfWeek.includes(day.value);
+                  return (
+                    <button
+                      key={day.value}
+                      className={active ? styles.active : ""}
+                      aria-pressed={active}
+                      onClick={() =>
+                        updateCustomSchedule({
+                          ...customConfig,
+                          daysOfWeek: active
+                            ? customConfig.daysOfWeek.filter(
+                                (value) => value !== day.value,
+                              )
+                            : [...customConfig.daysOfWeek, day.value],
+                        })
+                      }
+                    >
+                      {day.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {customRepeatMode === "frequency" && customConfig && (
+            <div className={styles.scheduleField}>
+              <span>执行间隔</span>
+              <div className={styles.customFrequencyControls}>
+                <span>每</span>
+                <input
+                  className={styles.scheduleNumber}
+                  type="number"
+                  min={1}
+                  max={customConfig.mode === "minutes" ? 59 : 23}
+                  value={customConfig.interval}
+                  aria-label={`${sceneName}自定义频率间隔`}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      interval: Number(event.target.value),
+                    })
+                  }
+                />
+                <select
+                  aria-label={`${sceneName}自定义频率单位`}
+                  value={customConfig.mode}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      mode: event.target.value as Extract<
+                        CustomScheduleMode,
+                        "minutes" | "hours"
+                      >,
+                    })
+                  }
+                >
+                  <option value="minutes">分钟</option>
+                  <option value="hours">小时</option>
+                </select>
+              </div>
+            </div>
+          )}
+          {customConfig?.mode === "monthly" && (
+            <label className={styles.scheduleField}>
+              <span>执行日期</span>
+              <select
+                aria-label={`${sceneName}每月执行日期`}
+                value={customConfig.dayOfMonth}
+                onChange={(event) =>
+                  updateCustomSchedule({
+                    ...customConfig,
+                    dayOfMonth: Number(event.target.value),
+                  })
+                }
+              >
+                {Array.from({ length: 31 }, (_, index) => index + 1).map(
+                  (day) => (
+                    <option key={day} value={day}>
+                      {day} 日
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+          )}
+          {customConfig?.mode === "yearly" && (
+            <div className={styles.scheduleField}>
+              <span>执行日期</span>
+              <div className={styles.scheduleDateParts}>
+                <select
+                  aria-label={`${sceneName}每年执行月份`}
+                  value={customConfig.month}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      month: Number(event.target.value),
+                    })
+                  }
+                >
+                  {Array.from({ length: 12 }, (_, index) => index + 1).map(
+                    (month) => (
+                      <option key={month} value={month}>
+                        {month} 月
+                      </option>
+                    ),
+                  )}
+                </select>
+                <select
+                  aria-label={`${sceneName}每年执行日期`}
+                  value={customConfig.dayOfMonth}
+                  onChange={(event) =>
+                    updateCustomSchedule({
+                      ...customConfig,
+                      dayOfMonth: Number(event.target.value),
+                    })
+                  }
+                >
+                  {Array.from({ length: 31 }, (_, index) => index + 1).map(
+                    (day) => (
+                      <option key={day} value={day}>
+                        {day} 日
+                      </option>
+                    ),
+                  )}
+                </select>
+              </div>
+            </div>
+          )}
+          {!customConfig && schedule.rawCron && (
+            <p className={styles.customScheduleHint}>
+              这是旧版创建的复杂规则，请重新选择一种重复规则后再编辑。
+            </p>
+          )}
+        </div>
       )}
-      <div className={styles.taskRangeLabel}>{scheduleLabel(schedule)}</div>
+      <div className={styles.taskRangeLabel}>
+        {type === "custom"
+          ? customScheduleLabel(schedule.rawCron)
+          : scheduleLabel(schedule)}
+      </div>
     </div>
   );
 }
 
 /** 单个场景的任务周期（有效期）配置块 */
-function TaskSchedule({ item, scene }: { item: PlanItem; scene: Scene }) {
+export function TaskSchedule({
+  item,
+  scene,
+}: {
+  item: PlanItem;
+  scene: Scene;
+}) {
   const setTaskCycle = useWealthStore((s) => s.setTaskCycle);
   const setItemDates = useWealthStore((s) => s.setItemDates);
-  const startDateRef = useRef<HTMLInputElement>(null);
-  const endDateRef = useRef<HTMLInputElement>(null);
-
-  const openDatePicker = (ref: { current: HTMLInputElement | null }) => {
-    ref.current?.showPicker?.();
-  };
 
   return (
     <>
@@ -253,22 +513,36 @@ function TaskSchedule({ item, scene }: { item: PlanItem; scene: Scene }) {
         </div>
         {item.cycle === "自定义" ? (
           <div className={styles.taskCustomDates}>
-            <input
-              ref={startDateRef}
-              type="date"
+            <DatePicker
+              className={styles.taskDatePicker}
+              classNames={{ popup: { root: styles.taskDatePopup } }}
+              inputReadOnly
+              allowClear={false}
+              format="YYYY-MM-DD"
               aria-label={`${scene.name}任务开始日期`}
-              value={item.start ?? ""}
-              onClick={() => openDatePicker(startDateRef)}
-              onChange={(e) => setItemDates(scene.id, "start", e.target.value)}
+              value={item.start ? dayjs(item.start) : null}
+              placeholder="请选择开始日期"
+              onChange={(value) =>
+                setItemDates(
+                  scene.id,
+                  "start",
+                  value?.format("YYYY-MM-DD") ?? "",
+                )
+              }
             />
             <span>至</span>
-            <input
-              ref={endDateRef}
-              type="date"
+            <DatePicker
+              className={styles.taskDatePicker}
+              classNames={{ popup: { root: styles.taskDatePopup } }}
+              inputReadOnly
+              allowClear={false}
+              format="YYYY-MM-DD"
               aria-label={`${scene.name}任务结束日期`}
-              value={item.end ?? ""}
-              onClick={() => openDatePicker(endDateRef)}
-              onChange={(e) => setItemDates(scene.id, "end", e.target.value)}
+              value={item.end ? dayjs(item.end) : null}
+              placeholder="请选择结束日期"
+              onChange={(value) =>
+                setItemDates(scene.id, "end", value?.format("YYYY-MM-DD") ?? "")
+              }
             />
           </div>
         ) : (
@@ -304,10 +578,11 @@ export default function Create() {
   const toast = useWealthStore((s) => s.toast);
   const targetSapIds = useWealthStore((s) => s.targetSapIds);
   const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const navigate = useNavigate();
 
   const [filterCategory, setFilterCategory] = useState("全部");
-  const [activeSteps, setActiveSteps] = useState<number[]>([0, 1]);
+  const [activeStep, setActiveStep] = useState(0);
   const dragId = useRef<string | null>(null);
 
   const sceneRef = useRef<HTMLElement>(null);
@@ -344,10 +619,14 @@ export default function Create() {
         ? directionRef.current
         : targetRef.current;
     el?.scrollIntoView({ behavior: "smooth" });
-    setActiveSteps([index]);
+    setActiveStep(index);
   };
 
   const onPublish = () => {
+    if (!plansLoaded) {
+      toast("正在加载已有规划，请稍候");
+      return;
+    }
     const error = validateDraft(draft);
     if (error) {
       toast(error);
@@ -358,28 +637,27 @@ export default function Create() {
       return;
     }
     const currentId = editingId;
-    // 行长/中台：草稿场景若已被其他已发布/发布中的规划占用，禁止重复新建发布
-    const conflicts = needsTargets
-      ? findSceneConflicts(plans, draft, currentId)
-      : [];
+    // 前端按角色矩阵预判；后端会再次检查本行完整数据，防止绕过页面发布。
+    const conflictPlans = filterSceneConflictPlans(
+      plans,
+      account?.id ?? "unknown",
+    );
+    const conflicts = findSceneConflicts(conflictPlans, draft, currentId);
     openDialog({
       title: currentId ? "保存规划修改" : "发布工作规划",
       body: (
         <>
           <p>请确认以下规划配置：</p>
           {conflicts.length > 0 && (
-            <p className={styles.pageNote}>
-              <b className={styles.red}>
-                以下经营场景已发布过：
-                {conflicts
-                  .map(
-                    (c) =>
-                      `「${c.scene.sceneName}」（见规划「${c.planName}」）`,
-                  )
-                  .join("、")}
-                。请前往规划看板编辑对应规划，无需新建。
-              </b>
-            </p>
+            <div className={styles.sceneConflictAlert} role="alert">
+              <strong>以下经营场景已被选用：</strong>
+              {conflicts
+                .map(
+                  (c) => `「${c.scene.sceneName}」（见规划「${c.planName}」）`,
+                )
+                .join("、")}
+              。请前往规划看板编辑对应规划，无需新建。
+            </div>
           )}
           <div className={styles.detailGrid}>
             <div>
@@ -400,7 +678,10 @@ export default function Create() {
               <p style={{ margin: 0 }}>
                 任务周期：{x.cycle}（{x.start} 至 {x.end}）
                 <br />
-                执行排程：{scheduleLabel(x.schedule)}
+                执行排程：
+                {x.schedule.type === "custom"
+                  ? customScheduleLabel(x.schedule.rawCron)
+                  : scheduleLabel(x.schedule)}
                 <br />
                 经营方向：{x.direction}
               </p>
@@ -429,6 +710,11 @@ export default function Create() {
 
   const visibleScenes = scenesByCategory[filterCode] ?? [];
   const allScenes = Object.values(scenesByCategory).flat();
+  const publishLabel = plansLoaded
+    ? editingId
+      ? "保存修改"
+      : "发布规划"
+    : "规划加载中…";
 
   return (
     <>
@@ -444,283 +730,302 @@ export default function Create() {
           </button>
           <button
             className={`${styles.btn} ${styles.primary}`}
+            disabled={!plansLoaded}
+            aria-busy={!plansLoaded}
             onClick={onPublish}
           >
-            {editingId ? "保存修改" : "发布规划"}
+            {publishLabel}
           </button>
         </div>
       </div>
 
-      <div className={`${styles.panel} ${styles.steps}`}>
-        {stepDefs.map((s, i) => (
-          <span key={s.n} style={{ display: "contents" }}>
-            {i > 0 && <div className={styles.stepLine}></div>}
-            <button
-              className={cx(
-                styles.step,
-                activeSteps.includes(i) && styles.active,
-              )}
-              onClick={() => scrollTo(s.target, i)}
-            >
-              <span className={styles.stepNum}>
-                {s.n === 1 && draft.items.length ? "✓" : s.n}
-              </span>
-              <span>
-                <strong>
-                  {s.n}
-                  {"　"}
-                  {s.title}
-                </strong>
-                <small>{s.sub}</small>
-              </span>
-            </button>
-          </span>
-        ))}
-      </div>
+      {!plansLoaded && (
+        <div className={styles.formLoading} role="status">
+          正在加载规划数据，加载完成后可编辑
+        </div>
+      )}
 
-      <div className={`${styles.panel} ${styles.createPanel}`}>
-        <section className={styles.formSection} ref={sceneRef}>
-          <h3>1. 选择经营场景</h3>
-          <div className={styles.categoryFilter}>
-            <strong>产品大类筛选</strong>
-            <div className={styles.pills}>
-              {["全部", ...SCENE_CATEGORIES.map((c) => c.label)].map((c) => (
+      <fieldset
+        className={styles.createForm}
+        disabled={!plansLoaded}
+        aria-busy={!plansLoaded}
+      >
+        <div className={`${styles.panel} ${styles.steps}`}>
+          {stepDefs.map((s, i) => {
+            const completed = s.n === 1 && draft.items.length > 0;
+            return (
+              <span key={s.n} style={{ display: "contents" }}>
+                {i > 0 && <div className={styles.stepLine}></div>}
                 <button
-                  key={c}
-                  className={cx(
-                    styles.pill,
-                    filterCategory === c && styles.active,
-                  )}
-                  onClick={() => setFilterCategory(c)}
+                  className={styles.step}
+                  aria-current={activeStep === i ? "step" : undefined}
+                  onClick={() => scrollTo(s.target, i)}
                 >
-                  {c}
+                  <StepIndicator
+                    active={!completed && activeStep === i}
+                    completed={completed}
+                    number={s.n}
+                  />
+                  <span>
+                    <strong>
+                      {s.n}
+                      {"　"}
+                      {s.title}
+                    </strong>
+                    <small>{s.sub}</small>
+                  </span>
                 </button>
-              ))}
-            </div>
-          </div>
-          <div className={styles.scenes}>
-            {scenesLoading && !(filterCode in scenesByCategory) ? (
-              <div className={styles.empty} style={{ gridColumn: "1/-1" }}>
-                场景加载中…
-              </div>
-            ) : visibleScenes.length ? (
-              visibleScenes.map((s, i) => {
-                const chosen = draft.items.some((x) => x.id === s.id);
-                return (
+              </span>
+            );
+          })}
+        </div>
+
+        <div className={`${styles.panel} ${styles.createPanel}`}>
+          <section className={styles.formSection} ref={sceneRef}>
+            <h3>1. 选择经营场景</h3>
+            <div className={styles.categoryFilter}>
+              <strong>产品大类筛选</strong>
+              <div className={styles.pills}>
+                {["全部", ...SCENE_CATEGORIES.map((c) => c.label)].map((c) => (
                   <button
-                    key={s.id}
+                    key={c}
                     className={cx(
-                      styles.scene,
-                      i < 3 && filterCategory === "全部" && styles.featured,
-                      chosen && styles.selected,
+                      styles.pill,
+                      filterCategory === c && styles.active,
                     )}
-                    aria-pressed={chosen}
-                    onClick={() => toggleScene(s.id)}
+                    onClick={() => setFilterCategory(c)}
                   >
-                    <span className={styles.sceneCheck}>
-                      {chosen ? "✓" : ""}
-                    </span>
-                    <div className={styles.bubble}>
-                      <Icon name={s.icon} />
-                    </div>
-                    <div>
-                      <div className={styles.sceneTitle}>
-                        {s.name}
-                        <span className={styles.tag}>{s.category}</span>
-                      </div>
-                      <p>{s.desc}</p>
-                      <span className={styles.status}>
-                        <i className={styles.dot}></i>
-                        AI能力已就绪
-                        <span
-                          className={styles.muted}
-                          style={{ marginLeft: 6 }}
-                        >
-                          · {s.source}
-                        </span>
-                      </span>
-                    </div>
+                    {c}
                   </button>
-                );
-              })
-            ) : (
-              <div className={styles.empty} style={{ gridColumn: "1/-1" }}>
-                该产品大类暂无可用经营场景
+                ))}
               </div>
-            )}
-          </div>
-        </section>
-
-        <section className={styles.formSection} ref={directionRef}>
-          <h3>
-            2. 已选择的规划场景{" "}
-            <span style={{ color: "var(--blue)" }}>
-              （{draft.items.length}）
-            </span>
-            <span
-              className={styles.muted}
-              style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}
-            >
-              拖动调整顺序，或使用上下箭头
-            </span>
-          </h3>
-          <div className={styles.selectedList}>
-            {draft.items.length ? (
-              draft.items.map((x, i) => {
-                const s = allScenes.find((sc) => sc.id === x.id);
-                const display: Scene =
-                  s ??
-                  ({
-                    id: x.id,
-                    name: x.sceneName,
-                    category: x.categoryLabel,
-                    categoryCode: x.categoryCode,
-                    icon: "layer",
-                    desc: x.direction,
-                    source: "",
-                    mcpRelations: x.mcpRelations,
-                  } as Scene);
-                return (
-                  <div
-                    className={styles.selectedRow}
-                    key={x.id}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      if (dragId.current != null)
-                        dropScene(dragId.current, x.id);
-                    }}
-                  >
-                    <span
-                      className={styles.drag}
-                      draggable
-                      onDragStart={(e) => {
-                        dragId.current = x.id;
-                        e.dataTransfer.setData("text/plain", x.id);
-                      }}
-                      title="拖动排序"
-                    >
-                      ⠿
-                    </span>
-                    <span className={styles.order}>{i + 1}</span>
-                    <div className={styles.selectedMain}>
-                      <div className={styles.selectedTitle}>
-                        {x.sceneName}
-                        <span className={styles.tag}>{x.categoryLabel}</span>
-                      </div>
-                      <label className={styles.direction}>
-                        <span>
-                          经营方向 <b style={{ color: "var(--red)" }}>·</b>
-                        </span>
-                        <input
-                          aria-label={`${x.sceneName}的经营方向`}
-                          value={x.direction}
-                          maxLength={120}
-                          onChange={(e) =>
-                            setItemDirection(x.id, e.target.value)
-                          }
-                        />
-                      </label>
-                    </div>
-                    <TaskSchedule item={x} scene={display} />
-                    <div className={styles.rowTools}>
-                      <button
-                        className={styles.iconbtn}
-                        title="上移"
-                        aria-label={`上移${x.sceneName}`}
-                        disabled={i === 0}
-                        onClick={() => moveScene(i, -1)}
-                      >
-                        <Icon name="up" />
-                      </button>
-                      <button
-                        className={styles.iconbtn}
-                        title="下移"
-                        aria-label={`下移${x.sceneName}`}
-                        disabled={i === draft.items.length - 1}
-                        onClick={() => moveScene(i, 1)}
-                      >
-                        <Icon name="down" />
-                      </button>
-                      <button
-                        className={styles.iconbtn}
-                        title="移除"
-                        aria-label={`移除${x.sceneName}`}
-                        onClick={() => toggleScene(x.id)}
-                      >
-                        <Icon name="trash" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            ) : (
-              <div className={`${styles.empty} ${styles.panel}`}>
-                请先选择至少一个经营场景
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section className={styles.formSection}>
-          <h3>3. 规划名称</h3>
-          <div className={styles.bottomForm}>
-            <div className={styles.field}>
-              <label htmlFor="wealthPlanName">规划名称</label>
-              <input
-                className={styles.input}
-                id="wealthPlanName"
-                value={draft.name}
-                maxLength={40}
-                placeholder="请输入规划名称"
-                onChange={(e) => setDraftName(e.target.value)}
-              />
             </div>
-          </div>
-          <p className={styles.pageNote}>
-            任务周期是场景的有效期，执行排程决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
-          </p>
-        </section>
+            <div className={styles.scenes}>
+              {scenesLoading && !(filterCode in scenesByCategory) ? (
+                <div className={styles.empty} style={{ gridColumn: "1/-1" }}>
+                  场景加载中…
+                </div>
+              ) : visibleScenes.length ? (
+                visibleScenes.map((s, i) => {
+                  const chosen = draft.items.some((x) => x.id === s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      className={cx(
+                        styles.scene,
+                        i < 3 && filterCategory === "全部" && styles.featured,
+                        chosen && styles.selected,
+                      )}
+                      aria-pressed={chosen}
+                      onClick={() => toggleScene(s.id)}
+                    >
+                      <span className={styles.sceneCheck}>
+                        {chosen ? "✓" : ""}
+                      </span>
+                      <div className={styles.bubble}>
+                        <Icon name={s.icon} />
+                      </div>
+                      <div>
+                        <div className={styles.sceneTitle}>
+                          {s.name}
+                          <span className={styles.tag}>{s.category}</span>
+                        </div>
+                        <SceneDescription description={s.desc} />
+                        <span className={styles.status}>
+                          <i className={styles.dot}></i>
+                          AI能力已就绪
+                          <span
+                            className={styles.muted}
+                            style={{ marginLeft: 6 }}
+                          >
+                            · {s.source}
+                          </span>
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })
+              ) : (
+                <div className={styles.empty} style={{ gridColumn: "1/-1" }}>
+                  该产品大类暂无可用经营场景
+                </div>
+              )}
+            </div>
+          </section>
 
-        {needsTargets && (
-          <section className={styles.formSection} ref={targetRef}>
+          <section className={styles.formSection} ref={directionRef}>
             <h3>
-              4. 选择分发目标{" "}
+              2. 已选择的规划场景{" "}
               <span style={{ color: "var(--blue)" }}>
-                （已选 {targetSapIds.length} 人）
+                （{draft.items.length}）
+              </span>
+              <span
+                className={styles.muted}
+                style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}
+              >
+                拖动调整顺序，或使用上下箭头
               </span>
             </h3>
-            <TargetPicker />
+            <div className={styles.selectedList}>
+              {draft.items.length ? (
+                draft.items.map((x, i) => {
+                  const s = allScenes.find((sc) => sc.id === x.id);
+                  const display: Scene =
+                    s ??
+                    ({
+                      id: x.id,
+                      name: x.sceneName,
+                      category: x.categoryLabel,
+                      categoryCode: x.categoryCode,
+                      icon: "layer",
+                      desc: x.direction,
+                      source: "",
+                      mcpRelations: x.mcpRelations,
+                    } as Scene);
+                  return (
+                    <div
+                      className={styles.selectedRow}
+                      key={x.id}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragId.current != null)
+                          dropScene(dragId.current, x.id);
+                      }}
+                    >
+                      <span
+                        className={styles.drag}
+                        draggable
+                        onDragStart={(e) => {
+                          dragId.current = x.id;
+                          e.dataTransfer.setData("text/plain", x.id);
+                        }}
+                        title="拖动排序"
+                      >
+                        ⠿
+                      </span>
+                      <span className={styles.order}>{i + 1}</span>
+                      <div className={styles.selectedMain}>
+                        <div className={styles.selectedTitle}>
+                          {x.sceneName}
+                          <span className={styles.tag}>{x.categoryLabel}</span>
+                        </div>
+                        <label className={styles.direction}>
+                          <span>
+                            经营方向 <b style={{ color: "var(--red)" }}>·</b>
+                          </span>
+                          <input
+                            aria-label={`${x.sceneName}的经营方向`}
+                            value={x.direction}
+                            maxLength={120}
+                            onChange={(e) =>
+                              setItemDirection(x.id, e.target.value)
+                            }
+                          />
+                        </label>
+                      </div>
+                      <TaskSchedule item={x} scene={display} />
+                      <div className={styles.rowTools}>
+                        <button
+                          className={styles.iconbtn}
+                          title="上移"
+                          aria-label={`上移${x.sceneName}`}
+                          disabled={i === 0}
+                          onClick={() => moveScene(i, -1)}
+                        >
+                          <Icon name="up" />
+                        </button>
+                        <button
+                          className={styles.iconbtn}
+                          title="下移"
+                          aria-label={`下移${x.sceneName}`}
+                          disabled={i === draft.items.length - 1}
+                          onClick={() => moveScene(i, 1)}
+                        >
+                          <Icon name="down" />
+                        </button>
+                        <button
+                          className={styles.iconbtn}
+                          title="移除"
+                          aria-label={`移除${x.sceneName}`}
+                          onClick={() => toggleScene(x.id)}
+                        >
+                          <Icon name="trash" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className={`${styles.empty} ${styles.panel}`}>
+                  请先选择至少一个经营场景
+                </div>
+              )}
+            </div>
           </section>
-        )}
-      </div>
 
-      <div className={styles.footerActions}>
-        {/* 「保存草稿」功能暂缓上线：入口与提示先注释，store/api 能力保留
+          <section className={styles.formSection}>
+            <h3>3. 规划名称</h3>
+            <div className={styles.bottomForm}>
+              <div className={styles.field}>
+                <label htmlFor="wealthPlanName">规划名称</label>
+                <input
+                  className={styles.input}
+                  id="wealthPlanName"
+                  value={draft.name}
+                  maxLength={40}
+                  placeholder="请输入规划名称"
+                  onChange={(e) => setDraftName(e.target.value)}
+                />
+              </div>
+            </div>
+            <p className={styles.pageNote}>
+              任务周期是场景的有效期，执行排程决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
+            </p>
+          </section>
+
+          {needsTargets && (
+            <section className={styles.formSection} ref={targetRef}>
+              <h3>
+                4. 选择分发目标{" "}
+                <span style={{ color: "var(--blue)" }}>
+                  （已选 {targetSapIds.length} 人）
+                </span>
+              </h3>
+              <TargetPicker />
+            </section>
+          )}
+        </div>
+
+        <div className={styles.footerActions}>
+          {/* 「保存草稿」功能暂缓上线：入口与提示先注释，store/api 能力保留
         <span className={styles.draftNote}>
           {savedAt ? `草稿已保存 · ${savedAt}` : "可保存草稿，稍后继续编辑"}
         </span>
         */}
-        <button
-          className={styles.btn}
-          onClick={() =>
-            sceneRef.current?.scrollIntoView({ behavior: "smooth" })
-          }
-        >
-          上一步
-        </button>
-        {/*
+          <button
+            className={styles.btn}
+            onClick={() =>
+              sceneRef.current?.scrollIntoView({ behavior: "smooth" })
+            }
+          >
+            上一步
+          </button>
+          {/*
         <button className={styles.btn} onClick={() => void saveDraft()}>
           保存草稿
         </button>
         */}
-        <button
-          className={`${styles.btn} ${styles.primary}`}
-          onClick={onPublish}
-        >
-          {editingId ? "保存修改" : "发布规划"}
-        </button>
-      </div>
+          <button
+            className={`${styles.btn} ${styles.primary}`}
+            disabled={!plansLoaded}
+            aria-busy={!plansLoaded}
+            onClick={onPublish}
+          >
+            {publishLabel}
+          </button>
+        </div>
+      </fieldset>
     </>
   );
 }

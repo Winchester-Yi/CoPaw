@@ -171,6 +171,29 @@ def test_turn_status_fallback_ignores_transport_message_status():
     }
 
 
+def test_turn_status_fallback_preserves_status_priority():
+    messages = [
+        _message("q1", "user", "first"),
+        _message("a1", "assistant", "answer"),
+        _message("a2", "assistant", "answer"),
+        _message("a3", "assistant", "answer"),
+    ]
+    for message, status in zip(
+        messages[1:],
+        ("running", "stopping", "failed"),
+        strict=True,
+    ):
+        message["metadata"]["turn_status"] = status
+
+    typed_messages = [
+        ChatMessage.model_validate(message) for message in messages
+    ]
+
+    assert _turn_statuses(typed_messages, {"turn_states": {}}) == {
+        "q1": "failed",
+    }
+
+
 @pytest.mark.parametrize("status", ["completed", "failed", "running"])
 def test_message_turn_status_accepts_explicit_answer_status(status):
     message = SimpleNamespace(metadata={}, status=status)

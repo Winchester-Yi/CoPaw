@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
+import { Tooltip } from "antd";
 import cx from "classnames";
 import DOMPurify from "dompurify";
 import styles from "../index.module.less";
@@ -88,6 +89,27 @@ function OpportunityHtml({ value }: { value: string }) {
   );
 }
 
+function OpportunityContent({
+  items,
+  multiple,
+}: {
+  items: string[];
+  multiple?: boolean;
+}) {
+  if (multiple && items.length > 1) {
+    return (
+      <ul className={styles.opportunityList}>
+        {items.map((item, index) => (
+          <li key={index}>
+            <OpportunityHtml value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <OpportunityHtml value={items[0]} />;
+}
+
 /** 经营机会单元格：支持外部接口返回的简单 HTML 列表。 */
 export function Opportunities({
   customer,
@@ -100,18 +122,21 @@ export function Opportunities({
     (item) => item.trim().length > 0,
   );
   if (!items.length) return <>--</>;
-  if (multiple && items.length > 1) {
-    return (
-      <ul className={styles.opportunityList}>
-        {items.map((t, i) => (
-          <li key={i}>
-            <OpportunityHtml value={t} />
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  return <OpportunityHtml value={items[0]} />;
+  return (
+    <Tooltip
+      placement="topLeft"
+      trigger={["hover", "focus"]}
+      title={
+        <div className={styles.opportunityTooltipContent}>
+          <OpportunityContent items={items} multiple={multiple} />
+        </div>
+      }
+    >
+      <div className={styles.opportunityPreview} tabIndex={0}>
+        <OpportunityContent items={items} multiple={multiple} />
+      </div>
+    </Tooltip>
+  );
 }
 
 /**
@@ -192,6 +217,21 @@ function labelTagClass(label: string) {
       : "";
 }
 
+/** 重点标签单元格：空值使用低强调度占位标签，避免表格出现空洞。 */
+export function CustomerLabel({ label }: { label: string }) {
+  const value = label.trim();
+  return (
+    <span
+      className={cx(
+        styles.tag,
+        value ? labelTagClass(value) : styles.emptyTag,
+      )}
+    >
+      {value || "暂无标签"}
+    </span>
+  );
+}
+
 export default function Tasks({ page }: { page: TaskPageKind }) {
   const canViewTasks = useCanAccess("tasks");
   const customers = useWealthStore((s) => s.customers);
@@ -201,6 +241,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const doneCustomers = useWealthStore((s) => s.doneCustomers);
   const doneLoading = useWealthStore((s) => s.doneLoading);
   const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const loadTodayCustomers = useWealthStore((s) => s.loadTodayCustomers);
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
@@ -283,10 +324,18 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
 
   // 进入任务页加载名单：今日任务按当前视角查询；待触达/已完成按 touched 口径各查一次
   useEffect(() => {
+    if (!plansLoaded) return;
     if (page === "today") void loadTodayCustomers(view);
     if (page === "pending") void loadPendingCustomers();
     if (page === "done") void loadDoneCustomers();
-  }, [page, view, loadTodayCustomers, loadPendingCustomers, loadDoneCustomers]);
+  }, [
+    page,
+    view,
+    plansLoaded,
+    loadTodayCustomers,
+    loadPendingCustomers,
+    loadDoneCustomers,
+  ]);
 
   const doneToday = customers.filter(
     (c) => c.done && (taskLabel === "全部" || matchLabel(c.label, taskLabel)),
@@ -682,11 +731,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                     <td className={styles.name}>{c.name}</td>
                     {!isBiz && (
                       <td>
-                        <span
-                          className={cx(styles.tag, labelTagClass(c.label))}
-                        >
-                          {c.label}
-                        </span>
+                        <CustomerLabel label={c.label} />
                       </td>
                     )}
                     <td className={styles.reason}>

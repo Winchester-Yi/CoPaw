@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_jobs (
     job_origin      VARCHAR(32) NOT NULL DEFAULT 'manual' COMMENT '任务来源: manual/subscription/system',
     subscription_key VARCHAR(255) DEFAULT '' COMMENT '订阅任务稳定分组ID',
     skill_ids       VARCHAR(200) DEFAULT '' COMMENT '绑定技能ID，逗号分隔',
+    plan_id         VARCHAR(255) DEFAULT NULL COMMENT '关联计划ID',
     meta            VARCHAR(4096) DEFAULT '' COMMENT '扩展元数据',
 
     -- 状态追踪
@@ -81,6 +82,11 @@ AFTER tenant_id;
 """
 
 CRON_JOBS_EXTRA_COLUMNS: dict[str, str] = {
+    "plan_id": (
+        "ALTER TABLE swe_cron_jobs "
+        "ADD COLUMN plan_id VARCHAR(255) DEFAULT NULL "
+        "COMMENT '关联计划ID'"
+    ),
     "job_origin": (
         "ALTER TABLE swe_cron_jobs "
         "ADD COLUMN job_origin VARCHAR(32) NOT NULL DEFAULT 'manual' "

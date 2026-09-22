@@ -63,6 +63,81 @@ def _validate_http_url(url: str) -> None:
         raise AsyncDownloadPolicyError("Unsupported media URL scheme")
 
 
+def _redirect_url(
+    response: httpx.Response,
+    current_url: str,
+    redirect_count: int,
+) -> str | None:
+    if not response.is_redirect:
+        return None
+    location = response.headers.get("location")
+    if not location or redirect_count >= _MAX_REDIRECTS:
+        raise AsyncDownloadPolicyError("Too many media redirects")
+    redirect_url = urljoin(current_url, location)
+    _validate_http_url(redirect_url)
+    return redirect_url
+
+
+def _validate_content_length(
+    response: httpx.Response,
+    max_bytes: int,
+) -> None:
+    raw_length = response.headers.get("content-length")
+    if not raw_length:
+        return
+    try:
+        content_length = int(raw_length)
+    except ValueError:
+        return
+    if content_length > max_bytes:
+        raise ValueError("Downloaded media exceeds 10 MiB limit")
+
+
+async def _stream_response_to_path(
+    response: httpx.Response,
+    destination: Path,
+    max_bytes: int,
+) -> Optional[str]:
+    total = 0
+    output = await asyncio.to_thread(destination.open, "wb")
+    try:
+        async for chunk in response.aiter_bytes(64 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("Downloaded media exceeds 10 MiB limit")
+            await asyncio.to_thread(output.write, chunk)
+    finally:
+        await asyncio.to_thread(output.close)
+    content_type = (
+        (response.headers.get("content-type") or "").split(";", 1)[0].strip()
+    )
+    return content_type or None
+
+
+async def _download_once(
+    client: httpx.AsyncClient,
+    current_url: str,
+    destination: Path,
+    *,
+    remaining: float,
+    redirect_count: int,
+    max_bytes: int,
+) -> tuple[str | None, Optional[str]]:
+    async with asyncio.timeout(remaining):
+        async with client.stream("GET", current_url) as response:
+            redirect_url = _redirect_url(response, current_url, redirect_count)
+            if redirect_url is not None:
+                return redirect_url, None
+            response.raise_for_status()
+            _validate_content_length(response, max_bytes)
+            content_type = await _stream_response_to_path(
+                response,
+                destination,
+                max_bytes,
+            )
+            return None, content_type
+
+
 async def download_http_to_path(
     url: str,
     destination: Path,
@@ -84,52 +159,14 @@ async def download_http_to_path(
             if remaining <= 0:
                 raise TimeoutError("Media download deadline exceeded")
             try:
-                async with asyncio.timeout(remaining):
-                    async with client.stream("GET", current) as response:
-                        if response.is_redirect:
-                            location = response.headers.get("location")
-                            if not location or redirect_count >= _MAX_REDIRECTS:
-                                raise AsyncDownloadPolicyError(
-                                    "Too many media redirects",
-                                )
-                            current = urljoin(current, location)
-                            _validate_http_url(current)
-                            continue
-                        response.raise_for_status()
-                        raw_length = response.headers.get("content-length")
-                        if raw_length:
-                            try:
-                                content_length = int(raw_length)
-                            except ValueError:
-                                content_length = None
-                            if (
-                                content_length is not None
-                                and content_length > max_bytes
-                            ):
-                                raise ValueError(
-                                    "Downloaded media exceeds 10 MiB limit",
-                                )
-                        total = 0
-                        output = await asyncio.to_thread(
-                            destination.open,
-                            "wb",
-                        )
-                        try:
-                            async for chunk in response.aiter_bytes(64 * 1024):
-                                total += len(chunk)
-                                if total > max_bytes:
-                                    raise ValueError(
-                                        "Downloaded media exceeds 10 MiB limit",
-                                    )
-                                await asyncio.to_thread(output.write, chunk)
-                        finally:
-                            await asyncio.to_thread(output.close)
-                        content_type = (
-                            (response.headers.get("content-type") or "")
-                            .split(";", 1)[0]
-                            .strip()
-                        )
-                        return content_type or None
+                redirect_url, content_type = await _download_once(
+                    client,
+                    current,
+                    destination,
+                    remaining=remaining,
+                    redirect_count=redirect_count,
+                    max_bytes=max_bytes,
+                )
             except httpx.TimeoutException as exc:
                 raise TimeoutError("Media download timeout") from exc
             except httpx.HTTPStatusError as exc:
@@ -140,6 +177,10 @@ async def download_http_to_path(
                 raise AsyncDownloadError(
                     "HTTP media download failed",
                 ) from exc
+            if redirect_url is not None:
+                current = redirect_url
+                continue
+            return content_type
         raise AsyncDownloadPolicyError("Too many media redirects")
     except BaseException:
         await asyncio.to_thread(destination.unlink, True)

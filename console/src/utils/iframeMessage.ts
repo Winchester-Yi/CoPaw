@@ -60,6 +60,23 @@ let pendingUserInfoRequest: Promise<boolean> | null = null;
 /** 正在执行初始化的用户，避免同一用户在接口返回前被重复初始化 */
 const pendingUserInitUserIds = new Set<string>();
 
+/** Wealth 在 W+ 入口下直接使用 Cookie 中的用户名，不再发起用户信息查询。 */
+function isWealthOriginEntry(): boolean {
+  const isWealthPath = /^\/(?:console\/)?wealth(?:\/|$)/.test(
+    window.location.pathname,
+  );
+  return isWealthPath && getIframeContext().isOriginY;
+}
+
+function decodeCookieValue(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 /**
  * 将值转换为布尔值，用于处理父窗口可能传递的字符串 "true"/"false"
  * @param value - 值
@@ -186,9 +203,15 @@ async function handleUserDataMessage(
     parentOrigin: origin,
     bbk: message.data.bbkId || message.data.bbkOrgId || null,
     hideChat: toBoolean(message.data.hideChat),
-    pageSource: message.data.pageSource || null,
-    platformSource: message.data.platformSource || null,
   });
+
+  // 消息监听器来源的 pageSource/platformSource 通过统一优先级写入，
+  // 不覆盖 URL 参数（最高优先级）来源的值，避免异步并发写入的竞态。
+  store.applyEntrySource(
+    message.data.pageSource || null,
+    message.data.platformSource || null,
+    "message",
+  );
 
   // 等待 userName 获取完成后再标记初始化完成
   // 确保 X-User-Name header 在后续请求中可用
@@ -342,6 +365,28 @@ export async function handleUrlOriginParam(): Promise<void> {
   const store = useIframeStore.getState();
   store.setOriginY(isOriginY);
 
+  // URL 参数来源优先级最高，无论 origin 是否为 Y 都先解析 URL 参数。
+  // applyEntrySource 内部同步基于 store 当前状态判断，避免与消息监听器异步写入竞态。
+  const urlPageSource = urlParams.get("pageSource");
+  const urlPlatformSource = urlParams.get("platformSource");
+  if (urlPageSource || urlPlatformSource) {
+    store.applyEntrySource(urlPageSource, urlPlatformSource, "url");
+  }
+  // origin=Y 且当前 store 中 pageSource/platformSource 均为空时，套用默认值。
+  // 走最低优先级 "origin"，不会覆盖消息监听器来源或 URL 来源已有的值。
+  if (isOriginY) {
+    const current = useIframeStore.getState();
+    const needPageDefault = current.pageSource == null;
+    const needPlatformDefault = current.platformSource == null;
+    if (needPageDefault || needPlatformDefault) {
+      store.applyEntrySource(
+        needPageDefault ? "CLAW" : current.pageSource,
+        needPlatformDefault ? "WP" : current.platformSource,
+        "origin",
+      );
+    }
+  }
+
   if (!isOriginY) {
     return;
   }
@@ -387,11 +432,15 @@ export async function handleUrlOriginParam(): Promise<void> {
 
 /**
  * 从 URL 参数初始化时的异步处理
- * 调用客户信息接口和用户初始化
+ * 调用客户信息接口；非财富入口同时执行 Agent 用户初始化
  */
 async function initFromUrlParams(userId: string): Promise<void> {
-  // 首次进入时客户信息接口可能较慢或被嵌入环境阻塞，用户初始化不能依赖它完成。
-  initializeUser(userId);
+  const shouldInitializeAgent = !isWealthOriginEntry();
+
+  // 非财富入口的用户初始化不能依赖可能较慢的客户信息接口完成。
+  if (shouldInitializeAgent) {
+    initializeUser(userId);
+  }
 
   // 调用客户信息接口（使用 cookie 中的参数）
   await fetchAndApplyCustomerInfoFromCookie(userId);
@@ -399,7 +448,7 @@ async function initFromUrlParams(userId: string): Promise<void> {
   // 客户信息接口可能修正 userId，修正后的用户仍需要初始化。
   const latestStore = useIframeStore.getState();
   const currentUserId = latestStore.userId;
-  if (currentUserId && currentUserId !== userId) {
+  if (shouldInitializeAgent && currentUserId && currentUserId !== userId) {
     initializeUser(currentUserId);
   }
 
@@ -580,6 +629,15 @@ export async function fetchAndSetUserName(): Promise<boolean> {
 
   if (!userId) {
     return false;
+  }
+
+  if (isWealthOriginEntry()) {
+    const cookieUserId = decodeCookieValue(getWPlusCookie("userid"));
+    const cookieUserName = decodeCookieValue(getWPlusCookie("username"));
+    if (store.bbk && cookieUserId === userId && cookieUserName) {
+      store.setContext({ userName: cookieUserName });
+      return true;
+    }
   }
 
   if (pendingUserInfoRequest && pendingUserInfoUserId === userId) {

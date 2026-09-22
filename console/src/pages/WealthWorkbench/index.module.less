@@ -613,6 +613,10 @@
     color: var(--green);
     background: #e8f7f1;
   }
+  .tag.emptyTag {
+    color: var(--muted);
+    background: #f2f5f9;
+  }
   .planTitle {
     font-size: 16px;
     font-weight: 650;
@@ -703,6 +707,13 @@
     color: var(--muted);
     padding: 45px 15px;
   }
+  .boardLoading {
+    min-height: 360px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+  }
   .pageHeading {
     display: flex;
     align-items: center;
@@ -715,6 +726,19 @@
   }
   .pageHeading .actions {
     margin-left: auto;
+  }
+  .formLoading {
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .createForm {
+    border: 0;
+    margin: 0;
+    min-inline-size: 0;
+    padding: 0;
+  }
+  .createForm:disabled {
+    pointer-events: none;
   }
   .steps {
     display: flex;
@@ -743,10 +767,14 @@
     font-size: 18px;
     color: #6d82a4;
   }
-  .step.active .stepNum {
+  .stepNum.stepActive {
     background: var(--blue);
     color: #fff;
     box-shadow: 0 0 0 5px #f1f7ff;
+  }
+  .stepNum.stepComplete {
+    background: #e8f3ff;
+    color: var(--blue);
   }
   .step small {
     display: block;
@@ -862,6 +890,13 @@
     font-size: 13px;
     color: var(--text);
     margin: 6px 0 3px;
+  }
+  .sceneDescription {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
   .scene .status {
     font-size: 12px;
@@ -1494,6 +1529,19 @@
     font-size: 12px;
     margin-top: 12px;
   }
+  .sceneConflictAlert {
+    color: var(--console-management-error, #b94a4f);
+    background: #fff5f5;
+    border: 1px solid #edc7c9;
+    // border-left: 4px solid var(--console-management-error, #b94a4f);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 12px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+  }
   .dialog {
     // 恢复原生弹窗居中：壳层全局 *{margin:0} 会覆盖 UA 的 margin:auto
     margin: auto;
@@ -1503,6 +1551,13 @@
     box-shadow: 0 20px 100px #11244833;
     width: min(560px, calc(100vw - 36px));
     color: var(--ink);
+    position: relative;
+  }
+  .dialogClose {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 1;
   }
   .dialog::backdrop {
     background: #112a514b;
@@ -2670,7 +2725,7 @@
   }
   .customerTable.opportunityTable th,
   .customerTable.opportunityTable td {
-    width: 1%;
+    width: 10%;
     white-space: nowrap;
   }
   .customerTable.opportunityTable .opportunityCol,
@@ -2680,7 +2735,7 @@
     min-width: 260px;
   }
   .customerTable.opportunityTable .executionCol {
-    width: 1%;
+    width: 15%;
     white-space: nowrap;
   }
   .customerTable.opportunityTable .contactActions {
@@ -2744,24 +2799,32 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .taskCustomDates input {
+  .taskDatePicker:global(.ant-picker) {
     width: 142px;
     height: 29px;
     min-width: 0;
-    padding: 5px 8px;
-    font-size: 12px;
+    padding: 0 8px;
     border: 1px solid #d4e4fa;
-    border-radius: 4px;
+    border-radius: 5px;
     background: #fff;
     color: var(--ink);
     cursor: pointer;
   }
-  .taskCustomDates input:hover,
-  .taskCustomDates input:focus {
+  .taskDatePicker:global(.ant-picker) :global(.ant-picker-input > input) {
+    color: var(--ink);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .taskDatePicker:global(.ant-picker) :global(.ant-picker-suffix) {
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .taskDatePicker:global(.ant-picker):hover,
+  .taskDatePicker:global(.ant-picker-focused) {
     border-color: #bcd5ff;
     outline: none;
   }
-  .taskCustomDates input:focus-visible {
+  .taskDatePicker:global(.ant-picker-focused) {
     box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
   }
   .scheduleBlock {
@@ -2780,7 +2843,8 @@
     font-size: 12px;
     white-space: nowrap;
   }
-  .scheduleField input {
+  .scheduleField input,
+  .scheduleField select {
     flex: 1;
     min-width: 0;
     padding: 5px 7px;
@@ -2789,6 +2853,48 @@
     border-radius: 5px;
     background: #fff;
     color: var(--ink);
+  }
+  .scheduleField select {
+    height: 29px;
+  }
+  .customScheduleFields {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .customFrequencyControls,
+  .scheduleDateParts {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 1;
+    min-width: 0;
+  }
+  .customFrequencyControls > span {
+    color: var(--text);
+  }
+  .scheduleNumber {
+    flex: 0 1 72px !important;
+    appearance: textfield;
+  }
+  .scheduleNumber::-webkit-inner-spin-button,
+  .scheduleNumber::-webkit-outer-spin-button {
+    margin: 0;
+    appearance: none;
+  }
+  .customFrequencyControls select {
+    flex: 0 1 92px;
+  }
+  .scheduleDateParts select {
+    flex: 1;
+  }
+  .customScheduleHint {
+    margin: 0;
+    padding-left: 55px;
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: normal;
   }
   .timeField {
     position: relative;
@@ -3001,6 +3107,18 @@
   .customerTable .reason .opportunityList {
     min-width: 0;
   }
+  .opportunityPreview {
+    display: -webkit-box;
+    overflow: hidden;
+    line-height: 1.65;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .opportunityPreview:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
   @media (max-width: 650px) {
     .taskLabelFilter {
       gap: 8px;
@@ -3017,6 +3135,25 @@
       font-size: 10px;
     }
   }
+}
+
+.opportunityTooltipContent {
+  max-width: 360px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: normal;
+  line-height: 1.65;
+}
+
+.opportunityTooltipContent ul,
+.opportunityTooltipContent ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.opportunityTooltipContent p,
+.opportunityTooltipContent div {
+  margin: 3px 0;
 }
 
 /* 账号卡片下拉与表头重点标签筛选 */
@@ -3431,5 +3568,96 @@
     font-size: 14px;
     color: var(--muted);
     max-width: 360px;
+  }
+}
+
+/* DatePicker 弹层挂载在 body 下，使用中央管理台 Token 保持嵌入页主题一致。 */
+.taskDatePopup {
+  :global(.ant-picker-panel-container) {
+    overflow: hidden;
+    border: 1px solid var(--console-management-border, #e5e7eb);
+    border-radius: 8px;
+    box-shadow: var(
+      --console-management-shadow-raised,
+      0 14px 36px rgba(29, 36, 51, 0.14)
+    );
+  }
+
+  :global(.ant-picker-header) {
+    min-height: 38px;
+    padding: 0 8px;
+    color: var(--console-management-text, #111827);
+    border-bottom-color: var(--console-management-border, #e5e7eb);
+  }
+
+  :global(.ant-picker-header button) {
+    width: 26px;
+    min-width: 26px;
+    height: 26px;
+    padding: 0;
+    color: var(--console-management-text-secondary, #4b5563);
+    border-radius: 6px;
+  }
+
+  :global(.ant-picker-header button:hover) {
+    color: var(--console-management-primary, #3769fc);
+    background: var(--console-management-primary-soft, #eef4ff);
+  }
+
+  :global(.ant-picker-header-view button) {
+    width: auto;
+    padding: 0 4px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  :global(.ant-picker-body) {
+    padding: 8px 12px 10px;
+  }
+
+  :global(.ant-picker-content) {
+    width: 224px;
+  }
+
+  :global(.ant-picker-content th) {
+    height: 28px;
+    color: var(--console-management-text-muted, #8a94a6);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  :global(.ant-picker-cell) {
+    padding: 2px 0;
+    font-size: 12px;
+  }
+
+  :global(.ant-picker-cell .ant-picker-cell-inner) {
+    min-width: 26px;
+    height: 26px;
+    line-height: 26px;
+    border-radius: 6px;
+  }
+
+  :global(.ant-picker-cell:hover .ant-picker-cell-inner) {
+    background: var(--console-management-primary-soft, #eef4ff);
+  }
+
+  :global(.ant-picker-cell-selected .ant-picker-cell-inner) {
+    color: #fff;
+    background: var(--console-management-primary, #3769fc);
+  }
+
+  :global(.ant-picker-cell-today .ant-picker-cell-inner::before) {
+    border-color: var(--console-management-primary, #3769fc);
+    border-radius: 6px;
+  }
+
+  :global(.ant-picker-footer) {
+    border-top-color: var(--console-management-border, #e5e7eb);
+  }
+
+  :global(.ant-picker-today-btn) {
+    color: var(--console-management-primary, #3769fc);
+    font-size: 12px;
   }
 }

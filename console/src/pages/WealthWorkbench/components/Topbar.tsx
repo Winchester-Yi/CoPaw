@@ -105,9 +105,9 @@ export function Topbar() {
         </button>
         <span className={styles.sep}></span>
         */}
-        <span className={`${styles.department} ${styles.subtle}`}>
+        {/* <span className={`${styles.department} ${styles.subtle}`}>
           {[account?.name, branchName].filter(Boolean).join(" · ")}
-        </span>
+        </span> */}
       </div>
     </header>
   );

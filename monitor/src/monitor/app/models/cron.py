@@ -311,6 +311,11 @@ class CronJobSyncRequest(BaseModel):
     """
 
     id: str = Field(..., description="任务ID")
+    plan_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="关联计划ID",
+    )
     name: str = Field(..., description="任务名称")
     tenant_id: str = Field(default="", description="租户ID")
     tenant_name: str = Field(
