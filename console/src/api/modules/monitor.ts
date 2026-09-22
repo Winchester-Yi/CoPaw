@@ -907,12 +907,12 @@ export function mapCronBranchRanking(
       insightManagers: formatInteger(item.insight_managers),
       insightManagerRate: formatDivisionPercentText(
         item.insight_managers,
-        item.plan_managers,
+        item.result_view_managers,
       ),
       phoneManagers: formatInteger(item.phone_managers),
       phoneManagerRate: formatDivisionPercentText(
         item.phone_managers,
-        item.plan_managers,
+        item.result_view_managers,
       ),
       recommendedCustomers: formatInteger(item.recommended_customers),
       viewedCustomers: formatInteger(item.viewed_customers),

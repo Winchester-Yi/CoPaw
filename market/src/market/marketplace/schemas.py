@@ -235,6 +235,53 @@ class AsyncTaskSubmitResponse(BaseModel):
     reused: bool = False
 
 
+class BatchDistributionRequest(BaseModel):
+    """批量分发技能和 MCP 请求体。"""
+
+    batch_id: str = Field(..., min_length=1, max_length=128)
+    skill_item_ids: list[str] = Field(default_factory=list)
+    mcp_item_ids: list[str] = Field(default_factory=list)
+    target_tenant_ids: list[str] = Field(default_factory=list)
+    overwrite: bool = True
+
+
+class BatchDistributionTask(BaseModel):
+    """批量分发中的单个异步任务。"""
+
+    task_id: str
+    resource_type: Literal["skill", "mcp"]
+    item_id: str
+    status: str = "queued"
+
+
+class BatchDistributionResponse(BaseModel):
+    """批量分发提交响应。"""
+
+    batch_id: str
+    status: str = "queued"
+    reused: bool = False
+    task_ids: list[str] = Field(default_factory=list)
+    tasks: list[BatchDistributionTask] = Field(default_factory=list)
+
+
+class BatchDistributionQueryItem(BaseModel):
+    """单个批次查询结果。"""
+
+    batch_id: str
+    status: str = "queued"
+    task_ids: list[str] = Field(default_factory=list)
+    tasks: list[BatchDistributionTask] = Field(default_factory=list)
+    total_task_count: int = 0
+    done_task_count: int = 0
+    failed_task_count: int = 0
+
+
+class BatchDistributionQueryResponse(BaseModel):
+    """批量分发查询响应。"""
+
+    batches: list[BatchDistributionQueryItem] = Field(default_factory=list)
+
+
 class FileTreeNode(BaseModel):
     """文件树节点."""
 
@@ -304,6 +351,7 @@ class MCPDistributionTenantResult(BaseModel):
     success: bool
     bootstrapped: bool = False
     default_agent_updated: list[str] = Field(default_factory=list)
+    skipped: bool = False
     error: Optional[str] = None
 
 

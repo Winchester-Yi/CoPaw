@@ -61,6 +61,9 @@ class TestMarketSkillRegistry:
 
         assert result is True
         db.execute.assert_called_once()
+        sql = db.execute.call_args.args[0]
+        assert "is_unpublished = 0" in sql
+        assert "is_deleted = 0" in sql
 
     async def test_update_statistics_config(self):
         """测试更新统计配置."""
@@ -139,6 +142,8 @@ class TestMarketSkillRegistry:
         sql = db.fetch_all.call_args.args[0]
         assert "FROM swe_marketplace_skills" in sql
         assert "include_in_statistics = 1" in sql
+        assert "is_unpublished = 0" in sql
+        assert "is_deleted = 0" in sql
         assert "GROUP BY skill_id" in sql
         assert db.fetch_all.call_args.args[1] == ("test_source",)
 

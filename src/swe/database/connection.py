@@ -5,12 +5,24 @@ Provides async connection pool management for MySQL-compatible databases.
 """
 
 import logging
+from contextvars import ContextVar
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from typing import Any, Optional
 
 from .config import DatabaseConfig
 
 logger = logging.getLogger(__name__)
+_CURRENT_CONNECTION: ContextVar[Any | None] = ContextVar(
+    "swe_db_connection",
+    default=None,
+)
+
+
+def _named_lock_name(name: str) -> str:
+    """Generate a stable lock name within MySQL GET_LOCK's limit."""
+    return f"swe:{sha256(name.encode()).hexdigest()[:60]}"
+
 
 # Try to import aiomysql, fall back to None if not available
 try:
@@ -100,6 +112,59 @@ class DatabaseConnection:
         async with self._pool.acquire() as conn:
             yield conn
 
+    @asynccontextmanager
+    async def transaction(self):
+        """在同一连接上执行可嵌套事务。"""
+        current = _CURRENT_CONNECTION.get()
+        if current is not None:
+            yield current
+            return
+
+        async with self.acquire() as conn:
+            token = _CURRENT_CONNECTION.set(conn)
+            try:
+                await conn.begin()
+                yield conn
+            except Exception:
+                await conn.rollback()
+                raise
+            else:
+                await conn.commit()
+            finally:
+                _CURRENT_CONNECTION.reset(token)
+
+    @asynccontextmanager
+    async def named_lock(self, name: str, timeout: int = 10):
+        """持有 MySQL 命名锁，跨实例串行化同一业务键。"""
+        lock_name = _named_lock_name(name)
+        conn = _CURRENT_CONNECTION.get()
+        if conn is None:
+            async with self.acquire() as conn:
+                token = _CURRENT_CONNECTION.set(conn)
+                try:
+                    async with self.named_lock(name, timeout):
+                        yield
+                finally:
+                    _CURRENT_CONNECTION.reset(token)
+            return
+
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT GET_LOCK(%s, %s) AS acquired",
+                (lock_name, timeout),
+            )
+            row = await cur.fetchone()
+        if not row or int(row.get("acquired") or 0) != 1:
+            raise TimeoutError(f"Failed to acquire database lock: {name}")
+        try:
+            yield
+        finally:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT RELEASE_LOCK(%s)",
+                    (lock_name,),
+                )
+
     async def execute(
         self,
         query: str,
@@ -114,6 +179,11 @@ class DatabaseConnection:
         Returns:
             Number of affected rows
         """
+        conn = _CURRENT_CONNECTION.get()
+        if conn is not None:
+            async with conn.cursor() as cur:
+                await cur.execute(query, params)
+                return cur.rowcount
         async with self.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
@@ -135,6 +205,11 @@ class DatabaseConnection:
         """
         if not params_list:
             return 0
+        conn = _CURRENT_CONNECTION.get()
+        if conn is not None:
+            async with conn.cursor() as cur:
+                await cur.executemany(query, params_list)
+                return cur.rowcount
         async with self.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(query, params_list)
@@ -154,6 +229,12 @@ class DatabaseConnection:
         Returns:
             Row as dict or None
         """
+        conn = _CURRENT_CONNECTION.get()
+        if conn is not None:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, params)
+                row = await cur.fetchone()
+                return dict(row) if row else None
         async with self.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, params)
@@ -174,6 +255,12 @@ class DatabaseConnection:
         Returns:
             List of rows as dicts
         """
+        conn = _CURRENT_CONNECTION.get()
+        if conn is not None:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, params)
+                rows = await cur.fetchall()
+                return [dict(row) for row in rows] if rows else []
         async with self.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, params)

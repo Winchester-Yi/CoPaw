@@ -3,6 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS swe_async_tasks (
     task_id VARCHAR(64) PRIMARY KEY COMMENT '异步任务ID',
+    batch_id VARCHAR(128) DEFAULT NULL COMMENT '批次ID',
     service VARCHAR(32) NOT NULL COMMENT '写入服务: swe/market',
     task_type VARCHAR(64) NOT NULL COMMENT '任务类型',
     status VARCHAR(32) NOT NULL COMMENT '任务状态',
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS swe_async_tasks (
     INDEX idx_async_tasks_status (status),
     INDEX idx_async_tasks_type (task_type),
     INDEX idx_async_tasks_source (source_id),
-    INDEX idx_async_tasks_created (created_at)
+    INDEX idx_async_tasks_created (created_at),
+    INDEX idx_async_tasks_batch_id (batch_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='统一异步任务主表';
 
 CREATE TABLE IF NOT EXISTS swe_async_task_items (

@@ -760,6 +760,8 @@ def test_list_skills_reads_statistics_eligible_marketplace_skills(tmp_path):
     sql = app.state.marketplace.db.fetch_all.call_args.args[0]
     assert "FROM swe_marketplace_skills" in sql
     assert "include_in_statistics = 1" in sql
+    assert "is_unpublished = 0" in sql
+    assert "is_deleted = 0" in sql
 
 
 def test_update_statistics_config_non_manager_returns_403(tmp_path):

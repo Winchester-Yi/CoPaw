@@ -78,6 +78,7 @@ class MarketSkillRegistry:
                     UPDATE swe_marketplace_skills
                     SET skill_id = %s, skill_name = %s, cn_name = %s,
                         include_in_statistics = %s,
+                        is_unpublished = 0, is_deleted = 0,
                         updator_id = %s, updator_name = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
@@ -104,9 +105,9 @@ class MarketSkillRegistry:
                     """
                     INSERT INTO swe_marketplace_skills
                         (source_id, item_id, skill_id, skill_name, cn_name,
-                         include_in_statistics, creator_id, creator_name,
-                         updator_id, updator_name)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         include_in_statistics, is_unpublished, is_deleted,
+                         creator_id, creator_name, updator_id, updator_name)
+                    VALUES (%s, %s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s)
                     """,
                     (
                         source_id,
@@ -240,6 +241,8 @@ class MarketSkillRegistry:
                 FROM swe_marketplace_skills
                 WHERE source_id = %s
                   AND include_in_statistics = 1
+                  AND is_unpublished = 0
+                  AND is_deleted = 0
                   AND skill_id IS NOT NULL
                   AND skill_id != ''
                 GROUP BY skill_id

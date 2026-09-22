@@ -399,6 +399,11 @@ async def _run_skill_distribution_task(
                 done_count=0,
                 failed_count=len(target_user_ids),
                 error_message=str(exc),
+                result={
+                    "item_id": item_id,
+                    "status": "failed",
+                    "error": str(exc),
+                },
             )
         except Exception:
             logger.warning(

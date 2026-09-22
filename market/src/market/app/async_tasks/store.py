@@ -95,6 +95,7 @@ class AsyncTaskStore:
         self,
         *,
         task_id: str,
+        batch_id: str | None = None,
         service: str,
         task_type: str,
         target_ids: list[str],
@@ -104,19 +105,70 @@ class AsyncTaskStore:
         source_id: str | None = None,
         actor_user_id: str | None = None,
         actor_user_name: str | None = None,
-    ) -> None:
+        result: Any = None,
+    ) -> bool:
         """创建主任务并批量写入明细。"""
-        await self.db.execute(
+        if isinstance(self.db, DatabaseConnection):
+            async with self.db.transaction():
+                return await self._start_task(
+                    task_id=task_id,
+                    batch_id=batch_id,
+                    service=service,
+                    task_type=task_type,
+                    target_ids=target_ids,
+                    target_names=target_names,
+                    title=title,
+                    summary=summary,
+                    source_id=source_id,
+                    actor_user_id=actor_user_id,
+                    actor_user_name=actor_user_name,
+                    result=result,
+                )
+        return await self._start_task(
+            task_id=task_id,
+            batch_id=batch_id,
+            service=service,
+            target_ids=target_ids,
+            task_type=task_type,
+            target_names=target_names,
+            title=title,
+            summary=summary,
+            source_id=source_id,
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
+            result=result,
+        )
+
+    async def _start_task(
+        self,
+        *,
+        task_id: str,
+        batch_id: str | None,
+        service: str,
+        task_type: str,
+        target_ids: list[str],
+        target_names: dict[str, str | None] | None,
+        title: str | None,
+        summary: str | None,
+        source_id: str | None,
+        actor_user_id: str | None,
+        actor_user_name: str | None,
+        result: Any,
+    ) -> bool:
+        """在当前事务中创建主任务及目标明细。"""
+        affected_rows = await self.db.execute(
             """
             INSERT INTO swe_async_tasks (
-                task_id, service, task_type, status, title, summary,
+                task_id, batch_id, service, task_type, status, title, summary,
                 source_id, actor_user_id, actor_user_name,
-                target_count, done_count, failed_count
+                target_count, done_count, failed_count, result_json
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, %s)
+            ON DUPLICATE KEY UPDATE task_id = task_id
             """,
             (
                 task_id,
+                batch_id,
                 service,
                 task_type,
                 "queued",
@@ -130,11 +182,12 @@ class AsyncTaskStore:
                 actor_user_id,
                 actor_user_name,
                 len(target_ids),
+                _json_dumps(result),
             ),
         )
         await self.db.execute_many(
             """
-            INSERT INTO swe_async_task_items (
+            INSERT IGNORE INTO swe_async_task_items (
                 task_id, target_id, target_name, status, error_message,
                 result_json
             )
@@ -152,6 +205,7 @@ class AsyncTaskStore:
                 for target_id in target_ids
             ],
         )
+        return affected_rows == 1
 
     async def mark_running(self, task_id: str) -> None:
         """标记任务运行中。"""
