@@ -130,10 +130,80 @@ def test_build_job_spec_maps_identity_and_schedule() -> None:
     assert job.schedule.cron == "30 8 * * mon,thu"
     assert job.schedule.timezone == "Asia/Shanghai"
     assert job.skill_ids == "skill-wealth-insurance-1"
+    assert job.plan_id == "plan-1"
+    assert job.model_dump()["plan_id"] == "plan-1"
     assert job.meta["wealth_plan_id"] == "plan-1"
     assert job.meta["wealth_item_id"] == ""
     assert job.meta["wealth_mcp_relations"] == ["mcp-customer"]
     assert job.dispatch.target.user_id == "zhangwl"
+
+
+def test_scene_without_mcp_creates_workflow_job() -> None:
+    job = _build_job_spec(
+        fake_request(),
+        make_plan([]),
+        make_scene(mcp_relations=[]),
+        "job-1",
+    )
+
+    assert job.task_type == "workflow"
+    assert job.skill_ids == "skill-wealth-insurance-1"
+    assert job.request is None
+    assert job.text is None
+    assert job.plan_id == "plan-1"
+
+
+@pytest.mark.parametrize(
+    "relations",
+    [["mcp-customer"], ["    "]],
+)
+def test_scene_with_mcp_keeps_agent_job(relations) -> None:
+    job = _build_job_spec(
+        fake_request(),
+        make_plan([]),
+        make_scene(mcp_relations=relations, cron_example="生成客户名单"),
+        "job-1",
+    )
+
+    assert job.task_type == "agent"
+    assert job.request.input[0]["content"][0]["text"] == "生成客户名单"
+    assert job.request.user_id == "zhangwl"
+
+
+async def test_workflow_plan_publishes_without_market_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from swe.app.wealth_plans import market_dispatch, publish
+    from swe.app.wealth_plans.store import WealthPlanStore
+
+    monkeypatch.setenv("SWE_MARKET_API_BASE_URL", "http://market.local")
+    jobs = []
+
+    async def create_job(job):
+        jobs.append(job)
+
+    async def get_manager(_request):
+        return SimpleNamespace(create_or_replace_job=create_job)
+
+    def unexpected_client():
+        pytest.fail("workflow 规划不能调用技能/MCP 下发接口")
+
+    monkeypatch.setattr(publish, "get_cron_manager", get_manager)
+    monkeypatch.setattr(market_dispatch, "_new_client", unexpected_client)
+    plan = make_plan([])
+    plan.source_id = "RMASSIST"
+    plan.scenes = [make_scene(item_id="skill-item", mcp_relations=[])]
+    store = WealthPlanStore()
+    await store.create(plan)
+
+    await publish._run_publish(fake_request(), store, plan.id)
+
+    record = await store.get(plan.id)
+    assert record.status == "published"
+    assert len(jobs) == 1
+    assert jobs[0].task_type == "workflow"
+    assert record.scenes[0].cron_job_id == jobs[0].id
+    assert record.skill_dispatch_task_id is None
 
 
 async def test_broadcast_skipped_when_only_creator_is_target() -> None:

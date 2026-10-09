@@ -128,8 +128,9 @@ describe("mapCronJobOverviewPageData", () => {
 
     expect(row.resultViewManagerRate).toBe("80.00%");
     expect(row.planManagerRate).toBe("75.00%");
-    expect(row.insightManagerRate).toBe("66.67%");
-    expect(row.phoneManagerRate).toBe("33.33%");
+    expect(row.readRate).toBe("61.11%");
+    expect(row.insightManagerRate).toBe("50.00%");
+    expect(row.phoneManagerRate).toBe("25.00%");
     expect(row.viewedCustomerRate).toBe("40.00%");
     expect(row.contactRate).toBe("40.00%");
   });

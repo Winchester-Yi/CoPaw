@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Cron CLI tenant header regression tests."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -101,6 +102,38 @@ def test_cron_create_does_not_invent_default_source_header():
     _, kwargs = mock_http.post.call_args
     assert kwargs["headers"]["X-Tenant-Id"] == "default"
     assert "X-Source-Id" not in kwargs["headers"]
+
+
+def test_cli_workflow_file_uses_target_user_for_task_ownership(tmp_path):
+    spec = {
+        "id": "",
+        "name": "skill task",
+        "schedule": {"type": "cron", "cron": "0 9 * * *"},
+        "task_type": "workflow",
+        "skill_ids": "skill-a",
+        "dispatch": {
+            "type": "channel",
+            "channel": "console",
+            "target": {"user_id": "user-a", "session_id": "session-a"},
+        },
+    }
+    path = tmp_path / "workflow-job.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    runner = CliRunner()
+
+    with patch("swe.cli.cron_cmd.client") as mock_client:
+        mock_http = MagicMock()
+        mock_http.__enter__.return_value = mock_http
+        mock_http.post.return_value = _Response()
+        mock_client.return_value = mock_http
+        result = runner.invoke(
+            cron_group,
+            ["create", "-f", str(path), "--source-id", "RMASSIST"],
+        )
+
+    assert result.exit_code == 0
+    _, kwargs = mock_http.post.call_args
+    assert kwargs["headers"]["X-User-Id"] == "user-a"
 
 
 def test_cron_create_uses_current_scope_context_for_headers():

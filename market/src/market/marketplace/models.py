@@ -31,6 +31,7 @@ class MarketItem(BaseModel):
 
     # 新增字段：是否纳入统计（仅对 skill 类型生效）
     include_in_statistics: bool = False  # 默认不纳入统计
+    content_path: str = ""
 
 
 class CategoryItem(BaseModel):
@@ -40,6 +41,8 @@ class CategoryItem(BaseModel):
     source_id: str
     name: str
     sort_order: int = 0
+    branch_visible: bool = True
+    skill_count: int = 0
     created_at: Optional[datetime] = None  # datetime from MySQL
 
 

@@ -363,7 +363,7 @@ def _infer_effective_user_id(
     if (
         not effective_user_id
         and isinstance(payload, dict)
-        and payload.get("task_type") == "agent"
+        and payload.get("task_type") in {"agent", "workflow"}
     ):
         dispatch = payload.get("dispatch") or {}
         target = dispatch.get("target") if isinstance(dispatch, dict) else {}

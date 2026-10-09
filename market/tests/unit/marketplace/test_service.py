@@ -4,19 +4,280 @@ import shutil
 import pytest
 from unittest.mock import AsyncMock, Mock
 
+from market.marketplace.errors import MarketplaceMetadataSyncError
+
 
 def _make_service(tmp_path, mock_db=None):
     from market.marketplace.service import MarketplaceService
+    from market.marketplace.fs import load_index
 
     if mock_db is None:
         mock_db = AsyncMock()
         mock_db.is_connected = True
         mock_db.fetch_one = AsyncMock(return_value=None)
         mock_db.fetch_all = AsyncMock(return_value=[])
-    return MarketplaceService(
+    svc = MarketplaceService(
         db=mock_db,
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
+    )
+
+    async def list_skills_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "skill"
+        ]
+
+    async def get_skill_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "skill" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    async def list_mcps_from_index(source_id, **_kwargs):
+        return [
+            item
+            for item in load_index(svc.marketplace_root, source_id)
+            if item.item_type == "mcp"
+        ]
+
+    async def get_mcp_from_index(source_id, item_id):
+        return next(
+            (
+                item
+                for item in load_index(svc.marketplace_root, source_id)
+                if item.item_type == "mcp" and item.item_id == item_id
+            ),
+            None,
+        )
+
+    svc.market_skill_registry.list_market_skills = list_skills_from_index
+    svc.market_skill_registry.get_market_skill = get_skill_from_index
+    svc.mcp_market_registry.list_market_mcps = list_mcps_from_index
+    svc.mcp_market_registry.get_market_mcp = get_mcp_from_index
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_list_skills_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.market_skill_registry.list_market_skills = AsyncMock(
+        return_value=[
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="risk_check",
+                skill_id="skill-1",
+                description="desc",
+                creator_id="u1",
+                bbk_ids=[],
+                status="active",
+            ),
+        ],
+    )
+
+    items = await svc.list_skills(
+        "src-1",
+        user_bbk_id="100",
+        is_manager=True,
+    )
+
+    assert [item.item_id for item in items] == ["item-1"]
+    svc.market_skill_registry.list_market_skills.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_publish_skill_fails_when_tdsql_metadata_sync_returns_false(
+    tmp_path,
+):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=False,
+    )
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="sync-failure",
+                creator_id="u1",
+                creator_name="User",
+                skill_json={},
+                skill_md="",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_skill_fails_when_database_is_unavailable(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    mock_db = AsyncMock()
+    mock_db.is_connected = False
+    svc = _make_service(tmp_path, mock_db)
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="db-down",
+                creator_id="u1",
+                creator_name="User",
+                skill_json={},
+                skill_md="",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_mcp_fails_when_database_is_unavailable(tmp_path):
+    from market.marketplace.schemas import PublishMCPRequest
+
+    mock_db = AsyncMock()
+    mock_db.is_connected = False
+    svc = _make_service(tmp_path, mock_db)
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await svc.publish_mcp(
+            "src_a",
+            PublishMCPRequest(
+                client_key="mcp-1",
+                name="db-down-mcp",
+                creator_id="u1",
+                creator_name="User",
+                config={
+                    "name": "db-down-mcp",
+                    "transport": "stdio",
+                    "command": "echo",
+                },
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_items_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.mcp_market_registry.list_market_mcps = AsyncMock(
+        return_value=[
+            MarketItem(
+                item_id="mcp-1",
+                item_type="mcp",
+                client_key="weather",
+                name="Weather",
+                creator_id="u1",
+                bbk_ids=[],
+                status="active",
+            ),
+        ],
+    )
+
+    items = await svc.list_mcp_items(
+        "src-1",
+        user_bbk_id="100",
+        is_manager=True,
+    )
+
+    assert [item.item_id for item in items] == ["mcp-1"]
+    svc.mcp_market_registry.list_market_mcps.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_skill_detail_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.market_skill_registry.get_market_skill = AsyncMock(
+        return_value=MarketItem(
+            item_id="item-1",
+            item_type="skill",
+            name="risk_check",
+            skill_id="skill-1",
+            description="desc",
+            creator_id="u1",
+            bbk_ids=[],
+            status="active",
+        ),
+    )
+    svc._get_stats = AsyncMock(return_value=(2, 1))
+    svc._get_user_stats = AsyncMock(return_value=[])
+
+    detail = await svc.get_skill_detail(
+        "src-1",
+        "item-1",
+        user_bbk_id="100",
+        is_manager=True,
+    )
+
+    assert detail is not None
+    assert detail.name == "risk_check"
+    svc.market_skill_registry.get_market_skill.assert_awaited_once_with(
+        "src-1",
+        "item-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_detail_reads_market_metadata_from_tdsql_without_index(
+    tmp_path,
+):
+    from market.marketplace.fs import save_mcp_config
+    from market.marketplace.models import MarketItem
+
+    svc = _make_service(tmp_path)
+    svc.mcp_market_registry.get_market_mcp = AsyncMock(
+        return_value=MarketItem(
+            item_id="mcp-1",
+            item_type="mcp",
+            client_key="weather",
+            name="Weather",
+            creator_id="u1",
+            bbk_ids=[],
+            status="active",
+        ),
+    )
+    save_mcp_config(
+        svc.marketplace_root,
+        "src-1",
+        "mcp-1",
+        {
+            "client_key": "weather",
+            "config": {
+                "transport": "stdio",
+                "command": "weather",
+                "env": {"TOKEN": "secret"},
+            },
+        },
+    )
+
+    detail = await svc.get_mcp_detail(
+        "src-1",
+        "mcp-1",
+        user_bbk_id="100",
+    )
+
+    assert detail is not None
+    assert detail.name == "Weather"
+    assert detail.config.env["TOKEN"] != "secret"
+    svc.mcp_market_registry.get_market_mcp.assert_awaited_once_with(
+        "src-1",
+        "mcp-1",
     )
 
 
@@ -941,10 +1202,62 @@ async def test_unpublish_skill_sets_inactive(tmp_path):
     )
     item, _ = await svc.publish_skill("src_a", req)
     await svc.unpublish_skill("src_a", item.item_id, "u1", "User One")
-    items = await svc.list_skills("src_a", user_bbk_id="100")
+    items = await svc.list_skills("src_a", user_bbk_id="100", is_manager=False)
     assert all(
         i.status == "inactive" for i in items if i.item_id == item.item_id
     )
+
+
+@pytest.mark.asyncio
+async def test_unpublish_skill_soft_marks_marketplace_skill(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    req = PublishSkillRequest(
+        name="skill_soft_unpublish",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = await svc.publish_skill("src_a", req)
+    svc.db.execute.reset_mock()
+
+    await svc.unpublish_skill("src_a", item.item_id, "u1", "User One")
+
+    sql_text = "\n".join(
+        call.args[0] for call in svc.db.execute.await_args_list
+    )
+    assert "DELETE FROM swe_marketplace_skills" not in sql_text
+    assert "UPDATE swe_marketplace_skills" in sql_text
+    assert "is_unpublished = 1" in sql_text
+
+
+@pytest.mark.asyncio
+async def test_delete_market_skill_soft_marks_marketplace_skill(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    req = PublishSkillRequest(
+        name="skill_soft_delete",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = await svc.publish_skill("src_a", req)
+    svc.db.execute.reset_mock()
+
+    await svc.delete_market_skill("src_a", item.item_id, "u1", "User One")
+
+    sql_text = "\n".join(
+        call.args[0] for call in svc.db.execute.await_args_list
+    )
+    assert "DELETE FROM swe_marketplace_skills" not in sql_text
+    assert "UPDATE swe_marketplace_skills" in sql_text
+    assert "is_deleted = 1" in sql_text
 
 
 @pytest.mark.asyncio
@@ -974,16 +1287,74 @@ async def test_list_skills_filters_by_explicit_bbk_ids(tmp_path):
     )
     await svc.publish_skill("src_a", req_all)
     await svc.publish_skill("src_a", req_200)
-    # user_bbk_id is compatibility metadata; explicit bbk_ids controls filtering.
-    items_all = await svc.list_skills("src_a", user_bbk_id="100")
-    assert len(items_all) == 2
-    items_200 = await svc.list_skills(
+    # user_bbk_id filters by visibility; explicit bbk_ids narrows further.
+    # With user_bbk_id=200 (non-manager), sees skill_all ([]) + skill_200 (["200"]).
+    items_200_all = await svc.list_skills(
+        "src_a",
+        user_bbk_id="200",
+        is_manager=False,
+    )
+    assert len(items_200_all) == 2
+    # user_bbk_id=300 (non-manager) only sees HQ skill (bbk_ids=[]).
+    # Even if bbk_ids=["200"] is passed, visibility filter blocks skill_200 first.
+    items_300 = await svc.list_skills(
         "src_a",
         user_bbk_id="300",
         bbk_ids=["200"],
+        is_manager=False,
     )
-    assert len(items_200) == 1
-    assert items_200[0].name == "skill_200"
+    assert len(items_300) == 0  # bbk_ids=200 is not visible to bbk 300
+
+
+@pytest.mark.asyncio
+async def test_list_skills_tiered_visibility(tmp_path):
+    from market.marketplace.schemas import PublishSkillRequest
+
+    svc = _make_service(tmp_path)
+    # skill visible to all (bbk_ids=[])
+    req_hq = PublishSkillRequest(
+        name="skill_hq",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+        bbk_ids=[],
+    )
+    # skill visible only to bbk_id=200
+    req_200 = PublishSkillRequest(
+        name="skill_200",
+        description="",
+        creator_id="u1",
+        creator_name="",
+        skill_json={},
+        skill_md="",
+        bbk_ids=["200"],
+    )
+    await svc.publish_skill("src_a", req_hq)
+    await svc.publish_skill("src_a", req_200)
+    # Manager sees all skills
+    items_manager = await svc.list_skills(
+        "src_a",
+        user_bbk_id="200",
+        is_manager=True,
+    )
+    assert len(items_manager) == 2
+    # Non-manager (bbk 300) sees only HQ skill (bbk_ids=[])
+    items_300 = await svc.list_skills(
+        "src_a",
+        user_bbk_id="300",
+        is_manager=False,
+    )
+    assert len(items_300) == 1
+    assert items_300[0].name == "skill_hq"
+    # Non-manager (bbk 200) sees HQ + bbk_200 skills
+    items_200 = await svc.list_skills(
+        "src_a",
+        user_bbk_id="200",
+        is_manager=False,
+    )
+    assert len(items_200) == 2
 
 
 @pytest.mark.asyncio
@@ -1648,6 +2019,246 @@ async def test_publish_mcp_appends_for_different_user(tmp_path):
     assert current["version_id"] == "1.0.1"
     assert current["source_user_id"] == "bob"
     assert current["source_user_version"] == "2.0.0"
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_overwrite_skips_same_name_custom_mcp(
+    tmp_path,
+):
+    """显式 overwrite 时，目标租户有同名自建 MCP 应跳过且不改配置。"""
+    from market.marketplace.fs import resolve_effective_user_id
+    from market.marketplace.schemas import (
+        MCPDistributionRequest,
+        PublishMCPRequest,
+    )
+
+    svc = _make_service(tmp_path)
+    item, _ = await svc.publish_mcp(
+        "source-1",
+        PublishMCPRequest(
+            client_key="market-mcp",
+            name="shared-mcp",
+            description="market",
+            creator_id="publisher",
+            creator_name="Publisher",
+            config={
+                "name": "shared-mcp",
+                "transport": "stdio",
+                "command": "/market-mcp",
+            },
+            version="1.0.0",
+        ),
+    )
+
+    user_id = "tenant-1"
+    config_path = (
+        tmp_path
+        / "swe"
+        / resolve_effective_user_id(user_id, "source-1")
+        / "workspaces"
+        / "default"
+        / "agent.json"
+    )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "clients": {
+                        "custom-mcp": {
+                            "name": "shared-mcp",
+                            "transport": "stdio",
+                            "command": "/custom-mcp",
+                            "creator_id": "tenant-1",
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.distribute_mcp(
+        "source-1",
+        item.item_id,
+        operator_id="admin",
+        operator_name="Admin",
+        req=MCPDistributionRequest(
+            target_tenant_ids=[user_id],
+            overwrite=True,
+        ),
+    )
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    clients = saved["mcp"]["clients"]
+    assert result.results[0].success is True
+    assert result.results[0].skipped is True
+    assert clients == {
+        "custom-mcp": {
+            "name": "shared-mcp",
+            "transport": "stdio",
+            "command": "/custom-mcp",
+            "creator_id": "tenant-1",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_overwrite_skips_multiple_same_name_custom_mcps(
+    tmp_path,
+):
+    """存在多个同名自建 MCP 时，overwrite 也应整体跳过并保留配置。"""
+    from market.marketplace.fs import resolve_effective_user_id
+    from market.marketplace.schemas import (
+        MCPDistributionRequest,
+        PublishMCPRequest,
+    )
+
+    svc = _make_service(tmp_path)
+    item, _ = await svc.publish_mcp(
+        "source-1",
+        PublishMCPRequest(
+            client_key="market-mcp",
+            name="shared-mcp",
+            description="market",
+            creator_id="publisher",
+            creator_name="Publisher",
+            config={
+                "name": "shared-mcp",
+                "transport": "stdio",
+                "command": "/market-mcp",
+            },
+            version="1.0.0",
+        ),
+    )
+
+    user_id = "tenant-1"
+    config_path = (
+        tmp_path
+        / "swe"
+        / resolve_effective_user_id(user_id, "source-1")
+        / "workspaces"
+        / "default"
+        / "agent.json"
+    )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "clients": {
+                        "custom-a": {
+                            "name": "shared-mcp",
+                            "transport": "stdio",
+                            "command": "/custom-a",
+                        },
+                        "custom-b": {
+                            "name": "shared-mcp",
+                            "transport": "stdio",
+                            "command": "/custom-b",
+                        },
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.distribute_mcp(
+        "source-1",
+        item.item_id,
+        operator_id="admin",
+        operator_name="Admin",
+        req=MCPDistributionRequest(
+            target_tenant_ids=[user_id],
+            overwrite=True,
+        ),
+    )
+
+    clients = json.loads(config_path.read_text(encoding="utf-8"))["mcp"][
+        "clients"
+    ]
+    assert result.results[0].success is True
+    assert result.results[0].skipped is True
+    assert set(clients) == {"custom-a", "custom-b"}
+    assert [cfg["command"] for cfg in clients.values()] == [
+        "/custom-a",
+        "/custom-b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_distribute_mcp_overwrite_skip_does_not_require_market_config(
+    tmp_path,
+):
+    """同名自建 MCP 跳过时，不读取缺失的市场配置，也不改用户配置。"""
+    from market.marketplace.fs import get_mcp_dir, resolve_effective_user_id
+    from market.marketplace.schemas import (
+        MCPDistributionRequest,
+        PublishMCPRequest,
+    )
+
+    svc = _make_service(tmp_path)
+    item, _ = await svc.publish_mcp(
+        "source-1",
+        PublishMCPRequest(
+            client_key="market-mcp",
+            name="shared-mcp",
+            description="market",
+            creator_id="publisher",
+            creator_name="Publisher",
+            config={
+                "name": "shared-mcp",
+                "transport": "stdio",
+                "command": "/market-mcp",
+            },
+            version="1.0.0",
+        ),
+    )
+    shutil.rmtree(get_mcp_dir(tmp_path / "market", "source-1", item.item_id))
+
+    user_id = "tenant-1"
+    config_path = (
+        tmp_path
+        / "swe"
+        / resolve_effective_user_id(user_id, "source-1")
+        / "workspaces"
+        / "default"
+        / "agent.json"
+    )
+    original_config = {
+        "mcp": {
+            "clients": {
+                "custom-mcp": {
+                    "name": "shared-mcp",
+                    "transport": "stdio",
+                    "command": "/custom-mcp",
+                },
+            },
+        },
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(original_config),
+        encoding="utf-8",
+    )
+
+    result = await svc.distribute_mcp(
+        "source-1",
+        item.item_id,
+        operator_id="admin",
+        operator_name="Admin",
+        req=MCPDistributionRequest(
+            target_tenant_ids=[user_id],
+            overwrite=True,
+        ),
+    )
+
+    assert result.results[0].success is True
+    assert result.results[0].skipped is True
+    assert json.loads(config_path.read_text(encoding="utf-8")) == (
+        original_config
+    )
 
 
 @pytest.mark.asyncio

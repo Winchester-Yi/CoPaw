@@ -730,9 +730,7 @@ function ChatPageContent() {
     consumeBundle: consumeHtmlAnnotationBundle,
     migrateBundle: migrateHtmlAnnotationBundle,
   } = useHtmlAnnotations();
-  const pendingHtmlAnnotationBundleRef = useRef(
-    pendingHtmlAnnotationBundle,
-  );
+  const pendingHtmlAnnotationBundleRef = useRef(pendingHtmlAnnotationBundle);
   pendingHtmlAnnotationBundleRef.current = pendingHtmlAnnotationBundle;
   const annotationSessionMigrationRef = useRef(
     new Map<string, { fromChatKey: string; token: string }>(),
@@ -934,8 +932,7 @@ function ChatPageContent() {
   // Register session API event callbacks for URL synchronization
 
   useEffect(() => {
-    const annotationSessionMigrations =
-      annotationSessionMigrationRef.current;
+    const annotationSessionMigrations = annotationSessionMigrationRef.current;
     sessionApi.onSessionIdResolved = (tempId, realId) => {
       if (!isChatActiveRef.current) return;
       migrateHtmlAnnotationBundle(tempId, realId);
@@ -1797,7 +1794,9 @@ function ChatPageContent() {
         taskContentText:
           task.task_type === "text"
             ? formValues.text || ""
-            : extractTaskContentText(formValues.request?.input),
+            : task.task_type === "agent"
+            ? extractTaskContentText(formValues.request?.input)
+            : undefined,
       } as Parameters<typeof taskEditForm.setFieldsValue>[0]);
     },
     [taskEditForm],
@@ -2452,7 +2451,7 @@ function ChatPageContent() {
             <span style={{ flex: 1 }} />
             {!isContentOnly && (
               <FileManager
-                enableSessionAnnotations={!feedbackTask?.cronTaskId}
+                enableSessionAnnotations={false}
               />
             )}
             {!isContentOnly && <ChatActionGroup chatId={chatId} />}

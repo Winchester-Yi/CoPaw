@@ -739,10 +739,7 @@ export function convertArchivedPage(
   messages: Message[],
   boundaries: ChatCompactionBoundary[],
 ): IAgentScopeRuntimeWebUIMessage[] {
-  const boundariesByLastMessageId = new Map<
-    string,
-    ChatCompactionBoundary[]
-  >();
+  const boundariesByLastMessageId = new Map<string, ChatCompactionBoundary[]>();
   boundaries.forEach((boundary) => {
     const current = boundariesByLastMessageId.get(boundary.last_message_id);
     boundariesByLastMessageId.set(boundary.last_message_id, [
@@ -1612,7 +1609,9 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
                 jobsResult
                   .filter(
                     (job) =>
-                      job.task_type === "agent" || job.task_type === "text",
+                      job.task_type === "agent" ||
+                      job.task_type === "text" ||
+                      job.task_type === "workflow",
                   )
                   .map((job) => String(job.id)),
               );
@@ -1777,7 +1776,9 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
                 jobsResult
                   .filter(
                     (job) =>
-                      job.task_type === "agent" || job.task_type === "text",
+                      job.task_type === "agent" ||
+                      job.task_type === "text" ||
+                      job.task_type === "workflow",
                   )
                   .map((job) => String(job.id)),
               );
@@ -2000,11 +2001,14 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       this.sessionList = appendUniqueSessions([fromList], this.sessionList);
     }
     const generating = isGenerating(chatHistory);
-    const messages = withArchiveBoundaries(convertMessagesForSession(
-      chatHistory.messages || [],
-      fromList?.meta || {},
-      fromList?.name,
-    ), chatHistory.archive?.boundaries);
+    const messages = withArchiveBoundaries(
+      convertMessagesForSession(
+        chatHistory.messages || [],
+        fromList?.meta || {},
+        fromList?.name,
+      ),
+      chatHistory.archive?.boundaries,
+    );
     this.patchLastUserMessage(messages, generating, sessionId, [
       fromList?.sessionId,
       fromList?.realId,

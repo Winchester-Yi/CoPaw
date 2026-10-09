@@ -142,7 +142,7 @@ export interface CronOverviewResponse {
 }
 
 export type CronScheduleBucketMinutes = 5 | 10 | 15 | 30 | 60;
-export type CronScheduleTaskType = "text" | "agent";
+export type CronScheduleTaskType = "text" | "agent" | "workflow";
 
 export interface CronScheduleDistributionDiagnostics {
   invalid_cron_jobs: number;
@@ -157,6 +157,7 @@ export interface CronScheduleDistributionBucket {
   end_time: string;
   text_count: number;
   agent_count: number;
+  workflow_count?: number;
   total_count: number;
 }
 
@@ -169,6 +170,7 @@ export interface CronScheduleDistributionResponse {
   eligible_job_count: number;
   text_count: number;
   agent_count: number;
+  workflow_count?: number;
   total_count: number;
   buckets: CronScheduleDistributionBucket[];
   diagnostics: CronScheduleDistributionDiagnostics;
@@ -481,6 +483,7 @@ export interface CronJobOverviewBranchRankingRow {
   totalTasks: string;
   successCount: string;
   readTasks: string;
+  readRate: string;
   involvedManagers: string;
   resultViewManagers: string;
   resultViewManagerRate: string;
@@ -893,6 +896,7 @@ export function mapCronBranchRanking(
       totalTasks: formatInteger(item.total_tasks),
       successCount: formatInteger(item.success_count),
       readTasks: formatInteger(item.read_tasks),
+      readRate: formatDivisionPercentText(item.read_tasks, item.success_count),
       involvedManagers: formatInteger(item.involved_managers),
       resultViewManagers: formatInteger(item.result_view_managers),
       resultViewManagerRate: formatDivisionPercentText(
@@ -907,12 +911,12 @@ export function mapCronBranchRanking(
       insightManagers: formatInteger(item.insight_managers),
       insightManagerRate: formatDivisionPercentText(
         item.insight_managers,
-        item.plan_managers,
+        item.result_view_managers,
       ),
       phoneManagers: formatInteger(item.phone_managers),
       phoneManagerRate: formatDivisionPercentText(
         item.phone_managers,
-        item.plan_managers,
+        item.result_view_managers,
       ),
       recommendedCustomers: formatInteger(item.recommended_customers),
       viewedCustomers: formatInteger(item.viewed_customers),

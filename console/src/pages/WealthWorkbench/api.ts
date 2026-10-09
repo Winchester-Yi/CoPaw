@@ -264,6 +264,21 @@ interface NameListSkillView {
   skillName: string;
 }
 
+interface NameListField {
+  filedName: string;
+  filedNameCn: string;
+}
+
+interface NameListFieldValue extends NameListField {
+  filedValue?: string | number | boolean | null;
+}
+
+interface NameListSkillFields {
+  skillId: string;
+  groupField: string[];
+  fields: NameListField[];
+}
+
 interface NameListItemView {
   custUid: string;
   custNm: string;
@@ -274,10 +289,14 @@ interface NameListItemView {
   skillList?: NameListSkillView[];
   strongContactTime?: string | null;
   touchMethod?: string | null;
+  touched?: number | null;
+  fieldList?: NameListFieldValue[];
 }
 
 interface NameListResponse {
   items: NameListItemView[];
+  skillFieldList?: NameListSkillFields[];
+  allFields?: NameListField[];
 }
 
 /**
@@ -290,7 +309,7 @@ export async function fetchNameList(
   skillId?: string,
   sapId?: string,
   touched?: number,
-): Promise<NameListItemView[]> {
+): Promise<NameListResponse> {
   try {
     const params = new URLSearchParams();
     if (skillId) {
@@ -305,11 +324,52 @@ export async function fetchNameList(
     const resp = await request<NameListResponse>(
       `/wealth/name-list?${params.toString()}`,
     );
-    return resp.items;
+    return resp;
   } catch (error) {
     console.warn("[Wealth] 客户名单接口不可用，返回空列表", error);
-    return [];
+    return { items: [] };
   }
+}
+
+/** 配置负责顺序和名称，客户明细决定实际展示项；不生成无关字段占位。 */
+function customerFields(
+  item: NameListItemView,
+  response: NameListResponse,
+  skillId?: string,
+): Pick<Customer, "dynamicFields" | "groupFields"> {
+  const values = new Map(
+    (item.fieldList ?? []).map((field) => [field.filedName, field]),
+  );
+  const labels = new Map(
+    (response.allFields ?? []).map((field) => [
+      field.filedName,
+      field.filedNameCn,
+    ]),
+  );
+  const skill = response.skillFieldList?.find((s) => s.skillId === skillId);
+  const fields = skill?.fields ?? response.allFields ?? [];
+  const order = [...new Set(fields.map((field) => field.filedName))];
+  // 旧接口没有字段配置时仍可展示客户自己的指标。
+  if (!fields.length) order.push(...values.keys());
+  const toField = (name: string) => {
+    const field = values.get(name);
+    return {
+      name,
+      label:
+        labels.get(name) ||
+        field?.filedNameCn ||
+        fields.find((f) => f.filedName === name)?.filedNameCn ||
+        name,
+      value:
+        field?.filedValue == null || field.filedValue === ""
+          ? "未提供"
+          : String(field.filedValue),
+    };
+  };
+  return {
+    dynamicFields: order.filter((name) => values.has(name)).map(toField),
+    groupFields: (skill?.groupField ?? []).map(toField),
+  };
 }
 
 /** 今日有排程的经营场景（客户名单查询的入参上下文） */
@@ -346,13 +406,13 @@ export async function fetchTodayCustomers(
   const groups = await Promise.all(
     uniqueTasks.map(async (t) => ({
       task: t,
-      list: await fetchNameList(t.skillId, sapId, TOUCHED_ALL),
+      response: await fetchNameList(t.skillId, sapId, TOUCHED_ALL),
     })),
   );
   const seen = new Set<string>();
   const customers: Customer[] = [];
-  for (const { task, list } of groups) {
-    for (const item of list) {
+  for (const { task, response } of groups) {
+    for (const item of response.items) {
       const id = `${task.skillId}|${item.custUid}`;
       if (seen.has(id)) {
         continue;
@@ -368,13 +428,14 @@ export async function fetchTodayCustomers(
         reason,
         category: task.category,
         task: task.sceneName,
-        done: false,
+        done: item.touched === 1,
         channel: item.touchMethod ?? "",
         time: item.strongContactTime ?? "",
         note: "",
         opportunities: reason ? [reason] : [],
         bbkOrgId: item.bbkOrgId ?? undefined,
         link: item.filename ?? undefined,
+        ...customerFields(item, response, task.skillId),
       });
     }
   }
@@ -416,8 +477,8 @@ async function fetchCustomerViewCustomers(
   opts: { touched?: number; done?: boolean } = {},
 ): Promise<Customer[]> {
   const sceneBySkill = new Map(tasks.map((t) => [t.skillId, t]));
-  const list = await fetchNameList(undefined, sapId, opts.touched);
-  return list.map((item) => {
+  const response = await fetchNameList(undefined, sapId, opts.touched);
+  return response.items.map((item) => {
     const skillList = item.skillList ?? [];
     const skillIds = [...new Set(skillList.map((s) => s.skillId))];
     const skillNames = [
@@ -445,16 +506,17 @@ async function fetchCustomerViewCustomers(
       task: opts.done
         ? skillNames.join("、")
         : scenes.map((t) => t.sceneName).join("、"),
-      done: opts.done ?? false,
+      done: item.touched == null ? opts.done ?? false : item.touched === 1,
       channel: item.touchMethod ?? "",
       time: item.strongContactTime ?? "",
       note: "",
       bbkOrgId: item.bbkOrgId ?? undefined,
       opportunities: reason ? [reason] : [],
       link: item.filename ?? undefined,
+      ...customerFields(item, response),
     };
   });
-};
+}
 
 // ---------------------------------------------------------------------------
 // 电访 / 客户洞察外链（get-sign 签名 + base64 拼接）

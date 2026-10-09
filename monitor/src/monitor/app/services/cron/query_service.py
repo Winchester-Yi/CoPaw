@@ -418,7 +418,11 @@ class QueryService:
     ) -> _PreparedScheduleDefinition | None:
         """Validate one definition and preserve existing diagnostic semantics."""
         task_type_value = str(row.get("task_type") or "")
-        if task_type_value not in {TaskType.TEXT.value, TaskType.AGENT.value}:
+        if task_type_value not in {
+            TaskType.TEXT.value,
+            TaskType.AGENT.value,
+            TaskType.WORKFLOW.value,
+        }:
             self._increment_schedule_diagnostic(
                 diagnostics,
                 "unsupported_task_type_jobs",
@@ -626,6 +630,8 @@ class QueryService:
                 bucket = buckets[bucket_index]
                 if definition.task_type is TaskType.TEXT:
                     bucket.text_count += count
+                elif definition.task_type is TaskType.WORKFLOW:
+                    bucket.workflow_count += count
                 else:
                     bucket.agent_count += count
                 bucket.total_count += count
@@ -734,6 +740,7 @@ class QueryService:
 
         text_count = sum(bucket.text_count for bucket in buckets)
         agent_count = sum(bucket.agent_count for bucket in buckets)
+        workflow_count = sum(bucket.workflow_count for bucket in buckets)
         return CronScheduleDistributionResponse(
             start_time=normalized_start,
             end_time=normalized_end,
@@ -743,7 +750,8 @@ class QueryService:
             eligible_job_count=eligible_job_count,
             text_count=text_count,
             agent_count=agent_count,
-            total_count=text_count + agent_count,
+            workflow_count=workflow_count,
+            total_count=text_count + agent_count + workflow_count,
             buckets=buckets,
             diagnostics=diagnostics,
         )
@@ -778,7 +786,7 @@ class QueryService:
                 normalized_task_type = TaskType(task_type)
             except ValueError as exc:
                 raise ScheduleDistributionValidationError(
-                    "task_type must be text or agent.",
+                    "task_type must be text, agent or workflow.",
                 ) from exc
 
         calculation = await self._calculate_schedule_occurrences(

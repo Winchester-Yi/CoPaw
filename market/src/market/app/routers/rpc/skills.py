@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """技能查询 RPC 接口."""
 
-from fastapi import APIRouter, Header, HTTPException, Request
+import logging
 from typing import Optional
+
+from fastapi import APIRouter, Header, HTTPException, Request
 
 from market.marketplace.schemas import (
     SkillInfo,
@@ -11,8 +13,10 @@ from market.marketplace.schemas import (
     SkillQueryResult,
 )
 from market.app.deps import require_source_id
+from market.utils.logging_utils import log_params
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/skills/query", response_model=SkillQueryResponse)
@@ -27,6 +31,15 @@ async def query_skills(
     """
     # 参数校验：X-Source-Id 必填
     source_id = require_source_id(x_source_id)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        skill_names=body.skill_names,
+        source_types=body.source_types,
+        enabled_only=body.enabled_only,
+    )
 
     # 参数校验：技能名称列表不为空
     if not body.skill_names:

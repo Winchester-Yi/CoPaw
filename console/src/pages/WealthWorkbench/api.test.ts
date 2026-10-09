@@ -52,6 +52,73 @@ beforeEach(() => {
 });
 
 describe("WealthWorkbench api", () => {
+  it("动态字段按技能配置排序，只展示客户自己的值，保留组合分组及触达状态", async () => {
+    mockRequest.mockResolvedValue({
+      items: [
+        {
+          ...NAME_LIST_FIXTURE[0],
+          touched: 1,
+          fieldList: [
+            { filedName: "age", filedNameCn: "旧年龄名称", filedValue: 0 },
+            { filedName: "risk", filedNameCn: "风险等级", filedValue: null },
+            {
+              filedName: "other",
+              filedNameCn: "其他技能字段",
+              filedValue: "不展示",
+            },
+          ],
+        },
+      ],
+      skillFieldList: [
+        {
+          skillId: TASK.skillId,
+          groupField: ["age", "missing"],
+          fields: [
+            { filedName: "risk", filedNameCn: "风险等级" },
+            { filedName: "age", filedNameCn: "年龄" },
+            { filedName: "missing", filedNameCn: "缺失字段" },
+          ],
+        },
+      ],
+      allFields: [
+        { filedName: "age", filedNameCn: "客户年龄" },
+        { filedName: "risk", filedNameCn: "风险等级" },
+        { filedName: "missing", filedNameCn: "缺失字段" },
+        { filedName: "other", filedNameCn: "其他技能字段" },
+      ],
+    });
+    const [business] = await api.fetchTodayCustomers(
+      [TASK],
+      "10086",
+      "business",
+    );
+    expect(business.done).toBe(true);
+    expect(business.dynamicFields).toEqual([
+      { name: "risk", label: "风险等级", value: "未提供" },
+      { name: "age", label: "客户年龄", value: "0" },
+    ]);
+    expect(business.groupFields).toEqual([
+      { name: "age", label: "客户年龄", value: "0" },
+      { name: "missing", label: "缺失字段", value: "未提供" },
+    ]);
+    const [customer] = await api.fetchTodayCustomers(
+      [TASK],
+      "10086",
+      "customer",
+    );
+    expect(customer.dynamicFields?.map((f) => f.name)).toEqual([
+      "age",
+      "risk",
+      "other",
+    ]);
+    expect(customer.groupFields).toEqual([]);
+    expect(customer.done).toBe(true);
+    const [done] = await api.fetchDoneCustomers([TASK], "10086");
+    expect(done.dynamicFields).toEqual(customer.dynamicFields);
+    const [pending] = await api.fetchPendingCustomers([TASK], "10086");
+    expect(pending.dynamicFields).toEqual(customer.dynamicFields);
+  });
+
   it("fetchBootstrap 返回空草稿；客户名单与触达历史均不在 bootstrap 内", async () => {
     const data = await api.fetchBootstrap("rm");
     expect(data.plans).toEqual([]);
@@ -63,7 +130,7 @@ describe("WealthWorkbench api", () => {
 
   it("fetchNameList 透传 skillId 与 sapId；接口失败返回空列表", async () => {
     const list = await api.fetchNameList("skill-loan-1", "10086");
-    expect(list).toHaveLength(2);
+    expect(list.items).toHaveLength(2);
     expect(mockRequest.mock.calls[0]?.[0]).toContain("skill_id=skill-loan-1");
     expect(mockRequest.mock.calls[0]?.[0]).toContain("sap_id=10086");
 
@@ -71,7 +138,9 @@ describe("WealthWorkbench api", () => {
     expect(mockRequest.mock.calls[1]?.[0]).not.toContain("sap_id=");
 
     mockRequest.mockRejectedValueOnce(new Error("boom"));
-    await expect(api.fetchNameList("skill-loan-1")).resolves.toEqual([]);
+    await expect(api.fetchNameList("skill-loan-1")).resolves.toEqual({
+      items: [],
+    });
   });
 
   it("fetchAvailableSceneCount 返回全部大类场景数；失败返回 null", async () => {

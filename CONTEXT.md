@@ -1033,6 +1033,14 @@ _Avoid_: one-shot plan flag, global plan switch
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
 
+**Workflow Scheduled Job**:
+A **Scheduled Job** whose run obtains a result from one published Skill-associated workflow binding without invoking an Agent. It uses the same task Chat and execution history as other Scheduled Jobs.
+_Avoid_: Agent tool call, MCP workflow, external timer
+
+**Workflow Binding**:
+The shared, published association between a Skill and the workflow invocation rules used by **Workflow Scheduled Jobs**. One binding can have many immutable published versions; a run selects one version at its execution boundary or when its Dispatch Batch is created.
+_Avoid_: per-recipient endpoint copy, Skill activation, execution model override
+
 **Scheduled Job Enablement**:
 The permission for a particular **Scheduled Job** to execute. Disabling a broadcast source job, manually or through unread-result protection, does not itself pause batch dispatch for its other recipients.
 

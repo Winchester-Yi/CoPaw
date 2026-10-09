@@ -673,18 +673,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 *EXCLUDED_SOURCE_IDS,
                 *bbk_params,
             )
-            span_where = f"""
-                start_time >= %s AND start_time < %s
-                AND source_id NOT IN ({exclude_placeholders})
-                AND user_id != 'default'
-                AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
-            """
-            span_params = (
-                start_date,
-                end_date,
-                *EXCLUDED_SOURCE_IDS,
-                *bbk_params,
-            )
         else:
             trace_where = f"""
                 source_id = %s AND start_time >= %s AND start_time < %s
@@ -692,26 +680,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
             """
             trace_params = (source_id, start_date, end_date, *bbk_params)
-            span_where = f"""
-                source_id = %s AND start_time >= %s AND start_time < %s
-                AND user_id != 'default'
-                AND bbk_id IS NOT NULL AND bbk_id != ''{bbk_filter_sql}
-            """
-            span_params = (source_id, start_date, end_date, *bbk_params)
 
         # 各项分行统计查询（V00 并入总行 100）
         users_query = f"""
             SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
                    COUNT(DISTINCT user_id) AS value
-            FROM swe_tracing_traces
-            WHERE {trace_where}
-            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
-            ORDER BY value DESC
-            LIMIT 5
-        """
-        conversations_query = f"""
-            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
-                   COUNT(*) AS value
             FROM swe_tracing_traces
             WHERE {trace_where}
             GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
@@ -732,16 +705,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                    COALESCE(SUM(total_tokens), 0) AS value
             FROM swe_tracing_traces
             WHERE {trace_where}
-            GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
-            ORDER BY value DESC
-            LIMIT 5
-        """
-        skills_query = f"""
-            SELECT CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END AS bbk_id,
-                   COUNT(DISTINCT trace_id) AS value
-            FROM swe_tracing_spans
-            WHERE {span_where}
-              AND skill_name IS NOT NULL
             GROUP BY CASE WHEN bbk_id = 'V00' THEN '100' ELSE bbk_id END
             ORDER BY value DESC
             LIMIT 5
@@ -848,19 +811,19 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             cron_params = (start_date, end_date, source_id, *cron_bbk_params)
 
         # 执行查询
-        users_rows = await self._db.fetch_all(users_query, trace_params)
-        conversations_rows = await self._db.fetch_all(
-            conversations_query,
-            trace_params,
+        (
+            users_rows,
+            sessions_rows,
+            tokens_rows,
+            customer_rows,
+            cron_rows,
+        ) = await asyncio.gather(
+            self._db.fetch_all(users_query, trace_params),
+            self._db.fetch_all(sessions_query, trace_params),
+            self._db.fetch_all(tokens_query, trace_params),
+            self._db.fetch_all(customer_query, customer_params),
+            self._db.fetch_all(cron_query, cron_params),
         )
-        sessions_rows = await self._db.fetch_all(sessions_query, trace_params)
-        tokens_rows = await self._db.fetch_all(tokens_query, trace_params)
-        skills_rows = await self._db.fetch_all(skills_query, span_params)
-        customer_rows = await self._db.fetch_all(
-            customer_query,
-            customer_params,
-        )
-        cron_rows = await self._db.fetch_all(cron_query, cron_params)
 
         def build_branch_items(rows: list) -> list[BranchMetricItem]:
             total = sum(float(r.get("value") or 0) for r in rows)
@@ -881,10 +844,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
 
         return OverviewBranchBreakdown(
             users=build_branch_items(users_rows),
-            conversations=build_branch_items(conversations_rows),
             sessions=build_branch_items(sessions_rows),
             tokens=build_branch_items(tokens_rows),
-            skills=build_branch_items(skills_rows),
             cron_tasks=build_branch_items(cron_rows),
             customers=build_branch_items(customer_rows),
         )

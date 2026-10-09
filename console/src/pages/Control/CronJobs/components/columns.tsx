@@ -197,7 +197,7 @@ export const createColumns = (
       key: "cron",
       width: 180,
       render: (cron: string, record: CronJob) => {
-        const batchDispatch = isBatchDispatchJob(record);
+        const batchDispatch = (record);
 
         // Parse cron to friendly text
         const cronParts = parseCron(cron || "0 9 * * *");
@@ -279,6 +279,7 @@ export const createColumns = (
       dataIndex: "task_type",
       key: "task_type",
       width: 140,
+      render: (value: string) => (value === "workflow" ? "技能任务" : value),
     },
     {
       title: "ExecutionModel",

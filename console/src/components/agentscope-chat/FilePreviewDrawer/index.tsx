@@ -9,6 +9,10 @@ export type FilePreviewDrawerProps = Omit<
 
 export default function FilePreviewDrawer(props: FilePreviewDrawerProps) {
   return (
-    <FilePreviewModal {...props} presentation="drawer" enableAnnotations />
+    <FilePreviewModal
+      {...props}
+      presentation="drawer"
+      enableAnnotations={false}
+    />
   );
 }

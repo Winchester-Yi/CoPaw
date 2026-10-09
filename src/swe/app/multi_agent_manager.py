@@ -72,6 +72,7 @@ class MultiAgentManager:
         self,
         *,
         source_system_config_service: object | None = None,
+        workflow_config_store: object | None = None,
         continuous_governance_service: object | None = None,
         workspace_cache_max_size: int | None = None,
         workspace_start_max_concurrent: int | None = None,
@@ -120,6 +121,7 @@ class MultiAgentManager:
         self._cleanup_tasks: Set[asyncio.Task] = set()
         self._workspace_cleanup_task: asyncio.Task | None = None
         self._source_system_config_service = source_system_config_service
+        self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
         logger.debug("MultiAgentManager initialized")
 
@@ -129,6 +131,10 @@ class MultiAgentManager:
     ) -> None:
         """Update the source config service for future workspaces."""
         self._source_system_config_service = source_system_config_service
+
+    def set_workflow_config_store(self, store: object | None) -> None:
+        """Supply published workflow bindings to future workspaces."""
+        self._workflow_config_store = store
 
     def set_continuous_governance_service(
         self,
@@ -269,6 +275,7 @@ class MultiAgentManager:
                     source_system_config_service=(
                         self._source_system_config_service
                     ),
+                    workflow_config_store=self._workflow_config_store,
                     continuous_governance_service=(
                         self._continuous_governance_service
                     ),
@@ -838,6 +845,7 @@ class MultiAgentManager:
             workspace_dir=agent_ref.workspace_dir,
             tenant_id=tenant_id,
             source_system_config_service=(self._source_system_config_service),
+            workflow_config_store=self._workflow_config_store,
             continuous_governance_service=(
                 self._continuous_governance_service
             ),

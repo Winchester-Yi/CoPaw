@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -174,13 +175,19 @@ class CronJobRequest(BaseModel):
     user_id: Optional[str] = None
 
 
-TaskType = Literal["text", "agent"]
+TaskType = Literal["text", "agent", "workflow"]
 
 
 class CronJobSpec(BaseModel):
     id: str
     name: str
     enabled: bool = True
+    plan_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        validation_alias=AliasChoices("planId", "plan_id"),
+        description="关联计划ID",
+    )
 
     # Tenant isolation: each job belongs to a tenant
     tenant_id: Optional[str] = Field(
@@ -214,6 +221,7 @@ class CronJobSpec(BaseModel):
     request: Optional[CronJobRequest] = None
     model_slot: Optional[ModelSlotConfig] = None
     skill_ids: str = ""
+    workflow_binding_id: Optional[str] = None
     dispatch: DispatchSpec
 
     runtime: JobRuntimeSpec = Field(default_factory=JobRuntimeSpec)
@@ -226,6 +234,8 @@ class CronJobSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_task_type_fields(self) -> "CronJobSpec":
+        if self.task_type != "workflow" and self.workflow_binding_id:
+            raise ValueError("workflow_binding_id is only valid for workflow")
         if self.task_type == "text":
             if not (self.text and self.text.strip()):
                 raise ValueError("task_type is text but text is empty")
@@ -241,6 +251,12 @@ class CronJobSpec(BaseModel):
                     "session_id": self.request.session_id or target.session_id,
                 },
             )
+        elif self.task_type == "workflow":
+            if not self.skill_ids and not self.workflow_binding_id:
+                raise ValueError("workflow requires a skill or workflow_binding_id")
+            self.model_slot = None
+            self.request = None
+            self.text = None
         return self
 
 

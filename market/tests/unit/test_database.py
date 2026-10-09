@@ -23,3 +23,12 @@ async def test_get_db_dependency_returns_connection():
     from market.app.deps import get_db
 
     assert callable(get_db)
+
+
+def test_named_lock_name_does_not_exceed_mysql_limit():
+    from market.database.connection import _named_lock_name
+
+    lock_name = _named_lock_name("source:batch")
+
+    assert len(lock_name) <= 64
+    assert lock_name == _named_lock_name("source:batch")

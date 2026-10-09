@@ -110,7 +110,7 @@ export interface UploadMCPResponse {
 export interface MCPDistributeRequest {
   /** 目标租户 ID 列表 */
   target_tenant_ids: string[];
-  /** 是否覆盖目标 default agent 中同名 MCP */
+  /** 是否更新目标 default agent 中已有市场分发的同名 MCP；同名自建 MCP 会跳过 */
   overwrite: boolean;
 }
 
@@ -124,6 +124,8 @@ export interface MCPDistributeResult {
   bootstrapped?: boolean;
   /** 已更新的 default agent 客户端 */
   default_agent_updated?: string[];
+  /** 是否因目标租户已有同名自建 MCP 而跳过 */
+  skipped?: boolean;
   /** 错误信息 */
   error?: string;
 }

@@ -34,6 +34,7 @@ from .models import (
     PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_PUBLISHING,
     PUBLISH_STATUS_PUBLISHED,
+    SOURCE_LABEL_BY_ROLE,
     NameListItem,
     NameListResponse,
     PlanCreateResponse,
@@ -57,7 +58,7 @@ from .publish import (
     delete_removed_scene_jobs,
     launch_publish,
 )
-from .roles import can_view_branch_wide, resolve_role
+from .roles import ROLE_RM, can_view_branch_wide, resolve_role
 from .store import WealthPlanStore, new_plan_id
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,8 @@ async def _fetch_external_skill_stats(
         "bbkId": bbk_id,
         "skills": [s.model_dump() for s in skills],
     }
+    if _request_role(request) == ROLE_RM:
+        body["sapId"] = _request_sap_id(request)
     try:
         async with httpx.AsyncClient(
             timeout=_SKILL_CONFIG_TIMEOUT_SECONDS,
@@ -245,8 +248,7 @@ async def list_name_list(
     """
     if touched is not None and touched not in (0, 1, 2):
         raise HTTPException(status_code=400, detail="invalid touched")
-    items = await _fetch_external_name_list(request, skill_id, sap_id, touched)
-    return NameListResponse(items=items)
+    return await _fetch_external_name_list(request, skill_id, sap_id, touched)
 
 
 async def _fetch_external_name_list(
@@ -254,10 +256,10 @@ async def _fetch_external_name_list(
     skill_id: str,
     sap_id: str,
     touched: int | None,
-) -> list[NameListItem]:
+) -> NameListResponse:
     base = os.environ.get(_SKILL_CONFIG_API_BASE_ENV, "").strip().rstrip("/")
     if not base:
-        return []
+        return NameListResponse()
     bbk_id = getattr(request.state, "bbk_id", None) or ""
     body: dict[str, Any] = {
         "bbkId": bbk_id,
@@ -292,16 +294,24 @@ async def _fetch_external_name_list(
             payload = resp.json()
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("name-list request failed: %s", exc)
-        return []
+        return NameListResponse()
+    return _parse_name_list_response(payload)
+
+
+def _parse_name_list_response(payload: dict[str, Any]) -> NameListResponse:
     if str(payload.get("code")) != "200":
         logger.warning("name-list rejected: %s", payload.get("code"))
-        return []
+        return NameListResponse()
     data = payload.get("data") or {}
     items: list[NameListItem] = []
     for row in data.get("list") or []:
         if (item := _parse_name_list_item(row)) is not None:
             items.append(item)
-    return items
+    return NameListResponse(
+        items=items,
+        skillFieldList=data.get("skillFieldList") or [],
+        allFields=data.get("allFields") or [],
+    )
 
 
 def _parse_name_list_item(row: Any) -> NameListItem | None:
@@ -352,6 +362,40 @@ async def _validate_plan_scenes_for_branch(
         )
 
 
+async def _validate_scene_conflicts(
+    request: Request,
+    store: WealthPlanStore,
+    body: PlanUpsertRequest,
+    *,
+    exclude_plan_id: str | None = None,
+    scene_ids: set[str] | None = None,
+) -> None:
+    """按发布角色矩阵校验本行已被占用的经营场景。"""
+    checked_scene_ids = (
+        scene_ids
+        if scene_ids is not None
+        else {scene.scene_id for scene in body.scenes}
+    )
+    conflicts = await store.find_scene_conflicts(
+        _request_role(request),
+        _request_sap_id(request),
+        getattr(request.state, "bbk_id", None),
+        checked_scene_ids,
+        exclude_plan_id=exclude_plan_id,
+    )
+    if not conflicts:
+        return
+    scene_names = {scene.scene_id: scene.scene_name for scene in body.scenes}
+    items = "、".join(
+        f"「{scene_names[scene_id]}」（规划「{plan_name}」）"
+        for scene_id, plan_name in conflicts.items()
+    )
+    raise HTTPException(
+        status_code=409,
+        detail=f"以下经营场景已被选用：{items}，请调整后重新发布",
+    )
+
+
 @router.post("/plans", response_model=PlanCreateResponse)
 async def create_plan(
     request: Request,
@@ -360,6 +404,7 @@ async def create_plan(
     """创建规划并异步发布：落库即返回，编排结果回写状态。"""
     await _validate_plan_scenes_for_branch(request, body)
     store = _get_store(request)
+    await _validate_scene_conflicts(request, store, body)
     record = _build_record(request, body, plan_id=new_plan_id())
     await store.create(record)
     launch_publish(request, store, record.id)
@@ -410,6 +455,14 @@ async def update_plan(
     if old.status == PUBLISH_STATUS_PUBLISHING:
         raise HTTPException(status_code=409, detail="规划发布中，请稍后再修改")
     await _validate_plan_scenes_for_branch(request, body)
+    await _validate_scene_conflicts(
+        request,
+        store,
+        body,
+        exclude_plan_id=plan_id,
+        scene_ids={scene.scene_id for scene in body.scenes}
+        - {scene.scene_id for scene in old.scenes},
+    )
     record = _build_record(request, body, plan_id=plan_id)
     _carry_scene_links(old, record)
     await store.update(record)
@@ -493,7 +546,10 @@ def _build_record(
         agent_id=getattr(state, "agent_id", None) or "default",
         name=body.name.strip(),
         description=body.description,
-        source_label=body.source_label,
+        source_label=(
+            SOURCE_LABEL_BY_ROLE.get(_request_role(request))
+            or body.source_label
+        ),
         period_start=starts[0] if starts else None,
         period_end=ends[-1] if ends else None,
         scenes=[

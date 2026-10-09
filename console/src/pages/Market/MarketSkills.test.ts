@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { MarketSkill } from "../../api/modules/market";
-import { matchesMarketSkillSearch } from "./MarketSkills";
+import {
+  getMarketSearchResultLabel,
+  matchesMarketSkillSearch,
+} from "./MarketSkills";
 
 function buildSkill(overrides: Partial<MarketSkill> = {}): MarketSkill {
   return {
@@ -41,5 +44,12 @@ describe("matchesMarketSkillSearch", () => {
     });
 
     expect(matchesMarketSkillSearch(skill, "  存款增长分析  ")).toBe(true);
+  });
+});
+
+describe("getMarketSearchResultLabel", () => {
+  it("only shows a match count when a search query is present", () => {
+    expect(getMarketSearchResultLabel("", 15)).toBeNull();
+    expect(getMarketSearchResultLabel("deposit", 3)).toBe("匹配 3 个");
   });
 });

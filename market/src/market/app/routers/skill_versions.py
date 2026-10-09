@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..deps import require_source_id
+from ...utils.logging_utils import log_params
 from ...marketplace.zip_download import build_skill_zip
 from ...marketplace.version_models import (
     VersionCompareRequest,
@@ -182,6 +183,9 @@ async def list_versions(
 ):
     """获取技能版本历史列表."""
     source_id = require_source_id(x_source_id)
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = _get_version_service(request)
 
     _validate_item_exists(svc, source_id, item_id)
@@ -206,6 +210,15 @@ async def get_version_detail(
 ):
     """获取单个版本详情（含文件树）."""
     source_id = require_source_id(x_source_id)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = _get_version_service(request)
 
     _validate_item_exists(svc, source_id, item_id)
@@ -231,6 +244,15 @@ async def download_version_snapshot(
 ):
     """下载指定历史版本快照 ZIP。"""
     source_id = require_source_id(x_source_id)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = _get_version_service(request)
 
     _validate_item_exists(svc, source_id, item_id)
@@ -292,6 +314,14 @@ async def switch_version(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
 
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = _get_version_service(request)
     marketplace = request.app.state.marketplace
 
@@ -330,6 +360,16 @@ async def compare_versions(
 ):
     """比对两个版本."""
     source_id = require_source_id(x_source_id)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        base_version_id=compare_request.base_version_id,
+        target_version_id=compare_request.target_version_id,
+    )
+
     svc = _get_version_service(request)
 
     _validate_item_exists(svc, source_id, item_id)
@@ -365,6 +405,14 @@ async def delete_version(
     """删除指定版本（管理员）."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
 
     svc = _get_version_service(request)
 
@@ -403,6 +451,14 @@ async def batch_initialize_versions(
     """
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_ids=init_request.item_ids,
+        dry_run=init_request.dry_run,
+    )
 
     svc = _get_version_service(request)
     marketplace = request.app.state.marketplace

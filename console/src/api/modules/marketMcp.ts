@@ -45,8 +45,9 @@ export const marketMcpApi = {
    */
   getMarketMCPDetail: async (
     itemId: string,
+    sourceId?: string,
   ): Promise<MarketMCPDetail | null> => {
-    const opts = mergeHeaders();
+    const opts = mergeHeaders(sourceId ? { "X-Source-Id": sourceId } : {});
     return request<MarketMCPDetail | null>(`/market/mcp/${itemId}`, opts);
   },
 

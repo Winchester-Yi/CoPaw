@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from ...marketplace.schemas import MarketExpertDetail, MarketExpertResponse
+from ...utils.logging_utils import log_params
 from ..deps import require_source_id
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/market/experts", response_model=list[MarketExpertResponse])
@@ -24,6 +27,15 @@ async def list_market_experts(
     """Browse active community experts."""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        category_id=category_id,
+        bbk_ids=bbk_ids,
+    )
+
     parsed_bbk_ids = (
         [item.strip() for item in bbk_ids.split(",") if item.strip()]
         if bbk_ids
@@ -48,6 +60,9 @@ async def get_market_expert_detail(
     """Get a community expert detail."""
     source_id = require_source_id(x_source_id)
     user_bbk_id = x_bbk_id or "100"
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = request.app.state.marketplace
     detail = await svc.get_expert_detail(source_id, item_id, user_bbk_id)
     if detail is None:

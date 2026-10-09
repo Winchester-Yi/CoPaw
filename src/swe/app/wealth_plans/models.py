@@ -264,6 +264,23 @@ class NameListSkill(BaseModel):
     skillName: str
 
 
+class NameListField(BaseModel):
+    """外部接口的正式字段名保留 filed 拼写。"""
+
+    filedName: str
+    filedNameCn: str
+
+
+class NameListFieldValue(NameListField):
+    filedValue: str | int | float | bool | None = None
+
+
+class NameListSkillFields(BaseModel):
+    skillId: str
+    groupField: list[str] = Field(default_factory=list)
+    fields: list[NameListField] = Field(default_factory=list)
+
+
 class NameListItem(BaseModel):
     """客户名单明细，字段与外部 name-list 接口 data.list 保持一致。"""
 
@@ -276,7 +293,11 @@ class NameListItem(BaseModel):
     skillList: list[NameListSkill] = Field(default_factory=list)
     strongContactTime: str | None = None
     touchMethod: str | None = None
+    touched: int | None = None
+    fieldList: list[NameListFieldValue] = Field(default_factory=list)
 
 
 class NameListResponse(BaseModel):
     items: list[NameListItem] = Field(default_factory=list)
+    skillFieldList: list[NameListSkillFields] = Field(default_factory=list)
+    allFields: list[NameListField] = Field(default_factory=list)

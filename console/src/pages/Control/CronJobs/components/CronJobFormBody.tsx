@@ -253,7 +253,7 @@ export function CronJobFormBody({
       >
         <Select
           onChange={(value) => {
-            if (value === "text") {
+            if (value !== "agent") {
               form.setFieldValue(
                 "execution_model_key",
                 DEFAULT_EXECUTION_MODEL_KEY,
@@ -263,24 +263,49 @@ export function CronJobFormBody({
         >
           <Select.Option value="text">text</Select.Option>
           <Select.Option value="agent">agent</Select.Option>
+          <Select.Option value="workflow">技能任务</Select.Option>
         </Select>
       </Form.Item>
 
       <Form.Item
-        name="skillIds"
-        label="绑定技能ID"
-        rules={[{ validator: validateSkillIds }]}
+        noStyle
+        shouldUpdate={(prev, cur) => prev.task_type !== cur.task_type}
       >
-        <Select
-          key={skillOptionsKey}
-          mode="multiple"
-          allowClear
-          showSearch
-          loading={skillOptionsLoading}
-          placeholder="请选择绑定技能ID"
-          optionFilterProp="label"
-          options={skillOptions}
-        />
+        {({ getFieldValue }) => {
+          const workflow = getFieldValue("task_type") === "workflow";
+          return (
+            <Form.Item
+              name="skillIds"
+              label="绑定技能ID"
+              required={workflow}
+              extra={workflow ? "将按第一个绑定技能执行" : undefined}
+              rules={[
+                {
+                  validator: async (_, value) => {
+                    await validateSkillIds(_, value);
+                    if (
+                      workflow &&
+                      (!Array.isArray(value) || value.length === 0)
+                    ) {
+                      throw new Error("技能任务需要选择技能");
+                    }
+                  },
+                },
+              ]}
+            >
+              <Select
+                key={skillOptionsKey}
+                mode="multiple"
+                allowClear
+                showSearch
+                loading={skillOptionsLoading}
+                placeholder="请选择绑定技能ID"
+                optionFilterProp="label"
+                options={skillOptions}
+              />
+            </Form.Item>
+          );
+        }}
       </Form.Item>
 
       <Form.Item
@@ -317,87 +342,101 @@ export function CronJobFormBody({
                 </Form.Item>
               )}
 
-              <Form.Item
-                name="text"
-                label={t("cronJobs.text")}
-                required={textRequired}
-                rules={
-                  textRequired
-                    ? [
-                        {
-                          required: true,
-                          message: t("cronJobs.pleaseInputMessageContent"),
-                        },
-                      ]
-                    : []
-                }
-                tooltip={t("cronJobs.textTooltip")}
-              >
-                <Input.TextArea
-                  rows={3}
-                  placeholder={t("cronJobs.taskDescriptionPlaceholder")}
-                />
-              </Form.Item>
+              {taskType === "text" && (
+                <Form.Item
+                  name="text"
+                  label={t("cronJobs.text")}
+                  required={textRequired}
+                  rules={
+                    textRequired
+                      ? [
+                          {
+                            required: true,
+                            message: t("cronJobs.pleaseInputMessageContent"),
+                          },
+                        ]
+                      : []
+                  }
+                  tooltip={t("cronJobs.textTooltip")}
+                >
+                  <Input.TextArea
+                    rows={3}
+                    placeholder={t("cronJobs.taskDescriptionPlaceholder")}
+                  />
+                </Form.Item>
+              )}
 
-              <Form.Item
-                name={["request", "input"]}
-                label={t("cronJobs.requestInput")}
-                required={agentRequired}
-                rules={[
-                  ...(agentRequired
-                    ? [
-                        {
-                          required: true,
-                          message: t("cronJobs.pleaseInputRequest"),
-                        },
-                      ]
-                    : []),
-                  {
-                    validator: (_, value) => {
-                      if (!value) return Promise.resolve();
-                      try {
-                        JSON.parse(value);
-                        return Promise.resolve();
-                      } catch {
-                        return Promise.reject(
-                          new Error(t("cronJobs.invalidJsonFormat")),
-                        );
-                      }
+              {taskType === "agent" && (
+                <Form.Item
+                  name={["request", "input"]}
+                  label={t("cronJobs.requestInput")}
+                  required={agentRequired}
+                  rules={[
+                    ...(agentRequired
+                      ? [
+                          {
+                            required: true,
+                            message: t("cronJobs.pleaseInputRequest"),
+                          },
+                        ]
+                      : []),
+                    {
+                      validator: (_, value) => {
+                        if (!value) return Promise.resolve();
+                        try {
+                          JSON.parse(value);
+                          return Promise.resolve();
+                        } catch {
+                          return Promise.reject(
+                            new Error(t("cronJobs.invalidJsonFormat")),
+                          );
+                        }
+                      },
                     },
-                  },
-                ]}
-                tooltip={t("cronJobs.requestInputTooltip")}
-                extra={
-                  <span className={styles.formExtraText}>
-                    {t("cronJobs.requestInputExample")}
-                  </span>
-                }
-              >
-                <Input.TextArea
-                  rows={6}
-                  placeholder='[{"role":"user","content":[{"text":"Hello","type":"text"}]}]'
-                  style={{ fontFamily: "monospace", fontSize: 12 }}
-                />
-              </Form.Item>
+                  ]}
+                  tooltip={t("cronJobs.requestInputTooltip")}
+                  extra={
+                    <span className={styles.formExtraText}>
+                      {t("cronJobs.requestInputExample")}
+                    </span>
+                  }
+                >
+                  <Input.TextArea
+                    rows={6}
+                    placeholder='[{"role":"user","content":[{"text":"Hello","type":"text"}]}]'
+                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                  />
+                </Form.Item>
+              )}
             </>
           );
         }}
       </Form.Item>
 
       <Form.Item
-        name={["request", "session_id"]}
-        label={t("cronJobs.requestSessionId")}
-        tooltip={t("cronJobs.requestSessionIdTooltip")}
+        noStyle
+        shouldUpdate={(prev, cur) => prev.task_type !== cur.task_type}
       >
-        <Input placeholder="default" />
-      </Form.Item>
-
-      <Form.Item
-        name={["request", "user_id"]}
-        label={t("cronJobs.requestUserId")}
-        tooltip={t("cronJobs.requestUserIdTooltip")}
-      >
-        <Input placeholder="system" />
+        {({ getFieldValue }) =>
+          getFieldValue("task_type") !== "workflow" ? (
+            <>
+              <Form.Item
+                name={["request", "session_id"]}
+                label={t("cronJobs.requestSessionId")}
+                tooltip={t("cronJobs.requestSessionIdTooltip")}
+              >
+                <Input placeholder="default" />
+              </Form.Item>
+              <Form.Item
+                name={["request", "user_id"]}
+                label={t("cronJobs.requestUserId")}
+                tooltip={t("cronJobs.requestUserIdTooltip")}
+              >
+                <Input placeholder="system" />
+              </Form.Item>
+            </>
+          ) : null
+        }
       </Form.Item>
 
       <Form.Item name={["dispatch", "type"]} label="DispatchType" hidden>

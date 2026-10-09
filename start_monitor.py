@@ -48,6 +48,8 @@ def run_in_venv():
     )
     env = os.environ.copy()
     env["PYTHONPATH"] = src_path
+    # 设置日志级别：debug 时打印所有 SQL
+    env["MONITOR_LOG_LEVEL"] = "debug"
 
     venv_python = get_venv_python()
 

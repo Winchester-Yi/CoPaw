@@ -17,7 +17,7 @@ def build_cron_task_view(
     meta = spec.meta or {}
     creator_user_id = meta.get("creator_user_id")
     visible_in_my_tasks = bool(
-        spec.task_type in {"agent", "text"}
+        spec.task_type in {"agent", "text", "workflow"}
         and creator_user_id
         and creator_user_id == user_id,
     )

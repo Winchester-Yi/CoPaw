@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -114,3 +114,36 @@ async def test_chat_sharing_startup_does_not_initialize_schema(
     )
 
     initializer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_workflow_store_startup_does_not_access_schema(
+    monkeypatch,
+) -> None:
+    from swe.app.crons.workflow.config_store import WorkflowConfigStore
+
+    initializer = AsyncMock()
+    monkeypatch.setattr(WorkflowConfigStore, "ensure_schema", initializer)
+    db = SimpleNamespace(
+        is_connected=True,
+        execute=AsyncMock(),
+        fetch_one=AsyncMock(),
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    pool = SimpleNamespace(set_workflow_config_store=Mock())
+    manager = SimpleNamespace(set_workflow_config_store=Mock())
+
+    await app_module._initialize_workflow_config_store(
+        app,
+        db,
+        pool,
+        manager,
+    )
+
+    store = app.state.workflow_config_store
+    assert isinstance(store, WorkflowConfigStore)
+    initializer.assert_not_awaited()
+    db.execute.assert_not_awaited()
+    db.fetch_one.assert_not_awaited()
+    pool.set_workflow_config_store.assert_called_once_with(store)
+    manager.set_workflow_config_store.assert_called_once_with(store)

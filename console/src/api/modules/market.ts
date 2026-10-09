@@ -3,6 +3,7 @@ import { mergeHeaders } from "../mergeHeaders";
 import { getApiUrl } from "../config";
 import type { FileContentResponse, FileTreeNode, MySkill } from "./mySkills";
 import type { DistributionRecord, RecallResponse } from "../types";
+import type { MarketMCPItem } from "../types/marketMcp";
 
 export interface MarketSkill {
   item_id: string;
@@ -136,7 +137,45 @@ export interface Category {
   source_id: string;
   name: string;
   sort_order: number;
+  branch_visible: boolean;
+  skill_count: number;
 }
+
+export interface BranchCount {
+  bbk_id: string;
+  skill_count: number;
+  mcp_count: number;
+  total_unique_skill_count: number;
+  total_unique_mcp_count: number;
+}
+
+export interface BranchCountsResponse {
+  branches: BranchCount[];
+}
+
+export interface MarketBrowseFacet {
+  id: number;
+  name: string;
+  count: number;
+}
+
+export interface MarketBrowseBranch {
+  bbk_id: string;
+  count: number;
+}
+
+export interface MarketBrowseResponse {
+  resource_type: "skill" | "mcp";
+  items: Array<MarketSkill | MarketMCPItem>;
+  total: number;
+  category_total: number;
+  branch_total: number;
+  categories: MarketBrowseFacet[];
+  branches: MarketBrowseBranch[];
+}
+
+export const UNCATEGORIZED_CATEGORY_ID = -1;
+export const ORPHANED_CATEGORY_ID = -2;
 
 export interface PublishSkillRequest {
   name: string;
@@ -302,6 +341,55 @@ export const marketApi = {
     return request<Category>("/market/categories", opts);
   },
 
+  updateCategory: async (
+    sourceId: string,
+    categoryId: number,
+    data: { name?: string; branch_visible?: boolean },
+  ): Promise<Category> => {
+    return request<Category>(`/market/categories/${categoryId}`, {
+      method: "PATCH",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+      body: JSON.stringify(data),
+    });
+  },
+
+  reorderCategories: async (
+    sourceId: string,
+    categoryIds: number[],
+  ): Promise<{ success: boolean }> => {
+    return request<{ success: boolean }>("/market/categories/reorder", {
+      method: "PUT",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+      body: JSON.stringify({ category_ids: categoryIds }),
+    });
+  },
+
+  deleteCategory: async (
+    sourceId: string,
+    categoryId: number,
+  ): Promise<void> => {
+    await request(`/market/categories/${categoryId}`, {
+      method: "DELETE",
+      ...mergeHeaders({
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+    });
+  },
+
+  listBbkIds: async (sourceId: string): Promise<BranchCountsResponse> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return request<BranchCountsResponse>("/market/bbk-ids", opts);
+  },
+
   listMarketSkills: async (
     sourceId: string,
     categoryId?: number,
@@ -320,6 +408,35 @@ export const marketApi = {
     }
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<MarketSkill[]>(url, opts);
+  },
+
+  browseMarket: async (
+    sourceId: string,
+    resourceType: "skill" | "mcp",
+    options?: {
+      categoryId?: number | null;
+      bbkId?: string | null;
+      uncategorized?: boolean;
+      orphaned?: boolean;
+    },
+  ): Promise<MarketBrowseResponse> => {
+    const params = new URLSearchParams({ resource_type: resourceType });
+    if (options?.categoryId != null) {
+      params.set("category_id", String(options.categoryId));
+    }
+    if (options?.bbkId) {
+      params.set("bbk_id", options.bbkId);
+    }
+    if (options?.uncategorized) {
+      params.set("uncategorized", "true");
+    }
+    if (options?.orphaned) {
+      params.set("orphaned", "true");
+    }
+    return request<MarketBrowseResponse>(
+      `/market/browse?${params.toString()}`,
+      mergeHeaders({ "X-Source-Id": sourceId }),
+    );
   },
 
   listMarketExperts: async (
@@ -776,6 +893,8 @@ export const marketApi = {
     data: {
       skill_id: string;
       chinese_name: string;
+      category_id?: number;
+      bbk_ids?: string[];
       sync_to_users?: boolean;
       target_user_ids?: string[];
     },
@@ -785,6 +904,7 @@ export const marketApi = {
     synced_users: number;
     skipped_users: number;
     errors: Array<{ user_id: string; reason: string }>;
+    synced_category_users?: number;
   }> => {
     const opts: RequestInit = {
       method: "PATCH",

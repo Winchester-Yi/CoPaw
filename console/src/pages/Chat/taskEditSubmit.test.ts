@@ -1,10 +1,7 @@
 import dayjs from "dayjs";
 import { describe, expect, it, vi } from "vitest";
 import type { CronJobSpecOutput } from "@/api/types";
-import {
-  extractTaskContentText,
-  submitCronTaskEdit,
-} from "./taskEditSubmit";
+import { extractTaskContentText, submitCronTaskEdit } from "./taskEditSubmit";
 
 function buildCronJob(
   overrides: Partial<CronJobSpecOutput> = {},
@@ -109,6 +106,32 @@ describe("submitCronTaskEdit", () => {
     expect(payload.text).toBe("今天 18 点提醒我整理日报");
     expect(payload.request).toBeUndefined();
     expect(replaceCronJob).toHaveBeenCalledWith("job-1", payload);
+  });
+
+  it("edits a workflow task without creating an Agent request", async () => {
+    const replaceCronJob = vi.fn().mockResolvedValue({});
+    const task = buildCronJob({
+      task_type: "workflow",
+      skill_ids: "skill-a",
+      workflow_binding_id: "binding-1",
+      request: undefined,
+    });
+
+    const payload = await submitCronTaskEdit(
+      task,
+      {
+        ...task,
+        cronType: "daily",
+        cronTime: dayjs().hour(6).minute(0),
+        taskContentText: "stale form text",
+      },
+      replaceCronJob,
+    );
+
+    expect(payload.task_type).toBe("workflow");
+    expect(payload.workflow_binding_id).toBe("binding-1");
+    expect(payload.request).toBeUndefined();
+    expect(payload.text).toBeUndefined();
   });
 
   it("normalizes form values and calls replaceCronJob for the edited task", async () => {

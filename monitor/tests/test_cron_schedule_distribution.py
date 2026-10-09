@@ -149,6 +149,25 @@ async def test_distribution_counts_occurrences_and_half_open_boundaries(
 
 
 @pytest.mark.asyncio
+async def test_workflow_has_its_own_planned_firing_count(patch_database):
+    patch_database(
+        [job_row("workflow-job", task_type="workflow", cron_expr="0 10 * * *")],
+    )
+
+    result = await QueryService().get_schedule_distribution(
+        source_id="source-a",
+        start_time=datetime(2026, 7, 27, 10, 0, tzinfo=UTC),
+        end_time=datetime(2026, 7, 27, 10, 5, tzinfo=UTC),
+        bucket_minutes=5,
+    )
+
+    assert result.workflow_count == 1
+    assert result.total_count == 1
+    assert result.buckets[0].workflow_count == 1
+    assert result.diagnostics.unsupported_task_type_jobs == 0
+
+
+@pytest.mark.asyncio
 async def test_distribution_does_not_materialize_detail_occurrences(
     patch_database,
     monkeypatch: pytest.MonkeyPatch,

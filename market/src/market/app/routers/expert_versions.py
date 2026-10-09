@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -10,9 +11,11 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from ...marketplace.fs import load_index
 from ...marketplace.schemas import ExpertVersionListResponse
 from ...marketplace.service import MarketplaceService
+from ...utils.logging_utils import log_params
 from ..deps import require_source_id
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _get_service(request: Request) -> MarketplaceService:
@@ -49,6 +52,9 @@ async def list_expert_versions(
 ):
     """List expert version history."""
     source_id = require_source_id(x_source_id)
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = _get_service(request)
     _validate_item_exists(svc, source_id, item_id)
     return svc._get_expert_version_service().list_versions(source_id, item_id)
@@ -63,6 +69,15 @@ async def get_expert_version_detail(
 ):
     """Get a historical expert version detail."""
     source_id = require_source_id(x_source_id)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = _get_service(request)
     _validate_item_exists(svc, source_id, item_id)
     try:

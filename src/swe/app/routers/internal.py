@@ -190,7 +190,7 @@ def _build_dispatch_callback_meta(
         intent_id, batch_id, dispatch_attempt = _require_dispatch_callback_ids(
             params,
         )
-        return {
+        metadata = {
             "source": _DISPATCH_CALLBACK_SOURCE,
             "intent_id": intent_id,
             "batch_id": batch_id,
@@ -198,6 +198,10 @@ def _build_dispatch_callback_meta(
             **context,
             **(_callback_execution_meta(params) or {}),
         }
+        workflow_version = _safe_int(params.get("workflow_config_version"))
+        if workflow_version > 0:
+            metadata["workflow_config_version"] = workflow_version
+        return metadata
     return _callback_execution_meta(params)
 
 

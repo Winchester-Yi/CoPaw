@@ -389,6 +389,12 @@ class MonitorSyncClient:
             "enabled": self._get_or_default(spec_dict, "enabled", True),
             "task_type": self._get_or_default(spec_dict, "task_type", "agent"),
             "skill_ids": self._get_or_empty(spec_dict, "skill_ids"),
+            "workflow_binding_id": (
+                spec_dict.get("workflow_binding_id")
+                if spec_dict.get("task_type") == "workflow"
+                else None
+            ),
+            "plan_id": spec_dict.get("plan_id"),
             "text_content": self._get_or_empty(spec_dict, "text"),
             "request_input": self._build_request_input(spec_dict),
         }
@@ -665,8 +671,11 @@ class MonitorSyncClient:
         job: CronJobSpec,
         status: str,
     ) -> bool:
-        """只有 agent 成功任务需要进入完成通知队列。"""
-        return status == "success" and getattr(job, "task_type", "") == "agent"
+        """Agent and workflow results enter the completion-notification queue."""
+        return status == "success" and getattr(job, "task_type", "") in {
+            "agent",
+            "workflow",
+        }
 
     def _format_actual_time(self, time: datetime) -> str:
         """Format actual_time datetime to ISO string in Beijing timezone.

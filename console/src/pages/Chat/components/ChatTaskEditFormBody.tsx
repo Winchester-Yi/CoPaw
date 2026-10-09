@@ -129,6 +129,7 @@ export default function ChatTaskEditFormBody() {
       >
         {({ getFieldValue }) => {
           const taskType = getFieldValue("task_type");
+          if (taskType === "workflow") return null;
           const isTextTask = taskType === "text";
 
           return (

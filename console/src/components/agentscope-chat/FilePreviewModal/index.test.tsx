@@ -429,9 +429,7 @@ describe("FilePreviewModal HTML preview recording", () => {
     getRecordDataMock
       .mockReturnValueOnce(firstResponse)
       .mockResolvedValueOnce({ code: "200", data: { marker: "second" } });
-    renderTemplateMock.mockResolvedValue(
-      "<html><body>second</body></html>",
-    );
+    renderTemplateMock.mockResolvedValue("<html><body>second</body></html>");
 
     const { rerender } = render(
       <FilePreviewDrawer
@@ -454,8 +452,9 @@ describe("FilePreviewModal HTML preview recording", () => {
       />,
     );
     await waitFor(() =>
-      expect(document.querySelector("iframe")?.getAttribute("srcdoc"))
-        .toContain("second"),
+      expect(
+        document.querySelector("iframe")?.getAttribute("srcdoc"),
+      ).toContain("second"),
     );
 
     vi.useFakeTimers();
@@ -469,7 +468,7 @@ describe("FilePreviewModal HTML preview recording", () => {
     }
   });
 
-  it("shows annotation for a legacy HTML drawer with a writable composer", async () => {
+  it("keeps the HTML drawer annotation-free with a writable composer", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
         <FilePreviewDrawer
@@ -481,9 +480,9 @@ describe("FilePreviewModal HTML preview recording", () => {
       </HtmlAnnotationProvider>,
     );
 
-    expect(
-      await screen.findByRole("button", { name: "添加批注" }),
-    ).toBeVisible();
+    await waitFor(() => expect(renderTemplateMock).toHaveBeenCalled());
+    expect(document.querySelector("iframe")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "添加批注" })).toBeNull();
   });
 
   it("shows annotation for an explicitly enabled HTML workspace preview", async () => {
@@ -520,7 +519,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("selects a DOM target without activating it and stages the saved comment", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
@@ -565,7 +566,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("suppresses pre-click target handlers while selecting an annotation", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
@@ -591,7 +594,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("rejects canvas content before resolving a meaningful ancestor", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
@@ -619,7 +624,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("does not record another preview view when annotation mode exits", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
@@ -654,7 +661,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("exits annotation mode when Escape is pressed in the comment editor", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
@@ -681,7 +690,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("repositions a saved marker after iframe scrolling and DOM replacement", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"
@@ -738,7 +749,9 @@ describe("FilePreviewModal HTML preview recording", () => {
   it("keeps interactive annotation markers exposed to assistive technology", async () => {
     render(
       <HtmlAnnotationProvider activeChatKey="chat-1" composerAvailable>
-        <FilePreviewDrawer
+        <FilePreviewModal
+          presentation="drawer"
+          enableAnnotations
           open
           onClose={vi.fn()}
           fileUrl="https://example.test/report[auto-preview].html?resultId=result-1&templateId=1"

@@ -221,6 +221,14 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 排错注意：`MessageList` 会倒序挂载消息，不能用组件注册先后判断报告新旧。历史执行默认折叠规则在 `console/src/pages/Chat/sessionApi/index.ts`；最新执行没有报告时，不应回退到折叠的旧执行。加载期间不应消耗 5 秒候选等待窗口。
 - 回归验证：在 `console/` 运行 `npm run test:run -- src/components/agentscope-chat/ChatAutoPreviewHtmlProvider.test.tsx src/components/agentscope-chat/autoPreviewSelection.test.ts src/pages/Chat/components/TaskRunGroupCard/index.test.tsx src/components/agentscope-chat/DownloadFileCard/index.test.tsx`。
 
+## 定时任务关联计划 planId
+
+- 创建接口 `POST /cron/jobs` 接受可选字符串 `planId`（最长 255 字符）；内部字段、返回值和 `jobs.json` 使用 `plan_id`，也接受 snake_case 输入。省略或 null 保存为 SQL NULL。
+- 分发通过 `src/swe/app/crons/api.py` 的 `_build_broadcast_job` 复制任务；重复分发通过 `_merge_existing_child_with_source` 继承父任务当前的 `plan_id`。
+- 同步链路：`monitor_sync_client.py::_build_job_sync_data` → Monitor `CronJobSyncRequest` → `SyncService.sync_job`，INSERT/UPDATE 都写 `swe_cron_jobs.plan_id`。同步仍为异步，失败查 Monitor sync 日志。
+- 部署先在 Monitor 数据库执行 `deploy/migrations/2026_09_21_add_cron_plan_id.sql`，再部署 SWE/Monitor；脚本可重复执行，旧记录保持 NULL。`schema.py` 的初始化也覆盖新表与缺列升级，但当前服务启动路径不自动调用该初始化，不能只靠重启完成升级。
+- 回归：`tests/unit/app/test_cron_plan_id.py`、`tests/unit/app/test_tenant_cron_api.py`。
+
 ## Claw 技能运行看板
 
 - 页面：`/analytics/claw-data-overview`；组件：`console/src/pages/Analytics/ClawDataOverview/index.tsx`。
@@ -234,3 +242,22 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 - 统计和技能明细各自通过 GET /task-type-report/export 导出后端 XLSX，传当前完整筛选、移除分页，包含未加载的行；模拟模式禁用导出。50000行以上后端返回413。契约见 docs/superpowers/specs/2026-09-14-claw-report-console/API.md。
 - 客户行为同时展示去重客户数和点击总次数：`insight_customer_count` / `insight_count`、`phone_customer_count` / `phone_count`；次数列位于对应覆盖率之后，非名单方案显示“—”。
+
+## 财富规划任务类型与技能/MCP 下发
+
+- `GET /wealth/scene-skills` 返回的 `mcpRelationList` 经 Console 映射为规划场景的 `mcp_relations`。
+- `src/swe/app/wealth_plans/publish.py` 的 `_build_job_spec` 按场景判断：空数组创建 `workflow`，非空数组保持 `agent`。只判断数组是否为空，`["    "]` 仍按非空处理。
+- `src/swe/app/wealth_plans/market_dispatch.py` 的 `collect_distribution_items` 只汇总非空 MCP 关联数组场景的技能 item 和 MCP item；全是 workflow 场景时不调用 market 下发接口，混合规划只下发 agent 场景。
+- 创建/广播定时任务的顺序不变；`workflow` 保留 `scene_id` 作为 `skill_ids`，其 `text` 和 `request` 由 `CronJobSpec` 校验器清空。
+- 回归入口：`venv/bin/python -m pytest tests/unit/app/wealth_plans/ -q`。
+
+## 财富任务名单动态字段
+
+- 外部接口为 `POST /api/agent/workspace/name-list`；Console 使用 `GET /api/wealth/name-list`，代理返回 `items`、`skillFieldList`、`allFields`。
+- 客户动态值数组的正式字段名是 `fieldList`；属性仍为 `filedName / filedNameCn / filedValue`。数组名拼错会导致模型丢弃明细，前端即使收到 `allFields` 也显示“暂无指标”。
+- 指标丢失先检查 `src/swe/app/wealth_plans/models.py` 和 `router.py` 是否保留客户明细及顶层字段配置，再检查 `console/src/pages/WealthWorkbench/api.ts` 的映射。
+- `allFields` 提供中文名称；经营视角按技能的 `fields` 顺序与客户实际字段取交集，客户视角按全局字段顺序展示客户实际字段。不为其他客户的字段生成占位。
+- 只有今日任务经营视角使用 `groupField`。组合值完全一致才合并，空数组不分组；把客户姓名配置为分组字段可能导致每人一组。每个分类对应独立表格，分类标题、人数和折叠按钮放在表格上方；多个字段以 ` / ` 分隔。
+- `touched=1` 标记客户已触达；客户字段缺失不展示、返回空值显示“未提供”、数值 `0` 正常展示。
+- 指标交互入口为 `components/CustomerMetrics.tsx`；分组入口为 `Tasks/customerGroups.ts`。大量指标先查展开状态；长字段先查悬停或聚焦提示，不应依靠增加全部动态表头排查。
+- 今日任务进入页面、切回经营视角或点击经营视角的刷新图标时，经 `store.ts` 的 `refreshTodayCustomers` 先查询最新规划，再用新规划查询当前视角名单。页内切到客户视角只调用 `loadTodayCustomers` 查询聚合名单，不重复查询规划。刷新期间禁用重复刷新和视角切换；已失效的选中任务回退到首个任务。不自动轮询，发布尚未完成时需完成后手动刷新。

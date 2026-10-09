@@ -184,7 +184,11 @@ export function buildCronJobSubmitPayload(
         : undefined,
   };
 
-  if (values.request?.input && typeof values.request.input === "string") {
+  if (
+    values.task_type === "agent" &&
+    values.request?.input &&
+    typeof values.request.input === "string"
+  ) {
     processedValues = {
       ...processedValues,
       request: {
@@ -192,6 +196,14 @@ export function buildCronJobSubmitPayload(
         input: JSON.parse(values.request.input),
       },
     };
+  }
+
+  if (values.task_type === "workflow") {
+    delete processedValues.request;
+    delete processedValues.text;
+    delete processedValues.model_slot;
+  } else {
+    delete processedValues.workflow_binding_id;
   }
 
   return processedValues as unknown as CronJobSpecInput;

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS swe_marketplace_categories (
     source_id   VARCHAR(64)  NOT NULL COMMENT '应用入口标识',
     name        VARCHAR(128) NOT NULL COMMENT '分类名称',
     sort_order  INT          NOT NULL DEFAULT 0 COMMENT '排序权重，升序',
+    branch_visible TINYINT(1) NOT NULL DEFAULT 1 COMMENT '分行是否可见',
     created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     UNIQUE KEY uk_source_name (source_id, name),
     INDEX idx_source_id (source_id)

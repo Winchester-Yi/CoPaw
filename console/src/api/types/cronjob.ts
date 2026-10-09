@@ -36,7 +36,13 @@ export interface CronJobState {
   next_run_at?: string | null;
   next_run_times?: string[] | null;
   last_run_at?: string | null;
-  last_status?: "success" | "error" | "running" | "skipped" | "cancelled" | null;
+  last_status?:
+    | "success"
+    | "error"
+    | "running"
+    | "skipped"
+    | "cancelled"
+    | null;
   last_error?: string | null;
 }
 
@@ -59,9 +65,10 @@ export interface CronJobSpecInput {
   name: string;
   enabled?: boolean;
   schedule: CronJobSchedule;
-  task_type?: "text" | "agent";
+  task_type?: "text" | "agent" | "workflow";
   text?: string;
   skill_ids?: string;
+  workflow_binding_id?: string | null;
   model_slot?: ModelSlotConfig | null;
   request?: CronJobRequest;
   dispatch: CronJobDispatch;

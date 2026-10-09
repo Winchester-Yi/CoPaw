@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from ..deps import require_source_id
+from ...utils.logging_utils import log_params
 from ...marketplace.fs import get_mcp_dir, load_index, save_index
 from ...marketplace.mcp_version_service import MCPVersionService
 from ...marketplace.version_models import (
@@ -53,6 +54,9 @@ async def list_mcp_versions(
 ):
     """列出某 MCP 条目的所有版本（按时间倒序）."""
     source_id = require_source_id(x_source_id)
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = _get_service(request)
     _validate_item_exists(svc, source_id, item_id)
     return svc.list_versions(source_id, item_id)
@@ -69,6 +73,15 @@ async def switch_mcp_version(
     """切换 MCP 当前版本（管理员）；R8：同步更新 MarketItem.creator."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = _get_service(request)
     _validate_item_exists(svc, source_id, item_id)
 
@@ -117,6 +130,16 @@ async def compare_mcp_versions(
 ):
     """比对两个 MCP 版本（仅 mcp.json，与 skill_versions.compare_versions 对称）."""
     source_id = require_source_id(x_source_id)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        base_version_id=compare_request.base_version_id,
+        target_version_id=compare_request.target_version_id,
+    )
+
     svc = _get_service(request)
     _validate_item_exists(svc, source_id, item_id)
 
@@ -142,6 +165,15 @@ async def delete_mcp_version(
     """删除某个 MCP 版本快照（管理员；拒删 current/initial）."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = _get_service(request)
     _validate_item_exists(svc, source_id, item_id)
 

@@ -13,6 +13,8 @@
 5. [Cron Monitor 与通知](cron-monitor-notification.md) 与 [Cron 通知延迟](cron-notification-delay.md)：理解执行记录、批次看板、通知领取和 due time。
 6. [Cron 广播与系统任务](cron-broadcast-system.md) 与 [Cron 分发子任务管理](cron-distribution-management.md)：理解异步广播、模式同步、归档维护和子任务管理。
 7. [Cron 排查与提交脉络](cron-troubleshooting-history.md)：按症状定位源码与提交。
+8. [Workflow 类型定时任务](cron-workflow.md)：配置技能关联的同步接口、身份映射、结果渲染与批调度模型。
+9. [Workflow 绑定配置操作手册](workflow-binding-guide.md)：按请求头和 JSON 示例发布、验证技能到接口的绑定。
 
 ## 文档目录
 
@@ -27,6 +29,8 @@
 | [Cron 广播与系统任务](cron-broadcast-system.md) | 异步广播、批调度模式、source 级清理/归档维护、heartbeat/dream |
 | [Cron 分发子任务管理](cron-distribution-management.md) | 快照刷新、分发子任务反查、批量删除/重跑、模式同步 |
 | [Cron 排查与提交脉络](cron-troubleshooting-history.md) | 没有触发、intent 卡住、通知缺失、同步不完整等问题怎么查 |
+| [Workflow 类型定时任务](cron-workflow.md) | workflow 配置发布、运行身份、版本冻结及记录链路 |
+| [Workflow 绑定配置操作手册](workflow-binding-guide.md) | 调用哪个接口、提交哪些参数、如何验证绑定和排查常见错误 |
 
 ## 示例目录
 
@@ -44,7 +48,7 @@
 
 ## 先看结论
 
-- SWE 是 cron 任务定义和执行逻辑的 owner；`CronManager` 管生命周期，`CronExecutor` 管单次执行。
+- SWE 是 cron 任务定义和执行逻辑的 owner；`CronManager` 管生命周期，`CronExecutor` 执行 agent/text，独立 workflow 引擎执行技能接口任务。
 - 普通模式下，外部调度平台到点回调 SWE `/api/internal/cron/callback`。
 - 批调度模式下，外部平台只触发父任务的批调度物理 timer，并回调独立 Scheduler `/api/scheduler/cron/callback`；Scheduler 创建 intents，再逐个回调任务所属 SWE。
 - Monitor 保存 job/execution，并提供 cron 查询、批次看板、worker 状态和完成通知领取。

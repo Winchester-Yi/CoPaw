@@ -110,14 +110,22 @@ function buildMetricCards(
       title: "活跃用户数",
       valueText: (
         <span className={styles.userValueWrap}>
-          <span className={styles.userTotal}>{formatNumber(overviewStats?.total_users ?? 0)}</span>
+          <span className={styles.userTotal}>
+            {formatNumber(overviewStats?.total_users ?? 0)}
+          </span>
           <span className={styles.userAnnotation}>
             <span className={styles.annotationRow}>
-              <span className={styles.annotationDot} style={{ background: "#6366f1" }} />
+              <span
+                className={styles.annotationDot}
+                style={{ background: "#6366f1" }}
+              />
               IT人员 {formatNumber(overviewStats?.it_users ?? 0)}
             </span>
             <span className={styles.annotationRow}>
-              <span className={styles.annotationDot} style={{ background: "#22c55e" }} />
+              <span
+                className={styles.annotationDot}
+                style={{ background: "#22c55e" }}
+              />
               业务人员 {formatNumber(overviewStats?.business_users ?? 0)}
             </span>
           </span>
@@ -147,7 +155,10 @@ function buildMetricCards(
           </span>
           <span className={styles.userAnnotation}>
             <span className={styles.annotationRow}>
-              <span className={styles.annotationDot} style={{ background: "#22c55e" }} />
+              <span
+                className={styles.annotationDot}
+                style={{ background: "#22c55e" }}
+              />
               已读 {formatNumber(taskStatusSummary?.read_count ?? 0)}
             </span>
           </span>
@@ -177,11 +188,17 @@ function buildMetricCards(
           </span>
           <span className={styles.userAnnotation}>
             <span className={styles.annotationRow}>
-              <span className={styles.annotationDot} style={{ background: "#3b82f6" }} />
+              <span
+                className={styles.annotationDot}
+                style={{ background: "#3b82f6" }}
+              />
               去洞察客户数 {formatNumber(overviewStats?.insight_customers ?? 0)}
             </span>
             <span className={styles.annotationRow}>
-              <span className={styles.annotationDot} style={{ background: "#f97316" }} />
+              <span
+                className={styles.annotationDot}
+                style={{ background: "#f97316" }}
+              />
               去电访客户数 {formatNumber(overviewStats?.phone_customers ?? 0)}
             </span>
           </span>
@@ -288,7 +305,11 @@ function renderModelErrorCodeTooltip(summary: ErrorSummary | null) {
 }
 
 /** 漏斗图组件：使用 echarts 展示任务执行转化率 */
-function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummary | null }) {
+function TaskFunnel({
+  taskStatusSummary,
+}: {
+  taskStatusSummary: TaskStatusSummary | null;
+}) {
   const totalTasks = safeNumber(taskStatusSummary?.total_tasks);
   const successCount = safeNumber(taskStatusSummary?.success);
   const readCount = safeNumber(taskStatusSummary?.read_count);
@@ -303,7 +324,8 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   }
 
   const successRate = ((successCount / totalTasks) * 100).toFixed(1);
-  const readRate = successCount > 0 ? ((readCount / successCount) * 100).toFixed(1) : "0.0";
+  const readRate =
+    successCount > 0 ? ((readCount / successCount) * 100).toFixed(1) : "0.0";
 
   // 值为 0 时保证有最小值显示
   const minBar = Math.max(totalTasks * 0.12, 1);
@@ -312,8 +334,16 @@ function TaskFunnel({ taskStatusSummary }: { taskStatusSummary: TaskStatusSummar
   const funnelColors = ["#4f46e5", "#16a34a", "#0891b2"];
 
   const chartData = [
-    { name: "总任务数", value: ensureVisible(totalTasks), rawValue: totalTasks },
-    { name: "执行成功数", value: ensureVisible(successCount), rawValue: successCount },
+    {
+      name: "总任务数",
+      value: ensureVisible(totalTasks),
+      rawValue: totalTasks,
+    },
+    {
+      name: "执行成功数",
+      value: ensureVisible(successCount),
+      rawValue: successCount,
+    },
     { name: "已读数", value: ensureVisible(readCount), rawValue: readCount },
   ];
 
@@ -467,11 +497,7 @@ function buildTrendChartOption(
       ? dayjs(item.date).format("HH:mm")
       : dayjs(item.date).format("MM-DD"),
   );
-  const extendedLegend = [
-    "查看方案客户数",
-    "去洞察客户数",
-    "去电访客户数",
-  ];
+  const extendedLegend = ["查看方案客户数", "去洞察客户数", "去电访客户数"];
   const series = [
     {
       name: "调用量",
@@ -686,16 +712,21 @@ export default function BusinessOverviewPage() {
   );
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
-  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
+  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([
+    dayjs(),
+    dayjs(),
+  ]);
   // 管理员多选分行；非管理员使用用户所属分行
-  const [bbkIds, setBbkIds] = useState<string[]>(
-    () => branchScope.lockedBbkId ? [branchScope.lockedBbkId] : [],
+  const [bbkIds, setBbkIds] = useState<string[]>(() =>
+    branchScope.lockedBbkId ? [branchScope.lockedBbkId] : [],
   );
 
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(
     null,
   );
-  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [trendLoading, setTrendLoading] = useState(false);
+  const dashboardRequestIdRef = useRef(0);
   const [trendData, setTrendData] = useState<TrendDatum[]>([]);
   const [activeUsers, setActiveUsers] = useState<UserRow[]>([]);
   const [activePage, setActivePage] = useState(1);
@@ -704,14 +735,18 @@ export default function BusinessOverviewPage() {
   const activeLoadingRef = useRef(false);
   const activeListRef = useRef<HTMLDivElement | null>(null);
   // 用户过滤类型：filtered(过滤IT人员) / all(全部用户)
-  const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">("all");
+  const [activeFilterType, setActiveFilterType] = useState<"filtered" | "all">(
+    "all",
+  );
   const [skills, setSkills] = useState<SkillUsage[]>([]);
   const [skillsPage, setSkillsPage] = useState(1);
   const [skillsHasMore, setSkillsHasMore] = useState(true);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const skillsLoadingRef = useRef(false);
   const skillsListRef = useRef<HTMLDivElement | null>(null);
-  const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(null);
+  const [errorSummaryData, setErrorSummaryData] = useState<ErrorSummary | null>(
+    null,
+  );
   const [taskStatusSummary, setTaskStatusSummary] =
     useState<TaskStatusSummary | null>(null);
   const [taskStatusLoading, setTaskStatusLoading] = useState(false);
@@ -785,48 +820,63 @@ export default function BusinessOverviewPage() {
 
   const fetchDashboard = useCallback(async () => {
     const isSingleDay = dateRange[0].isSame(dateRange[1], "day");
+    const requestId = dashboardRequestIdRef.current + 1;
+    dashboardRequestIdRef.current = requestId;
 
-    setDashboardLoading(true);
-    try {
-      const [overviewRes, trendRes] = await Promise.allSettled([
-        tracingApi.getOverview(
-          startDateText,
-          endDateText,
-          effectiveBbkIds?.join(","),
-          { detail: "summary", timeRange },
-        ),
-        isSingleDay
-          ? tracingApi.getHourlyTrend(
-              startDateText,
-              endDateText,
-              effectiveBbkIds?.join(","),
-            )
-          : tracingApi.getDailyTrend(
-              startDateText,
-              endDateText,
-              effectiveBbkIds?.join(","),
-            ),
-      ]);
+    setOverviewLoading(true);
+    setTrendLoading(true);
 
-      if (overviewRes.status === "fulfilled") {
-        setOverviewStats(overviewRes.value);
-      }
-      if (trendRes.status === "fulfilled") {
-        setTrendData(trendRes.value.trendData || []);
-      }
-    } catch (error) {
-      console.error("Failed to fetch dashboard:", error);
-      message.error("获取总览数据失败");
-    } finally {
-      setDashboardLoading(false);
-    }
-  }, [
-    dateRange,
-    effectiveBbkIds,
-    endDateText,
-    startDateText,
-    timeRange,
-  ]);
+    const overviewRequest = tracingApi
+      .getOverview(startDateText, endDateText, effectiveBbkIds?.join(","), {
+        detail: "summary",
+        timeRange,
+      })
+      .then((result) => {
+        if (dashboardRequestIdRef.current === requestId) {
+          setOverviewStats(result);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to fetch overview stats:", error);
+        if (dashboardRequestIdRef.current === requestId) {
+          message.error("获取总览数据失败");
+        }
+      })
+      .finally(() => {
+        if (dashboardRequestIdRef.current === requestId) {
+          setOverviewLoading(false);
+        }
+      });
+
+    const trendRequest = (
+      isSingleDay
+        ? tracingApi.getHourlyTrend(
+            startDateText,
+            endDateText,
+            effectiveBbkIds?.join(","),
+          )
+        : tracingApi.getDailyTrend(
+            startDateText,
+            endDateText,
+            effectiveBbkIds?.join(","),
+          )
+    )
+      .then((result) => {
+        if (dashboardRequestIdRef.current === requestId) {
+          setTrendData(result.trendData || []);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to fetch trend data:", error);
+      })
+      .finally(() => {
+        if (dashboardRequestIdRef.current === requestId) {
+          setTrendLoading(false);
+        }
+      });
+
+    await Promise.allSettled([overviewRequest, trendRequest]);
+  }, [dateRange, effectiveBbkIds, endDateText, startDateText, timeRange]);
 
   const fetchActiveUsers = useCallback(
     async (page: number, append = false) => {
@@ -868,7 +918,13 @@ export default function BusinessOverviewPage() {
         setActiveLoading(false);
       }
     },
-    [effectiveBbkIds, endDateText, startDateText, transformUserData, activeFilterType],
+    [
+      effectiveBbkIds,
+      endDateText,
+      startDateText,
+      transformUserData,
+      activeFilterType,
+    ],
   );
 
   const fetchSkills = useCallback(
@@ -913,30 +969,27 @@ export default function BusinessOverviewPage() {
     [effectiveBbkIds, endDateText, startDateText],
   );
 
-  const fetchErrorSummary = useCallback(
-    async () => {
-      if (errorLoadingRef.current) {
-        return;
-      }
-      errorLoadingRef.current = true;
-      setErrorLoading(true);
+  const fetchErrorSummary = useCallback(async () => {
+    if (errorLoadingRef.current) {
+      return;
+    }
+    errorLoadingRef.current = true;
+    setErrorLoading(true);
 
-      try {
-        const result = await tracingApi.getErrorSummary({
-          start_date: startDateText,
-          end_date: endDateText,
-          bbk_ids: effectiveBbkIds?.join(","),
-        });
-        setErrorSummaryData(result);
-      } catch (error) {
-        console.error("Failed to fetch error summary:", error);
-      } finally {
-        errorLoadingRef.current = false;
-        setErrorLoading(false);
-      }
-    },
-    [effectiveBbkIds, endDateText, startDateText],
-  );
+    try {
+      const result = await tracingApi.getErrorSummary({
+        start_date: startDateText,
+        end_date: endDateText,
+        bbk_ids: effectiveBbkIds?.join(","),
+      });
+      setErrorSummaryData(result);
+    } catch (error) {
+      console.error("Failed to fetch error summary:", error);
+    } finally {
+      errorLoadingRef.current = false;
+      setErrorLoading(false);
+    }
+  }, [effectiveBbkIds, endDateText, startDateText]);
 
   const fetchTaskStatusSummary = useCallback(async () => {
     setTaskStatusLoading(true);
@@ -963,12 +1016,7 @@ export default function BusinessOverviewPage() {
     fetchErrorSummary();
     fetchTaskStatusSummary();
     // 活跃用户请求由独立的 useEffect 处理
-  }, [
-    fetchDashboard,
-    fetchErrorSummary,
-    fetchSkills,
-    fetchTaskStatusSummary,
-  ]);
+  }, [fetchDashboard, fetchErrorSummary, fetchSkills, fetchTaskStatusSummary]);
 
   // 活跃用户请求独立处理，避免 activeFilterType 变化触发其他请求
   useEffect(() => {
@@ -976,9 +1024,7 @@ export default function BusinessOverviewPage() {
     setActiveHasMore(true);
     setActiveUsers([]);
     fetchActiveUsers(1, false);
-  }, [
-    fetchActiveUsers,
-  ]);
+  }, [fetchActiveUsers]);
 
   const handleModeChange = (nextRange: TimeRange) => {
     setTimeRange(nextRange);
@@ -993,7 +1039,9 @@ export default function BusinessOverviewPage() {
     }
   };
 
-  const handleDateRangeChange = (dates: [Dayjs | null, Dayjs | null] | null) => {
+  const handleDateRangeChange = (
+    dates: [Dayjs | null, Dayjs | null] | null,
+  ) => {
     if (!dates || !dates[0] || !dates[1]) {
       return;
     }
@@ -1239,7 +1287,7 @@ export default function BusinessOverviewPage() {
               className={styles.metricPanel}
               data-testid="overview-metric-card"
             >
-              {dashboardLoading ? (
+              {overviewLoading ? (
                 renderCardLoading()
               ) : (
                 <>
@@ -1265,8 +1313,12 @@ export default function BusinessOverviewPage() {
                         }
                       >
                         环比
-                        {card.changeDirection === "up" && <TrendingUp size={14} />}
-                        {card.changeDirection === "down" && <TrendingDown size={14} />}
+                        {card.changeDirection === "up" && (
+                          <TrendingUp size={14} />
+                        )}
+                        {card.changeDirection === "down" && (
+                          <TrendingDown size={14} />
+                        )}
                         {card.changeText}
                       </div>
                     </div>
@@ -1300,7 +1352,9 @@ export default function BusinessOverviewPage() {
                   ) : (
                     <div className={styles.emptyBreakdown}>
                       <Database className={styles.emptyBreakdownIcon} />
-                      <span className={styles.emptyBreakdownText}>暂无分行数据</span>
+                      <span className={styles.emptyBreakdownText}>
+                        暂无分行数据
+                      </span>
                     </div>
                   )}
                 </>
@@ -1318,13 +1372,16 @@ export default function BusinessOverviewPage() {
           <div className={styles.panelHeader}>
             <h3 className={styles.panelTitle}>调用量趋势</h3>
           </div>
-          {dashboardLoading ? (
+          {trendLoading ? (
             renderCardLoading()
           ) : (
             <div className={styles.trendChart}>
               <ReactECharts
                 className={styles.trendChartCanvas}
-                option={buildTrendChartOption(trendData, showExtendedTrendMetrics)}
+                option={buildTrendChartOption(
+                  trendData,
+                  showExtendedTrendMetrics,
+                )}
                 style={{ height: 280, width: "100%", gridColumn: "1 / -1" }}
               />
             </div>
@@ -1336,7 +1393,11 @@ export default function BusinessOverviewPage() {
             <h3 className={styles.panelTitle}>活跃用户排行榜</h3>
             <div className={styles.filterTab}>
               <span
-                className={activeFilterType === "all" ? styles.filterTabActive : styles.filterTabItem}
+                className={
+                  activeFilterType === "all"
+                    ? styles.filterTabActive
+                    : styles.filterTabItem
+                }
                 onClick={() => {
                   if (activeFilterType !== "all") {
                     setActiveFilterType("all");
@@ -1349,7 +1410,11 @@ export default function BusinessOverviewPage() {
                 全部
               </span>
               <span
-                className={activeFilterType === "filtered" ? styles.filterTabActive : styles.filterTabItem}
+                className={
+                  activeFilterType === "filtered"
+                    ? styles.filterTabActive
+                    : styles.filterTabItem
+                }
                 onClick={() => {
                   if (activeFilterType !== "filtered") {
                     setActiveFilterType("filtered");
@@ -1400,9 +1465,10 @@ export default function BusinessOverviewPage() {
                 if (item.userName) {
                   displayParts.push(item.userName);
                 }
-                const displayName = displayParts.length > 0
-                  ? `${displayParts.join("/")}(${item.userId})`
-                  : item.userId;
+                const displayName =
+                  displayParts.length > 0
+                    ? `${displayParts.join("/")}(${item.userId})`
+                    : item.userId;
 
                 return (
                   <button
@@ -1417,9 +1483,7 @@ export default function BusinessOverviewPage() {
                   >
                     <span className={rankClass}>{rank}</span>
                     <Tooltip title={displayName} placement="top">
-                      <span className={styles.rankUser}>
-                        {displayName}
-                      </span>
+                      <span className={styles.rankUser}>{displayName}</span>
                     </Tooltip>
                     <span className={styles.rankCalls}>
                       {formatNumber(item.cronExecutions)}
@@ -1442,7 +1506,6 @@ export default function BusinessOverviewPage() {
             )}
           </div>
         </article>
-
       </section>
 
       <section
@@ -1468,7 +1531,12 @@ export default function BusinessOverviewPage() {
               <div className={styles.donutColumn}>
                 <div className={styles.donutWrap}>
                   <svg viewBox="0 0 120 120" className={styles.donutSvg}>
-                    <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                    <circle
+                      cx="60"
+                      cy="60"
+                      r="45"
+                      className={styles.donutTrack}
+                    />
                     {buildDonutSegments(executionSummary).map((item) => (
                       <circle
                         key={item.key}
@@ -1500,10 +1568,14 @@ export default function BusinessOverviewPage() {
 
                     return (
                       <div key={item.key} className={styles.donutLegendItem}>
-                        <span className={styles.donutLegendDot} style={{ background: item.color }} />
+                        <span
+                          className={styles.donutLegendDot}
+                          style={{ background: item.color }}
+                        />
                         <span>{item.label}</span>
                         <span className={styles.donutLegendValue}>
-                          {formatNumber(item.value)}&nbsp;({formatPercent((item.value / total) * 100)})
+                          {formatNumber(item.value)}&nbsp;(
+                          {formatPercent((item.value / total) * 100)})
                         </span>
                       </div>
                     );
@@ -1545,7 +1617,14 @@ export default function BusinessOverviewPage() {
                     ? styles.rankBadgeBronze
                     : styles.rankBadge;
                 const descLen = skill.skill_description?.length || 0;
-                const tooltipWidth = descLen <= 30 ? 240 : descLen <= 60 ? 320 : descLen <= 100 ? 400 : 520;
+                const tooltipWidth =
+                  descLen <= 30
+                    ? 240
+                    : descLen <= 60
+                    ? 320
+                    : descLen <= 100
+                    ? 400
+                    : 520;
                 const skillLabel = displaySkillName(skill);
                 return (
                   <button
@@ -1561,7 +1640,10 @@ export default function BusinessOverviewPage() {
                     <span className={rankClass}>{rank}</span>
                     <Tooltip
                       placement="top"
-                      overlayInnerStyle={{ width: tooltipWidth, maxWidth: tooltipWidth }}
+                      overlayInnerStyle={{
+                        width: tooltipWidth,
+                        maxWidth: tooltipWidth,
+                      }}
                       title={
                         skill.skill_description ? (
                           <div className={styles.skillTooltip}>
@@ -1612,7 +1694,12 @@ export default function BusinessOverviewPage() {
             <div className={styles.donutLayoutCompact}>
               <div className={styles.donutCompact}>
                 <svg viewBox="0 0 120 120" className={styles.donutCompactSvg}>
-                  <circle cx="60" cy="60" r="45" className={styles.donutTrack} />
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="45"
+                    className={styles.donutTrack}
+                  />
                   {buildDonutSegments(errorSummaryItems).map((item) => (
                     <circle
                       key={item.key}
@@ -1639,7 +1726,10 @@ export default function BusinessOverviewPage() {
                 <div className={styles.legendGroup}>
                   {errorSummaryItems.map((item) => {
                     const total = Math.max(
-                      errorSummaryItems.reduce((sum, row) => sum + row.value, 0),
+                      errorSummaryItems.reduce(
+                        (sum, row) => sum + row.value,
+                        0,
+                      ),
                       1,
                     );
                     const label = (
@@ -1660,7 +1750,9 @@ export default function BusinessOverviewPage() {
                         {item.key === "model-error" && item.value > 0 ? (
                           <Tooltip
                             placement="top"
-                            title={renderModelErrorCodeTooltip(errorSummaryData)}
+                            title={renderModelErrorCodeTooltip(
+                              errorSummaryData,
+                            )}
                           >
                             {label}
                           </Tooltip>

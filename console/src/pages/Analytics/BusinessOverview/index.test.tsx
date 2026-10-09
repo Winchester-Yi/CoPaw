@@ -4,17 +4,25 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+import { message } from "antd";
 import BusinessOverviewPage from "./index";
 
 const echartsRenderMock = vi.hoisted(() => ({
-  lastProps: null as null | { style?: Record<string, unknown>; option?: Record<string, unknown> },
+  lastProps: null as null | {
+    style?: Record<string, unknown>;
+    option?: Record<string, unknown>;
+  },
 }));
 
 vi.mock("echarts-for-react", () => ({
-  default: (props: { style?: Record<string, unknown>; option?: Record<string, unknown> }) => {
+  default: (props: {
+    style?: Record<string, unknown>;
+    option?: Record<string, unknown>;
+  }) => {
     echartsRenderMock.lastProps = props;
     return <div data-testid="echarts" style={props.style} />;
   },
@@ -45,8 +53,10 @@ const iframeStoreMock = vi.hoisted(() => ({
 
 vi.mock("../../../api/modules/tracing", () => ({
   tracingApi: tracingApiMock,
-  displaySkillName: (skill: { display_name?: string | null; skill_name?: string | null }) =>
-    skill.display_name || skill.skill_name || "-",
+  displaySkillName: (skill: {
+    display_name?: string | null;
+    skill_name?: string | null;
+  }) => skill.display_name || skill.skill_name || "-",
 }));
 
 vi.mock("../../../api/modules/htmlPreviewEvents", () => ({
@@ -95,7 +105,12 @@ describe("BusinessOverview trend chart", () => {
         planCustomersGrowth: 0,
       },
       branch_breakdown: {
-        users: [], sessions: [], tokens: [], skills: [], cron_tasks: [], customers: [],
+        users: [],
+        sessions: [],
+        tokens: [],
+        skills: [],
+        cron_tasks: [],
+        customers: [],
       },
     });
 
@@ -125,7 +140,9 @@ describe("BusinessOverview trend chart", () => {
         tokens: [],
         skills: [],
         cron_tasks: [],
-        customers: [{ bbk_id: "100", bbk_name: "总行", value: 30, percent: 100 }],
+        customers: [
+          { bbk_id: "100", bbk_name: "总行", value: 30, percent: 100 },
+        ],
       },
     });
     tracingApiMock.getHourlyTrend.mockResolvedValue({
@@ -285,7 +302,7 @@ describe("BusinessOverview trend chart", () => {
   });
 
   it("locks branch filter to current branch for branch users", async () => {
-    iframeStoreMock.bbk = "200";
+    iframeStoreMock.bbk = "110";
 
     const { container } = render(
       <MemoryRouter>
@@ -306,12 +323,11 @@ describe("BusinessOverview trend chart", () => {
       expect(tracingApiMock.getOverview).toHaveBeenCalledWith(
         expect.any(String),
         expect.any(String),
-        "200",
+        "110",
+        { detail: "summary", timeRange: "day" },
       );
     });
-    expect(
-      container.querySelector(".ant-select-disabled"),
-    ).toBeInTheDocument();
+    expect(container.querySelector(".ant-select-disabled")).toBeInTheDocument();
   });
 
   function renderBusinessOverview() {
@@ -343,6 +359,108 @@ describe("BusinessOverview trend chart", () => {
     expect(screen.getByTestId("echarts")).toBeInTheDocument();
   });
 
+  it("renders the trend chart while overview cards are still loading", async () => {
+    const pending = new Promise<never>(() => {});
+    tracingApiMock.getOverview.mockReturnValueOnce(pending);
+
+    renderBusinessOverview();
+
+    expect(await screen.findByTestId("echarts")).toBeInTheDocument();
+    expect(
+      screen.getAllByTestId("overview-panel-loading").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("ignores stale dashboard responses after a newer refresh", async () => {
+    let resolveFirstOverview!: (value: Record<string, unknown>) => void;
+    const firstOverview = new Promise<Record<string, unknown>>((resolve) => {
+      resolveFirstOverview = resolve;
+    });
+    const latestOverview = {
+      total_users: 99,
+      total_sessions: 1,
+      total_tokens: 1,
+      total_skill_calls: 0,
+      total_conversations: 1,
+      it_users: 0,
+      business_users: 99,
+      plan_customers: 0,
+      insight_customers: 0,
+      phone_customers: 0,
+      branch_breakdown: {
+        users: [],
+        sessions: [],
+        tokens: [],
+        cron_tasks: [],
+        customers: [],
+      },
+    };
+    tracingApiMock.getOverview
+      .mockReset()
+      .mockReturnValueOnce(firstOverview)
+      .mockResolvedValueOnce(latestOverview);
+
+    renderBusinessOverview();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("99")).toBeInTheDocument();
+    resolveFirstOverview({
+      ...latestOverview,
+      total_users: 1,
+      business_users: 1,
+    });
+    const firstMetricCard = screen.getAllByTestId("overview-metric-card")[0];
+    expect(within(firstMetricCard).getByText("99")).toBeInTheDocument();
+    expect(within(firstMetricCard).queryByText("1")).not.toBeInTheDocument();
+  });
+
+  it("does not show an error toast when a stale overview request fails", async () => {
+    let rejectFirstOverview!: (reason?: unknown) => void;
+    const firstOverview = new Promise<Record<string, unknown>>((_, reject) => {
+      rejectFirstOverview = reject;
+    });
+    const latestOverview = {
+      total_users: 99,
+      total_sessions: 1,
+      total_tokens: 1,
+      total_skill_calls: 0,
+      total_conversations: 1,
+      it_users: 0,
+      business_users: 99,
+      plan_customers: 0,
+      insight_customers: 0,
+      phone_customers: 0,
+      branch_breakdown: {
+        users: [],
+        sessions: [],
+        tokens: [],
+        cron_tasks: [],
+        customers: [],
+      },
+    };
+    const messageErrorSpy = vi.spyOn(message, "error");
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    tracingApiMock.getOverview
+      .mockReset()
+      .mockReturnValueOnce(firstOverview)
+      .mockResolvedValueOnce(latestOverview);
+
+    renderBusinessOverview();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("99")).toBeInTheDocument();
+    rejectFirstOverview(new Error("stale overview failed"));
+    await waitFor(() => {
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "Failed to fetch overview stats:",
+        expect.any(Error),
+      );
+    });
+    expect(messageErrorSpy).not.toHaveBeenCalledWith("获取总览数据失败");
+  });
+
   it("renders only three trend metrics for non-RMASSIST source", async () => {
     renderBusinessOverview();
 
@@ -353,14 +471,15 @@ describe("BusinessOverview trend chart", () => {
     const option = echartsRenderMock.lastProps?.option as {
       legend?: { data?: string[] };
       yAxis?: Array<{ name?: string }>;
-      series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
+      series?: Array<{
+        name?: string;
+        type?: string;
+        yAxisIndex?: number;
+        z?: number;
+      }>;
     };
 
-    expect(option.legend?.data).toEqual([
-      "调用量",
-      "调用用户",
-      "已读任务数",
-    ]);
+    expect(option.legend?.data).toEqual(["调用量", "调用用户", "已读任务数"]);
     expect(option.yAxis?.[1]?.name).toBe("任务数");
     expect(option.series?.map((item) => item.name)).toEqual([
       "调用量",
@@ -382,9 +501,15 @@ describe("BusinessOverview trend chart", () => {
       type: "line",
       yAxisIndex: 1,
     });
-    expect(option.series?.some((item) => item.name === "查看方案客户数")).toBe(false);
-    expect(option.series?.some((item) => item.name === "去洞察客户数")).toBe(false);
-    expect(option.series?.some((item) => item.name === "去电访客户数")).toBe(false);
+    expect(option.series?.some((item) => item.name === "查看方案客户数")).toBe(
+      false,
+    );
+    expect(option.series?.some((item) => item.name === "去洞察客户数")).toBe(
+      false,
+    );
+    expect(option.series?.some((item) => item.name === "去电访客户数")).toBe(
+      false,
+    );
   });
 
   it("renders six trend metrics for RMASSIST source", async () => {
@@ -398,7 +523,12 @@ describe("BusinessOverview trend chart", () => {
     const option = echartsRenderMock.lastProps?.option as {
       legend?: { data?: string[] };
       yAxis?: Array<{ name?: string }>;
-      series?: Array<{ name?: string; type?: string; yAxisIndex?: number; z?: number }>;
+      series?: Array<{
+        name?: string;
+        type?: string;
+        yAxisIndex?: number;
+        z?: number;
+      }>;
     };
 
     expect(option.legend?.data).toEqual([
@@ -433,9 +563,10 @@ describe("BusinessOverview trend chart", () => {
       type: "line",
       yAxisIndex: 1,
     });
-    expect(option.series?.some((item) => item.name === "已读任务数")).toBe(true);
+    expect(option.series?.some((item) => item.name === "已读任务数")).toBe(
+      true,
+    );
   });
-
 
   it("renders the report-view customer card with current annotations", async () => {
     renderBusinessOverview();
@@ -468,7 +599,9 @@ describe("BusinessOverview trend chart", () => {
 
     renderBusinessOverview();
 
-    expect(await screen.findByTestId("overview-panel-loading")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("overview-panel-loading"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("报错总数")).not.toBeInTheDocument();
   });
 

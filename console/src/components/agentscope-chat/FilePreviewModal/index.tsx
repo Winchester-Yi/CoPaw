@@ -28,6 +28,7 @@ import {
 } from "./fileUtils";
 import Markdown from "../Markdown";
 import { htmlPreviewEventsApi } from "@/api/modules/htmlPreviewEvents";
+import type { HtmlPreviewTemplateType } from "@/api/types/htmlPreviewEvents";
 import { useHtmlPreviewTracking } from "../HtmlPreviewTrackingContext";
 import { useDynamicRender } from "../DynamicRenderContext";
 import { useIframeHtmlPreviewTracking } from "./useHtmlPreviewTracking";
@@ -196,6 +197,14 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     }
     return null;
   }, [isTemplateListLoaded, effectiveTemplateId]);
+
+  const templateType = useMemo<HtmlPreviewTemplateType | null>(() => {
+    if (templateInfo) {
+      return templateInfo.templateFlag === "main" ? "main" : "sub";
+    } else {
+      return custUid ? "sub" : "main";
+    }
+  }, [templateInfo, custUid]);
 
   // 获取动态渲染数据的函数（带轮询逻辑）
   // 对于静态模板（templateFlag === 'no_query'），跳过数据获取，直接渲染模板内容
@@ -509,6 +518,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         result_id: effectiveResultId,
         page_source: pageSource || 'default',
         platform_source: platformSource || 'default',
+        template_type: "sub" as const,
       };
       htmlPreviewEventsApi.recordClick(payload);
     }
@@ -664,6 +674,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       rootTemplateId,
       pageSource,
       platformSource,
+      templateType,
     }),
     [
       fileName,
@@ -678,6 +689,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
       effectiveTemplateId,
       pageSource,
       platformSource,
+      templateType,
     ],
   );
 

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """HTTP export contract, including validation before database work."""
 
 from io import BytesIO
@@ -50,7 +51,7 @@ def test_binary_response_and_filters(api):
         "attachment; filename*=UTF-8''定时任务分行维度_",
     )
     assert response.content.startswith(b"PK")
-    assert load_workbook(BytesIO(response.content)).active.max_column == 22
+    assert load_workbook(BytesIO(response.content)).active.max_column == 23
     service.get_branch_behavior.assert_awaited_once_with(
         **DATES,
         bbk_ids="100,200",

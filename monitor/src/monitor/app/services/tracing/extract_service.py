@@ -127,7 +127,7 @@ class ExtractCustomerNamesService:
     ) -> list[dict]:
         """按技能名称查询待处理的 trace_id 列表.
 
-        从 swe_tracing_spans 表查询 event_type='skill_invocation' 的记录，
+        从 swe_tracing_spans 表按技能名称查询记录，
         使用 NOT EXISTS 跳过已有提取记录的 trace。
         """
         # 构建技能名称 IN 条件
@@ -141,8 +141,7 @@ class ExtractCustomerNamesService:
                 s.bbk_id,
                 s.skill_name
             FROM swe_tracing_spans s
-            WHERE s.event_type = 'skill_invocation'
-              AND s.skill_name IN ({skill_placeholders})
+            WHERE s.skill_name IN ({skill_placeholders})
               AND NOT EXISTS (
                   SELECT 1 FROM swe_extracted_customer_names e
                   WHERE e.trace_id = s.trace_id AND e.skill_name = s.skill_name

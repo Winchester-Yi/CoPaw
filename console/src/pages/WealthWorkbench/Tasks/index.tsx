@@ -3,13 +3,17 @@
  * 对应原型 tasksHTML：经营/客户双视角、任务树、重点标签表头筛选、
  * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
+import { Tooltip } from "antd";
+import { RotateCw } from "lucide-react";
 import cx from "classnames";
 import DOMPurify from "dompurify";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import { CustomerSchemePreview } from "../components/CustomerSchemePreview";
+import { CustomerMetrics } from "../components/CustomerMetrics";
+import { buildCustomerGroups } from "./customerGroups";
 import { buildInsightUrl, buildTelUrl, fetchSchemeSignature } from "../api";
 import { useCanAccess, useWealthStore } from "../store";
 import type { Customer } from "../types";
@@ -88,6 +92,27 @@ function OpportunityHtml({ value }: { value: string }) {
   );
 }
 
+function OpportunityContent({
+  items,
+  multiple,
+}: {
+  items: string[];
+  multiple?: boolean;
+}) {
+  if (multiple && items.length > 1) {
+    return (
+      <ul className={styles.opportunityList}>
+        {items.map((item, index) => (
+          <li key={index}>
+            <OpportunityHtml value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <OpportunityHtml value={items[0]} />;
+}
+
 /** 经营机会单元格：支持外部接口返回的简单 HTML 列表。 */
 export function Opportunities({
   customer,
@@ -100,18 +125,21 @@ export function Opportunities({
     (item) => item.trim().length > 0,
   );
   if (!items.length) return <>--</>;
-  if (multiple && items.length > 1) {
-    return (
-      <ul className={styles.opportunityList}>
-        {items.map((t, i) => (
-          <li key={i}>
-            <OpportunityHtml value={t} />
-          </li>
-        ))}
-      </ul>
-    );
-  }
-  return <OpportunityHtml value={items[0]} />;
+  return (
+    <Tooltip
+      placement="topLeft"
+      trigger={["hover", "focus"]}
+      title={
+        <div className={styles.opportunityTooltipContent}>
+          <OpportunityContent items={items} multiple={multiple} />
+        </div>
+      }
+    >
+      <div className={styles.opportunityPreview} tabIndex={0}>
+        <OpportunityContent items={items} multiple={multiple} />
+      </div>
+    </Tooltip>
+  );
 }
 
 /**
@@ -192,6 +220,21 @@ function labelTagClass(label: string) {
       : "";
 }
 
+/** 重点标签单元格：空值使用低强调度占位标签，避免表格出现空洞。 */
+export function CustomerLabel({ label }: { label: string }) {
+  const value = label.trim();
+  return (
+    <span
+      className={cx(
+        styles.tag,
+        value ? labelTagClass(value) : styles.emptyTag,
+      )}
+    >
+      {value || "暂无标签"}
+    </span>
+  );
+}
+
 export default function Tasks({ page }: { page: TaskPageKind }) {
   const canViewTasks = useCanAccess("tasks");
   const customers = useWealthStore((s) => s.customers);
@@ -201,6 +244,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const doneCustomers = useWealthStore((s) => s.doneCustomers);
   const doneLoading = useWealthStore((s) => s.doneLoading);
   const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
+  const refreshTodayCustomers = useWealthStore((s) => s.refreshTodayCustomers);
   const loadTodayCustomers = useWealthStore((s) => s.loadTodayCustomers);
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
@@ -212,9 +257,14 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const [selectedTask, setSelectedTask] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
   const [tagFilterOpen, setTagFilterOpen] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    new Set(),
+  );
   const [tagFilterPos, setTagFilterPos] = useState({ left: 10, top: 10 });
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const lastLoadedPageRef = useRef<TaskPageKind | null>(null);
+  const groupTablesId = useId();
   /**
    * 经营方案 iframe 自增序列：作为 _t 时间戳附加到 URL 强制刷新加载，
    * 同时用作 <CustomerSchemePreview> 的 key 强制重挂载，从而重置内部的
@@ -280,13 +330,42 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [page, pool, isBiz, selectedTask, selectedCategory, search, taskLabel],
   );
+  const groups = useMemo(() => buildCustomerGroups(list, isBiz), [list, isBiz]);
+  const columnCount = (doneView ? 6 : isBiz ? 4 : 5) + 1;
+  const tableGroups = groups.length
+    ? groups
+    : [{ key: "empty", fields: [], customers: [] }];
 
-  // 进入任务页加载名单：今日任务按当前视角查询；待触达/已完成按 touched 口径各查一次
+  // 进入今日任务或切回经营视角更新规划；页内切到客户视角仅查询聚合名单。
   useEffect(() => {
-    if (page === "today") void loadTodayCustomers(view);
-    if (page === "pending") void loadPendingCustomers();
-    if (page === "done") void loadDoneCustomers();
-  }, [page, view, loadTodayCustomers, loadPendingCustomers, loadDoneCustomers]);
+    if (!plansLoaded) {
+      return;
+    }
+    const enteringToday =
+      page === "today" && lastLoadedPageRef.current !== "today";
+    lastLoadedPageRef.current = page;
+    if (page === "today") {
+      if (enteringToday || view === "business") {
+        void refreshTodayCustomers(view);
+      } else {
+        void loadTodayCustomers(view);
+      }
+    }
+    if (page === "pending") {
+      void loadPendingCustomers();
+    }
+    if (page === "done") {
+      void loadDoneCustomers();
+    }
+  }, [
+    page,
+    view,
+    plansLoaded,
+    refreshTodayCustomers,
+    loadTodayCustomers,
+    loadPendingCustomers,
+    loadDoneCustomers,
+  ]);
 
   const doneToday = customers.filter(
     (c) => c.done && (taskLabel === "全部" || matchLabel(c.label, taskLabel)),
@@ -471,7 +550,32 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     <div className={cx(styles.tasksLayout, isBiz && styles.business)}>
       {isBiz && (
         <aside className={`${styles.panel} ${styles.taskTree}`}>
-          <h2>工作任务</h2>
+          <div className={styles.taskTreeHeading}>
+            <h2>工作任务</h2>
+            <Tooltip
+              trigger={["hover", "focus"]}
+              title={customersLoading ? "正在刷新工作任务" : "刷新工作任务"}
+            >
+              <span>
+                <button
+                  type="button"
+                  className={styles.taskRefresh}
+                  aria-label="刷新工作任务"
+                  disabled={!plansLoaded || customersLoading}
+                  aria-busy={customersLoading}
+                  onClick={() => void refreshTodayCustomers("business")}
+                >
+                  <RotateCw
+                    size={16}
+                    aria-hidden="true"
+                    className={
+                      customersLoading ? styles.taskRefreshBusy : undefined
+                    }
+                  />
+                </button>
+              </span>
+            </Tooltip>
+          </div>
           {taskTree.length ? (
             taskTree.map((g) => (
               <details className={styles.treeGroup} key={g.category} open>
@@ -517,6 +621,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
           {page === "today" ? (
             <div className={styles.switch} aria-label="任务视角">
               <button
+                disabled={customersLoading}
                 className={view === "business" ? styles.active : ""}
                 onClick={() => {
                   setView("business");
@@ -526,6 +631,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 经营视角
               </button>
               <button
+                disabled={customersLoading}
                 className={view === "customer" ? styles.active : ""}
                 onClick={() => {
                   setView("customer");
@@ -589,11 +695,6 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
                 </>
               )}
             </div>
-            {isBiz && (
-              <p className={styles.pageNote}>
-                客户清单为演示数据，待任务实例接口接入后由定时任务执行结果生成
-              </p>
-            )}
           </div>
         </div>
 
@@ -614,167 +715,226 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
           </div>
         )}
 
-        <div className={styles.tableWrap}>
-          <table
-            className={cx(
-              styles.customerTable,
-              doneView ? styles.completedTable : styles.opportunityTable,
-            )}
-          >
-            <thead>
-              <tr>
-                <th>客户姓名</th>
-                {!isBiz && (
-                  <th scope="col" className={styles.tagFilterHeading}>
+        <div className={styles.customerGroups}>
+          {tableGroups.map((group, index) => {
+            const groupKey = `${selectedCategory}|${selectedTask}|${group.key}`;
+            const collapsed = collapsedGroups.has(groupKey);
+            const tableId = `${groupTablesId}-${index}`;
+            const groupTitle = group.fields
+              .map((field) => `${field.label}：${field.value}`)
+              .join(" / ");
+            return (
+              <div key={groupKey} className={styles.customerGroup}>
+                {group.fields.length > 0 && (
+                  <h3 className={styles.customerGroupHeading}>
                     <button
                       type="button"
-                      ref={triggerRef}
-                      className={cx(
-                        styles.tagFilterTrigger,
-                        filterActive && styles.filtered,
-                      )}
-                      aria-label={
-                        "筛选重点标签" +
-                        (filterActive ? `，当前：${taskLabel}` : "")
+                      className={styles.customerGroupToggle}
+                      aria-expanded={!collapsed}
+                      aria-controls={tableId}
+                      aria-label={`${groupTitle}，${group.customers.length} 人`}
+                      onClick={() =>
+                        setCollapsedGroups((current) => {
+                          const next = new Set(current);
+                          if (next.has(groupKey)) {
+                            next.delete(groupKey);
+                          } else {
+                            next.add(groupKey);
+                          }
+                          return next;
+                        })
                       }
-                      aria-haspopup="dialog"
-                      aria-expanded={tagFilterOpen}
-                      aria-controls="wealthTagFilterPopover"
-                      onClick={toggleTagFilter}
                     >
-                      <span>重点标签</span>
-                      <span className={styles.tagFilterIcon}>
-                        <svg viewBox="0 0 20 20" aria-hidden="true">
-                          <path d="M3 4h14l-5.5 6v5l-3 1v-6Z" />
-                        </svg>
-                        {filterActive && <i></i>}
+                      <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+                      <span className={styles.customerGroupTitle}>
+                        {groupTitle}
+                      </span>
+                      <span className={styles.customerGroupCount}>
+                        {group.customers.length} 人
                       </span>
                     </button>
-                    {filterActive && (
-                      <div className={styles.tagFilterApplied}>
-                        <span>{taskLabel}</span>
-                        <button
-                          type="button"
-                          aria-label="清除重点标签筛选"
-                          title="清除筛选"
-                          onClick={() => applyTagFilter("全部")}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    )}
-                  </th>
+                  </h3>
                 )}
-                <th className={styles.opportunityCol}>
-                  {doneView ? "经营任务" : "经营机会"}
-                </th>
-                <th>{doneView ? "触达方式" : "经营方案"}</th>
-                <th className={styles.executionCol}>
-                  {doneView ? "完成时间" : "执行"}
-                </th>
-                {doneView && <th>经营结果</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {list.length ? (
-                list.map((c) => (
-                  <tr key={c.id}>
-                    <td className={styles.name}>{c.name}</td>
-                    {!isBiz && (
-                      <td>
-                        <span
-                          className={cx(styles.tag, labelTagClass(c.label))}
-                        >
-                          {c.label}
-                        </span>
-                      </td>
+                <div
+                  id={tableId}
+                  className={styles.tableWrap}
+                  hidden={collapsed}
+                >
+                  <table
+                    aria-label={group.fields.length > 0 ? groupTitle : undefined}
+                    className={cx(
+                      styles.customerTable,
+                      doneView
+                        ? styles.completedTable
+                        : styles.opportunityTable,
+                      styles.metricsTable,
                     )}
-                    <td className={styles.reason}>
-                      {doneView ? (
-                        c.task
+                  >
+                    <thead>
+                      <tr>
+                        <th>客户姓名</th>
+                        {!isBiz && (
+                          <th scope="col" className={styles.tagFilterHeading}>
+                            <button
+                              type="button"
+                              ref={triggerRef}
+                              className={cx(
+                                styles.tagFilterTrigger,
+                                filterActive && styles.filtered,
+                              )}
+                              aria-label={
+                                "筛选重点标签" +
+                                (filterActive ? `，当前：${taskLabel}` : "")
+                              }
+                              aria-haspopup="dialog"
+                              aria-expanded={tagFilterOpen}
+                              aria-controls="wealthTagFilterPopover"
+                              onClick={toggleTagFilter}
+                            >
+                              <span>重点标签</span>
+                              <span className={styles.tagFilterIcon}>
+                                <svg viewBox="0 0 20 20" aria-hidden="true">
+                                  <path d="M3 4h14l-5.5 6v5l-3 1v-6Z" />
+                                </svg>
+                                {filterActive && <i></i>}
+                              </span>
+                            </button>
+                            {filterActive && (
+                              <div className={styles.tagFilterApplied}>
+                                <span>{taskLabel}</span>
+                                <button
+                                  type="button"
+                                  aria-label="清除重点标签筛选"
+                                  title="清除筛选"
+                                  onClick={() => applyTagFilter("全部")}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            )}
+                          </th>
+                        )}
+                        <th className={styles.opportunityCol}>
+                          {doneView ? "经营任务" : "经营机会"}
+                        </th>
+                        <th scope="col" className={styles.metricsCol}>
+                          客户指标
+                        </th>
+                        <th>{doneView ? "触达方式" : "经营方案"}</th>
+                        <th className={styles.executionCol}>
+                          {doneView ? "完成时间" : "执行"}
+                        </th>
+                        {doneView && <th>经营结果</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.customers.length ? (
+                        group.customers.map((c) => (
+                          <tr key={c.id}>
+                            <td className={styles.name}>{c.name}</td>
+                            {!isBiz && (
+                              <td>
+                                <CustomerLabel label={c.label} />
+                              </td>
+                            )}
+                            <td className={styles.reason}>
+                              {doneView ? (
+                                c.task
+                              ) : (
+                                <Opportunities customer={c} multiple={!isBiz} />
+                              )}
+                            </td>
+                            <td className={styles.metricsCol}>
+                              <CustomerMetrics
+                                key={c.id}
+                                fields={c.dynamicFields}
+                              />
+                            </td>
+                            <td>
+                              {doneView ? (
+                                <>
+                                  <Icon
+                                    name={
+                                      c.channel === "电话"
+                                        ? "phone"
+                                        : c.channel === "企微"
+                                        ? "chat"
+                                        : "user"
+                                    }
+                                  />
+                                  {"　"}
+                                  {c.channel}
+                                </>
+                              ) : (
+                                <button
+                                  className={styles.link}
+                                  onClick={() => showScheme(c.id)}
+                                >
+                                  查看经营方案
+                                </button>
+                              )}
+                            </td>
+                            <td className={styles.executionCol}>
+                              {doneView ? (
+                                c.time
+                              ) : (
+                                <div className={styles.contactActions}>
+                                  <button
+                                    className={`${styles.btn} ${styles.primary}`}
+                                    onClick={() => openOutboundLink("dial", c)}
+                                  >
+                                    <Icon name="phone" />
+                                    电访
+                                  </button>
+                                  <button
+                                    className={styles.btn}
+                                    onClick={() =>
+                                      openOutboundLink("insight", c)
+                                    }
+                                  >
+                                    <Icon name="user" />
+                                    客户洞察
+                                  </button>
+                                </div>
+                              )}
+                            </td>
+                            {doneView && (
+                              <td>
+                                <button
+                                  className={styles.link}
+                                  onClick={() => showResult(c.id)}
+                                >
+                                  查看记录
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        ))
                       ) : (
-                        <Opportunities customer={c} multiple={!isBiz} />
+                        <tr>
+                          <td colSpan={columnCount}>
+                            <div className={styles.empty}>
+                              {(
+                                page === "pending"
+                                  ? pendingLoading
+                                  : page === "done"
+                                  ? doneLoading
+                                  : customersLoading
+                              )
+                                ? "客户清单加载中…"
+                                : isBiz && selectedTask && !search.trim()
+                                ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
+                                : "暂无符合条件的客户"}
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td>
-                      {doneView ? (
-                        <>
-                          <Icon
-                            name={
-                              c.channel === "电话"
-                                ? "phone"
-                                : c.channel === "企微"
-                                  ? "chat"
-                                  : "user"
-                            }
-                          />
-                          {"　"}
-                          {c.channel}
-                        </>
-                      ) : (
-                        <button
-                          className={styles.link}
-                          onClick={() => showScheme(c.id)}
-                        >
-                          查看经营方案
-                        </button>
-                      )}
-                    </td>
-                    <td className={styles.executionCol}>
-                      {doneView ? (
-                        c.time
-                      ) : (
-                        <div className={styles.contactActions}>
-                          <button
-                            className={`${styles.btn} ${styles.primary}`}
-                            onClick={() => openOutboundLink("dial", c)}
-                          >
-                            <Icon name="phone" />
-                            电访
-                          </button>
-                          <button
-                            className={styles.btn}
-                            onClick={() => openOutboundLink("insight", c)}
-                          >
-                            <Icon name="user" />
-                            客户洞察
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                    {doneView && (
-                      <td>
-                        <button
-                          className={styles.link}
-                          onClick={() => showResult(c.id)}
-                        >
-                          查看记录
-                        </button>
-                      </td>
-                    )}
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={doneView ? 6 : isBiz ? 4 : 5}>
-                    <div className={styles.empty}>
-                      {(
-                        page === "pending"
-                          ? pendingLoading
-                          : page === "done"
-                            ? doneLoading
-                            : customersLoading
-                      )
-                        ? "客户清单加载中…"
-                        : isBiz && selectedTask && !search.trim()
-                          ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
-                          : "暂无符合条件的客户"}
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div className={styles.pagination}>

@@ -78,10 +78,10 @@ def _log_start(
         "request_start method=%s path=%s query=%s source_id=%s user_id=%s body=%s",
         method,
         path,
-        query,
-        source_id,
-        user_id,
-        body_str,
+        query or "-",
+        source_id or "-",
+        user_id or "-",
+        body_str or "-",
     )
 
 
@@ -99,8 +99,8 @@ def _log_done(
         path,
         status_code,
         duration_ms,
-        source_id,
-        user_id,
+        source_id or "-",
+        user_id or "-",
     )
 
 
@@ -117,8 +117,8 @@ def _log_error(
         method,
         path,
         duration_ms,
-        source_id,
-        user_id,
+        source_id or "-",
+        user_id or "-",
         error,
     )
 

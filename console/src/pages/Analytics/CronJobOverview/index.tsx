@@ -535,6 +535,7 @@ function RankingTable({
               <col style={{ width: 72 }} />
               <col style={{ width: 72 }} />
               <col style={{ width: 72 }} />
+              <col style={{ width: 72 }} />
               <col style={{ width: 80 }} />
               <col style={{ width: 80 }} />
               <col style={{ width: 80 }} />
@@ -555,7 +556,7 @@ function RankingTable({
               <tr>
                 <th rowSpan={2} className={styles.indexCell} />
                 <th rowSpan={2}>分行名称</th>
-                {renderGroupHeader("任务信息", 4)}
+                {renderGroupHeader("任务信息", 5)}
                 {renderGroupHeader("by客户经理", 9)}
                 {renderGroupHeader("by客户", 7)}
               </tr>
@@ -566,6 +567,7 @@ function RankingTable({
                   {renderSortableHeader("成功执行任务总数", "successCount")}
                 </th>
                 <th>{renderSortableHeader("已读任务数", "readTasks")}</th>
+                <th>{renderSortableHeader("任务已读率", "readRate")}</th>
                 <th>
                   {renderSortableHeader("涉及用户数", "involvedManagers")}
                 </th>
@@ -668,6 +670,7 @@ function RankingTable({
                     <td>{row.totalTasks}</td>
                     <td>{row.successCount}</td>
                     <td>{row.readTasks}</td>
+                    <td>{row.readRate}</td>
                     <td>{row.involvedManagers}</td>
                     <td>{row.resultViewManagers}</td>
                     <td>{row.resultViewManagerRate}</td>

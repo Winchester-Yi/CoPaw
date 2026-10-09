@@ -32,9 +32,49 @@ const ALLOWED_ORIGINS: string[] = [
   // 生产环境 - 从环境变量读取
   // ...(typeof import.meta !== "undefined" &&
   // import.meta.env?.VITE_ALLOWED_PARENT_ORIGINS
-  //   ? import.meta.env.VITE_ALLOWED_PARENT_ORIGINS.split(",").filter(Boolean)
-  //   : []),
+  //   ? import.meta.env.VITE_ALLOWED_PARENT_ORIGINS.split(",").filter(Boolean)
+  //   : []),
 ];
+
+/**
+ * 报告下载请求处理器
+ *
+ * 由 ReportView 页面在挂载时注册，用于响应父页面的下载触发请求：
+ * - onUrlRequest       : 方案2，生成短时效 blob URL 并以 REPORT_URL 回传父页面
+ * - onDownloadRequest  : 方案3，由 ReportView 侧复用 handleDownload 自行下载
+ */
+export interface ReportRequestHandler {
+  /** 方案2：父页面请求短时效下载 URL */
+  onUrlRequest?: () => void;
+  /** 方案3：父页面请求 ReportView 侧自行下载 */
+  onDownloadRequest?: () => void;
+}
+
+/** 当前注册的报告下载请求处理器（同一时刻只有一个 ReportView 实例注册） */
+let reportRequestHandler: ReportRequestHandler | null = null;
+
+/**
+ * 注册报告下载请求处理器
+ *
+ * 应在 ReportView 组件挂载时调用，卸载时调用 unregisterReportRequestHandler 释放。
+ * 若已有处理器被占用，会先覆盖（同一时刻仅一个报告页处于激活态）。
+ *
+ * @param handler - 报告下载请求处理回调集合
+ */
+export function registerReportRequestHandler(
+  handler: ReportRequestHandler,
+): void {
+  reportRequestHandler = handler;
+}
+
+/**
+ * 注销报告下载请求处理器
+ *
+ * 应在 ReportView 组件卸载时调用，避免对已销毁页面派发无效请求。
+ */
+export function unregisterReportRequestHandler(): void {
+  reportRequestHandler = null;
+}
 
 /** 是否已注册监听器 */
 let isListenerRegistered = false;
@@ -59,6 +99,23 @@ let pendingUserInfoRequest: Promise<boolean> | null = null;
 
 /** 正在执行初始化的用户，避免同一用户在接口返回前被重复初始化 */
 const pendingUserInitUserIds = new Set<string>();
+
+/** Wealth 在 W+ 入口下直接使用 Cookie 中的用户名，不再发起用户信息查询。 */
+function isWealthOriginEntry(): boolean {
+  const isWealthPath = /^\/(?:console\/)?wealth(?:\/|$)/.test(
+    window.location.pathname,
+  );
+  return isWealthPath && getIframeContext().isOriginY;
+}
+
+function decodeCookieValue(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 /**
  * 将值转换为布尔值，用于处理父窗口可能传递的字符串 "true"/"false"
@@ -106,6 +163,9 @@ function validateMessage(data: unknown): data is IframeIncomingMessage {
     case "HEARTBEAT":
       return typeof msg.timestamp === "number";
     case "READY_REQUEST":
+    case "VERIFY_REQUEST":
+    case "REPORT_URL_REQUEST":
+    case "REPORT_DOWNLOAD_REQUEST":
       return true;
     default:
       // 未知类型，忽略但不报错
@@ -189,7 +249,7 @@ async function handleUserDataMessage(
   });
 
   // 消息监听器来源的 pageSource/platformSource 通过统一优先级写入，
-  // 不覆盖 URL 参数（最高优先级）来源的值，避免异步并发写入的竞态。
+  // 不覆盖 URL 参数（最高优先级）来源的值，避免异步并发写入的竞态。
   store.applyEntrySource(
     message.data.pageSource || null,
     message.data.platformSource || null,
@@ -226,8 +286,8 @@ function handleReadyRequest(): void {
   // 父容器不需要知道初始化状态，已注释
   // const context = getIframeContext();
   // sendMessageToParent({
-  //   type: "READY_RESPONSE",
-  //   initialized: context.initialized,
+  //   type: "READY_RESPONSE",
+  //   initialized: context.initialized,
   // });
 }
 
@@ -258,8 +318,17 @@ function handleMessage(event: MessageEvent): void {
     case "READY_REQUEST":
       handleReadyRequest();
       break;
+    case "REPORT_URL_REQUEST":
+      // 方案2：父页面请求短时效下载 URL，转发给 ReportView 已注册 handler
+      reportRequestHandler?.onUrlRequest?.();
+      break;
+    case "REPORT_DOWNLOAD_REQUEST":
+      // 方案3：父页面请求 ReportView 侧自行下载
+      reportRequestHandler?.onDownloadRequest?.();
+      break;
   }
 }
+
 
 /**
  * 向父窗口发送消息
@@ -275,6 +344,50 @@ export function sendMessageToParent(message: IframeOutgoingMessage): void {
   const targetOrigin = context.parentOrigin && context.parentOrigin !== "null" ? context.parentOrigin : "*";
 
   window.parent.postMessage(message, targetOrigin);
+}
+
+
+/**
+ * 向父窗口发送报告相关消息（原始 HTML / 短时效下载 URL / 加载完成通知）
+ *
+ * 与 sendMessageToParent 的关系：
+ * - 复用其 parentOrigin 目标源逻辑（无白名单限制）；
+ * - 仅限定消息类型为 REPORT_HTML / REPORT_URL / REPORT_READY，其余类型请走 sendMessageToParent。
+ *
+ * @param message - 报告出站消息（REPORT_HTML / REPORT_URL / REPORT_READY）
+ * @returns 是否成功透传（false 表示非报告类型或不在 iframe 中）
+ */
+export function sendReportMessageToParent(
+  message: IframeOutgoingMessage,
+): boolean {
+  // 仅允许报告透传消息类型，其余类型请走 sendMessageToParent
+  if (
+    message.type !== "REPORT_HTML" &&
+    message.type !== "REPORT_URL" &&
+    message.type !== "REPORT_READY"
+  ) {
+    console.warn(
+      "[IframeMessage] sendReportMessageToParent 仅接受 REPORT_HTML / REPORT_URL / REPORT_READY 消息",
+    );
+    return false;
+  }
+
+
+  // 不在 iframe 子页面环境中则无需透传
+  if (window.parent === window.self) {
+    return false;
+  }
+
+
+  const context = getIframeContext();
+  const targetOrigin =
+    context.parentOrigin && context.parentOrigin !== "null"
+      ? context.parentOrigin
+      : "*";
+
+
+  window.parent.postMessage(message, targetOrigin);
+  return true;
 }
 
 /**
@@ -348,8 +461,10 @@ export async function handleUrlOriginParam(): Promise<void> {
   const store = useIframeStore.getState();
   store.setOriginY(isOriginY);
 
-  // URL 参数来源优先级最高，无论 origin 是否为 Y 都先解析 URL 参数。
-  // applyEntrySource 内部同步基于 store 当前状态判断，避免与消息监听器异步写入竞态。
+
+  // ==================== pageSource/platformSource 来源处理 (2026-09-15) ====================
+  // URL 参数来源优先级最高，无论 origin 是否为 Y 都先解析 URL 参数。
+  // applyEntrySource 内部同步基于 store 当前状态判断，避免与消息监听器异步写入竞态。
   const urlPageSource = urlParams.get("pageSource");
   const urlPlatformSource = urlParams.get("platformSource");
   if (urlPageSource || urlPlatformSource) {
@@ -415,11 +530,14 @@ export async function handleUrlOriginParam(): Promise<void> {
 
 /**
  * 从 URL 参数初始化时的异步处理
- * 调用客户信息接口和用户初始化
+ * 调用客户信息接口；非财富入口同时执行 Agent 用户初始化
  */
 async function initFromUrlParams(userId: string): Promise<void> {
-  // 首次进入时客户信息接口可能较慢或被嵌入环境阻塞，用户初始化不能依赖它完成。
-  initializeUser(userId);
+  const shouldInitializeAgent = !isWealthOriginEntry();
+  // 非财富入口的用户初始化不能依赖可能较慢的客户信息接口完成。
+  if (shouldInitializeAgent) {
+    initializeUser(userId);
+  }
 
   // 调用客户信息接口（使用 cookie 中的参数）
   await fetchAndApplyCustomerInfoFromCookie(userId);
@@ -427,7 +545,7 @@ async function initFromUrlParams(userId: string): Promise<void> {
   // 客户信息接口可能修正 userId，修正后的用户仍需要初始化。
   const latestStore = useIframeStore.getState();
   const currentUserId = latestStore.userId;
-  if (currentUserId && currentUserId !== userId) {
+  if (shouldInitializeAgent && currentUserId && currentUserId !== userId) {
     initializeUser(currentUserId);
   }
 
@@ -608,6 +726,15 @@ export async function fetchAndSetUserName(): Promise<boolean> {
 
   if (!userId) {
     return false;
+  }
+
+  if (isWealthOriginEntry()) {
+    const cookieUserId = decodeCookieValue(getWPlusCookie("userid"));
+    const cookieUserName = decodeCookieValue(getWPlusCookie("username"));
+    if (store.bbk && cookieUserId === userId && cookieUserName) {
+      store.setContext({ userName: cookieUserName });
+      return true;
+    }
   }
 
   if (pendingUserInfoRequest && pendingUserInfoUserId === userId) {

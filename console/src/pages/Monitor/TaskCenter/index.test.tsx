@@ -79,6 +79,10 @@ describe("TaskCenterPage", () => {
           status: "skipped",
           target_name: "跳过",
           error_message: null,
+          result_json: {
+            error: '用户已有同名自建 MCP "demo"，已跳过',
+            skipped: true,
+          },
         },
         {
           task_id: "task-1",
@@ -131,5 +135,8 @@ describe("TaskCenterPage", () => {
     await screen.findByText("分发明细");
     const targetCells = screen.getAllByText(/^t-/).map((node) => node.textContent);
     expect(targetCells).toEqual(["t-2", "t-4", "t-5", "t-6", "t-3", "t-1"]);
+    expect(
+      screen.getByText('用户已有同名自建 MCP "demo"，已跳过'),
+    ).toBeInTheDocument();
   });
 });

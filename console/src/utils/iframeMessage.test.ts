@@ -108,6 +108,7 @@ describe("fetchAndSetUserName", () => {
       "vorglvl",
       "positionID",
       "token",
+      "username",
     ].forEach((name) => {
       document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
     });
@@ -272,6 +273,137 @@ describe("fetchAndSetUserName", () => {
     ).not.toHaveProperty("isOriginY");
     expect(useIframeStore.getState().userId).toBe("80000002");
     expect(useIframeStore.getState().userName).toBeNull();
+  });
+
+  it("/wealth + origin=Y 时从 cookie 读取用户名且不请求用户信息接口", async () => {
+    window.history.pushState({}, "", "/wealth/board?origin=Y");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "vbbk=100; path=/";
+    document.cookie = "username=%E5%BC%A0%E4%B8%89; path=/";
+
+    await handleUrlOriginParam();
+    await expect(fetchAndSetUserName()).resolves.toBe(true);
+
+    expect(mockedFetchUserInfo).not.toHaveBeenCalled();
+    expect(useIframeStore.getState().userName).toBe("张三");
+  });
+
+  it.each([
+    "/wealth/board?origin=Y",
+    "/console/wealth/board?origin=Y",
+  ])("%s 时不初始化 Agent", async (path) => {
+    window.history.pushState({}, "", path);
+    document.cookie = "userid=80000002; path=/";
+
+    await handleUrlOriginParam();
+
+    expect(mockedFetchUserInit).not.toHaveBeenCalled();
+  });
+
+  it("/console/wealth + origin=Y 时也不请求用户信息接口", async () => {
+    window.history.pushState({}, "", "/console/wealth/board?origin=Y");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "vbbk=100; path=/";
+    document.cookie = "username=李四; path=/";
+
+    await handleUrlOriginParam();
+    await expect(fetchAndSetUserName()).resolves.toBe(true);
+
+    expect(mockedFetchUserInfo).not.toHaveBeenCalled();
+    expect(useIframeStore.getState().userName).toBe("李四");
+  });
+
+  it("财富工作台内部导航丢失 origin 查询串后仍不请求用户信息接口", async () => {
+    window.history.pushState({}, "", "/wealth/board?origin=Y");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "vbbk=100; path=/";
+    document.cookie = "username=张三; path=/";
+
+    await handleUrlOriginParam();
+    window.history.pushState({}, "", "/wealth/create");
+    await expect(fetchAndSetUserName()).resolves.toBe(true);
+
+    expect(mockedFetchUserInfo).not.toHaveBeenCalled();
+    expect(useIframeStore.getState().userName).toBe("张三");
+  });
+
+  it("财富工作台缺少 BBK cookie 时回退查询用户信息", async () => {
+    window.history.pushState({}, "", "/wealth/board?origin=Y");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "username=张三; path=/";
+    mockedFetchUserInfo.mockResolvedValueOnce({
+      code: "SUC0000",
+      message: "success",
+      result: true,
+      data: [{ userName: "接口姓名", pathName: "某企业/总行/生产部" }],
+    });
+
+    await handleUrlOriginParam();
+    await expect(fetchAndSetUserName()).resolves.toBe(true);
+
+    expect(mockedFetchUserInfo).toHaveBeenCalledWith("80000002");
+    expect(useIframeStore.getState()).toMatchObject({
+      userName: "接口姓名",
+      bbk: "100",
+    });
+  });
+
+  it("客户信息切换用户后不使用旧用户的 username cookie", async () => {
+    window.history.pushState({}, "", "/wealth/board?origin=Y");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "vbbk=100; path=/";
+    document.cookie = "username=旧用户; path=/";
+    mockedFetchCustomerInfo.mockResolvedValueOnce({
+      returnCode: "SUC0000",
+      body: {
+        output: {
+          result: {
+            userChange: true,
+            sysId: "new-sys",
+            token: "new-token",
+            bbk: "200",
+            orgCode: "new-org",
+            orgLvl: "new-level",
+            userId: "80000003",
+            positionId: "RB0101",
+          },
+        },
+      },
+    });
+    mockedFetchUserInfo.mockResolvedValueOnce({
+      code: "SUC0000",
+      message: "success",
+      result: true,
+      data: [{ userName: "新用户", pathName: "某企业/分行/生产部" }],
+    });
+
+    await handleUrlOriginParam();
+    await expect(fetchAndSetUserName()).resolves.toBe(true);
+
+    expect(mockedFetchUserInfo).toHaveBeenCalledWith("80000003");
+    expect(useIframeStore.getState()).toMatchObject({
+      userId: "80000003",
+      userName: "新用户",
+      bbk: "200",
+    });
+  });
+
+  it("非财富路由的 origin=Y 入口仍请求用户信息接口", async () => {
+    window.history.pushState({}, "", "/chat?origin=Y");
+    document.cookie = "userid=80000002; path=/";
+    document.cookie = "username=张三; path=/";
+    mockedFetchUserInfo.mockResolvedValueOnce({
+      code: "SUC0000",
+      message: "success",
+      result: true,
+      data: [{ userName: "接口姓名", pathName: "某企业/总行/生产部" }],
+    });
+
+    await handleUrlOriginParam();
+    await expect(fetchAndSetUserName()).resolves.toBe(true);
+
+    expect(mockedFetchUserInfo).toHaveBeenCalledWith("80000002");
+    expect(useIframeStore.getState().userName).toBe("接口姓名");
   });
 
   it("非 origin=Y 入口会清除本次页面的 origin 标记", async () => {

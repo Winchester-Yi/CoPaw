@@ -32,6 +32,7 @@ async def test_start_task_inserts_master_and_items() -> None:
 
     await store.start_task(
         task_id="task-1",
+        batch_id="batch-1",
         service="market",
         task_type="market.skill.distribute",
         title="分发技能",
@@ -41,10 +42,11 @@ async def test_start_task_inserts_master_and_items() -> None:
     assert "INSERT INTO swe_async_tasks" in db.executed[0][0]
     assert "tenant_id" not in db.executed[0][0]
     assert db.executed[0][1] is not None
-    assert len(db.executed[0][1]) == 10
-    assert db.executed[0][1][7] is None
+    assert len(db.executed[0][1]) == 12
+    assert db.executed[0][1][1] == "batch-1"
     assert db.executed[0][1][8] is None
-    assert "INSERT INTO swe_async_task_items" in db.executed_many[0][0]
+    assert db.executed[0][1][9] is None
+    assert "INSERT IGNORE INTO swe_async_task_items" in db.executed_many[0][0]
     assert db.executed_many[0][1] == [
         ("task-1", "u1", None, "queued", None, None),
         ("task-1", "u2", None, "queued", None, None),
@@ -66,7 +68,7 @@ async def test_start_task_generates_title_from_task_type() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[4] == "MCP 分发"
+    assert params[5] == "MCP 分发"
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,7 @@ async def test_start_task_generates_summary_from_task_type() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[5] == "向 2 个用户分发技能"
+    assert params[6] == "向 2 个用户分发技能"
 
 
 @pytest.mark.asyncio
@@ -123,7 +125,7 @@ async def test_start_task_keeps_explicit_summary() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[5] == "向指定用户分发 MCP"
+    assert params[6] == "向指定用户分发 MCP"
 
 
 @pytest.mark.asyncio
@@ -143,8 +145,8 @@ async def test_start_task_keeps_empty_actor_fields() -> None:
 
     params = db.executed[0][1]
     assert params is not None
-    assert params[7] == ""
     assert params[8] == ""
+    assert params[9] == ""
 
 
 @pytest.mark.asyncio

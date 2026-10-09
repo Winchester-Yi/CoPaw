@@ -184,7 +184,7 @@ export function DistributeTargetModal({
     type === "skill"
       ? "将当前技能分发到目标用户的工作空间中，用户可在「我的技能」中查看。"
       : type === "mcp"
-      ? "将当前市场 MCP 分发到目标租户的 default agent 中，如已存在同名 MCP 将覆盖。"
+      ? "将当前市场 MCP 分发到目标租户的 default agent 中；已由市场分发的同名 MCP 会更新，目标租户已有同名自建 MCP 时将跳过。"
       : "将当前专家分发到目标用户的 default agent 中。";
 
   return (

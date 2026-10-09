@@ -7,14 +7,12 @@ import {
   UserOutlined,
   DownloadOutlined,
 } from "@ant-design/icons";
-import { Button, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Dropdown, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle, BarChart3 } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
-import type { DistributionRecord } from "../../api/types";
-import { BBK_ID_TO_NAME_MAP } from "../../constants/bbk";
 import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
@@ -34,6 +32,7 @@ interface SkillDetailDrawerProps {
   sourceId?: string;
   onRefresh?: () => void;
   categoryName?: string;
+  onEdit?: () => void;
 }
 
 const FRONTMATTER_PATTERN = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
@@ -320,6 +319,7 @@ export function SkillDetailDrawer(
     sourceId,
     categoryName,
     onRefresh,
+    onEdit,
   } = props;
   const [fileDetail, setFileDetail] = useState<FileContentResponse | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
@@ -328,12 +328,6 @@ export function SkillDetailDrawer(
   const [downloadingCurrentVersion, setDownloadingCurrentVersion] = useState(false);
   const normalizedCategoryName = categoryName?.trim();
 
-  // 编辑中文名相关状态
-  const [isEditing, setIsEditing] = useState(false);
-  const [draftCnName, setDraftCnName] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
-  const [syncModalOpen, setSyncModalOpen] = useState(false);
-  const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
   const [usagePage, setUsagePage] = useState(1);
   const [usagePageSize, setUsagePageSize] = useState(DEFAULT_USAGE_PAGE_SIZE);
 
@@ -351,39 +345,6 @@ export function SkillDetailDrawer(
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }, []);
-
-  // 分发记录去重（同一用户多次分发只保留最新记录）
-  const uniqueDistributions = useMemo(() => {
-    const userMap = new Map<string, DistributionRecord>();
-    for (const dist of distributions) {
-      const existing = userMap.get(dist.target_user_id);
-      if (
-        !existing ||
-        (dist.distributed_at &&
-          (!existing.distributed_at || dist.distributed_at > existing.distributed_at))
-      ) {
-        userMap.set(dist.target_user_id, dist);
-      }
-    }
-    return Array.from(userMap.values());
-  }, [distributions]);
-
-  // 按机构分组分发记录，只读展示同步影响范围
-  const groupedDistributions = useMemo(() => {
-    const groups: Record<string, DistributionRecord[]> = {};
-    for (const dist of uniqueDistributions) {
-      const bbkId = dist.target_bbk_id || "unknown";
-      if (!groups[bbkId]) {
-        groups[bbkId] = [];
-      }
-      groups[bbkId].push(dist);
-    }
-    return Object.entries(groups).map(([bbkId, records]) => ({
-      bbkId,
-      bbkName: bbkId === "unknown" ? "未分配机构" : BBK_ID_TO_NAME_MAP[bbkId] || bbkId,
-      records,
-    }));
-  }, [uniqueDistributions]);
 
   const handleDownloadCurrentVersion = useCallback(async () => {
     if (!skill || !sourceId) return;
@@ -407,74 +368,6 @@ export function SkillDetailDrawer(
       setDownloadingCurrentVersion(false);
     }
   }, [skill, sourceId, triggerBrowserDownload]);
-
-  // 编辑开始
-  const handleEditStart = useCallback(() => {
-    setIsEditing(true);
-    setDraftCnName(skill?.chinese_name || "");
-  }, [skill?.chinese_name]);
-
-  // 编辑取消
-  const handleEditCancel = useCallback(() => {
-    setIsEditing(false);
-    setDraftCnName("");
-    setSyncModalOpen(false);
-  }, []);
-
-  // 执行保存
-  const handleSave = useCallback(async (sync: boolean, userIds: string[]) => {
-    if (!skill || !sourceId) return;
-
-    setIsSaving(true);
-    try {
-      await marketApi.updateSkillCnName(sourceId, skill.item_id, {
-        skill_id: skill.skill_id || "",
-        chinese_name: draftCnName,
-        sync_to_users: sync,
-        target_user_ids: userIds,
-      });
-      message.success("保存成功");
-      setIsEditing(false);
-      setSyncModalOpen(false);
-      onRefresh?.();
-    } catch {
-      message.error("保存失败");
-    } finally {
-      setIsSaving(false);
-    }
-  }, [skill, sourceId, draftCnName, onRefresh]);
-
-  // 保存点击：检查是否有分发记录
-  const handleSaveClick = useCallback(async () => {
-    if (!skill || !sourceId) return;
-
-    if (draftCnName === skill.chinese_name) {
-      message.info("名称未变化");
-      setIsEditing(false);
-      return;
-    }
-
-    // 查询分发记录
-    try {
-      const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
-      setDistributions(dists);
-      const uniqueIds = Array.from(new Set(dists.map((d) => d.target_user_id)));
-      if (uniqueIds.length > 0) {
-        setSyncModalOpen(true);
-      } else {
-        // 无分发记录，直接保存
-        await handleSave(false, []);
-      }
-    } catch {
-      // 查询失败时直接保存（不同步）
-      await handleSave(false, []);
-    }
-  }, [skill, sourceId, draftCnName, handleSave]);
-
-  // 同步确认弹窗确认
-  const handleSyncConfirm = useCallback(() => {
-    handleSave(true, uniqueDistributions.map((dist) => dist.target_user_id));
-  }, [handleSave, uniqueDistributions]);
 
   // 初始化统计配置状态
   useEffect(() => {
@@ -691,61 +584,29 @@ export function SkillDetailDrawer(
               )}
 
               {/* 中文名（大号） + 技能名（小号） */}
-              {isEditing ? (
-                <Input
-                  value={draftCnName}
-                  onChange={(e) => setDraftCnName(e.target.value)}
-                  style={{ width: 200, fontSize: 14 }}
-                  maxLength={50}
-                  showCount
-                  placeholder="输入中文名称"
-                />
-              ) : (
-                <span style={CHINESE_NAME_STYLE}>
-                  {chineseName}
-                  {chineseName && skillName && (
-                    <span style={SKILL_NAME_STYLE}> ({skillName})</span>
-                  )}
-                  {!chineseName && skillName && (
-                    <span style={CHINESE_NAME_STYLE}>{skillName}</span>
-                  )}
-                </span>
-              )}
+              <span style={CHINESE_NAME_STYLE}>
+                {chineseName}
+                {chineseName && skillName && (
+                  <span style={SKILL_NAME_STYLE}> ({skillName})</span>
+                )}
+                {!chineseName && skillName && (
+                  <span style={CHINESE_NAME_STYLE}>{skillName}</span>
+                )}
+              </span>
 
               {/* 编辑按钮 */}
-              {isManager && !isEditing && (
-                <Tooltip title="编辑中文名">
+              {isManager && onEdit && (
+                <Tooltip title="编辑技能名称、分类和归属分行">
                   <Button
                     type="text"
                     size="small"
                     icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
-                    onClick={handleEditStart}
+                    onClick={onEdit}
                     style={{ padding: 4 }}
-                  />
+                  >
+                    编辑
+                  </Button>
                 </Tooltip>
-              )}
-
-              {/* 编辑时显示保存/取消按钮 */}
-              {isManager && isEditing && (
-                <>
-                  <Button
-                    size="small"
-                    onClick={handleEditCancel}
-                    disabled={isSaving}
-                    style={{ height: 24, borderRadius: 4 }}
-                  >
-                    取消
-                  </Button>
-                  <Button
-                    size="small"
-                    type="primary"
-                    onClick={handleSaveClick}
-                    loading={isSaving}
-                    style={{ height: 24, borderRadius: 4 }}
-                  >
-                    保存
-                  </Button>
-                </>
               )}
 
               {/* 分类 */}
@@ -964,84 +825,6 @@ export function SkillDetailDrawer(
         onVersionSwitched={onRefresh}
       />
 
-      {/* 同步确认弹窗 */}
-      <Modal
-        open={syncModalOpen}
-        title="同步设置"
-        onCancel={handleEditCancel}
-        onOk={handleSyncConfirm}
-        okText="确认保存"
-        cancelText="取消"
-        okButtonProps={{ loading: isSaving }}
-        width={520}
-      >
-        <div style={{ marginBottom: 12, color: "#333", fontSize: 14 }}>
-          将同步更新全部已分发目标的技能名称（共 {uniqueDistributions.length} 位用户）。
-        </div>
-
-        <div style={{ color: "#666", fontSize: 12 }}>
-          同步更新后，用户下次会话将看到新名称。
-        </div>
-
-        {uniqueDistributions.length > 0 && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <div style={{ fontWeight: 500 }}>已分发用户</div>
-            </div>
-
-            <Collapse
-              size="small"
-              style={{ maxHeight: 280, overflow: "auto" }}
-              items={groupedDistributions.map((group) => ({
-                key: group.bbkId,
-                label: (
-                  <span style={{ fontSize: 13 }}>
-                    <UserOutlined style={{ marginRight: 6, color: "#1677ff" }} />
-                    {group.bbkName}
-                    <span style={{ color: "#999", marginLeft: 8 }}>
-                      {group.records.length} 人
-                    </span>
-                  </span>
-                ),
-                children: (
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
-                      gap: 4,
-                    }}
-                  >
-                    {group.records.map((dist) => {
-                      const displayName = dist.target_user_name
-                        ? `${dist.target_user_name} (${dist.target_user_id})`
-                        : dist.target_user_id;
-                      return (
-                        <div
-                          key={dist.target_user_id}
-                          style={{
-                            fontSize: 12,
-                            color: "#333",
-                            padding: "4px 8px",
-                            borderRadius: 4,
-                            backgroundColor: "#f5f5f5",
-                            border: "1px solid #e5e7eb",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                          title={displayName}
-                        >
-                          {displayName}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ),
-              }))}
-            />
-          </div>
-        )}
-      </Modal>
     </>
   );
 }

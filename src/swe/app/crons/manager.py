@@ -53,6 +53,7 @@ from ..runner.models import ChatSpec
 from .repo.base import BaseJobRepository
 from .scheduler_adapter import SchedulerAdapter, NoopSchedulerAdapter
 from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
+from .workflow.cron_adapter import WorkflowCronExecutor
 from .broadcast import (
     DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
     MAX_BROADCAST_OFFSET_WINDOW_HOURS,
@@ -618,6 +619,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         tenant_id: Optional[str] = None,
         scheduler_adapter: Optional[SchedulerAdapter] = None,
         source_system_config_service: Any = None,
+        workflow_config_store: Any = None,
         continuous_governance_service: Any = None,
     ):
         self._repo = repo
@@ -628,11 +630,21 @@ class CronManager:  # pylint: disable=too-many-public-methods
         self._tenant_id = tenant_id
         self._timezone = timezone
         self._source_system_config_service = source_system_config_service
+        self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
 
         self._executor = CronExecutor(
             runner=runner,
             channel_manager=channel_manager,
+        )
+        self._workflow_executor = (
+            WorkflowCronExecutor(
+                config_store=workflow_config_store,
+                session=getattr(runner, "session", None),
+                channel_manager=channel_manager,
+            )
+            if workflow_config_store is not None
+            else None
         )
 
         self._lock = asyncio.Lock()
@@ -697,13 +709,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
             user_id: User's sapId
 
         Returns:
-            List of jobs with tenant_id matching user_id and task_type is agent
+            List of agent/workflow jobs owned by this user.
         """
         user_jobs = []
         for job in jobs:
-            # Check tenant_id match and task_type is agent
             if job.tenant_id and job.tenant_id == user_id:
-                if job.task_type == "agent":
+                if job.task_type in {"agent", "workflow"}:
                     user_jobs.append(job)
         return user_jobs
 
@@ -1928,7 +1939,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         prepared["cron_is_manual"] = is_manual
         if (
             not is_manual
-            and job.task_type in {"agent", "text"}
+            and job.task_type in {"agent", "text", "workflow"}
             and not _has_cron_execution_identity(prepared)
         ):
             raise RuntimeError(
@@ -2266,7 +2277,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         creator_user_id: Optional[str],
     ) -> bool:
         return bool(
-            spec.task_type in {"agent", "text"}
+            spec.task_type in {"agent", "text", "workflow"}
             and creator_user_id
             and self._chat_manager is not None,
         )
@@ -2442,7 +2453,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         creator_user_id = (job.meta or {}).get("creator_user_id")
         task_session_id = (job.meta or {}).get("task_session_id")
         if (
-            job.task_type not in {"agent", "text"}
+            job.task_type not in {"agent", "text", "workflow"}
             or not creator_user_id
             or not task_session_id
         ):
@@ -2481,6 +2492,22 @@ class CronManager:  # pylint: disable=too-many-public-methods
     ) -> str:
         if job.task_type == "text":
             return (job.text or "").strip()
+        if job.task_type == "workflow":
+            session = getattr(self._runner, "session", None)
+            if session is None:
+                return ""
+            state = await session.get_session_state_dict(
+                task_session_id,
+                creator_user_id,
+            )
+            messages = (state or {}).get(TASK_MESSAGES_STATE_KEY, [])
+            if isinstance(messages, list):
+                for message in reversed(messages):
+                    if isinstance(message, dict):
+                        preview = _extract_task_message_preview(message)
+                        if preview:
+                            return preview
+            return ""
         if not getattr(self._runner, "session", None):
             return ""
         return await self._load_task_preview_text(
@@ -2920,8 +2947,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
     ) -> None:
         """Push success notification when an agent task completes."""
         # 只对 agent 类型的任务发送通知
-        if job.task_type != "agent":
-            logger.debug("Skip notification: job %s is not agent type", job.id)
+        if job.task_type not in {"agent", "workflow"}:
+            logger.debug("Skip notification: job %s has no completion push", job.id)
             return
 
         task_session_id = job.meta.get("task_session_id")
@@ -3619,9 +3646,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
         with self._bind_scheduled_run_source_system_config(
             outcome.source_system_config,
         ):
-            result = await self._executor.execute(
+            result = await self._execute_job_by_type(
                 job,
-                dispatch_meta=dispatch_meta,
+                dispatch_meta,
             )
             outcome.trace_id = result.trace_id
             outcome.output_preview = result.output_preview
@@ -3644,6 +3671,20 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 outcome.exec_status,
                 outcome.trace_id[:20] if outcome.trace_id else "(empty)",
             )
+
+    async def _execute_job_by_type(
+        self,
+        job: CronJobSpec,
+        dispatch_meta: Dict[str, Any],
+    ) -> Any:
+        if job.task_type == "workflow":
+            if self._workflow_executor is None:
+                raise RuntimeError("workflow executor is unavailable")
+            return await self._workflow_executor.execute(job, dispatch_meta)
+        return await self._executor.execute(
+            job,
+            dispatch_meta=dispatch_meta,
+        )
 
     async def _handle_once_success(
         self,

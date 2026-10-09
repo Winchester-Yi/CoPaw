@@ -114,6 +114,26 @@ describe("CronJobs helpers", () => {
     expect(result.request?.input).toEqual([{ role: "user", content: [] }]);
   });
 
+  it("submits workflow as a skill task without stale Agent fields", () => {
+    const result = buildCronJobSubmitPayload({
+      ...buildCronJob({
+        task_type: "workflow",
+        workflow_binding_id: "binding-1",
+        text: "old text",
+      }),
+      skillIds: ["skill-a", "skill-b"],
+      cronType: "daily",
+      cronTime: dayjs().hour(9).minute(0),
+    });
+
+    expect(result.task_type).toBe("workflow");
+    expect(result.skill_ids).toBe("skill-a,skill-b");
+    expect(result.workflow_binding_id).toBe("binding-1");
+    expect(result.request).toBeUndefined();
+    expect(result.text).toBeUndefined();
+    expect(result.model_slot).toBeUndefined();
+  });
+
   it("removes hidden broadcast dispatch intent flag on submit", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob({

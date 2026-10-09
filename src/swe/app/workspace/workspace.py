@@ -152,6 +152,7 @@ class Workspace:
         workspace_dir: str,
         tenant_id: Optional[str] = None,
         source_system_config_service: object | None = None,
+        workflow_config_store: object | None = None,
         continuous_governance_service: object | None = None,
     ):
         """Initialize agent instance.
@@ -165,6 +166,7 @@ class Workspace:
         self.workspace_dir = Path(workspace_dir).expanduser()
         self.tenant_id = tenant_id
         self._source_system_config_service = source_system_config_service
+        self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -398,6 +400,7 @@ class Workspace:
                     "source_system_config_service": (
                         ws._source_system_config_service
                     ),
+                    "workflow_config_store": ws._workflow_config_store,
                     "continuous_governance_service": (
                         ws._continuous_governance_service
                     ),

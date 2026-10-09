@@ -117,6 +117,60 @@ async def test_submit_skipped_when_no_items() -> None:
     assert await submit_distribution(plan) is None
 
 
+async def test_workflow_scene_skips_distribution_even_with_skill_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_MARKET_API_BASE_URL", "http://market.local")
+
+    def unexpected_client():
+        pytest.fail("workflow 场景不能调用技能/MCP 下发接口")
+
+    monkeypatch.setattr(market_dispatch, "_new_client", unexpected_client)
+    plan = make_plan(scenes=[make_scene(mcp_relations=[])])
+
+    assert await submit_distribution(plan) is None
+
+
+async def test_mixed_plan_distributes_only_scenes_with_nonempty_mcp_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    monkeypatch.setenv("SWE_MARKET_API_BASE_URL", "http://market.local")
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"status": "queued"})
+
+    monkeypatch.setattr(
+        market_dispatch,
+        "_new_client",
+        lambda: mock_client(handler),
+    )
+    plan = make_plan(
+        scenes=[
+            make_scene(item_id="workflow-item", mcp_relations=[]),
+            make_scene(item_id="blank-item", mcp_relations=["    "]),
+            make_scene(),
+        ],
+    )
+
+    assert await submit_distribution(plan) is not None
+    assert len(captured) == 1
+    assert captured[0]["skill_item_ids"] == [
+        "blank-item",
+        "item-wealth-insurance-1",
+    ]
+    assert captured[0]["mcp_item_ids"] == [
+        "    ",
+        "mcp-customer",
+        "mcp-insurance",
+    ]
+    assert captured[0]["target_tenant_ids"] == ["chenjy", "zhangwl"]
+    assert captured[0]["overwrite"] is True
+
+
 async def test_submit_skipped_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

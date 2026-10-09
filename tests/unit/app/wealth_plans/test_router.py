@@ -136,6 +136,140 @@ def test_create_plan_applies_scene_branch_validation(
     assert resp.status_code == 403
 
 
+@pytest.mark.parametrize(
+    ("owner_headers", "source_label"),
+    [
+        ({"X-User-Id": "president", "X-Position-Id": "RB1101"}, "行长关注"),
+        ({"X-User-Id": "middle", "X-Position-Id": "RB0301"}, "分行关注"),
+        ({"X-User-Id": "rm-1", "X-Position-Id": "RB0101"}, "我的关注"),
+    ],
+)
+def test_rm_cannot_publish_scene_reserved_by_management_or_self(
+    client: TestClient,
+    owner_headers: dict[str, str],
+    source_label: str,
+) -> None:
+    owner_payload = plan_payload(
+        name=f"{source_label}规划",
+        source_label=source_label,
+    )
+    created = client.post(
+        "/api/wealth/plans",
+        json=owner_payload,
+        headers={**owner_headers, "X-Bbk-Id": "100"},
+    )
+    assert created.status_code == 200
+
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "保障潜客经营" in response.json()["detail"]
+    assert f"{source_label}规划" in response.json()["detail"]
+
+
+def test_other_rm_plan_does_not_reserve_scene(client: TestClient) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers={
+            "X-User-Id": "rm-2",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+    assert created.status_code == 200
+
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("owner_position", "actor_position", "expected_status"),
+    [
+        ("RB0301", "RB0301", 409),  # 中台受中台规划约束
+        ("RB1101", "RB0301", 200),  # 中台不受行长规划约束
+        ("RB0101", "RB0301", 200),  # 中台不受客户经理规划约束
+        ("RB0301", "RB1101", 409),  # 行长受中台规划约束
+        ("RB1101", "RB1101", 409),  # 行长受行长规划约束
+        ("RB0101", "RB1101", 200),  # 行长不受客户经理规划约束
+    ],
+)
+def test_management_scene_reservation_matrix(
+    client: TestClient,
+    owner_position: str,
+    actor_position: str,
+    expected_status: int,
+) -> None:
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(name="已占用规划"),
+        headers={
+            "X-User-Id": "owner",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": owner_position,
+        },
+    )
+    assert created.status_code == 200
+
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(name="新规划"),
+        headers={
+            "X-User-Id": "actor",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": actor_position,
+        },
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert "保障潜客经营" in response.json()["detail"]
+        assert "已占用规划" in response.json()["detail"]
+
+
+def test_create_plan_derives_source_label_from_request_role(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="分行关注"),
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    )
+    assert response.status_code == 200
+
+    plans = client.get(
+        "/api/wealth/plans",
+        headers={
+            "X-User-Id": "rm-1",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB0101",
+        },
+    ).json()["items"]
+
+    assert plans[0]["source_label"] == "我的关注"
+
+
 async def test_scene_branch_validation_accepts_current_branch_skill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -416,6 +550,93 @@ async def test_update_relaunches_after_published(
     assert record is not None and record.name == "十月计划"
 
 
+async def test_rm_can_update_own_published_plan_schedule(
+    client: TestClient,
+    store: WealthPlanStore,
+) -> None:
+    headers = {
+        "X-User-Id": "rm-1",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB0101",
+    }
+    created = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(source_label="我的关注"),
+        headers=headers,
+    ).json()
+    await store.set_publish_status(created["id"], "published")
+    occupied = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(name="行长历史规划"),
+        headers={
+            "X-User-Id": "president",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB1101",
+        },
+    )
+    assert occupied.status_code == 200
+    payload = plan_payload(source_label="我的关注")
+    payload["scenes"][0]["cron_expr"] = "0 10 * * *"
+
+    response = client.put(
+        f"/api/wealth/plans/{created['id']}",
+        json=payload,
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+
+
+async def test_rm_update_still_rejects_new_scene_reserved_by_management(
+    client: TestClient,
+    store: WealthPlanStore,
+) -> None:
+    rm_headers = {
+        "X-User-Id": "rm-1",
+        "X-Bbk-Id": "100",
+        "X-Position-Id": "RB0101",
+    }
+    own_payload = plan_payload(source_label="我的关注")
+    own_payload["scenes"][0]["scene_id"] = "scene-own"
+    created = client.post(
+        "/api/wealth/plans",
+        json=own_payload,
+        headers=rm_headers,
+    ).json()
+    await store.set_publish_status(created["id"], "published")
+
+    management_payload = plan_payload(name="行长规划")
+    management_payload["scenes"][0]["scene_id"] = "scene-management"
+    occupied = client.post(
+        "/api/wealth/plans",
+        json=management_payload,
+        headers={
+            "X-User-Id": "president",
+            "X-Bbk-Id": "100",
+            "X-Position-Id": "RB1101",
+        },
+    )
+    assert occupied.status_code == 200
+
+    update_payload = plan_payload(source_label="我的关注")
+    retained_scene = {**update_payload["scenes"][0], "scene_id": "scene-own"}
+    added_scene = {
+        **update_payload["scenes"][0],
+        "scene_id": "scene-management",
+        "scene_name": "新增经营场景",
+    }
+    update_payload["scenes"] = [retained_scene, added_scene]
+
+    response = client.put(
+        f"/api/wealth/plans/{created['id']}",
+        json=update_payload,
+        headers=rm_headers,
+    )
+
+    assert response.status_code == 409
+    assert "新增经营场景" in response.json()["detail"]
+
+
 def test_update_forbidden_for_target(client: TestClient) -> None:
     created = client.post(
         "/api/wealth/plans",
@@ -506,7 +727,7 @@ def test_name_list_allows_empty_skill_id(client: TestClient) -> None:
     resp = client.get("/api/wealth/name-list?sap_id=10086")
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": []}
+    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
 
 
 def test_name_list_empty_when_external_absent(client: TestClient) -> None:
@@ -514,7 +735,7 @@ def test_name_list_empty_when_external_absent(client: TestClient) -> None:
     resp = client.get("/api/wealth/name-list?skill_id=loan_verify")
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": []}
+    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
 
 
 def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
@@ -522,7 +743,7 @@ def test_name_list_allows_empty_sap_id(client: TestClient) -> None:
     resp = client.get("/api/wealth/name-list?skill_id=loan_verify&sap_id=")
 
     assert resp.status_code == 200
-    assert resp.json() == {"items": []}
+    assert resp.json() == {"items": [], "skillFieldList": [], "allFields": []}
 
 
 def test_name_list_rejects_invalid_touched(client: TestClient) -> None:
@@ -564,8 +785,26 @@ def test_name_list_forwards_touch_filter_context(
                             ],
                             "strongContactTime": "2026-09-16 10:30:00",
                             "touchMethod": "电话",
+                            "touched": 1,
+                            "fieldList": [
+                                {
+                                    "filedName": "age",
+                                    "filedNameCn": "年龄",
+                                    "filedValue": 0,
+                                },
+                            ],
                         },
                     ],
+                    "skillFieldList": [
+                        {
+                            "skillId": "SKILL0001",
+                            "groupField": ["age"],
+                            "fields": [
+                                {"filedName": "age", "filedNameCn": "年龄"},
+                            ],
+                        },
+                    ],
+                    "allFields": [{"filedName": "age", "filedNameCn": "年龄"}],
                 },
             }
 
@@ -628,7 +867,16 @@ def test_name_list_forwards_touch_filter_context(
             "skillList": [{"skillId": "SKILL0001", "skillName": "贷款经营"}],
             "strongContactTime": "2026-09-16 10:30:00",
             "touchMethod": "电话",
+            "touched": 1,
+            "fieldList": [
+                {"filedName": "age", "filedNameCn": "年龄", "filedValue": 0},
+            ],
         },
+    ]
+
+    assert resp.json()["skillFieldList"][0]["groupField"] == ["age"]
+    assert resp.json()["allFields"] == [
+        {"filedName": "age", "filedNameCn": "年龄"},
     ]
 
 
@@ -662,11 +910,21 @@ def test_skill_stats_requires_non_empty_skills(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
-def test_skill_stats_forwards_bbk_and_skills(
+@pytest.mark.parametrize(
+    ("position_id", "expected_sap_id"),
+    [
+        ("RB0101", "zhangwl"),
+        ("RB1101", None),
+        ("RB0301", None),
+    ],
+)
+def test_skill_stats_forwards_role_scope(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    position_id: str,
+    expected_sap_id: str | None,
 ) -> None:
-    """代理层注入 bbkId 并原样转发 skills，响应项透传。"""
+    """代理层注入机构范围，客户经理额外注入本人 sapId。"""
     captured: dict = {}
 
     class FakeResponse:
@@ -713,7 +971,11 @@ def test_skill_stats_forwards_bbk_and_skills(
                 },
             ],
         },
-        headers={**VIEWER, "X-Bbk-Id": "755"},
+        headers={
+            **VIEWER,
+            "X-Bbk-Id": "755",
+            "X-Position-Id": position_id,
+        },
     )
 
     assert resp.status_code == 200
@@ -721,6 +983,10 @@ def test_skill_stats_forwards_bbk_and_skills(
     assert captured["url"].endswith("/api/agent/workspace/skill-stats")
     assert captured["json"]["bbkId"] == "755"
     assert captured["json"]["skills"][0]["skillId"] == "s1"
+    if expected_sap_id is None:
+        assert "sapId" not in captured["json"]
+    else:
+        assert captured["json"]["sapId"] == expected_sap_id
 
 
 async def _make_broadcast_store(

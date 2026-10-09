@@ -485,6 +485,25 @@ def _initialize_source_system_config(
         logger.warning("Failed to initialize source system config: %s", e)
 
 
+async def _initialize_workflow_config_store(
+    app: FastAPI,
+    db_connection: Any | None,
+    tenant_workspace_pool: TenantWorkspacePool,
+    multi_agent_manager: MultiAgentManager,
+) -> None:
+    """Install the shared workflow binding store for Cron workspaces."""
+    from .crons.workflow.config_store import WorkflowConfigStore
+
+    store = (
+        WorkflowConfigStore(db_connection)
+        if db_connection is not None and db_connection.is_connected
+        else None
+    )
+    app.state.workflow_config_store = store
+    multi_agent_manager.set_workflow_config_store(store)
+    tenant_workspace_pool.set_workflow_config_store(store)
+
+
 def _initialize_source_tools(app: FastAPI) -> None:
     """Initialize the source-owned tool catalogue outside tenant workspaces."""
     try:
@@ -938,6 +957,12 @@ async def lifespan(
 
     # --- 初始化 source 系统配置模块 ---
     _initialize_source_system_config(
+        app,
+        db_connection,
+        tenant_workspace_pool,
+        multi_agent_manager,
+    )
+    await _initialize_workflow_config_store(
         app,
         db_connection,
         tenant_workspace_pool,

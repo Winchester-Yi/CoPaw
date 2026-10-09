@@ -5,9 +5,57 @@
 """
 
 import logging
+import json
+from datetime import date, datetime
 from typing import Any
 
+from .errors import MarketplaceDatabaseUnavailableError
+from .models import MarketItem
+
 logger = logging.getLogger(__name__)
+
+
+def _as_iso_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def _as_bbk_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def market_skill_from_row(row: dict[str, Any]) -> MarketItem:
+    """Convert one market-skill TDSQL row to the shared market model."""
+    return MarketItem(
+        item_id=str(row.get("item_id") or ""),
+        item_type="skill",
+        name=str(row.get("skill_name") or row.get("name") or ""),
+        skill_id=str(row.get("skill_id") or ""),
+        chinese_name=str(row.get("cn_name") or row.get("chinese_name") or ""),
+        description=str(row.get("description") or ""),
+        version=str(row.get("version") or "1.0.0"),
+        creator_id=str(row.get("creator_id") or ""),
+        creator_name=str(row.get("creator_name") or ""),
+        category_id=row.get("category_id"),
+        bbk_ids=_as_bbk_ids(row.get("bbk_ids")),
+        status=str(row.get("status") or "active"),
+        created_at=_as_iso_string(row.get("created_at")),
+        updated_at=_as_iso_string(row.get("updated_at")),
+        include_in_statistics=bool(row.get("include_in_statistics")),
+        content_path=str(row.get("content_path") or ""),
+    )
 
 
 class MarketSkillRegistry:
@@ -21,6 +69,76 @@ class MarketSkillRegistry:
         """检查数据库是否已连接."""
         return self.db.is_connected
 
+    async def list_market_skills(
+        self,
+        source_id: str,
+        user_bbk_id: str = "100",
+        category_id: int | None = None,
+        is_manager: bool = False,
+    ) -> list[MarketItem]:
+        """List active market skill metadata from TDSQL."""
+        if not self.is_connected():
+            raise MarketplaceDatabaseUnavailableError("Database unavailable")
+        clauses = [
+            "source_id = %s",
+            "COALESCE(is_unpublished, 0) = 0",
+            "COALESCE(is_deleted, 0) = 0",
+            "COALESCE(status, 'active') = 'active'",
+        ]
+        params: list[Any] = [source_id]
+        if category_id is not None:
+            clauses.append("category_id = %s")
+            params.append(category_id)
+        if not is_manager and user_bbk_id != "100":
+            clauses.append(
+                "("
+                "bbk_ids IS NULL OR JSON_LENGTH(bbk_ids) = 0 "
+                "OR JSON_CONTAINS(bbk_ids, JSON_QUOTE(%s)) "
+                "OR JSON_CONTAINS(bbk_ids, JSON_QUOTE('100'))"
+                ")",
+            )
+            params.append(user_bbk_id)
+        rows = await self.db.fetch_all(
+            """
+            SELECT item_id, skill_id, skill_name, cn_name, description,
+                   version, creator_id, creator_name, category_id, bbk_ids,
+                   status, created_at, updated_at, include_in_statistics,
+                   content_path
+            FROM swe_marketplace_skills
+            WHERE """
+            + " AND ".join(clauses)
+            + " ORDER BY COALESCE(updated_at, created_at) DESC, item_id",
+            tuple(params),
+        )
+        return [market_skill_from_row(dict(row)) for row in rows]
+
+    async def get_market_skill(
+        self,
+        source_id: str,
+        item_id: str,
+    ) -> MarketItem | None:
+        """Get one active market skill metadata row from TDSQL."""
+        if not self.is_connected():
+            raise MarketplaceDatabaseUnavailableError("Database unavailable")
+        row = await self.db.fetch_one(
+            """
+            SELECT item_id, skill_id, skill_name, cn_name, description,
+                   version, creator_id, creator_name, category_id, bbk_ids,
+                   status, created_at, updated_at, include_in_statistics,
+                   content_path
+            FROM swe_marketplace_skills
+            WHERE source_id = %s
+              AND item_id = %s
+              AND COALESCE(is_unpublished, 0) = 0
+              AND COALESCE(is_deleted, 0) = 0
+              AND COALESCE(status, 'active') = 'active'
+            """,
+            (source_id, item_id),
+        )
+        if not row or not row.get("item_id"):
+            return None
+        return market_skill_from_row(row)
+
     async def upsert_market_skill(
         self,
         source_id: str,
@@ -28,6 +146,12 @@ class MarketSkillRegistry:
         skill_id: str,
         skill_name: str,
         cn_name: str = "",
+        description: str = "",
+        version: str = "1.0.0",
+        status: str = "active",
+        category_id: int | None = None,
+        bbk_ids: list[str] | None = None,
+        content_path: str = "",
         include_in_statistics: bool = True,
         creator_id: str = "",
         creator_name: str = "",
@@ -77,7 +201,10 @@ class MarketSkillRegistry:
                     """
                     UPDATE swe_marketplace_skills
                     SET skill_id = %s, skill_name = %s, cn_name = %s,
+                        description = %s, version = %s, status = %s,
+                        category_id = %s, bbk_ids = %s, content_path = %s,
                         include_in_statistics = %s,
+                        is_unpublished = 0, is_deleted = 0,
                         updator_id = %s, updator_name = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
@@ -86,6 +213,12 @@ class MarketSkillRegistry:
                         skill_id,
                         skill_name,
                         cn_name,
+                        description,
+                        version,
+                        status,
+                        category_id,
+                        json.dumps(bbk_ids or []),
+                        content_path,
                         1 if include_in_statistics else 0,
                         updator_id,
                         updator_name,
@@ -104,9 +237,12 @@ class MarketSkillRegistry:
                     """
                     INSERT INTO swe_marketplace_skills
                         (source_id, item_id, skill_id, skill_name, cn_name,
-                         include_in_statistics, creator_id, creator_name,
-                         updator_id, updator_name)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         description, version, status, category_id, bbk_ids,
+                         content_path, include_in_statistics,
+                         is_unpublished, is_deleted,
+                         creator_id, creator_name, updator_id, updator_name)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, 0, 0, %s, %s, %s, %s)
                     """,
                     (
                         source_id,
@@ -114,6 +250,12 @@ class MarketSkillRegistry:
                         skill_id,
                         skill_name,
                         cn_name,
+                        description,
+                        version,
+                        status,
+                        category_id,
+                        json.dumps(bbk_ids or []),
+                        content_path,
                         1 if include_in_statistics else 0,
                         creator_id,
                         creator_name,
@@ -240,6 +382,8 @@ class MarketSkillRegistry:
                 FROM swe_marketplace_skills
                 WHERE source_id = %s
                   AND include_in_statistics = 1
+                  AND is_unpublished = 0
+                  AND is_deleted = 0
                   AND skill_id IS NOT NULL
                   AND skill_id != ''
                 GROUP BY skill_id

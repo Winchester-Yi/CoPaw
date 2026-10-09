@@ -356,6 +356,7 @@ describe("CronJobOverview summary cards", () => {
             totalTasks: "20",
             successCount: "18",
             readTasks: "11",
+            readRate: "61.11%",
             involvedManagers: "5",
             resultViewManagers: "4",
             resultViewManagerRate: "80.00%",
@@ -495,10 +496,12 @@ describe("CronJobOverview summary cards", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("客户查看率")).toBeInTheDocument();
     expect(screen.getAllByText("接触客户率").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("任务已读率").length).toBeGreaterThan(0);
+    expect(screen.getByText("61.11%")).toBeInTheDocument();
     expect(screen.getAllByText("80.00%").length).toBeGreaterThan(0);
     expect(screen.getAllByText("75.00%").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("66.67%").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("33.33%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("50.00%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("25.00%").length).toBeGreaterThan(0);
   });
 
   it("shows unified loading placeholders for overview cards, anomaly section, and skill-view ranking while the main query is pending", async () => {

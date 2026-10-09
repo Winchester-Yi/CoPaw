@@ -65,6 +65,28 @@ describe("CronJobFormBody", () => {
     expect(screen.queryByPlaceholderText("skill-a, skill_b")).toBeNull();
   });
 
+  it("shows the workflow type as a skill task without Agent input fields", () => {
+    const Wrapper = () => {
+      const [form] = Form.useForm();
+      return (
+        <Form form={form} initialValues={{ task_type: "workflow" }}>
+          <CronJobFormBody
+            form={form}
+            executionModelOptions={[]}
+            executionModelLoading={false}
+            tenantDefaultModelLabel="Tenant default"
+          />
+        </Form>
+      );
+    };
+
+    render(<Wrapper />);
+
+    expect(screen.getByText("技能任务")).toBeInTheDocument();
+    expect(screen.queryByLabelText("cronJobs.requestInput")).toBeNull();
+    expect(screen.queryByLabelText("cronJobs.text")).toBeNull();
+  });
+
   it("shows existing bound skill labels after options load asynchronously", async () => {
     const Wrapper = ({
       skillOptions,

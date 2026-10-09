@@ -33,6 +33,7 @@ from .dispatch_intent_service import (
     DEFAULT_DISPATCHED_STALE_SECONDS,
     get_cron_dispatch_intent_service,
 )
+from .workflow_binding import resolve_workflow_batch_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,7 @@ class SweCronCallbackClient:
         parent_scheduled_fire_at: str = "",
         provider_id: str = DEFAULT_PROVIDER_ID,
         model_id: str = DEFAULT_MODEL_ID,
+        workflow_config_version: int | None = None,
         scope_id: str = "",
         from_id: str = "",
         swe_server_domain: str = "",
@@ -220,6 +222,8 @@ class SweCronCallbackClient:
             payload["parent_scheduled_fire_at"] = parent_scheduled_fire_at
         if execution_key:
             payload["execution_key"] = execution_key
+        if workflow_config_version is not None:
+            payload["workflow_config_version"] = workflow_config_version
         logger.info(
             "scheduler_swe_callback_attempt batch_id=%s intent_id=%s "
             "job_id=%s attempt=%s provider_id=%s model_id=%s",
@@ -1028,6 +1032,15 @@ async def _prepare_parent_callback_context(
         callback_params,
     )
     children = await _fetch_batch_child_jobs(parent)
+    batch_jobs = [parent, *children]
+    if any(job.get("task_type") == "workflow" for job in batch_jobs):
+        await resolve_workflow_batch_jobs(
+            batch_jobs,
+            get_db_connection(),
+        )
+    if parent.get("task_type") == "workflow":
+        provider_id = str(parent["provider_id"])
+        model_id = str(parent["model_id"])
     logger.info(
         "scheduler_parent_jobs_fetched parent_job_id=%s child_count=%s",
         job_id,
@@ -1220,7 +1233,8 @@ async def _fetch_parent_job_for_callback(
         params.append(source_id)
     row = await db.fetch_one(
         f"""
-        SELECT id, tenant_id, source_id, cron_expr, timezone, meta, enabled, status, deleted_at
+        SELECT id, tenant_id, source_id, task_type, workflow_binding_id,
+               cron_expr, timezone, meta, enabled, status, deleted_at
         FROM swe_cron_jobs
         WHERE {' AND '.join(clauses)}
         LIMIT 1
@@ -1237,7 +1251,7 @@ async def _fetch_batch_child_jobs(
     parent_id = str(parent.get("id") or "")
     rows = await db.fetch_all(
         """
-        SELECT id, tenant_id, source_id, meta
+        SELECT id, tenant_id, source_id, task_type, workflow_binding_id, meta
         FROM swe_cron_jobs
         WHERE enabled = 1
           AND status = 'active'
@@ -1262,6 +1276,8 @@ async def _fetch_batch_child_jobs(
                 "source_id": str(
                     item.get("source_id") or parent.get("source_id") or "",
                 ),
+                "task_type": str(item.get("task_type") or ""),
+                "workflow_binding_id": item.get("workflow_binding_id"),
                 "agent_id": str(
                     meta.get("agent_id")
                     or parent.get("agent_id")
@@ -1338,7 +1354,7 @@ def _base_execution_payload(
     model_id: str,
     scheduled: str,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "tenant_id": str(job.get("tenant_id") or ""),
         "job_id": job_id,
         "source_id": str(job.get("source_id") or ""),
@@ -1347,6 +1363,11 @@ def _base_execution_payload(
         "model_id": model_id,
         "parent_scheduled_fire_at": scheduled,
     }
+    if job.get("task_type") == "workflow":
+        payload["workflow_config_version"] = int(
+            job["workflow_config_version"],
+        )
+    return payload
 
 
 def _apply_execution_transport(
@@ -1627,6 +1648,9 @@ def _build_execution_callback_kwargs(
     swe_server_domain = _first_truthy_text(
         payload.get(SWE_SERVER_DOMAIN_PAYLOAD_KEY),
     )
+    workflow_version = _positive_int(payload.get("workflow_config_version"))
+    if workflow_version:
+        callback_kwargs["workflow_config_version"] = workflow_version
     if swe_server_domain:
         callback_kwargs["swe_server_domain"] = swe_server_domain
     return callback_kwargs

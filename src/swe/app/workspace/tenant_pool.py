@@ -86,6 +86,7 @@ class TenantWorkspacePool:
         base_working_dir: Path,
         *,
         source_system_config_service: object | None = None,
+        workflow_config_store: object | None = None,
         continuous_governance_service: object | None = None,
         bootstrap_validation_ttl_seconds: float = (
             DEFAULT_BOOTSTRAP_VALIDATION_TTL_SECONDS
@@ -105,6 +106,7 @@ class TenantWorkspacePool:
         self._base_working_dir = Path(base_working_dir).expanduser().resolve()
         self._base_working_dir.mkdir(parents=True, exist_ok=True)
         self._source_system_config_service = source_system_config_service
+        self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
         self._bootstrap_validation_ttl_seconds = (
             bootstrap_validation_ttl_seconds
@@ -126,6 +128,10 @@ class TenantWorkspacePool:
     ) -> None:
         """Update the source config service for future workspaces."""
         self._source_system_config_service = source_system_config_service
+
+    def set_workflow_config_store(self, store: object | None) -> None:
+        """Supply published workflow bindings to future tenant workspaces."""
+        self._workflow_config_store = store
 
     @property
     def init_source_store(self):
@@ -904,6 +910,7 @@ class TenantWorkspacePool:
                 source_system_config_service=(
                     self._source_system_config_service
                 ),
+                workflow_config_store=self._workflow_config_store,
                 continuous_governance_service=(
                     self._continuous_governance_service
                 ),

@@ -3,11 +3,12 @@
  * 已按需求移除「业绩分析」入口与「今日完成率」圆环。
  * 任务导航组仅客户经理角色可见（原型 canAccessPage 门禁）。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import cx from "classnames";
 import styles from "../index.module.less";
-import { useCanAccess } from "../store";
+import { useCanAccess, useWealthStore } from "../store";
+import { buildTaskTree, todayKey } from "../utils";
 import { Icon } from "./Icon";
 
 export function Sidebar({
@@ -17,12 +18,26 @@ export function Sidebar({
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
+  const plans = useWealthStore((s) => s.plans);
+  const plansLoaded = useWealthStore((s) => s.plansLoaded);
+  const pendingCustomers = useWealthStore((s) => s.pendingCustomers);
+  const doneCustomers = useWealthStore((s) => s.doneCustomers);
+  const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
+  const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const hasTasks = useCanAccess("tasks");
   const [tasksOpen, setTasksOpen] = useState(true);
   const location = useLocation();
   const navigate = useNavigate();
 
   const current = location.pathname;
+  const todayTaskCount = buildTaskTree(plans, todayKey()).flatMap(
+    (group) => group.nodes,
+  ).length;
+
+  useEffect(() => {
+    if (!hasTasks || !plansLoaded) return;
+    void Promise.all([loadPendingCustomers(), loadDoneCustomers()]);
+  }, [hasTasks, plansLoaded, loadPendingCustomers, loadDoneCustomers]);
 
   const navClass = (path: string) =>
     cx(styles.nav, current === path && styles.active);
@@ -78,6 +93,9 @@ export function Sidebar({
                   >
                     <Icon name="list" />
                     <span className={styles.navLabel}>今日任务</span>
+                    {todayTaskCount > 0 && (
+                      <span className={styles.badge}>{todayTaskCount}</span>
+                    )}
                   </button>
                   <button
                     className={cx(
@@ -93,6 +111,11 @@ export function Sidebar({
                   >
                     <Icon name="user" />
                     <span className={styles.navLabel}>待触达客户</span>
+                    {pendingCustomers.length > 0 && (
+                      <span className={styles.badge}>
+                        {pendingCustomers.length}
+                      </span>
+                    )}
                   </button>
                   <button
                     className={cx(
@@ -106,6 +129,11 @@ export function Sidebar({
                   >
                     <Icon name="check" />
                     <span className={styles.navLabel}>已完成</span>
+                    {doneCustomers.length > 0 && (
+                      <span className={styles.badge}>
+                        {doneCustomers.length}
+                      </span>
+                    )}
                   </button>
                 </div>
               )}

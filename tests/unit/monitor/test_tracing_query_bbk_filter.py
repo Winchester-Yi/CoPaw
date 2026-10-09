@@ -7,6 +7,7 @@ Tests for:
 - _build_users_query subquery bbk_id filtering
 """
 
+import asyncio
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -175,6 +176,58 @@ class TestOverviewStatsDetail:
         service._get_top_tools.assert_awaited_once()
         service._get_top_skills.assert_awaited_once()
         service._get_mcp_stats.assert_awaited_once()
+
+
+class TestOverviewBranchBreakdownQueries:
+    """Tests for the branch breakdown queries used by overview cards."""
+
+    @pytest.mark.asyncio
+    async def test_only_queries_branch_metrics_rendered_by_overview_cards(
+        self,
+    ):
+        db = MagicMock()
+        db.fetch_all = AsyncMock(return_value=[])
+        service = TracingQueryService(db)
+
+        result = await service._get_branch_breakdown(
+            "source-a",
+            datetime(2026, 6, 1),
+            datetime(2026, 6, 2),
+        )
+
+        assert result == OverviewBranchBreakdown()
+        assert db.fetch_all.await_count == 5
+        queries = [call.args[0] for call in db.fetch_all.await_args_list]
+        assert not any("FROM swe_tracing_spans" in query for query in queries)
+        assert not any(
+            "COUNT(*) AS value" in query and "FROM swe_tracing_traces" in query
+            for query in queries
+        )
+
+    @pytest.mark.asyncio
+    async def test_branch_breakdown_queries_run_in_parallel(self):
+        db = MagicMock()
+        active_queries = 0
+        max_active_queries = 0
+
+        async def fetch_all(*_args):
+            nonlocal active_queries, max_active_queries
+            active_queries += 1
+            max_active_queries = max(max_active_queries, active_queries)
+            await asyncio.sleep(0)
+            active_queries -= 1
+            return []
+
+        db.fetch_all = AsyncMock(side_effect=fetch_all)
+        service = TracingQueryService(db)
+
+        await service._get_branch_breakdown(
+            "source-a",
+            datetime(2026, 6, 1),
+            datetime(2026, 6, 2),
+        )
+
+        assert max_active_queries == 5
 
 
 class TestBuildTracesWhereClause:

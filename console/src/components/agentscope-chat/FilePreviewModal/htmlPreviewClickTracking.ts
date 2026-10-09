@@ -1,5 +1,6 @@
 import type {
   HtmlTrackerPayloadType,
+  HtmlPreviewTemplateType,
   HtmlPreviewListSnapshotPayload,
 } from "@/api/types/htmlPreviewEvents";
 
@@ -16,7 +17,7 @@ export interface HtmlPreviewClickMetadata {
   resultId?: string | null;
   rootTemplateId?: string | null;
   rootResultId?: string | null;
-  templateType?: 'sub' | 'main' | null;
+  templateType?: HtmlPreviewTemplateType | null;
   pageSource?: string;
   platformSource?: string;
 }
@@ -324,7 +325,7 @@ export function buildHtmlPreviewClickPayload(
   if (!buttonId && !buttonName && !buttonText) {
     return null;
   }
-  const template_type = metadata.rootTemplateId ? 'sub' : 'main';
+  const template_type: HtmlPreviewTemplateType = metadata.rootTemplateId ? 'sub' : 'main';
   return {
     cron_task_id: metadata.cronTaskId || null,
     cron_task_name: metadata.cronTaskName || null,
@@ -554,7 +555,7 @@ export function buildHtmlPreviewExposurePayload(
   if (!metadata.sectionName) {
     return null;
   }
-  const template_type = metadata.rootTemplateId ? 'sub' : 'main';
+  const template_type: HtmlPreviewTemplateType = metadata.rootTemplateId ? 'sub' : 'main';
   return {
     cron_task_id: metadata.cronTaskId || null,
     cron_task_name: metadata.cronTaskName || null,
@@ -674,7 +675,7 @@ export function buildHtmlPreviewLoadPayload(
 ): HtmlTrackerPayloadType | null {
   const customerInfo = metadata.defaultCustomerInfo || null;
   const customerIdentity = getCustomerIdentity(customerInfo);
-  const template_type = metadata.rootTemplateId ? 'sub' : 'main';
+  const template_type: HtmlPreviewTemplateType = metadata.rootTemplateId ? 'sub' : 'main';
 
   return {
     cron_task_id: metadata.cronTaskId || null,

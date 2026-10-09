@@ -112,6 +112,12 @@ export interface SkillStat {
 }
 
 /** 客户 / 触达记录 */
+export interface CustomerField {
+  name: string;
+  label: string;
+  value: string;
+}
+
 export interface Customer {
   /** 页面内唯一标识：`${skillId}|${custUid}`（同一客户可出现在多个任务下） */
   id: string;
@@ -135,4 +141,6 @@ export interface Customer {
   bbkOrgId?: string;
   /** 客户详情跳转链接（外部 name-list 的 filename，可直接 iframe 渲染） */
   link?: string;
+  dynamicFields?: CustomerField[];
+  groupFields?: CustomerField[];
 }

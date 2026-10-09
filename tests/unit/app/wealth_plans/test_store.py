@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from swe.app.wealth_plans.models import (
+    PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_PUBLISHED,
     PUBLISH_STATUS_PUBLISHING,
     PlanSceneRecord,
@@ -22,16 +23,18 @@ def make_plan(
     sap_id: str = "zhangwl",
     targets: list[str] | None = None,
     bbk_id: str = "100",
+    source_label: str = "行长关注",
+    scene_id: str = "skill-wealth-insurance-1",
 ) -> WealthPlanRecord:
     return WealthPlanRecord(
         id=plan_id,
         sap_id=sap_id,
         bbk_id=bbk_id,
         name="九月重点客户经营计划",
-        source_label="行长关注",
+        source_label=source_label,
         scenes=[
             PlanSceneRecord(
-                scene_id="skill-wealth-insurance-1",
+                scene_id=scene_id,
                 scene_name="保障潜客经营",
                 category="insurance",
                 cron_expr="0 9 * * *",
@@ -98,6 +101,128 @@ async def test_list_for_viewer_scopes_personal_roles_by_branch_and_relation() ->
     assert unknown_outsider_view == []
     assert {r.id for r in other_branch_view} == {"plan-3"}
     assert no_bbk_view == []
+
+
+@pytest.mark.asyncio
+async def test_find_scene_conflicts_reserves_management_and_own_plans() -> (
+    None
+):
+    store = WealthPlanStore()
+    plans = [
+        make_plan("president", sap_id="president", scene_id="scene-president"),
+        make_plan(
+            "middle",
+            sap_id="middle",
+            source_label="分行关注",
+            scene_id="scene-middle",
+        ),
+        make_plan(
+            "self",
+            sap_id="rm-1",
+            source_label="我的关注",
+            scene_id="scene-self",
+        ),
+        make_plan(
+            "other-rm",
+            sap_id="rm-2",
+            source_label="我的关注",
+            scene_id="scene-other-rm",
+        ),
+        make_plan(
+            "other-branch",
+            sap_id="president-2",
+            bbk_id="200",
+            scene_id="scene-other-branch",
+        ),
+        make_plan(
+            "failed",
+            sap_id="president-3",
+            scene_id="scene-failed",
+        ),
+    ]
+    for plan in plans:
+        await store.create(plan)
+    await store.set_publish_status("failed", PUBLISH_STATUS_FAILED)
+
+    conflicts = await store.find_scene_conflicts(
+        "rm",
+        "rm-1",
+        "100",
+        {
+            "scene-president",
+            "scene-middle",
+            "scene-self",
+            "scene-other-rm",
+            "scene-other-branch",
+            "scene-failed",
+        },
+    )
+
+    assert conflicts == {
+        "scene-president": "九月重点客户经营计划",
+        "scene-middle": "九月重点客户经营计划",
+        "scene-self": "九月重点客户经营计划",
+    }
+
+
+@pytest.mark.asyncio
+async def test_find_scene_conflicts_excludes_plan_being_edited() -> None:
+    store = WealthPlanStore()
+    await store.create(
+        make_plan(
+            "self",
+            sap_id="rm-1",
+            source_label="我的关注",
+            scene_id="scene-self",
+        ),
+    )
+
+    conflicts = await store.find_scene_conflicts(
+        "rm",
+        "rm-1",
+        "100",
+        {"scene-self"},
+        exclude_plan_id="self",
+    )
+
+    assert conflicts == {}
+
+
+@pytest.mark.asyncio
+async def test_find_scene_conflicts_database_query_scopes_reservations() -> (
+    None
+):
+    db = AsyncMock()
+    db.fetch_all.return_value = [
+        {"scene_id": "scene-1", "plan_name": "行长重点规划"},
+    ]
+    store = WealthPlanStore(db)
+
+    conflicts = await store.find_scene_conflicts(
+        "rm",
+        "rm-1",
+        "100",
+        {"scene-1"},
+        exclude_plan_id="plan-self",
+    )
+
+    assert conflicts == {"scene-1": "行长重点规划"}
+    sql, params = db.fetch_all.await_args.args
+    normalized_sql = " ".join(sql.split())
+    assert "p.bbk_id = %s" in normalized_sql
+    assert "p.status <> %s" in normalized_sql
+    assert "p.sap_id = %s OR p.source_label IN (%s, %s)" in normalized_sql
+    assert "s.scene_id IN (%s)" in normalized_sql
+    assert "p.id <> %s" in normalized_sql
+    assert params == (
+        "100",
+        PUBLISH_STATUS_FAILED,
+        "rm-1",
+        "分行关注",
+        "行长关注",
+        "scene-1",
+        "plan-self",
+    )
 
 
 @pytest.mark.asyncio

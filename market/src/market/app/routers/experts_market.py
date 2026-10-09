@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Request, status
@@ -23,9 +24,11 @@ from ...marketplace.service import (
     ExpertNameConflictError,
 )
 from ...security import SkillScanError
+from ...utils.logging_utils import log_params
 from ..deps import decode_user_name, require_source_id
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _require_manager(x_manager: Optional[str]) -> None:
@@ -54,6 +57,18 @@ async def publish_expert(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        agent_id=req.agent_id,
+        definition_id=req.definition_id,
+        category_id=req.category_id,
+        bbk_ids=req.bbk_ids,
+        overwrite=req.overwrite,
+    )
+
     svc = request.app.state.marketplace
     try:
         item, version_unchanged = await svc.publish_expert_from_profile(
@@ -114,6 +129,15 @@ async def restore_expert_version(
     """Restore a historical expert version."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        version_id=version_id,
+    )
+
     svc = request.app.state.marketplace
     try:
         item = await svc.restore_expert_version(
@@ -144,6 +168,9 @@ async def unpublish_expert(
     """Unpublish a community expert."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(logger, request.method, request.url.path, item_id=item_id)
+
     svc = request.app.state.marketplace
     success = await svc.unpublish_expert(
         source_id,
@@ -171,6 +198,15 @@ async def install_expert(
             status_code=400,
             detail="X-User-Id header is required",
         )
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        agent_id=req.agent_id,
+    )
+
     try:
         return await request.app.state.marketplace.install_expert(
             source_id,
@@ -198,6 +234,16 @@ async def distribute_expert(
     """管理员静默分发并覆盖已接收专家。"""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        target_tenant_ids=req.target_tenant_ids,
+        overwrite=req.overwrite,
+    )
+
     try:
         return await request.app.state.marketplace.distribute_expert(
             source_id,
@@ -246,6 +292,15 @@ async def recall_expert(
     """管理员按社区 item_id 撤回已接收副本。"""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        item_id=item_id,
+        target_user_ids=req.target_user_ids,
+    )
+
     try:
         return await request.app.state.marketplace.recall_expert(
             source_id,

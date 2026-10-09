@@ -50,10 +50,12 @@ from ...marketplace.service import (
     load_index,
     save_index,
 )
+from ...marketplace.errors import MarketplaceMetadataSyncError
 from ...marketplace.version_service import SkillVersionService
 from ...security import SkillScanError
 from ..async_tasks import AsyncTaskStore
 from ..deps import decode_user_name, require_source_id
+from ...utils.logging_utils import log_params
 from .skills_browse import (
     _decode_zip_filename,
     _extract_zip_skills,
@@ -398,6 +400,11 @@ async def _run_skill_distribution_task(
                 done_count=0,
                 failed_count=len(target_user_ids),
                 error_message=str(exc),
+                result={
+                    "item_id": item_id,
+                    "status": "failed",
+                    "error": str(exc),
+                },
             )
         except Exception:
             logger.warning(
@@ -776,12 +783,11 @@ async def _sync_skill_to_market_db(
     user_name: str,
 ) -> None:
     """同步技能到 swe_marketplace_skills 数据库表."""
-    if not (item_id and svc.db and svc.db.is_connected):
+    if not item_id:
         return
-    from market.marketplace.market_skill_registry import MarketSkillRegistry
-
-    registry = MarketSkillRegistry(svc.db)
-    await registry.upsert_market_skill(
+    if not (svc.db and svc.db.is_connected):
+        raise MarketplaceMetadataSyncError("Database unavailable")
+    success = await svc.market_skill_registry.upsert_market_skill(
         source_id=source_id,
         item_id=item_id,
         skill_id=skill_id,
@@ -792,6 +798,111 @@ async def _sync_skill_to_market_db(
         creator_name=user_name,
         updator_id=x_user_id,
         updator_name=user_name,
+    )
+    if not success:
+        raise MarketplaceMetadataSyncError(
+            "Failed to synchronize market skill metadata",
+        )
+
+
+async def _process_skill_upload_batch(
+    found_skills,
+    svc,
+    source_id: str,
+    user_id: str,
+    user_name: str,
+    category_id: Optional[int],
+    overwrite: bool,
+    cn_name: str,
+    skill_id: str,
+    parsed_bbk_ids: list[str],
+    include_in_statistics: bool,
+) -> tuple[
+    list[str],
+    list[dict],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    bool,
+    Optional[str],
+]:
+    imported: list[str] = []
+    conflicts: list[dict] = []
+    parsed_name = None
+    parsed_description = None
+    parsed_cn_name = None
+    has_unchanged = False
+    final_skill_id = None
+
+    for skill_dir, skill_name in found_skills:
+        (
+            imported_name,
+            conflict,
+            _first_name,
+            resolved_cn_name,
+            version_unchanged,
+            item_id,
+            final_skill_id,
+        ) = await asyncio.to_thread(
+            _process_skill_upload_single,
+            skill_dir,
+            skill_name,
+            svc,
+            source_id,
+            user_id,
+            user_name,
+            category_id,
+            overwrite,
+            cn_name,
+            skill_id,
+            parsed_bbk_ids,
+            include_in_statistics,
+        )
+
+        if conflict:
+            conflicts.append(conflict)
+            continue
+
+        if version_unchanged:
+            has_unchanged = True
+
+        if imported_name:
+            imported.append(imported_name)
+            parsed_name, parsed_description, parsed_cn_name = (
+                await _process_published_skill_record(
+                    skill_dir,
+                    skill_name,
+                    imported_name,
+                    resolved_cn_name,
+                    svc,
+                    source_id,
+                    user_id,
+                    user_name,
+                    parsed_name,
+                    parsed_description,
+                    parsed_cn_name,
+                )
+            )
+            await _sync_skill_to_market_db(
+                svc=svc,
+                source_id=source_id,
+                item_id=item_id,
+                skill_id=skill_id,
+                imported_name=imported_name,
+                resolved_cn_name=resolved_cn_name,
+                include_in_statistics=include_in_statistics,
+                x_user_id=user_id,
+                user_name=user_name,
+            )
+
+    return (
+        imported,
+        conflicts,
+        parsed_name,
+        parsed_description,
+        parsed_cn_name,
+        has_unchanged,
+        final_skill_id,
     )
 
 
@@ -834,7 +945,22 @@ async def publish_skill_upload(
         )
 
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     user_name = decode_user_name(x_user_name) or x_user_id
+
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        category_id=category_id,
+        overwrite=overwrite,
+        cn_name=cn_name,
+        skill_id=skill_id,
+        bbk_ids=bbk_ids,
+        include_in_statistics=include_in_statistics,
+        file_size=file.size,
+    )
 
     # 解析 bbk_ids（逗号分隔）
     parsed_bbk_ids = []
@@ -866,76 +992,30 @@ async def publish_skill_upload(
             shutil.rmtree(tmp_dir, ignore_errors=True)
         return UploadSkillResponse(imported=[], count=0, enabled=True)
 
-    imported = []
-    conflicts = []
-    parsed_name = None
-    parsed_description = None
-    parsed_cn_name = None
-    has_unchanged = False
-
     try:
-        for skill_dir, skill_name in found_skills:
-            (
-                imported_name,
-                conflict,
-                first_name,
-                resolved_cn_name,
-                version_unchanged,
-                item_id,
-                final_skill_id,
-            ) = await asyncio.to_thread(
-                _process_skill_upload_single,
-                skill_dir,
-                skill_name,
-                svc,
-                source_id,
-                x_user_id,
-                user_name,
-                category_id,
-                overwrite,
-                cn_name,
-                skill_id,  # 传递 parse-zip 生成的 skill_id
-                parsed_bbk_ids,  # 传递所属分行
-                include_in_statistics,  # 传递是否纳入统计
-            )
-
-            if conflict:
-                conflicts.append(conflict)
-                continue
-
-            if version_unchanged:
-                has_unchanged = True
-
-            if imported_name:
-                imported.append(imported_name)
-                parsed_name, parsed_description, parsed_cn_name = (
-                    await _process_published_skill_record(
-                        skill_dir,
-                        skill_name,
-                        imported_name,
-                        resolved_cn_name,
-                        svc,
-                        source_id,
-                        x_user_id,
-                        user_name,
-                        parsed_name,
-                        parsed_description,
-                        parsed_cn_name,
-                    )
-                )
-
-                # 同步写入 swe_marketplace_skills 表
-                await _sync_skill_to_market_db(
-                    svc=svc,
-                    source_id=source_id,
-                    item_id=item_id,
-                    skill_id=skill_id,
-                    imported_name=imported_name,
-                    resolved_cn_name=resolved_cn_name,
-                    include_in_statistics=include_in_statistics,
-                    x_user_id=x_user_id,
-                    user_name=user_name,
-                )
+        (
+            imported,
+            conflicts,
+            parsed_name,
+            parsed_description,
+            parsed_cn_name,
+            has_unchanged,
+            final_skill_id,
+        ) = await _process_skill_upload_batch(
+            found_skills,
+            svc,
+            source_id,
+            x_user_id,
+            user_name,
+            category_id,
+            overwrite,
+            cn_name,
+            skill_id,
+            parsed_bbk_ids,
+            include_in_statistics,
+        )
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -972,6 +1052,8 @@ async def publish_skill(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     operator_name = ""
     if x_user_name:
         from urllib.parse import unquote
@@ -1010,6 +1092,8 @@ async def publish_skill(
                 "hint": "本次同步内容与已有版本撞车，请稍后重试或联系管理员",
             },
         ) from exc
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return MarketSkillResponse(
         item_id=item.item_id,
         name=item.name,
@@ -1793,22 +1877,25 @@ async def get_skill_distributions(
 
 
 class _UpdateSkillRequest(BaseModel):
-    """更新技能中文名请求体."""
+    """更新技能市场元数据请求体."""
 
     skill_id: str
     chinese_name: str
+    category_id: int | None = None
+    bbk_ids: list[str] | None = None
     sync_to_users: bool = False
     target_user_ids: list[str] = Field(default_factory=list)
 
 
 class _UpdateSkillResponse(BaseModel):
-    """更新技能中文名响应体."""
+    """更新技能市场元数据响应体."""
 
     success: bool
     market_updated: bool
     synced_users: int
     skipped_users: int
     errors: list[dict]
+    synced_category_users: int = 0
 
 
 @router.patch("/market/skills/{item_id}")
@@ -1819,7 +1906,7 @@ async def update_skill_cn_name(
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
 ):
-    """更新市场技能中文名，可选同步用户空间."""
+    """更新市场技能元数据，可选同步用户空间名称和分类."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
@@ -1833,15 +1920,24 @@ async def update_skill_cn_name(
     if item is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    result = await svc.update_skill_cn_name(
-        source_id=source_id,
-        item_id=item_id,
-        skill_id=req.skill_id,
-        skill_name=item.name,
-        chinese_name=req.chinese_name,
-        sync_to_users=req.sync_to_users,
-        target_user_ids=req.target_user_ids,
-    )
+    try:
+        result = await svc.update_skill_metadata(
+            source_id=source_id,
+            item_id=item_id,
+            skill_id=req.skill_id,
+            skill_name=item.name,
+            chinese_name=req.chinese_name,
+            category_id=(
+                req.category_id
+                if req.category_id is not None
+                else item.category_id
+            ),
+            bbk_ids=req.bbk_ids if req.bbk_ids is not None else item.bbk_ids,
+            sync_to_users=req.sync_to_users,
+            target_user_ids=req.target_user_ids,
+        )
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return _UpdateSkillResponse(**result)
 
@@ -2222,6 +2318,223 @@ async def init_market_skills(
     )
 
     return results
+
+
+class _InitMissingSkillFieldsRequest(BaseModel):
+    """初始化缺失分类和分行请求参数."""
+
+    source_id: str = Field(..., description="来源ID")
+    category_id: int = Field(..., description="要设置的分类ID")
+    bbk_ids: list[str] = Field(
+        default_factory=list,
+        description="要设置的分行ID列表，默认为 ['100']",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="试运行模式，仅预览不实际写入",
+    )
+
+
+class _SkillMissingFieldsItem(BaseModel):
+    """缺失字段的技能条目."""
+
+    item_id: str
+    name: str
+    chinese_name: str
+    category_id: int | None
+    bbk_ids: list[str]
+    missing_category: bool
+    missing_bbk: bool
+
+
+class _InitMissingSkillFieldsResult(BaseModel):
+    """初始化缺失分类和分行返回结果."""
+
+    dry_run: bool
+    source_id: str
+    category_id: int
+    bbk_ids: list[str]
+    total_skills: int
+    missing_category_count: int
+    missing_bbk_count: int
+    skills: list[_SkillMissingFieldsItem]
+
+
+def _collect_missing_skill_fields(
+    items: list[MarketItem],
+) -> tuple[list[_SkillMissingFieldsItem], int, int]:
+    skills: list[_SkillMissingFieldsItem] = []
+    missing_category_count = 0
+    missing_bbk_count = 0
+    for item in items:
+        if item.item_type != "skill":
+            continue
+        missing_category = item.category_id is None
+        missing_bbk = not item.bbk_ids
+        if not (missing_category or missing_bbk):
+            continue
+        skills.append(
+            _SkillMissingFieldsItem(
+                item_id=item.item_id,
+                name=item.name,
+                chinese_name=item.chinese_name,
+                category_id=item.category_id,
+                bbk_ids=item.bbk_ids,
+                missing_category=missing_category,
+                missing_bbk=missing_bbk,
+            ),
+        )
+        if missing_category:
+            missing_category_count += 1
+        if missing_bbk:
+            missing_bbk_count += 1
+    return skills, missing_category_count, missing_bbk_count
+
+
+def _apply_missing_skill_fields(
+    items: list[MarketItem],
+    category_id: int,
+    bbk_ids: list[str],
+) -> list[MarketItem]:
+    changed_items: list[MarketItem] = []
+    for item in items:
+        if item.item_type != "skill":
+            continue
+        changed = False
+        if item.category_id is None:
+            item.category_id = category_id
+            changed = True
+        if not item.bbk_ids:
+            item.bbk_ids = bbk_ids.copy()
+            changed = True
+        if changed:
+            item.updated_at = datetime.now(timezone.utc).isoformat()
+            changed_items.append(item)
+    return changed_items
+
+
+async def _sync_missing_skill_fields_to_market_db(
+    svc,
+    source_id: str,
+    changed_items: list[MarketItem],
+) -> None:
+    if not changed_items:
+        return
+    if not svc.db.is_connected:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        async with svc.db.transaction():
+            for item in changed_items:
+                success = await svc.market_skill_registry.upsert_market_skill(
+                    source_id=source_id,
+                    item_id=item.item_id,
+                    skill_id=item.skill_id,
+                    skill_name=item.name,
+                    cn_name=item.chinese_name,
+                    description=item.description,
+                    version=item.version,
+                    status=item.status,
+                    category_id=item.category_id,
+                    bbk_ids=item.bbk_ids,
+                    content_path=str(
+                        svc.marketplace_root
+                        / source_id
+                        / "skills"
+                        / item.item_id,
+                    ),
+                    include_in_statistics=item.include_in_statistics,
+                    creator_id=item.creator_id,
+                    creator_name=item.creator_name,
+                )
+                if not success:
+                    raise MarketplaceMetadataSyncError(
+                        "Failed to synchronize market skill metadata",
+                    )
+    except MarketplaceMetadataSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to synchronize market skill metadata",
+        ) from exc
+
+
+@router.post(
+    "/market/skills/init-missing-fields",
+    response_model=_InitMissingSkillFieldsResult,
+)
+async def init_missing_skill_fields(
+    request: Request,
+    payload: _InitMissingSkillFieldsRequest,
+):
+    """初始化缺失分类和分行的技能.
+
+    扫描 index.json 中 category_id 为空或 bbk_ids 为空的技能，
+    预览或更新这些技能的 category_id 和 bbk_ids。
+
+    Args:
+        payload.source_id: 来源ID
+        payload.category_id: 要设置的分类ID
+        payload.bbk_ids: 要设置的分行ID列表，默认为 ["100"]
+        payload.dry_run: 试运行模式，仅预览不实际写入
+    """
+    log_params(
+        logger,
+        request.method,
+        request.url.path,
+        source_id=payload.source_id,
+        category_id=payload.category_id,
+        bbk_ids=payload.bbk_ids,
+        dry_run=payload.dry_run,
+    )
+
+    svc = request.app.state.marketplace
+    items = load_index(svc.marketplace_root, payload.source_id)
+
+    # 默认分行为 ["100"]（总行）
+    bbk_ids_to_set = payload.bbk_ids if payload.bbk_ids else ["100"]
+
+    skills, missing_category_count, missing_bbk_count = (
+        _collect_missing_skill_fields(items)
+    )
+
+    # 非 dry_run 模式：实际更新
+    if not payload.dry_run:
+        changed_items = _apply_missing_skill_fields(
+            items,
+            payload.category_id,
+            bbk_ids_to_set,
+        )
+        if changed_items:
+            await _sync_missing_skill_fields_to_market_db(
+                svc,
+                payload.source_id,
+                changed_items,
+            )
+            save_index(svc.marketplace_root, payload.source_id, items)
+
+    logger.info(
+        "初始化缺失字段完成: dry_run=%s, source_id=%s, category_id=%s, "
+        "bbk_ids=%s, total_skills=%d, missing_category=%d, missing_bbk=%d",
+        payload.dry_run,
+        payload.source_id,
+        payload.category_id,
+        bbk_ids_to_set,
+        len(skills),
+        missing_category_count,
+        missing_bbk_count,
+    )
+
+    return _InitMissingSkillFieldsResult(
+        dry_run=payload.dry_run,
+        source_id=payload.source_id,
+        category_id=payload.category_id,
+        bbk_ids=bbk_ids_to_set,
+        total_skills=len(skills),
+        missing_category_count=missing_category_count,
+        missing_bbk_count=missing_bbk_count,
+        skills=skills,
+    )
 
 
 @router.post(

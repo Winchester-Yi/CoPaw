@@ -107,17 +107,146 @@ export interface IframeReadyResponse {
 }
 
 /**
+ * 验证请求消息
+ * 父窗口查询子窗口的当前状态
+ */
+export interface IframeVerifyRequest {
+  type: "VERIFY_REQUEST";
+}
+
+/**
+ * 短时效下载 URL 请求消息（父 → 子）
+ *
+ * 方案2：父页面仅触发下载动作，无需拿到整份 HTML。
+ * 父页面点击下载后发送该请求，子页面 ReportView 生成 blob URL
+ * 并以 REPORT_URL 消息回传。
+ */
+export interface IframeReportUrlRequest {
+  type: "REPORT_URL_REQUEST";
+  /** 请求发起时间，子页面可用于判重/日志 */
+  timestamp: number;
+}
+
+/**
+ * ReportView 侧下载请求消息（父 → 子）
+ *
+ * 方案3：父页面仅触发下载动作，由 ReportView 自行执行下载。
+ * 父页面点击下载后发送该请求，子页面复用 handleDownload 下载，
+ * 不向父页面外发任何报告内容。
+ */
+export interface IframeReportDownloadRequest {
+  type: "REPORT_DOWNLOAD_REQUEST";
+  /** 请求发起时间，子页面可用于判重/日志 */
+  timestamp: number;
+}
+
+/**
+ * 验证响应消息
+ * 子窗口响应父窗口的状态查询
+ */
+export interface IframeVerifyResponse {
+  type: "VERIFY_RESPONSE";
+  context: IframeContext;
+}
+
+/**
+ * 报告原始 HTML 透传消息（子 → 父）
+ *
+ * 触发场景：URL 查询参数携带报告下载标识（如 needReportHtml=Y）时，
+ * 在 renderedHtmlContent 生成完成后，将整份渲染后的 HTML 透传给父页面，
+ * 供父页面自行执行下载或二次处理。
+ *
+ * 说明：透传由 sendReportMessageToParent 统一发送，仅做消息类型限定，
+ * 目标源复用 parentOrigin；透传时机/对象由父页面配合管控。
+ */
+export interface IframeReportHtmlMessage {
+  type: "REPORT_HTML";
+  data: {
+    /** 渲染后的完整报告 HTML 内容 */
+    html: string;
+    /** 建议下载文件名（含 .html 后缀） */
+    fileName: string;
+    /** 报告相关唯一标识（当前解析的 resultId，可为空） */
+    resultId?: string | null;
+    /** 模板 ID（当前解析的 templateId，可为空） */
+    templateId?: string | null;
+    /** 透传时间戳，便于父页面判重与日志 */
+    timestamp: number;
+  };
+}
+
+/**
+ * 报告短时效下载 URL 透传消息（子 → 父）
+ *
+ * 触发场景：父页面仅需"触发下载动作"，不需要拿到整份 HTML 全文。
+ * ReportView 负责生成临时下载 URL（blob URL），仅将 URL 透传给父页面，
+ * 父页面通过 <a href download> 或 window.open 发起下载，报告内容不随 message 外发。
+ */
+export interface IframeReportUrlMessage {
+  type: "REPORT_URL";
+  data: {
+    /** 短时效下载 URL（blob URL，父页面需在有效期内下载） */
+    url: string;
+    /** 建议下载文件名（含 .html 后缀） */
+    fileName: string;
+    /** 报告相关唯一标识（当前解析的 resultId，可为空） */
+    resultId?: string | null;
+    /** 透传时间戳 */
+    timestamp: number;
+  };
+}
+
+/**
+ * 报告内容加载完成通知消息（子 → 父）
+ *
+ * 触发场景：renderedHtmlContent 通过 srcDoc 注入的 iframe 加载完成
+ * （iframe onLoad 触发）后，ReportView 主动向父页面发送 REPORT_READY，
+ * 告知父页面报告内容已在页面内渲染完成。
+ *
+ * 用途：父页面可据此感知"报告内容已就绪"，再决定执行下载、触发
+ * REPORT_URL_REQUEST / REPORT_DOWNLOAD_REQUEST 或隐藏加载态。
+ * 通知本身不携带报告内容，父页面应校验 event.origin 后按需处理。
+ */
+export interface IframeReportReadyMessage {
+  type: "REPORT_READY";
+  data: {
+    /** 报告相关唯一标识（当前解析的 resultId，可为空） */
+    resultId?: string | null;
+    /** 模板 ID（当前解析的 templateId，可为空） */
+    templateId?: string | null;
+    /** 通知时间戳，便于父页面判重与日志 */
+    timestamp: number;
+  };
+}
+
+/**
  * 入站消息类型（父 → 子）
+ *
+ * 说明：REPORT_URL_REQUEST / REPORT_DOWNLOAD_REQUEST 为方案2/方案3的
+ * 父页面下载触发请求，子页面在 frameMessage 监听器中处理。
  */
 export type IframeIncomingMessage =
   | IframeUserDataMessage
   | IframeHeartbeatMessage
-  | IframeReadyRequest;
+  | IframeReadyRequest
+  | IframeVerifyRequest
+  | IframeReportUrlRequest
+  | IframeReportDownloadRequest;
 
 /**
  * 出站消息类型（子 → 父）
+ *
+ * 说明：报告相关消息（REPORT_HTML / REPORT_URL / REPORT_READY）经
+ * sendReportMessageToParent 统一发送，目标源复用 parentOrigin，仅做消息
+ * 类型限定；透传时机/对象由父页面配合管控，避免向非预期父页面外呼敏感
+ * 报告内容。
  */
-export type IframeOutgoingMessage = IframeReadyResponse;
+export type IframeOutgoingMessage =
+  | IframeReadyResponse
+  | IframeVerifyResponse
+  | IframeReportHtmlMessage
+  | IframeReportUrlMessage
+  | IframeReportReadyMessage;
 
 /**
  * 存储从父窗口接收的参数

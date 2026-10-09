@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -12,10 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, NoReturn, Optional
 
-import httpx
 from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
 
 from .auth_state import resolve_auth_token_for_execution
+from .execution_result import ExecutionResult
 from .model_slot_context import bind_model_slot_override
 from .models import CronJobSpec
 from ..b3_headers import (
@@ -42,6 +41,9 @@ from ...providers.models import ModelSlotConfig
 from ...providers.provider_manager import ProviderManager
 from ...tracing import has_trace_manager, get_trace_manager
 from ...tracing.models import TraceStatus
+from ...tracing.output_index import (
+    index_trace_output as _index_model_output_to_monitor,
+)
 from ..runner.model_call_error_detail import redact_sensitive_fragments
 
 logger = logging.getLogger(__name__)
@@ -120,21 +122,6 @@ async def resolve_user_identity(
         headers=headers,
         allow_remote_lookup=allow_remote_lookup,
     )
-
-
-@dataclass
-class ExecutionResult:
-    """执行结果，包含 trace_id 和输出预览。
-
-    用于将执行过程中的关键信息传递给调用方。
-    """
-
-    trace_id: str = ""
-    output_preview: str = ""
-    input_snapshot: Optional[Dict[str, Any]] = None  # 执行时的输入快照
-    executor_leader: str = ""  # 执行者 leader ID
-    execution_meta: Optional[Dict[str, Any]] = None
-    status: str = "success"
 
 
 @dataclass
@@ -306,59 +293,6 @@ class _AgentStreamEventFlags:
     @property
     def terminates_stream(self) -> bool:
         return self.completed_response or self.requires_terminal_notification
-
-
-async def _index_model_output_to_monitor(
-    trace_id: str,
-    model_output: str,
-) -> None:
-    """通过 Monitor API 写入 model_output 到 ES.
-
-    Args:
-        trace_id: 追踪 ID
-        model_output: 模型输出文本
-    """
-    monitor_url = os.environ.get(
-        "SWE_MONITOR_API_URL",
-        "http://127.0.0.1:9090",
-    )
-    url = f"{monitor_url}/monitor/tracing/model-output"
-
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                url,
-                json={
-                    "trace_id": trace_id,
-                    "model_output": model_output,
-                },
-            )
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "success":
-                    logger.info(
-                        "Model output indexed via Monitor API: trace_id=%s",
-                        trace_id,
-                    )
-                else:
-                    logger.info(
-                        "Model output write skipped: trace_id=%s, reason=%s",
-                        trace_id,
-                        result.get("reason", "unknown"),
-                    )
-            else:
-                logger.warning(
-                    "Monitor API returned %s: trace_id=%s",
-                    response.status_code,
-                    trace_id,
-                )
-    except httpx.TimeoutException:
-        logger.warning("Monitor API timeout: trace_id=%s", trace_id)
-    except Exception as e:
-        logger.warning(
-            "Failed to call Monitor API for model_output: %s",
-            e,
-        )
 
 
 class CronExecutor:

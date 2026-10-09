@@ -17,7 +17,7 @@ def _make_app(tmp_path):
     from market.marketplace.service import MarketplaceService
 
     mock_db = AsyncMock(spec=DatabaseConnection)
-    mock_db.is_connected = False
+    mock_db.is_connected = True
     mock_db.execute = AsyncMock(return_value=1)
     mock_db.fetch_one = AsyncMock(return_value=None)
     mock_db.fetch_all = AsyncMock(return_value=[])
@@ -27,6 +27,7 @@ def _make_app(tmp_path):
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
     )
+    svc.mcp_market_registry.upsert_market_mcp = AsyncMock(return_value=True)
     app = FastAPI()
     app.state.marketplace = svc
     app.include_router(api_router, prefix="/api")
@@ -53,7 +54,7 @@ async def test_list_mcp_versions_returns_versions(tmp_path):
 
     app = _make_app(tmp_path)
     svc = app.state.marketplace
-    item = await svc.publish_mcp(
+    item, _ = await svc.publish_mcp(
         "src1",
         PublishMCPRequest(
             client_key="m1",
@@ -86,7 +87,7 @@ async def test_switch_mcp_version_updates_market_item(tmp_path):
     app = _make_app(tmp_path)
     svc = app.state.marketplace
 
-    item = await svc.publish_mcp(
+    item, _ = await svc.publish_mcp(
         "src1",
         PublishMCPRequest(
             client_key="m1",
@@ -108,6 +109,7 @@ async def test_switch_mcp_version_updates_market_item(tmp_path):
             creator_name="Bob",
             config={"name": "demo", "transport": "stdio", "command": "/b"},
             version="2.0.0",
+            overwrite=True,
         ),
     )
 
@@ -134,7 +136,7 @@ async def test_delete_current_mcp_version_returns_400(tmp_path):
 
     app = _make_app(tmp_path)
     svc = app.state.marketplace
-    item = await svc.publish_mcp(
+    item, _ = await svc.publish_mcp(
         "src1",
         PublishMCPRequest(
             client_key="m1",

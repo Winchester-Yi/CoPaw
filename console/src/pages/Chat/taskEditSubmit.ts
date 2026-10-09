@@ -81,6 +81,9 @@ export function prepareCronTaskEditValues(
   values: CronTaskEditFormValues,
 ): Parameters<typeof buildCronJobSubmitPayload>[0] {
   const { taskContentText, ...restValues } = values;
+  if (restValues.task_type === "workflow") {
+    return restValues;
+  }
   if (typeof taskContentText !== "string") {
     return restValues;
   }

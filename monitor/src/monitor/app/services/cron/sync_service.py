@@ -377,6 +377,8 @@ class SyncService:
                     job_origin = %s,
                     subscription_key = %s,
                     skill_ids = %s,
+                    workflow_binding_id = %s,
+                    plan_id = %s,
                     broadcast_source_job_id = %s,
                     meta = %s,
                     status = %s,
@@ -409,6 +411,8 @@ class SyncService:
                     request.job_origin,
                     request.subscription_key,
                     request.skill_ids,
+                    request.workflow_binding_id,
+                    request.plan_id,
                     broadcast_source_job_id,
                     request.meta,
                     request.status,
@@ -434,10 +438,11 @@ class SyncService:
                     text_content, request_input,
                     creator_user_id, task_chat_id, task_session_id,
                     job_origin, subscription_key, skill_ids,
+                    workflow_binding_id, plan_id,
                     broadcast_source_job_id, meta,
                     status, pause_reason, created_at, updated_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -465,6 +470,8 @@ class SyncService:
                     request.job_origin,
                     request.subscription_key,
                     request.skill_ids,
+                    request.workflow_binding_id,
+                    request.plan_id,
                     broadcast_source_job_id,
                     request.meta,
                     request.status,

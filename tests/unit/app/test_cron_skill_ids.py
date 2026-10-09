@@ -101,6 +101,39 @@ def test_model_copy_preserves_skill_ids_for_broadcast_style_copies():
     assert copied.model_dump(mode="json")["skill_ids"] == "foo,bar"
 
 
+def test_workflow_task_uses_skills_without_an_agent_request():
+    job = CronJobSpec.model_validate(
+        _job_payload(
+            task_type="workflow",
+            request={"input": {"text": "stale Agent prompt"}},
+            text="stale fixed text",
+            skill_ids="first,second",
+            model_slot={"provider_id": "provider", "model": "model"},
+        ),
+    )
+
+    assert job.task_type == "workflow"
+    assert job.skill_ids == "first,second"
+    assert job.request is None
+    assert job.text is None
+    assert job.model_slot is None
+    assert job.workflow_binding_id is None
+
+
+def test_workflow_task_requires_a_skill_or_explicit_binding():
+    with pytest.raises(ValidationError, match="workflow"):
+        CronJobSpec.model_validate(
+            _job_payload(task_type="workflow", request=None),
+        )
+
+
+def test_non_workflow_task_cannot_keep_workflow_binding():
+    with pytest.raises(ValidationError, match="workflow_binding_id"):
+        CronJobSpec.model_validate(
+            _job_payload(workflow_binding_id="binding-1"),
+        )
+
+
 def test_monitor_sync_client_job_payload_includes_normalized_skill_ids():
     job = CronJobSpec.model_validate(_job_payload(skill_ids="a, b\nc a"))
 
@@ -109,10 +142,47 @@ def test_monitor_sync_client_job_payload_includes_normalized_skill_ids():
     assert payload["skill_ids"] == "a,b,c"
 
 
+def test_monitor_sync_client_job_payload_includes_workflow_binding_only_for_workflow():
+    workflow = CronJobSpec.model_validate(
+        _job_payload(
+            task_type="workflow",
+            request=None,
+            skill_ids="skill-a",
+            workflow_binding_id="binding-1",
+        ),
+    )
+    agent = CronJobSpec.model_validate(_job_payload())
+
+    client = MonitorSyncClient("")
+    assert client._build_job_sync_data(workflow)["workflow_binding_id"] == (
+        "binding-1"
+    )
+    assert client._build_job_sync_data(agent)["workflow_binding_id"] is None
+
+
 def test_monitor_schema_declares_skill_ids_column_and_migration():
     assert "skill_ids" in CREATE_CRON_JOBS_TABLE
     assert "skill_ids" in CRON_JOBS_EXTRA_COLUMNS
     assert "VARCHAR(200)" in CRON_JOBS_EXTRA_COLUMNS["skill_ids"]
+
+
+def test_monitor_schema_declares_workflow_binding_column_and_migration():
+    assert "workflow_binding_id" in CREATE_CRON_JOBS_TABLE
+    assert "workflow_binding_id" in CRON_JOBS_EXTRA_COLUMNS
+
+
+def test_monitor_sync_contract_restricts_binding_to_workflow_jobs():
+    with pytest.raises(ValidationError, match="workflow_binding_id"):
+        CronJobSyncRequest.model_validate(
+            {
+                **_sync_request().model_dump(),
+                "workflow_binding_id": "binding-1",
+            },
+        )
+    with pytest.raises(ValidationError, match="workflow_binding_id"):
+        CronJobSyncRequest.model_validate(
+            {**_sync_request().model_dump(), "task_type": "workflow"},
+        )
 
 
 class _FakeDb:
@@ -168,6 +238,7 @@ async def test_monitor_sync_insert_sql_writes_skill_ids(monkeypatch):
     sql, params = fake_db.executed[0]
     assert "skill_ids" in sql
     assert "foo,bar" in params
+    assert sql.count("%s") == len(params)
 
 
 @pytest.mark.asyncio
@@ -190,3 +261,30 @@ async def test_monitor_sync_update_sql_writes_skill_ids(monkeypatch):
     sql, params = fake_db.executed[0]
     assert "skill_ids" in sql
     assert "foo,bar" in params
+    assert sql.count("%s") == len(params)
+
+
+@pytest.mark.asyncio
+async def test_monitor_sync_workflow_definition_writes_binding_id(monkeypatch):
+    fake_db = _FakeDb(existing=None)
+    monkeypatch.setattr(sync_service, "get_db_connection", lambda: fake_db)
+    monkeypatch.setattr(
+        sync_service,
+        "_get_beijing_now",
+        lambda: datetime(2026, 6, 18, 9, 0, 0),
+    )
+
+    async def _identity(request):
+        return request
+
+    monkeypatch.setattr(sync_service, "_enrich_sync_request", _identity)
+    request = _sync_request().model_copy(
+        update={"task_type": "workflow", "workflow_binding_id": "binding-1"},
+    )
+
+    await SyncService().sync_job(request)
+
+    sql, params = fake_db.executed[0]
+    assert "workflow_binding_id" in sql
+    assert "binding-1" in params
+    assert sql.count("%s") == len(params)

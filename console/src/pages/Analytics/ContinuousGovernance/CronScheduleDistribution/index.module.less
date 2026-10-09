@@ -80,7 +80,7 @@
 
 .kpiGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -100,6 +100,10 @@
 
 .kpiAgent {
   border-top-color: #16a34a;
+}
+
+.kpiWorkflow {
+  border-top-color: #0891b2;
 }
 
 .kpiPeak {
@@ -262,6 +266,15 @@
 
 .agentDot {
   background: #16a34a;
+}
+
+.workflowDot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 3px;
+  background: #0891b2;
+  border-radius: 2px;
 }
 
 .rankTotal {

@@ -14,18 +14,36 @@ from datetime import datetime
 from typing import Any
 
 from .models import (
+    PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_PUBLISHING,
+    SOURCE_LABEL_BY_ROLE,
     PlanSceneRecord,
     PlanTargetRecord,
     WealthPlanRecord,
 )
-from .roles import can_view_branch_wide
+from .roles import ROLE_MIDDLE, ROLE_PRESIDENT, ROLE_RM, can_view_branch_wide
 
 logger = logging.getLogger(__name__)
 
 _PLAN_TABLE = "swe_wealth_plans"
 _SCENE_TABLE = "swe_wealth_plan_scenes"
 _TARGET_TABLE = "swe_wealth_plan_targets"
+
+_SCENE_RESERVING_SOURCE_LABELS_BY_ROLE = {
+    ROLE_MIDDLE: frozenset({SOURCE_LABEL_BY_ROLE[ROLE_MIDDLE]}),
+    ROLE_PRESIDENT: frozenset(
+        {
+            SOURCE_LABEL_BY_ROLE[ROLE_MIDDLE],
+            SOURCE_LABEL_BY_ROLE[ROLE_PRESIDENT],
+        },
+    ),
+    ROLE_RM: frozenset(
+        {
+            SOURCE_LABEL_BY_ROLE[ROLE_MIDDLE],
+            SOURCE_LABEL_BY_ROLE[ROLE_PRESIDENT],
+        },
+    ),
+}
 
 # 建表 SQL 见 scripts/sql/wealth_plan_tables.sql，由运维手动导入，启动时不自动建表。
 
@@ -232,6 +250,77 @@ class WealthPlanStore:
             for row in rows
         ]
 
+    async def find_scene_conflicts(
+        self,
+        role: str,
+        sap_id: str,
+        bbk_id: str | None,
+        scene_ids: set[str],
+        *,
+        exclude_plan_id: str | None = None,
+    ) -> dict[str, str]:
+        """按发布角色查询不可重复使用的场景及其占用规划名。"""
+        if not bbk_id or not scene_ids:
+            return {}
+        source_labels = _SCENE_RESERVING_SOURCE_LABELS_BY_ROLE.get(role)
+        if not source_labels:
+            return {}
+        if not self.is_available:
+            records = sorted(
+                self._plans.values(),
+                key=lambda record: record.created_at or datetime.min,
+                reverse=True,
+            )
+            conflicts: dict[str, str] = {}
+            for record in records:
+                if not self._reserves_scene(
+                    record,
+                    role,
+                    sap_id,
+                    bbk_id,
+                    exclude_plan_id,
+                ):
+                    continue
+                for scene in record.scenes:
+                    if scene.scene_id in scene_ids:
+                        conflicts.setdefault(scene.scene_id, record.name)
+            return conflicts
+
+        ordered_scene_ids = sorted(scene_ids)
+        scene_placeholders = ", ".join(["%s"] * len(ordered_scene_ids))
+        source_placeholders = ", ".join(["%s"] * len(source_labels))
+        exclude_sql = " AND p.id <> %s" if exclude_plan_id else ""
+        params: list[str] = [
+            bbk_id,
+            PUBLISH_STATUS_FAILED,
+        ]
+        reservation_sql = f"p.source_label IN ({source_placeholders})"
+        if role == ROLE_RM:
+            reservation_sql = f"(p.sap_id = %s OR {reservation_sql})"
+            params.append(sap_id)
+        params.extend(sorted(source_labels))
+        params.extend(ordered_scene_ids)
+        if exclude_plan_id:
+            params.append(exclude_plan_id)
+        rows = await self.db.fetch_all(
+            f"""
+            SELECT p.name AS plan_name, s.scene_id
+            FROM {_PLAN_TABLE} p
+            INNER JOIN {_SCENE_TABLE} s ON s.plan_id = p.id
+            WHERE p.bbk_id = %s
+              AND p.status <> %s
+              AND {reservation_sql}
+              AND s.scene_id IN ({scene_placeholders})
+              {exclude_sql}
+            ORDER BY p.created_at DESC
+            """,
+            tuple(params),
+        )
+        conflicts = {}
+        for row in rows:
+            conflicts.setdefault(row["scene_id"], row["plan_name"])
+        return conflicts
+
     async def update(self, record: WealthPlanRecord) -> None:
         """整体替换规划内容（场景与目标删除重插），状态重置为发布中。"""
         record.updated_at = _now()
@@ -427,6 +516,26 @@ class WealthPlanStore:
             (plan_id,),
         )
         return [_row_to_target(row) for row in rows]
+
+    @staticmethod
+    def _reserves_scene(
+        record: WealthPlanRecord,
+        role: str,
+        sap_id: str,
+        bbk_id: str,
+        exclude_plan_id: str | None,
+    ) -> bool:
+        source_labels = _SCENE_RESERVING_SOURCE_LABELS_BY_ROLE.get(role)
+        return bool(
+            source_labels
+            and record.id != exclude_plan_id
+            and record.bbk_id == bbk_id
+            and record.status != PUBLISH_STATUS_FAILED
+            and (
+                (role == ROLE_RM and record.sap_id == sap_id)
+                or record.source_label in source_labels
+            ),
+        )
 
     @staticmethod
     def _visible_to(

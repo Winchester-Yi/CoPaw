@@ -14,12 +14,17 @@ def _make_service(tmp_path):
     from market.marketplace.service import MarketplaceService
 
     mock_db = AsyncMock(spec=DatabaseConnection)
-    mock_db.is_connected = False
-    return MarketplaceService(
+    mock_db.is_connected = True
+    mock_db.execute = AsyncMock(return_value=1)
+    svc = MarketplaceService(
         db=mock_db,
         marketplace_root=tmp_path / "market",
         swe_root=tmp_path / "swe",
     )
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=True,
+    )
+    return svc
 
 
 def _make_app(tmp_path):

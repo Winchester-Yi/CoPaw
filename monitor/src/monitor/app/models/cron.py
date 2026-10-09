@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ============================================================
 # Enums
@@ -25,6 +25,7 @@ class TaskType(str, Enum):
 
     TEXT = "text"
     AGENT = "agent"
+    WORKFLOW = "workflow"
 
 
 class JobStatus(str, Enum):
@@ -71,7 +72,8 @@ class CronJobModel(BaseModel):
         description="来源标识 (X-Source-Id header)",
     )
     enabled: bool = Field(default=True, description="是否启用")
-    task_type: str = Field(..., description="任务类型: text/agent")
+    task_type: str = Field(..., description="任务类型: text/agent/workflow")
+    workflow_binding_id: Optional[str] = None
 
     # 调度配置
     cron_expr: str = Field(..., description="cron表达式 (5字段)")
@@ -311,6 +313,11 @@ class CronJobSyncRequest(BaseModel):
     """
 
     id: str = Field(..., description="任务ID")
+    plan_id: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="关联计划ID",
+    )
     name: str = Field(..., description="任务名称")
     tenant_id: str = Field(default="", description="租户ID")
     tenant_name: str = Field(
@@ -324,6 +331,7 @@ class CronJobSyncRequest(BaseModel):
     )
     enabled: bool = Field(default=True, description="是否启用")
     task_type: str = Field(default="agent", description="任务类型")
+    workflow_binding_id: Optional[str] = None
 
     # 调度配置
     cron_expr: str = Field(..., description="cron表达式")
@@ -365,6 +373,15 @@ class CronJobSyncRequest(BaseModel):
     # 状态
     status: str = Field(default="active", description="状态")
     pause_reason: str = Field(default="", description="暂停原因")
+
+    @model_validator(mode="after")
+    def validate_workflow_binding(self) -> "CronJobSyncRequest":
+        if self.task_type == "workflow":
+            if not self.workflow_binding_id:
+                raise ValueError("workflow_binding_id is required for workflow")
+        elif self.workflow_binding_id:
+            raise ValueError("workflow_binding_id is only valid for workflow")
+        return self
 
 
 class ExecutionSyncRequest(BaseModel):
@@ -557,6 +574,9 @@ class CronScheduleDistributionBucket(BaseModel):
     end_time: datetime = Field(..., description="区间结束时间（UTC，不含）")
     text_count: int = Field(default=0, ge=0, description="Text 计划触发次数")
     agent_count: int = Field(default=0, ge=0, description="Agent 计划触发次数")
+    workflow_count: int = Field(
+        default=0, ge=0, description="Workflow 计划触发次数",
+    )
     total_count: int = Field(default=0, ge=0, description="计划触发总次数")
 
 
@@ -578,6 +598,9 @@ class CronScheduleDistributionResponse(BaseModel):
     )
     text_count: int = Field(default=0, ge=0, description="Text 计划触发次数")
     agent_count: int = Field(default=0, ge=0, description="Agent 计划触发次数")
+    workflow_count: int = Field(
+        default=0, ge=0, description="Workflow 计划触发次数",
+    )
     total_count: int = Field(default=0, ge=0, description="计划触发总次数")
     buckets: List[CronScheduleDistributionBucket] = Field(
         default_factory=list,

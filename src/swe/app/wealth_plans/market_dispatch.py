@@ -48,9 +48,10 @@ def _new_client() -> httpx.AsyncClient:
 def collect_distribution_items(
     plan: WealthPlanRecord,
 ) -> tuple[list[str], list[str], list[str]]:
-    """汇总分发清单：技能 item、MCP item、目标租户（含创建人本人，去重排序）。"""
-    skill_ids = sorted({s.item_id for s in plan.scenes if s.item_id})
-    mcp_ids = sorted({m for s in plan.scenes for m in s.mcp_relations})
+    """仅汇总 MCP 关联数组非空的场景，workflow 场景不下发技能/MCP。"""
+    scenes = [s for s in plan.scenes if s.mcp_relations]
+    skill_ids = sorted({s.item_id for s in scenes if s.item_id})
+    mcp_ids = sorted({m for s in scenes for m in s.mcp_relations})
     tenant_ids = sorted({t.sap_id for t in plan.targets} | {plan.sap_id})
     return skill_ids, mcp_ids, tenant_ids
 

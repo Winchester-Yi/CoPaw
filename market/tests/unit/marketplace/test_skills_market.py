@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import io
 import json
 import pytest
+import zipfile
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from market.app.routers import skills_market as skills_router
+from market.marketplace.errors import MarketplaceMetadataSyncError
 
 
 def _make_app(tmp_path):
@@ -14,11 +18,16 @@ def _make_app(tmp_path):
     from market.marketplace.service import MarketplaceService
     from market.database.connection import DatabaseConnection
 
+    @asynccontextmanager
+    async def _transaction():
+        yield
+
     mock_db = AsyncMock(spec=DatabaseConnection)
     mock_db.is_connected = True
     mock_db.execute = AsyncMock(return_value=1)
     mock_db.fetch_one = AsyncMock(return_value=None)
     mock_db.fetch_all = AsyncMock(return_value=[])
+    mock_db.transaction = _transaction
 
     svc = MarketplaceService(
         db=mock_db,
@@ -279,6 +288,182 @@ def test_distribute_skill_writes_workspace_manifest(tmp_path):
     assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
+def test_distribute_skill_writes_market_category_to_workspace_manifest(
+    tmp_path,
+):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.schemas import (
+        DistributeRequest,
+        PublishSkillRequest,
+    )
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="categorized_skill",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                category_id=7,
+                bbk_ids=["200"],
+                skill_json={},
+                skill_md="",
+            ),
+        ),
+    )
+    svc.db.fetch_all = AsyncMock(
+        return_value=[
+            {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
+        ],
+    )
+
+    result = asyncio.run(
+        svc.distribute_skill(
+            "src_a",
+            item.item_id,
+            operator_id="u1",
+            operator_name="User",
+            req=DistributeRequest(target_type="all"),
+        ),
+    )
+
+    assert result.distributed_count == 1
+    workspace_dir = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "default",
+        "src_a",
+    ).parent
+    manifest = json.loads((workspace_dir / "skill.json").read_text())
+    assert (
+        manifest["skills"]["categorized_skill"]["metadata"]["category_id"] == 7
+    )
+
+
+def test_update_skill_metadata_updates_category_and_branch_without_recall(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace.fs import load_index, save_index
+    from market.marketplace.models import MarketItem
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=True,
+    )
+    save_index(
+        svc.marketplace_root,
+        "src_a",
+        [
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="skill",
+                skill_id="skill-1",
+                chinese_name="旧名",
+                category_id=1,
+                bbk_ids=["100"],
+                creator_id="u1",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        svc,
+        "get_distributions",
+        AsyncMock(
+            return_value=[
+                type(
+                    "Distribution",
+                    (),
+                    {"target_user_id": "user-1"},
+                )(),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_sync_skill_category_to_user",
+        AsyncMock(return_value=True),
+    )
+
+    result = asyncio.run(
+        svc.update_skill_metadata(
+            source_id="src_a",
+            item_id="item-1",
+            skill_id="skill-1",
+            skill_name="skill",
+            chinese_name="新名",
+            category_id=2,
+            bbk_ids=["200"],
+        ),
+    )
+
+    assert result["market_updated"] is True
+    assert result["synced_category_users"] == 1
+    item = load_index(svc.marketplace_root, "src_a")[0]
+    assert item.category_id == 2
+    assert item.bbk_ids == ["200"]
+    svc.market_skill_registry.upsert_market_skill.assert_awaited_once()
+    upsert_kwargs = (
+        svc.market_skill_registry.upsert_market_skill.call_args.kwargs
+    )
+    assert upsert_kwargs["cn_name"] == "新名"
+    assert upsert_kwargs["category_id"] == 2
+    assert upsert_kwargs["bbk_ids"] == ["200"]
+    svc.get_distributions.assert_awaited_once()
+
+
+def test_update_skill_metadata_does_not_write_index_when_tdsql_sync_fails(
+    tmp_path,
+):
+    from market.marketplace.fs import load_index, save_index
+    from market.marketplace.models import MarketItem
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=False,
+    )
+    save_index(
+        svc.marketplace_root,
+        "src_a",
+        [
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="skill",
+                skill_id="skill-1",
+                chinese_name="旧名",
+                category_id=1,
+                bbk_ids=["100"],
+                creator_id="u1",
+            ),
+        ],
+    )
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        asyncio.run(
+            svc.update_skill_metadata(
+                source_id="src_a",
+                item_id="item-1",
+                skill_id="skill-1",
+                skill_name="skill",
+                chinese_name="新名",
+                category_id=2,
+                bbk_ids=["200"],
+            ),
+        )
+
+    item = load_index(svc.marketplace_root, "src_a")[0]
+    assert item.chinese_name == "旧名"
+    assert item.category_id == 1
+    assert item.bbk_ids == ["100"]
+
+
 def test_publish_skill_missing_source_id_returns_400(tmp_path):
     app = _make_app(tmp_path)
     client = TestClient(app)
@@ -411,6 +596,218 @@ def test_publish_upload_rejects_nested_zip_path_traversal(tmp_path):
 
     assert resp.status_code == 400
     assert "Security scan" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sync_skill_to_market_db_fails_when_upsert_returns_false():
+    svc = type("Svc", (), {})()
+    svc.db = type("Db", (), {"is_connected": True})()
+    svc.market_skill_registry = type("Registry", (), {})()
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=False,
+    )
+
+    with pytest.raises(MarketplaceMetadataSyncError):
+        await skills_router._sync_skill_to_market_db(
+            svc=svc,
+            source_id="src_a",
+            item_id="item-1",
+            skill_id="skill-1",
+            imported_name="demo_skill",
+            resolved_cn_name="",
+            include_in_statistics=False,
+            x_user_id="u1",
+            user_name="User",
+        )
+
+
+def test_publish_upload_returns_503_when_database_is_unavailable(tmp_path):
+    app = _make_app(tmp_path)
+    app.state.marketplace.db.is_connected = False
+    client = TestClient(app)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr("demo_skill/SKILL.md", "# Demo Skill")
+    zip_buffer.seek(0)
+
+    resp = client.post(
+        "/api/market/skills/publish-upload",
+        files={"file": ("demo_skill.zip", zip_buffer, "application/zip")},
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Manager": "true",
+            "X-User-Id": "u1",
+            "X-User-Name": "User",
+        },
+    )
+
+    assert resp.status_code == 503
+
+
+def test_init_missing_skill_fields_syncs_market_metadata_to_tdsql(tmp_path):
+    from market.marketplace.fs import load_index, save_index
+    from market.marketplace.models import MarketItem
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        return_value=True,
+    )
+    save_index(
+        svc.marketplace_root,
+        "src_a",
+        [
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="skill",
+                skill_id="skill-1",
+                chinese_name="技能",
+                creator_id="u1",
+                creator_name="User One",
+            ),
+        ],
+    )
+
+    resp = TestClient(app).post(
+        "/api/market/skills/init-missing-fields",
+        json={
+            "source_id": "src_a",
+            "category_id": 7,
+            "bbk_ids": ["200"],
+            "dry_run": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    svc.market_skill_registry.upsert_market_skill.assert_awaited_once()
+    upsert_kwargs = (
+        svc.market_skill_registry.upsert_market_skill.call_args.kwargs
+    )
+    assert upsert_kwargs["creator_id"] == "u1"
+    assert upsert_kwargs["creator_name"] == "User One"
+    assert upsert_kwargs["category_id"] == 7
+    assert upsert_kwargs["bbk_ids"] == ["200"]
+    item = load_index(svc.marketplace_root, "src_a")[0]
+    assert item.category_id == 7
+    assert item.bbk_ids == ["200"]
+
+
+def test_init_missing_skill_fields_does_not_write_index_on_partial_sync_failure(
+    tmp_path,
+):
+    from market.marketplace.fs import load_index, save_index
+    from market.marketplace.models import MarketItem
+
+    transaction_entries = 0
+
+    @asynccontextmanager
+    async def _transaction():
+        nonlocal transaction_entries
+        transaction_entries += 1
+        yield
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc.db.transaction = _transaction
+    svc.market_skill_registry.upsert_market_skill = AsyncMock(
+        side_effect=[True, False],
+    )
+    save_index(
+        svc.marketplace_root,
+        "src_a",
+        [
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="skill_one",
+                skill_id="skill-1",
+                chinese_name="技能一",
+                creator_id="u1",
+                creator_name="User One",
+            ),
+            MarketItem(
+                item_id="item-2",
+                item_type="skill",
+                name="skill_two",
+                skill_id="skill-2",
+                chinese_name="技能二",
+                creator_id="u2",
+                creator_name="User Two",
+            ),
+        ],
+    )
+
+    resp = TestClient(app).post(
+        "/api/market/skills/init-missing-fields",
+        json={
+            "source_id": "src_a",
+            "category_id": 7,
+            "bbk_ids": ["200"],
+            "dry_run": False,
+        },
+    )
+
+    assert resp.status_code == 503
+    assert transaction_entries == 1
+    assert svc.market_skill_registry.upsert_market_skill.await_count == 2
+    items = load_index(svc.marketplace_root, "src_a")
+    assert [item.category_id for item in items] == [None, None]
+    assert [item.bbk_ids for item in items] == [[], []]
+
+
+def test_init_missing_skill_fields_noops_without_database_when_nothing_changed(
+    tmp_path,
+):
+    from market.marketplace.fs import save_index
+    from market.marketplace.models import MarketItem
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    svc.db.is_connected = False
+
+    transaction_entries = 0
+
+    @asynccontextmanager
+    async def _transaction():
+        nonlocal transaction_entries
+        transaction_entries += 1
+        yield
+
+    svc.db.transaction = _transaction
+    svc.market_skill_registry.upsert_market_skill = AsyncMock()
+    save_index(
+        svc.marketplace_root,
+        "src_a",
+        [
+            MarketItem(
+                item_id="item-1",
+                item_type="skill",
+                name="skill",
+                skill_id="skill-1",
+                chinese_name="技能",
+                category_id=7,
+                bbk_ids=["200"],
+                creator_id="u1",
+            ),
+        ],
+    )
+
+    resp = TestClient(app).post(
+        "/api/market/skills/init-missing-fields",
+        json={
+            "source_id": "src_a",
+            "category_id": 7,
+            "bbk_ids": ["200"],
+            "dry_run": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["total_skills"] == 0
+    assert transaction_entries == 0
+    svc.market_skill_registry.upsert_market_skill.assert_not_awaited()
 
 
 def test_switch_version_updates_market_item_creator(tmp_path):
@@ -641,6 +1038,8 @@ def test_list_skills_reads_statistics_eligible_marketplace_skills(tmp_path):
     sql = app.state.marketplace.db.fetch_all.call_args.args[0]
     assert "FROM swe_marketplace_skills" in sql
     assert "include_in_statistics = 1" in sql
+    assert "is_unpublished = 0" in sql
+    assert "is_deleted = 0" in sql
 
 
 def test_update_statistics_config_non_manager_returns_403(tmp_path):

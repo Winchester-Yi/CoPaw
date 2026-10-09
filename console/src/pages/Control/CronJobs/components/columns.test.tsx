@@ -123,6 +123,16 @@ describe("CronJobs columns", () => {
     expect(column?.render?.(undefined, job, 0)).toBe("2 小时");
   });
 
+  it("presents workflow as a skill task", () => {
+    const column = createColumns(buildHandlers()).find(
+      (item) => item.key === "task_type",
+    );
+
+    expect(
+      column?.render?.("workflow", buildCronJob({ task_type: "workflow" }), 0),
+    ).toBe("技能任务");
+  });
+
   it("extracts broadcast parent information from child task metadata", () => {
     const job = buildCronJob({
       meta: {

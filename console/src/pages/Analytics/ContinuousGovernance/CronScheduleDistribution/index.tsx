@@ -21,6 +21,7 @@ import {
   Clock3,
   Search,
   Type,
+  Workflow,
 } from "lucide-react";
 
 import {
@@ -409,10 +410,20 @@ export default function CronScheduleDistribution() {
           stack: "planned-firing",
           barMaxWidth: 28,
           data: buckets.map((bucket) => bucket.agent_count),
-          itemStyle: { borderRadius: [3, 3, 0, 0] },
           emphasis: {
             itemStyle: { borderWidth: 0 },
           },
+          select: { disabled: true },
+          selectedMode: false,
+        },
+        {
+          name: "技能任务",
+          type: "bar",
+          stack: "planned-firing",
+          barMaxWidth: 28,
+          data: buckets.map((bucket) => bucket.workflow_count || 0),
+          itemStyle: { borderRadius: [3, 3, 0, 0] },
+          emphasis: { itemStyle: { borderWidth: 0 } },
           select: { disabled: true },
           selectedMode: false,
         },
@@ -484,8 +495,12 @@ export default function CronScheduleDistribution() {
       dataIndex: "task_type",
       width: 88,
       render: (value: CronScheduleTaskType) => (
-        <Tag color={value === "text" ? "blue" : "green"}>
-          {value === "text" ? "Text" : "Agent"}
+        <Tag
+          color={
+            value === "text" ? "blue" : value === "agent" ? "green" : "cyan"
+          }
+        >
+          {value === "text" ? "Text" : value === "agent" ? "Agent" : "技能任务"}
         </Tag>
       ),
     },
@@ -633,6 +648,18 @@ export default function CronScheduleDistribution() {
                 </div>
               </article>
               <article
+                className={`${styles.kpiCard} ${styles.kpiWorkflow}`}
+                data-testid="schedule-kpi-workflow"
+              >
+                <div className={styles.kpiHeader}>
+                  <Workflow size={16} />
+                  <span>技能任务</span>
+                </div>
+                <div className={styles.kpiValue}>
+                  {formatNumber(distribution?.workflow_count || 0)}
+                </div>
+              </article>
+              <article
                 className={`${styles.kpiCard} ${styles.kpiPeak}`}
                 data-testid="schedule-kpi-peak"
               >
@@ -686,7 +713,11 @@ export default function CronScheduleDistribution() {
                       <div
                         className={styles.chart}
                         role="img"
-                        aria-label={`计划触发次数分布，共 ${distribution.total_count} 次，Text ${distribution.text_count} 次，Agent ${distribution.agent_count} 次`}
+                        aria-label={`计划触发次数分布，共 ${
+                          distribution.total_count
+                        } 次，Text ${distribution.text_count} 次，Agent ${
+                          distribution.agent_count
+                        } 次，技能任务 ${distribution.workflow_count || 0} 次`}
                       >
                         <ReactECharts
                           option={chartOption}
@@ -751,6 +782,8 @@ export default function CronScheduleDistribution() {
                             <i className={styles.textDot} /> {bucket.text_count}
                             <i className={styles.agentDot} />{" "}
                             {bucket.agent_count}
+                            <i className={styles.workflowDot} />{" "}
+                            {bucket.workflow_count || 0}
                           </span>
                           <span className={styles.rankTotal}>
                             {formatNumber(bucket.total_count)}
@@ -809,6 +842,7 @@ export default function CronScheduleDistribution() {
               { label: "全部", value: "all" },
               { label: "Text", value: "text" },
               { label: "Agent", value: "agent" },
+              { label: "技能任务", value: "workflow" },
             ]}
             value={detailFilter}
             onChange={(value) => {
