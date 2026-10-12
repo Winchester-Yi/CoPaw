@@ -64,6 +64,7 @@
     "analyticsSessions": "会话分析",
     "analyticsMessages": "用户消息",
     "analyticsTraces": "对话分析",
+    "analyticsTokenDiagnostics": "Token 记录与诊断",
     "monitorCronOverview": "定时任务概览",
     "monitorCronBatchDispatch": "批调度监控",
     "monitorTaskCenter": "异步任务中心",

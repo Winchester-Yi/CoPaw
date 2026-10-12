@@ -1,0 +1,9 @@
+# Token diagnostics own records and share tracing enablement
+
+Token diagnostics follow the effective Tracing enablement configuration while owning independent task, branch, and call identities, collection, persistence, analysis, queries, and retention. Execution Trace ID and Span ID are optional correlation references; their records and successful creation are not prerequisites for Token accounting.
+
+Token records use separate tables, connection pools, and transactions in the same MySQL database. This deliberately keeps Token data out of existing Span fields and Trace queues: either writer can fail, stop, or clean its own data without requiring the other writer to succeed. Token transactions must not reuse the legacy database module's shared transaction context. Existing Trace token statistics remain compatible and are not synchronized into the new diagnostic totals; the independent Token ledger is the source for diagnostics.
+
+Collection prioritizes business execution. Bounded in-memory buffering and retries may leave gaps after overload, prolonged database failure, or process exit; there is no cross-restart delivery guarantee in the first release. Completeness and unavailable usage are exposed when evidence permits, and no persisted record is not interpreted as proof of zero consumption. Rules run in Monitor after Token data commits and do not invoke models or control Agent execution.
+
+Extending Span storage would reduce initial schema work but couple diagnostic identity, retention, and failures to Tracing. Separate databases or durable delivery buffers would provide stronger isolation or recovery at greater deployment cost; the user chose same-database record isolation and business-priority collection for this release. Sharing the physical database does not isolate infrastructure faults or resources.

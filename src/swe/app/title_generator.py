@@ -11,6 +11,7 @@ import logging
 import os
 
 import httpx
+from ..token_diagnostics.runtime import external_call
 
 logger = logging.getLogger(__name__)
 
@@ -36,23 +37,26 @@ async def generate_title(question: str) -> str | None:
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=_TITLE_TIMEOUT) as client:
-            resp = await client.post(
-                _TITLE_API_URL,
-                headers={
-                    "API-Key": _TITLE_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={"inputParams": {"question": question.strip()}},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            title = (
-                data.get("body", {}).get("output", {}).get("res", "")
-            )
-            if title and title.strip():
-                return title.strip()[:_MAX_TITLE_LENGTH]
-            return None
+        with external_call("title"):
+            return await _request_title(question)
     except Exception:
         logger.warning("标题生成失败", exc_info=True)
+        return None
+
+
+async def _request_title(question):
+    async with httpx.AsyncClient(timeout=_TITLE_TIMEOUT) as client:
+        resp = await client.post(
+            _TITLE_API_URL,
+            headers={
+                "API-Key": _TITLE_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"inputParams": {"question": question.strip()}},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        title = data.get("body", {}).get("output", {}).get("res", "")
+        if title and title.strip():
+            return title.strip()[:_MAX_TITLE_LENGTH]
         return None

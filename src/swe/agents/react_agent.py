@@ -600,6 +600,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._sys_prompt_freshness_token = (
             self._current_system_prompt_freshness_token()
         )
+        from ..token_diagnostics.runtime import configure_agent, safe_call
+
+        safe_call(configure_agent, running_config, runtime.system_prompt)
 
         # Setup memory manager
         self._setup_memory_manager(

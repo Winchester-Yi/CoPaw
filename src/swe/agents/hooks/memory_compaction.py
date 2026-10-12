@@ -481,6 +481,9 @@ class MemoryCompactionHook:
             )
         logger.info("Marked %s messages as compacted", updated_count)
         await memory.update_compressed_summary(compact_content)
+        from ...token_diagnostics.runtime import notify_compaction
+
+        notify_compaction()
         return boundary
 
     async def __call__(

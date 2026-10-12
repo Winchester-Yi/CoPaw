@@ -24,6 +24,7 @@ from .models import (
     SubAgentRunRecord,
 )
 from .run_store import InMemorySubAgentRunStore, SubAgentRunStore
+from ...token_diagnostics.runtime import accounting_subagent, auxiliary_run
 
 SWEAgent: Any = None
 _FINALIZATION_TURN_RESERVE = 1
@@ -44,6 +45,7 @@ class SubAgentRuntime:
     def __init__(self, store: SubAgentRunStore | None = None):
         self._store = store or InMemorySubAgentRunStore()
 
+    @accounting_subagent
     async def run(
         self,
         *,
@@ -459,12 +461,13 @@ class SubAgentRuntime:
                 Msg("user", context, "user"),
             ],
         )
-        response = await agent.model(prompt)
-        if isinstance(response, AsyncIterable):
-            last_response = None
-            async for chunk in response:
-                last_response = chunk
-            response = last_response
+        with auxiliary_run("subagent_finalization"):
+            response = await agent.model(prompt)
+            if isinstance(response, AsyncIterable):
+                last_response = None
+                async for chunk in response:
+                    last_response = chunk
+                response = last_response
         summary = self._chat_response_text(response)
         if not summary:
             raise ValueError("Text finalization returned no summary.")

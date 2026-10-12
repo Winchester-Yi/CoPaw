@@ -293,6 +293,12 @@ export default function Sidebar({
       : []),
     // 洞察中心
     {
+      key: "analytics-token-diagnostics",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/token-diagnostics",
+      label: t("nav.analyticsTokenDiagnostics", "Token 记录与诊断"),
+    },
+    {
       key: "analytics-business-overview",
       icon: <SparkBarChartLine size={18} />,
       path: "/analytics/business-overview",
@@ -524,6 +530,11 @@ export default function Sidebar({
           label: collapsed
             ? null
             : t("nav.analyticsBusinessOverview", "运营看板"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
+          key: "analytics-token-diagnostics",
+          label: collapsed ? null : t("nav.analyticsTokenDiagnostics", "Token 记录与诊断"),
           icon: <SparkBarChartLine size={16} />,
         },
         {

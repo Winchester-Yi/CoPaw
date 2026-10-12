@@ -47,6 +47,7 @@ from .migration import (
 )
 from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
+from ..token_diagnostics.collector import start_collection, close_collection
 from ..tracing.agent_trace_sdk import shutdown_global_tracer
 from .runner.model_call_error_detail import redact_sensitive_fragments
 from ..database import get_database_config
@@ -841,6 +842,7 @@ async def _shutdown_lifespan_resources(
         except Exception as e:
             logger.warning("Error stopping cron notification worker: %s", e)
 
+    await close_collection()
     try:
         await close_trace_manager()
         logger.info("Tracing manager closed")
@@ -953,6 +955,7 @@ async def lifespan(
     app.state.db_connection = db_connection
 
     await _initialize_tracing_manager(db_connection)
+    start_collection()
     logger.info("Instance module initialized")
 
     # --- 初始化 source 系统配置模块 ---

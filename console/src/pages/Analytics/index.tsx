@@ -7,6 +7,7 @@ import BusinessOverviewPage from "./BusinessOverview";
 import CronJobOverviewPage from "./CronJobOverview";
 import ClawDataOverviewPage from "./ClawDataOverview";
 import ContinuousGovernancePage from "./ContinuousGovernance";
+import TokenDiagnosticsPage from "./TokenDiagnostics";
 
 export default function AnalyticsPage() {
   return (
@@ -16,6 +17,7 @@ export default function AnalyticsPage() {
       <Route path="sessions" element={<SessionsPage />} />
       <Route path="messages" element={<MessagesPage />} />
       <Route path="traces" element={<TracesPage />} />
+      <Route path="token-diagnostics" element={<TokenDiagnosticsPage />} />
       <Route path="business-overview" element={<BusinessOverviewPage />} />
       <Route path="claw-data-overview" element={<ClawDataOverviewPage />} />
       <Route path="cron-job-overview" element={<CronJobOverviewPage />} />

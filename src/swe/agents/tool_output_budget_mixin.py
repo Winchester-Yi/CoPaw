@@ -15,6 +15,7 @@ from swe.app.source_system_config.runtime import (
 from swe.constant import WORKING_DIR
 
 from .utils.tool_output_compaction import compact_tool_result_messages
+from ..token_diagnostics.runtime import notify_tool_started, notify_tool_completed
 
 
 class ToolOutputBudgetMixin:
@@ -22,6 +23,8 @@ class ToolOutputBudgetMixin:
 
     async def _acting(self, tool_call) -> dict | None:
         """Execute a tool call with its displayed and stored output bounded."""
+        diagnostic_operation = notify_tool_started(tool_call)
+        diagnostic_error = None
         tool_res_msg = Msg(
             "system",
             [
@@ -80,5 +83,13 @@ class ToolOutputBudgetMixin:
                     return chunk.metadata.get("structured_output")
 
             return None
+        except BaseException as exc:
+            diagnostic_error = type(exc).__name__
+            raise
         finally:
+            notify_tool_completed(
+                diagnostic_operation,
+                tool_res_msg.content[0]["output"],
+                diagnostic_error,
+            )
             await self.memory.add(tool_res_msg)
