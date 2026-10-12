@@ -174,6 +174,37 @@ describe("cycleRange（按传入当天动态计算）", () => {
 });
 
 describe("findSceneConflicts", () => {
+  it.each([
+    ["2026-10-01", "2026-10-31", false],
+    ["2026-08-01", "2026-08-31", false],
+    ["2026-09-30", "2026-10-31", true],
+    ["2026-08-01", "2026-09-01", true],
+    ["2026-09-10", "2026-09-20", true],
+    ["2026-08-01", "2026-10-31", true],
+    ["", "", true],
+  ])("按任务区间判断 %s 至 %s 是否重叠", (start, end, conflict) => {
+    const draft = { name: "新规划", items: [makeItem({ start, end })] };
+    expect(findSceneConflicts([makePlan()], draft, null).length > 0).toBe(
+      conflict,
+    );
+  });
+
+  it("编辑原场景日期后重新检查其他规划，不漏掉较旧的重叠规划", () => {
+    const september = makePlan({ id: "self" });
+    const october = makePlan({
+      id: "october",
+      items: [makeItem({ start: "2026-10-01", end: "2026-10-31" })],
+    });
+    const november = makePlan({
+      id: "november",
+      items: [makeItem({ start: "2026-11-01", end: "2026-11-30" })],
+    });
+    const draft = { name: "编辑规划", items: october.items! };
+    expect(
+      findSceneConflicts([september, november, october], draft, "self"),
+    ).toEqual([{ scene: draft.items[0], planName: october.name }]);
+  });
+
   it("草稿场景被其他已发布/发布中规划占用时给出冲突与所在规划名", () => {
     const published = makePlan({ id: "p1", name: "九月规划" });
     const publishing = makePlan({

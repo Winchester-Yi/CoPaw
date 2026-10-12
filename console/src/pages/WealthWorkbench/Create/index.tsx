@@ -650,13 +650,13 @@ export default function Create() {
           <p>请确认以下规划配置：</p>
           {conflicts.length > 0 && (
             <div className={styles.sceneConflictAlert} role="alert">
-              <strong>以下经营场景已被选用：</strong>
+              <strong>以下经营场景已被选用且任务周期重叠：</strong>
               {conflicts
                 .map(
                   (c) => `「${c.scene.sceneName}」（见规划「${c.planName}」）`,
                 )
                 .join("、")}
-              。请前往规划看板编辑对应规划，无需新建。
+              。请调整任务周期，或前往规划看板编辑对应规划。
             </div>
           )}
           <div className={styles.detailGrid}>

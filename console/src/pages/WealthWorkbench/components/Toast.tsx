@@ -2,15 +2,17 @@
  * 智能财富工作台 —— Toast 提示
  * 对应原型 #toast：显示 3.2s 后自动消失。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import cx from "classnames";
 import styles from "../index.module.less";
 import { useWealthStore } from "../store";
 
-export function Toast() {
+export function Toast({ container }: { container?: HTMLElement | null }) {
   const toastText = useWealthStore((s) => s.toastText);
   const toastSeq = useWealthStore((s) => s.toastSeq);
   const [visible, setVisible] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!toastSeq) return;
@@ -19,8 +21,17 @@ export function Toast() {
     return () => clearTimeout(timer);
   }, [toastSeq]);
 
-  return (
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    element.setAttribute("popover", "manual");
+    if (visible) element.showPopover();
+    else element.hidePopover();
+  }, [visible, container]);
+
+  const content = (
     <div
+      ref={ref}
       className={cx(styles.toast, visible && styles.visible)}
       role="status"
       aria-live="polite"
@@ -28,4 +39,5 @@ export function Toast() {
       {toastText}
     </div>
   );
+  return container ? createPortal(content, container) : content;
 }

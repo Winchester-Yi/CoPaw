@@ -382,6 +382,10 @@ async def _validate_scene_conflicts(
         getattr(request.state, "bbk_id", None),
         checked_scene_ids,
         exclude_plan_id=exclude_plan_id,
+        scene_ranges={
+            scene.scene_id: (scene.start_date, scene.end_date)
+            for scene in body.scenes
+        },
     )
     if not conflicts:
         return
@@ -392,7 +396,7 @@ async def _validate_scene_conflicts(
     )
     raise HTTPException(
         status_code=409,
-        detail=f"以下经营场景已被选用：{items}，请调整后重新发布",
+        detail=f"以下经营场景已被选用且任务周期重叠：{items}，请调整后重新发布",
     )
 
 
@@ -455,13 +459,21 @@ async def update_plan(
     if old.status == PUBLISH_STATUS_PUBLISHING:
         raise HTTPException(status_code=409, detail="规划发布中，请稍后再修改")
     await _validate_plan_scenes_for_branch(request, body)
+    retained_ranges = {
+        (scene.scene_id, scene.start_date, scene.end_date)
+        for scene in old.scenes
+    }
     await _validate_scene_conflicts(
         request,
         store,
         body,
         exclude_plan_id=plan_id,
-        scene_ids={scene.scene_id for scene in body.scenes}
-        - {scene.scene_id for scene in old.scenes},
+        scene_ids={
+            scene.scene_id
+            for scene in body.scenes
+            if (scene.scene_id, scene.start_date, scene.end_date)
+            not in retained_ranges
+        },
     )
     record = _build_record(request, body, plan_id=plan_id)
     _carry_scene_links(old, record)

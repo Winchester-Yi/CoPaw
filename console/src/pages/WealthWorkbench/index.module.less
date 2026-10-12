@@ -1687,6 +1687,8 @@
   }
   .toast {
     position: fixed;
+    inset: auto;
+    margin: 0;
     bottom: 30px;
     left: 50%;
     transform: translateX(-50%) translateY(20px);
@@ -1701,6 +1703,7 @@
     transition: 0.2s;
     z-index: 100;
     max-width: 80vw;
+    overflow-wrap: anywhere;
   }
   .toast.visible {
     opacity: 1;
@@ -3389,7 +3392,7 @@
     z-index: 1;
   }
   .customerTable.metricsTable.opportunityTable th.executionCol {
-    background: var(--console-management-surface-subtle, #f7f9fc);
+    background: linear-gradient(100deg, #f0f8ff, #edf6ff);
   }
   .customerTable.metricsTable .reason {
     min-width: 0;

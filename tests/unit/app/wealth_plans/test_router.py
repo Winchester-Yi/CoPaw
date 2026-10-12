@@ -17,6 +17,87 @@ from swe.app.wealth_plans.store import WealthPlanStore
 VIEWER = {"X-User-Id": "zhangwl", "X-Bbk-Id": "100"}
 
 
+@pytest.mark.parametrize(
+    "start,end,expected_status",
+    [
+        ("2026-10-01", "2026-10-31", 200),
+        ("2026-09-30", "2026-10-31", 409),
+    ],
+)
+def test_create_same_scene_in_separate_task_periods(
+    client: TestClient,
+    start: str,
+    end: str,
+    expected_status: int,
+) -> None:
+    headers = {**VIEWER, "X-Position-Id": "RB1101"}
+    assert (
+        client.post(
+            "/api/wealth/plans",
+            json=plan_payload(),
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    payload = plan_payload(name="十月规划")
+    payload["scenes"][0].update(start_date=start, end_date=end)
+    response = client.post(
+        "/api/wealth/plans",
+        json=payload,
+        headers=headers,
+    )
+    assert response.status_code == expected_status
+    if expected_status == 409:
+        assert "任务周期重叠" in response.json()["detail"]
+
+
+async def test_edit_scene_dates_rechecks_overlap(
+    client: TestClient,
+    store: WealthPlanStore,
+) -> None:
+    headers = {**VIEWER, "X-Position-Id": "RB1101"}
+    september = client.post(
+        "/api/wealth/plans",
+        json=plan_payload(),
+        headers=headers,
+    ).json()
+    await store.set_publish_status(september["id"], "published")
+    october = plan_payload(name="十月规划")
+    october["scenes"][0].update(
+        start_date="2026-10-01",
+        end_date="2026-10-31",
+    )
+    assert (
+        client.post(
+            "/api/wealth/plans",
+            json=october,
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            f"/api/wealth/plans/{september['id']}",
+            json=october,
+            headers=headers,
+        ).status_code
+        == 409
+    )
+    november = plan_payload(name="十一月规划")
+    november["scenes"][0].update(
+        start_date="2026-11-01",
+        end_date="2026-11-30",
+    )
+    assert (
+        client.put(
+            f"/api/wealth/plans/{september['id']}",
+            json=november,
+            headers=headers,
+        ).status_code
+        == 200
+    )
+
+
 @pytest.fixture()
 def store() -> WealthPlanStore:
     return WealthPlanStore()

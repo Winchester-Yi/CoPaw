@@ -45,6 +45,20 @@ _SCENE_RESERVING_SOURCE_LABELS_BY_ROLE = {
     ),
 }
 
+
+def _scene_dates_overlap(
+    requested: tuple[str | None, str | None],
+    start: str | None,
+    end: str | None,
+) -> bool:
+    """任务区间按闭区间比较；缺失边界视为无界。"""
+    requested_start, requested_end = requested
+    return not (
+        (requested_start and end and requested_start > end)
+        or (requested_end and start and requested_end < start)
+    )
+
+
 # 建表 SQL 见 scripts/sql/wealth_plan_tables.sql，由运维手动导入，启动时不自动建表。
 
 _INSERT_PLAN_SQL = f"""
@@ -258,33 +272,24 @@ class WealthPlanStore:
         scene_ids: set[str],
         *,
         exclude_plan_id: str | None = None,
+        scene_ranges: dict[str, tuple[str | None, str | None]] | None = None,
     ) -> dict[str, str]:
-        """按发布角色查询不可重复使用的场景及其占用规划名。"""
+        """按发布角色查询任务日期重叠的场景及其占用规划名。"""
         if not bbk_id or not scene_ids:
             return {}
         source_labels = _SCENE_RESERVING_SOURCE_LABELS_BY_ROLE.get(role)
         if not source_labels:
             return {}
+        ranges = scene_ranges or {}
         if not self.is_available:
-            records = sorted(
-                self._plans.values(),
-                key=lambda record: record.created_at or datetime.min,
-                reverse=True,
+            return self._find_scene_conflicts_in_memory(
+                role,
+                sap_id,
+                bbk_id,
+                scene_ids,
+                exclude_plan_id,
+                ranges,
             )
-            conflicts: dict[str, str] = {}
-            for record in records:
-                if not self._reserves_scene(
-                    record,
-                    role,
-                    sap_id,
-                    bbk_id,
-                    exclude_plan_id,
-                ):
-                    continue
-                for scene in record.scenes:
-                    if scene.scene_id in scene_ids:
-                        conflicts.setdefault(scene.scene_id, record.name)
-            return conflicts
 
         ordered_scene_ids = sorted(scene_ids)
         scene_placeholders = ", ".join(["%s"] * len(ordered_scene_ids))
@@ -304,7 +309,8 @@ class WealthPlanStore:
             params.append(exclude_plan_id)
         rows = await self.db.fetch_all(
             f"""
-            SELECT p.name AS plan_name, s.scene_id
+            SELECT p.name AS plan_name, s.scene_id,
+                   s.start_date, s.end_date
             FROM {_PLAN_TABLE} p
             INNER JOIN {_SCENE_TABLE} s ON s.plan_id = p.id
             WHERE p.bbk_id = %s
@@ -318,7 +324,46 @@ class WealthPlanStore:
         )
         conflicts = {}
         for row in rows:
-            conflicts.setdefault(row["scene_id"], row["plan_name"])
+            if _scene_dates_overlap(
+                ranges.get(row["scene_id"], (None, None)),
+                row.get("start_date"),
+                row.get("end_date"),
+            ):
+                conflicts.setdefault(row["scene_id"], row["plan_name"])
+        return conflicts
+
+    def _find_scene_conflicts_in_memory(
+        self,
+        role: str,
+        sap_id: str,
+        bbk_id: str,
+        scene_ids: set[str],
+        exclude_plan_id: str | None,
+        ranges: dict[str, tuple[str | None, str | None]],
+    ) -> dict[str, str]:
+        """内存模式按创建时间倒序查找日期重叠的占用规划。"""
+        records = sorted(
+            self._plans.values(),
+            key=lambda record: record.created_at or datetime.min,
+            reverse=True,
+        )
+        conflicts: dict[str, str] = {}
+        for record in records:
+            if not self._reserves_scene(
+                record,
+                role,
+                sap_id,
+                bbk_id,
+                exclude_plan_id,
+            ):
+                continue
+            for scene in record.scenes:
+                if scene.scene_id in scene_ids and _scene_dates_overlap(
+                    ranges.get(scene.scene_id, (None, None)),
+                    scene.start_date,
+                    scene.end_date,
+                ):
+                    conflicts.setdefault(scene.scene_id, record.name)
         return conflicts
 
     async def update(self, record: WealthPlanRecord) -> None:

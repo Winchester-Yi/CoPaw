@@ -18,6 +18,52 @@ from swe.app.wealth_plans.models import (
 from swe.app.wealth_plans.store import WealthPlanStore, new_plan_id
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("database", [False, True])
+@pytest.mark.parametrize(
+    "start,end,conflict",
+    [
+        ("2026-10-01", "2026-10-31", False),
+        ("2026-08-01", "2026-08-31", False),
+        ("2026-09-30", "2026-10-31", True),
+        ("2026-08-01", "2026-09-01", True),
+        ("2026-09-10", "2026-09-20", True),
+        ("2026-08-01", "2026-10-31", True),
+        (None, None, True),
+    ],
+)
+async def test_scene_conflicts_use_task_date_overlap(
+    database: bool,
+    start: str | None,
+    end: str | None,
+    conflict: bool,
+) -> None:
+    plan = make_plan()
+    scene = plan.scenes[0]
+    scene.start_date, scene.end_date = "2026-09-01", "2026-09-30"
+    db = AsyncMock() if database else None
+    store = WealthPlanStore(db)
+    if database:
+        db.fetch_all.return_value = [
+            {
+                "scene_id": scene.scene_id,
+                "plan_name": plan.name,
+                "start_date": scene.start_date,
+                "end_date": scene.end_date,
+            },
+        ]
+    else:
+        await store.create(plan)
+    conflicts = await store.find_scene_conflicts(
+        "rm",
+        "zhangwl",
+        "100",
+        {scene.scene_id},
+        scene_ranges={scene.scene_id: (start, end)},
+    )
+    assert bool(conflicts) is conflict
+
+
 def make_plan(
     plan_id: str = "plan-1",
     sap_id: str = "zhangwl",

@@ -171,6 +171,7 @@ Use a 4px base rhythm. Preferred steps: `4, 8, 12, 16, 20, 24, 32, 40`.
 - Do not hide primary actions behind hover-only UI.
 - Labels must remain associated with form controls; placeholders are not labels.
 - Dynamic loading, success, warning, and failure states must remain distinguishable without relying only on color.
+- Feedback triggered while a native modal dialog remains open must stay visible and accessible above its backdrop. Floating toasts can use a manual native popover opened after the modal, while remaining within the modal's DOM through a portal. Page-level `z-index` cannot lift a toast above a native modal backdrop; retain the feedback's expiry timer when returning it to the page after the dialog closes.
 - Use blue focus rings with sufficient contrast on Management Console surfaces; preserve conversation-specific focus behavior inside chat.
 - Respect `prefers-reduced-motion` for newly introduced non-essential animation.
 

@@ -14,7 +14,6 @@ import { DialogHost } from "./components/DialogHost";
 import { Icon, IconDefs } from "./components/Icon";
 import { Sidebar } from "./components/Sidebar";
 import { Ticker } from "./components/Ticker";
-import { Toast } from "./components/Toast";
 import { Topbar } from "./components/Topbar";
 import Board from "./Board";
 import Create from "./Create";
@@ -82,7 +81,6 @@ export default function WealthWorkbench() {
         </div>
       </main>
       <DialogHost />
-      <Toast />
     </div>
   );
 }
