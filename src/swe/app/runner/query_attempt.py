@@ -385,6 +385,13 @@ async def stream_single_query_attempt(
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(
             runtime=runtime,
         )
+        from ...jev.skills import prepare_skill_selection
+
+        await prepare_skill_selection(
+            runtime.agent,
+            pinned=getattr(skill_freshness_refresh, "refreshed_snapshot", None)
+            or {},
+        )
         runtime.agent.rebuild_sys_prompt()
         plan = await owner._build_turn_plan(
             runtime=runtime,

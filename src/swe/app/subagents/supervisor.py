@@ -206,6 +206,14 @@ class BackgroundSubAgentSupervisor:
         effective_budget = _effective_budget(definition.budget, spec.budget)
         nickname = assign_subagent_nickname(definition.nickname)
         run_id = f"subagent-{uuid4().hex[:12]}"
+        from ...jev.models import select_subagent_model
+
+        model_slot_override = await select_subagent_model(
+            getattr(parent_agent_config, "jev", None),
+            scope.tenant_id,
+            definition,
+            spec.model_dump(mode="json"),
+        )
         parent_skill_snapshot_dirs = skill_snapshot_dirs
         try:
             session_dependency_view = resolve_community_expert_dependency_view(
@@ -268,6 +276,7 @@ class BackgroundSubAgentSupervisor:
                     run_store_dir=scope.run_store_dir,
                     run_id=run_id,
                     definition=definition,
+                    model_slot_override=model_slot_override,
                 )
             )
         except (OSError, ModelLaunchSnapshotError) as exc:

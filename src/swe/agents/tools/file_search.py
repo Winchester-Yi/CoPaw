@@ -14,6 +14,7 @@ from typing import Optional
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
+from ...jev.search import filter_search_results
 
 from ...security.tenant_path_boundary import (
     resolve_tenant_path,
@@ -501,6 +502,9 @@ async def grep_search(
     case_sensitive: bool = True,
     context_lines: int = 0,
     include_pattern: Optional[str] = None,
+    *,
+    rerank: bool = True,
+    intent: str = "",
 ) -> ToolResponse:
     """Search file contents by pattern, recursively. Relative paths resolve
     from the current agent workspace when available, otherwise the current
@@ -522,6 +526,11 @@ async def grep_search(
         include_pattern (`str`, optional):
             Only search files whose **name** matches this glob
             (e.g. ``"*.py"``).  Defaults to None (all text files).
+        rerank (`bool`, optional):
+            Apply configured Jev relevance selection. Set False to recover
+            unfiltered results within the existing scan limits.
+        intent (`str`, optional):
+            What this search should help establish for the current task.
     """
     if not pattern:
         return _make_response("Error: No search `pattern` provided.")
@@ -594,12 +603,23 @@ async def grep_search(
                 f"Try narrowing the search scope.)"
             )
 
+    if rerank and not status.startswith("error:"):
+        result = await filter_search_results(
+            match_lines,
+            result,
+            query=f"pattern={pattern}; path={path}; include={include_pattern}",
+            kind="grep",
+            intent=intent,
+        )
     return _make_response(result)
 
 
 async def glob_search(
     pattern: str,
     path: Optional[str] = None,
+    *,
+    rerank: bool = True,
+    intent: str = "",
 ) -> ToolResponse:
     """Find files matching a glob pattern (e.g. ``"*.py"``, ``"**/*.json"``).
     Relative paths resolve from the current agent workspace when available,
@@ -611,6 +631,11 @@ async def glob_search(
         path (`str`, optional):
             Root directory to search from.  Defaults to current tool base
             directory (agent workspace when available, otherwise tenant root).
+        rerank (`bool`, optional):
+            Apply configured Jev relevance selection. Set False to recover
+            unfiltered results within the existing scan limits.
+        intent (`str`, optional):
+            What this search should help establish for the current task.
     """
     if not pattern:
         return _make_response("Error: No glob `pattern` provided.")
@@ -654,4 +679,12 @@ async def glob_search(
     if truncated:
         text += f"\n\n(Results truncated at {_MAX_MATCHES} entries.)"
 
+    if rerank:
+        text = await filter_search_results(
+            results,
+            text,
+            query=f"pattern={pattern}; path={path}",
+            kind="glob",
+            intent=intent,
+        )
     return _make_response(text)

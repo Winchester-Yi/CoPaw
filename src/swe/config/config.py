@@ -40,6 +40,7 @@ from ..constant import (
     CRON_LOCK_SAFETY_MARGIN_SECONDS,
 )
 from ..providers.models import ModelSlotConfig
+from ..jev.config import JevConfig
 from ..tracing.config import TracingConfig
 from ..agents.hook_runtime.models import HookConfig
 
@@ -1148,6 +1149,7 @@ class AgentProfileConfig(BaseModel):
     )
 
     # Agent-specific configurations
+    jev: JevConfig = Field(default_factory=JevConfig)
     channels: Optional["ChannelConfig"] = Field(
         default=None,
         description="Channel configurations for this agent",

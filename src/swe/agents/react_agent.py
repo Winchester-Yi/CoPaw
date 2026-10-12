@@ -73,6 +73,7 @@ from .tools import (
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
+from ..jev.context import jev_context
 from ..tracing.agent_trace_sdk import chat_traced
 from ..constant import (
     AGENT_INTERRUPT_TIMEOUT,
@@ -652,7 +653,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 and name in _COMPLETION_JUDGE_ALLOWED_TOOLS
                 for name in tool_functions
             }
-        toolkit = Toolkit()
+        from ..jev.skills import JevToolkit
+
+        jev = getattr(self._agent_config, "jev", None)
+        toolkit = (
+            JevToolkit()
+            if jev is not None and jev.skill_selection.enabled
+            else Toolkit()
+        )
         self._register_enabled_tools(
             toolkit,
             tool_functions,
@@ -2330,8 +2338,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self.toolkit.remove_tool_function(self.finish_function_name)
         self._start_watchdog()
         turn_callback = getattr(self, "_subagent_turn_callback", None)
+        last_input = msg[-1] if isinstance(msg, list) and msg else msg
+        task_text = (
+            last_input.get_text_content() or ""
+            if isinstance(last_input, Msg)
+            else ""
+        )
         try:
-            with self.agent_phase(AgentPhase.REASONING, reason="research"):
+            with (
+                jev_context(
+                    getattr(self._agent_config, "jev", None),
+                    task_text,
+                ),
+                self.agent_phase(AgentPhase.REASONING, reason="research"),
+            ):
                 for turn in range(1, self.max_iters + 1):
                     await self._compress_memory_if_needed()
                     reply = await self._reasoning()
@@ -2463,10 +2483,16 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         request_context = getattr(self, "_request_context", {}) or {}
         channel_name = request_context.get("channel", "console")
         workspace_dir = Path(self._workspace_dir or WORKING_DIR)
-        with apply_skill_config_env_overrides(
-            workspace_dir,
-            channel_name,
-            snapshot=getattr(self, "_workspace_skill_snapshot", None),
+        with (
+            jev_context(
+                getattr(self._agent_config, "jev", None),
+                query or request_context.get("current_user_text", ""),
+            ),
+            apply_skill_config_env_overrides(
+                workspace_dir,
+                channel_name,
+                snapshot=getattr(self, "_workspace_skill_snapshot", None),
+            ),
         ):
             try:
                 self._start_watchdog()

@@ -541,6 +541,10 @@ async def finalize_query_runtime(
         current_user_text=query or get_last_user_text(msgs) or "",
         workspace_skill_snapshot=workspace_skill_snapshot,
     )
+    if getattr(inputs.agent_config, "jev", None) is not None:
+        agent._jev_pinned_skills = {
+            directive.name for directive in inputs.selected_skill_directives
+        }
     await agent.register_mcp_clients()
     agent.set_console_output_enabled(enabled=False)
     debug_log(

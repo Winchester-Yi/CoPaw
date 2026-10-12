@@ -251,6 +251,7 @@ def capture_model_launch_snapshot(
     run_store_dir: Path,
     run_id: str,
     definition: SubAgentDefinition,
+    model_slot_override: ModelSlotConfig | None = None,
 ) -> tuple[str | None, ModelSlotConfig | None]:
     """Freeze the selected and parent provider configurations privately."""
     try:
@@ -259,7 +260,7 @@ def capture_model_launch_snapshot(
         if parent_slot is None:
             raise ModelLaunchSnapshotError("No active model is available")
         selected_slot = resolve_skill_owned_model_slot(tenant_id, definition)
-        chosen_slot = selected_slot or parent_slot
+        chosen_slot = selected_slot or model_slot_override or parent_slot
         selected_provider = manager.get_provider(chosen_slot.provider_id)
         parent_provider = manager.get_provider(parent_slot.provider_id)
         if selected_provider is None or parent_provider is None:

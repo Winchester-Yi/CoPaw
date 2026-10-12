@@ -102,6 +102,7 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
 }
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
+        "search_skills",
         "execute_shell_command",
         "read_file",
         "grep_search",
