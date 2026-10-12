@@ -1427,6 +1427,22 @@ _Avoid_: B3 trace ID, batch ID, request header trace ID
 The observability trace for one user-message execution by the Main Agent. It starts at the request's Main Agent entry point, contains that execution's agent stages, model calls, tool calls, retries, and terminal outcome, and ends when the execution finishes; a later message in the same session starts a new Agent Trace.
 _Avoid_: session trace, conversation-wide trace, SubAgent Run trace
 
+**Token Diagnostic Run**:
+An independently identified accounting run for one user-request execution, including its Main Agent, associated SubAgent work, and auxiliary model calls in separate execution branches. It can correlate with an Execution Trace ID while keeping its accounting lifecycle independent of the Agent Trace.
+_Avoid_: Agent Trace, B3 trace, whole conversation, billing invoice
+
+**Token Call Record**:
+The independently owned record of one observable model-request attempt within a Token Diagnostic Run, containing reported usage, input estimates, and their availability states. Retrying a logical model call creates a separate Token Call Record for each observable attempt.
+_Avoid_: Trace Span, logical call total, persisted context occupancy, inferred bill
+
+**Token Finding**:
+A versioned rule result that identifies potentially inefficient behavior from saved Token Call Records, input provenance, and related execution facts. It carries evidence and a developer action suggestion without granting authority to change or stop execution.
+_Avoid_: confirmed waste, automatic optimization, business failure, saved-token guarantee
+
+**Token Capture Completeness**:
+The extent to which saved accounting records reconcile with the observed branch lifecycle, declared descendant branches, and reported attempt counts of a Token Diagnostic Run. It does not prove that unobserved requests never occurred or that missing usage means zero consumption.
+_Avoid_: task success, provider billing completeness, zero missing rows
+
 **B3 Trace ID**:
 The external distributed-tracing identifier received through B3 transport metadata. It may be shared by multiple executions in one Dispatch Batch and therefore is not an execution identity.
 _Avoid_: execution trace ID, Subtask trace ID, unique run ID

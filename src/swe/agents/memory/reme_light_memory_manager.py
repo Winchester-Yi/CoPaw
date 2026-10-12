@@ -397,7 +397,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         self._warn_if_version_mismatch()
         return create_model_and_formatter(
             self.agent_id,
-            trace_context=trace_context,
+            trace_context={**(trace_context or {}), "token_purpose": "memory"},
         )
 
     # ------------------------------------------------------------------

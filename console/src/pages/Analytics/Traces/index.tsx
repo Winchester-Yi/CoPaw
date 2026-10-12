@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import {
   Table,
   Card,
@@ -371,6 +372,7 @@ export default function TracesPage() {
           </span>
         }
         placement="right"
+        extra={selectedTrace && <Link to={`/analytics/token-diagnostics?trace=${encodeURIComponent(selectedTrace.trace.trace_id)}`}>Token 用量与诊断</Link>}
         width={700}
         open={drawerOpen}
         onClose={() => {

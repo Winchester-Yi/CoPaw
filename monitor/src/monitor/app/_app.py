@@ -57,7 +57,13 @@ async def lifespan(
     else:
         logger.info("Elasticsearch not configured (ES_HOST not set)")
 
-    yield
+    from .services.token_diagnostics.lifecycle import start_services, close_services
+
+    await start_services(fastapi_app)
+    try:
+        yield
+    finally:
+        await close_services(fastapi_app)
 
     # Close Elasticsearch client on shutdown
     if ES_HOST:

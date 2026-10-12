@@ -48,6 +48,8 @@ from ..providers.retry_chat_model import (
     RateLimitConfig,
 )
 from ..token_usage import TokenRecordingModelWrapper
+from ..token_diagnostics.model_observer import AttemptObserver, LogicalObserver
+from ..token_diagnostics.collector import get_collector
 from ..tracing import TracingModelWrapper, has_trace_manager, get_trace_manager
 
 
@@ -1172,6 +1174,16 @@ def create_model_and_formatter(
         formatter = _create_formatter_instance(model.__class__)
 
         # Wrap with tracing and token recording
+        diagnostic_metadata = {
+            **(trace_context or {}),
+            "tenant_id": tenant_id,
+            "agent_id": resolved_agent_id,
+            "purpose": (trace_context or {}).get("token_purpose"),
+            "max_output_tokens": getattr(model_config, "max_output_length", None),
+        }
+        diagnostic_enabled = get_collector().config.enabled
+        if diagnostic_enabled:
+            model = AttemptObserver(model, provider_id, diagnostic_metadata)
         wrapped_model = _wrap_model_with_tracing(
             provider_id,
             model,
@@ -1188,6 +1200,8 @@ def create_model_and_formatter(
             on_retry=None,  # 模型层重试回调，后续可通过上下文变量传递事件
         )
 
+        if diagnostic_enabled:
+            wrapped_model = LogicalObserver(wrapped_model, diagnostic_metadata)
         return wrapped_model, formatter
     finally:
         logger.debug(

@@ -21,6 +21,7 @@ from .launch_snapshot import (
 from .models import SubAgentRunRecord, WorkerLaunchSpec
 from .run_store import PerRunSubAgentRunStore
 from .runtime import SubAgentRuntime
+from ...token_diagnostics.collector import close_collection, apply_worker_snapshot
 
 
 def load_launch_spec(path: Path) -> WorkerLaunchSpec:
@@ -65,6 +66,7 @@ async def run_worker(launch_spec_path: Path) -> int:
     try:
         runtime = SubAgentRuntime(store=store)
         context = launch_spec.request_context
+        apply_worker_snapshot(context.get("_token_scope"))
         workspace_dir = Path(launch_spec.workspace_dir)
         mcp_clients: list[Any] = []
         selected_slot, selected_provider, parent_slot, parent_provider = (
@@ -129,6 +131,7 @@ async def run_worker(launch_spec_path: Path) -> int:
         )
         return 1
     finally:
+        await close_collection()
         _remove_private_snapshot_paths(launch_spec)
 
 

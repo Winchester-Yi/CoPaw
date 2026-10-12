@@ -322,6 +322,11 @@ class BackgroundSubAgentSupervisor:
         scope_id = get_current_scope_id()
         if scope_id is not None:
             worker_context["scope_id"] = scope_id
+        from ...token_diagnostics.runtime import safe_child_snapshot
+
+        token_snapshot = safe_child_snapshot()
+        if token_snapshot is not None:
+            worker_context["_token_scope"] = token_snapshot
         launch_spec = WorkerLaunchSpec(
             run_id=record.run_id,
             run_store_dir=str(scope.run_store_dir),

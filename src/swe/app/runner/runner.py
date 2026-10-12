@@ -140,6 +140,8 @@ from ...tracing.agent_trace_sdk import (
     use_b3_trace_context,
 )
 from ...tracing.models import TraceStatus
+from ...token_diagnostics.runtime import accounting_query
+from ...token_diagnostics.context import bind_trace
 from ...config.context import (
     get_current_passthrough_headers,
 )
@@ -3687,6 +3689,7 @@ class AgentRunner(Runner):
             if trace_id:
                 # 通道层负责把事件发给前端，这里写回 request 让 SSE 能透传 trace_id。
                 setattr(request, "trace_id", trace_id)
+                bind_trace(trace_id)
 
             return trace_id
         except Exception as e:
@@ -6308,6 +6311,7 @@ class AgentRunner(Runner):
             outcome = TurnOutcome.completed(identity)
         await self._report_answer_turn_outcome(identity, outcome)
 
+    @accounting_query
     async def query_handler(
         self,
         msgs,
