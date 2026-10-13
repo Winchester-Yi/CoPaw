@@ -115,7 +115,7 @@ Token 采集器从运行时获得这些数字与指纹事件，不读取 Trace �
 
 ### 4.5 表字段与约束
 
-五张表构成一个 Token 记录域；不新增通用任务引擎或消息总线。
+本版原列五张主表；后续 [观测底座 A](2026-10-12-token-diagnostics-observation-foundation-design.md) 增加六张类型化关系明细，共 11 张表构成一个 Token 记录域；不新增通用任务引擎或消息总线。
 
 | 表 | 主要字段 | 幂等与访问索引 |
 | --- | --- | --- |
@@ -125,9 +125,9 @@ Token 采集器从运行时获得这些数字与指纹事件，不读取 Trace �
 | `swe_token_execution_events` | event_id、任务/分支及访问范围、branch_event_seq、事件类型、producer_operation_id、父调用身份、规范化工具身份、参数/结果指纹、结果/错误枚举、轮询声明、阶段/进展版本、compaction_epoch、时间、revision | event_id 唯一；`(source_id, tenant_id, branch_run_id, branch_event_seq)`；操作 ID 索引 |
 | `swe_token_findings` | finding_id、任务/分支及访问范围、rule_id/version、稳定 finding_key、observed_revision、指标/阈值快照、证据引用、证据等级、建议代码、自动观测状态、时间 | `(source_id, tenant_id, branch_run_id, rule_id, rule_version, finding_key)` 唯一；任务与状态索引 |
 
-新身份使用不可复用的随机 ID；时间统一存 UTC，日期过滤和界面按调用方时区解释。计数字段使用 BIGINT，未知用量可空；不依赖旧 MySQL 版本可能忽略的 CHECK 约束，数据校验由写入 DTO 执行。状态枚举由应用约束，初始迁移按兼容 MySQL JSON 能力编写，不依赖 MySQL 8 专属领取语法。
+新执行身份独立生成；已知根执行使用 scoped AnswerTurn / cron 执行关联保持附着身份，具体以观测底座 A 为准；时间统一存 UTC，日期过滤和界面按调用方时区解释。计数字段使用 BIGINT，未知用量可空；不依赖旧 MySQL 版本可能忽略的 CHECK 约束，数据校验由写入 DTO 执行。状态枚举由应用约束，初始 DDL 按项目数据库规范使用类型化列与关系明细编写，不依赖 MySQL 8 专属领取语法。
 
-证据 JSON 只允许标识符、枚举、数字和安全元数据，不接收任意原始对象。Provider 子项只保存白名单数字，禁止将 raw response 整体 JSON 化落库。首期问题只有自动观测状态，不预留人工处理工作流的字段或写接口。
+内存证据对象只允许标识符、状态值、数字和安全元数据；数据库通过类型化列和引用明细持久化，不接收任意原始对象。Provider 子项只保存白名单数字，禁止将 raw response 整体 JSON 化落库。首期问题只有自动观测状态，不预留人工处理工作流的字段或写接口。
 
 ### 4.6 状态语义
 

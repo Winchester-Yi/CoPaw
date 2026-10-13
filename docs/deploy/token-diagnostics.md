@@ -8,13 +8,23 @@ Token 的队列、ID、表、事务、连接池与清理均独立于 Trace。两
 
 ## 上线顺序
 
-1. 在 SWE / Monitor 共同访问的 MySQL database 执行 `scripts/sql/token_diagnostics_tables.sql`。SQL 仅创建五张 `swe_token_*` 表，不修改 Trace 表。应用启动不会自动执行 DDL。
+1. 在 SWE / Monitor 共同访问的 MySQL database 执行 `scripts/sql/token_diagnostics_tables.sql`。SQL 仅创建 11 张 `swe_token_*` 表（五张主表和六张关系明细表），不修改 Trace 表。应用启动不会自动执行 DDL。
 2. SWE 的 `SWE_DB_*` 与 Monitor 的 `MONITOR_DB_*` 必须指向上述 database。两个模块各自创建 1–2 个连接的小连接池，不借用已有事务连接。SubAgent 进程有自己的池，需要把并发进程数计入 MySQL 总连接预算。
 3. SWE 和 Monitor 均配置 `SWE_TRACING_ENABLED=true`。SWE 读取 Tracing 的有效配置，Worker 继承父调用的启用快照。Trace 管理器创建或写入失败不会阻止 Token 采集。Monitor 配置未启用时接口返回 503。
 4. 在 SWE 及所有 Worker 的环境配置 `SWE_TOKEN_DIAGNOSTICS_FINGERPRINT_KEY`，使用部署平台的密钥注入方式；不要提交到仓库。各实例使用相同密钥与 `SWE_TOKEN_DIAGNOSTICS_KEY_VERSION`（默认 `v1`）。Monitor 不需要指纹密钥。
 5. 发布后端、Monitor 和 Console。验证新请求出现记录，并等待后台分析更新。历史 Trace 不自动回填。
 
 未配置指纹密钥时仍保存数字用量，重复内容和工具规则显示“证据不足”。轮换密钥时同步变更 key version；不同版本的指纹不用于关联内容。
+
+## 初始表结构与采集版本
+
+本结构仅用于尚未建表的部署，直接执行修订后的初始 DDL；没有旧 JSON 载荷迁移或兼容读写。所有表及字段包含注释、主键；多值关系由独立明细保存，查询显式列举字段。
+
+五张主表为 `swe_token_runs`、`swe_token_model_calls`、`swe_token_input_items`、`swe_token_execution_events`、`swe_token_findings`。六张关系表为 `swe_token_expected_children`、`swe_token_rule_evaluations`、`swe_token_rule_missing_fields`、`swe_token_finding_calls`、`swe_token_finding_operations`、`swe_token_finding_sources`。
+
+事件契约 `schema_version=1.0`。一次根执行建立一个 Task；同一 AnswerTurn 或定时执行复用身份，后续请求独立。会话和 Trace 仅为关联字段。子 Agent 和辅助调用共用 Task，独立保存分支。
+
+每个可观察模型尝试保存 Context ID、步骤 ID 和父分支；`messages_only` / `message_approx` 标明采集边界，不包含服务端模板、Tokenizer 或 Token 偏移。工具步骤保留实际开始/结束时间，安全属性缺声明时为 unknown/false。
 
 ## 可配置限额
 
@@ -30,7 +40,7 @@ Token 的队列、ID、表、事务、连接池与清理均独立于 Trace。两
 
 规则扫描有界窗口：每个分支最多读取 256 次调用、10000 个输入条目和 1000 个工具事件。超过窗口时明确标记 `insufficient_evidence`，已有问题不会因缺少证据自动消失。单次调用的明细仍可独立分页查询。任务首页明细上限 1000 次调用 / 1000 个分支；超限的实际用量使用单独汇总查询，不拿明细窗口当完整总量。
 
-清理每 60 秒执行一次，每次最多 20 个已过期分支；任务内任何活跃、近期结束或仍被分析租约保护的分支会保留该任务。优先清理子分支，再清理根记录。清理只操作五张 Token 表。
+清理每 60 秒执行一次，每次最多 20 个已过期分支；任务内任何活跃、近期结束或仍被分析租约保护的分支会保留该任务。优先清理子分支，再清理根记录。清理只操作这 11 张 Token 表。
 
 ## 数字与诊断口径
 
@@ -65,6 +75,6 @@ Monitor 路由前缀 `/api/token-diagnostics`；Console 经现有网关访问 `/
 
 ## 验证与回退
 
-程序测试位于 `tests/unit/token_diagnostics/`。前端测试位于 `console/src/pages/Analytics/TokenDiagnostics/`。浏览器验证脚本 `scripts/testing/token_diagnostics_browser.py` 渲染真实 Console 路由，使用数字 API fixture，不访问业务数据库；覆盖三种桌面尺寸、hideMenu、任务 / 调用选择和刷新。
+程序测试位于 `tests/unit/token_diagnostics/`。`test_relational_storage.py` 默认执行 SQLite 关系读写验证；真实 MySQL 需设置专用测试 `TEST_TOKEN_MYSQL_DSN` 后运行该文件（如 `mysql://test_user:test_password@127.0.0.1:3306/test_token_diagnostics`）。测试创建并删除 UUID 后缀的隔离 schema，测试用户需要相应 CREATE/DROP 权限；不得使用业务连接。前端测试位于 `console/src/pages/Analytics/TokenDiagnostics/`。浏览器验证脚本 `scripts/testing/token_diagnostics_browser.py` 渲染真实 Console 路由，使用数字 API fixture，不访问业务数据库；覆盖三种桌面尺寸、hideMenu、任务 / 调用选择和刷新。
 
-关闭配置并重启后停止新采集 / 分析；表与已有记录保留。回退旧应用不要求修改 Trace 表。部署前仍需要在测试 MySQL 上执行 SQL、验证写入与 Monitor 跨进程分析，确认网关身份配置；本次本地开发没有操作业务数据库，也没有用真实 Provider 请求核对账单。
+关闭配置并重启后停止新采集 / 分析；表与已有记录保留。回退旧应用不要求修改 Trace 表，但旧版 JSON Store 与本结构不兼容，须关闭旧版 Token 采集/分析。部署前仍需要在测试 MySQL 上执行 SQL、验证写入与 Monitor 跨进程分析，确认网关身份配置；本次本地开发没有操作业务数据库，也没有用真实 Provider 请求核对账单。
