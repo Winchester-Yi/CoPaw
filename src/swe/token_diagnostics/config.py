@@ -28,6 +28,7 @@ class DiagnosticConfig:
     retry_age: float = 60.0
     shutdown_timeout: float = 3.0
     retention_days: int = 30
+    context_enabled: bool = False
 
     @classmethod
     def from_env(cls):
@@ -35,16 +36,23 @@ class DiagnosticConfig:
 
         return cls(
             enabled=TRACING_ENABLED,
+            context_enabled=os.environ.get(
+                "SWE_TOKEN_DIAGNOSTICS_CONTEXT_ENABLED",
+                "false",
+            ).lower()
+            in {"true", "1", "yes", "on"},
             fingerprint_key=os.environ.get(
                 "SWE_TOKEN_DIAGNOSTICS_FINGERPRINT_KEY",
                 "",
             ),
             key_version=os.environ.get(
-                "SWE_TOKEN_DIAGNOSTICS_KEY_VERSION", "v1"
+                "SWE_TOKEN_DIAGNOSTICS_KEY_VERSION",
+                "v1",
             )[:32],
             max_records=env_int("SWE_TOKEN_DIAGNOSTICS_MAX_RECORDS", 1000),
             max_bytes=env_int(
-                "SWE_TOKEN_DIAGNOSTICS_MAX_BYTES", 16 * 1024 * 1024
+                "SWE_TOKEN_DIAGNOSTICS_MAX_BYTES",
+                16 * 1024 * 1024,
             ),
             retention_days=env_int("SWE_TOKEN_DIAGNOSTICS_RETENTION_DAYS", 30),
         )

@@ -67,8 +67,8 @@ node .gitnexus/run.cjs impact Analyzer --direction upstream --repo .
 
 **Files:** 新建 `context_contract.py`、`diagnostic_contract.py`；修改 SWE `contract.py`、`config.py`。测试 `tests/unit/token_diagnostics/test_b_contract.py`。
 
-- [ ] 添加契约测试：接受事件 1.0/1.1，拒绝其他版本；拒绝不支持的状态；B disabled 时继续产生 A 事件 1.0；启用时新证据为 1.1。
-- [ ] 在 Token 子系统 `conftest.py` 注册 Monitor 源路径，使新增测试统一可导入 Monitor；不移动或改写既有测试的导入行为。
+- [x] 添加契约测试：接受事件 1.0/1.1，拒绝其他版本；拒绝不支持的状态；B disabled 时继续产生 A 事件 1.0；启用时新证据为 1.1。
+- [x] 在 Token 子系统 `conftest.py` 注册 Monitor 源路径，使新增测试统一可导入 Monitor；不移动或改写既有测试的导入行为。
 
 ```python
 from pathlib import Path
@@ -80,7 +80,7 @@ if MONITOR_SOURCE not in sys.path:
     sys.path.insert(0, MONITOR_SOURCE)
 ```
 
-- [ ] 冻结下列常量；旧 `SCHEMA_VERSION` 的调用点逐一检查，不能把读旧数据支持删掉。增加独立 `SWE_TOKEN_DIAGNOSTICS_CONTEXT_ENABLED`，默认 false，且只在既有总采集启用时有效。部署先更新 Monitor/DDL，最后开此开关。
+- [x] 冻结下列常量；旧 `SCHEMA_VERSION` 的调用点逐一检查，不能把读旧数据支持删掉。增加独立 `SWE_TOKEN_DIAGNOSTICS_CONTEXT_ENABLED`，默认 false，且只在既有总采集启用时有效。部署先更新 Monitor/DDL，最后开此开关。
 
 ```python
 B_SCHEMA_VERSION = "1.1"
@@ -104,9 +104,9 @@ RULE_IDS = (
 )
 ```
 
-- [ ] 定义明确的 DTO（dataclass 或 TypedDict）：`CapturedContext` 具有 `context_id, context_role, representation_version, estimator_version, key_version, capture_state, capture_reason, text_bytes, encoded_bytes, expected_item_count, occurrences, blocks`；`PrefixBounds` 具有 `lower_text_bytes, upper_text_bytes, first_difference_index`；`Evaluation` 具有 `evaluation_id, rule_id, rule_version, threshold_version, input_revision, snapshot_id, state, values, gaps, refs, findings`。未知值用 None，禁止 raw_text/prompt/arguments/result 正文字段。
-- [ ] 为后续任务冻结 helper 合同：SWE `capture_context(messages, tools, scope, config, *, context_id, context_role)`；Monitor `compare_prefix(current, historical)`、`aggregate_prefix(comparisons)`、`evaluate_context_rules(snapshot)`。上述均在对应任务定义，不能在 Task 1 写空实现。
-- [ ] 配置边界测试使用 `dataclasses.replace(config, context_enabled=True)`，确认负数、无效字符串、超大上限不扩大已批准预算。队列及 retention 仍沿用 A 默认值。
+- [x] 定义明确的 DTO（dataclass 或 TypedDict）：`CapturedContext` 具有 `context_id, context_role, representation_version, estimator_version, key_version, capture_state, capture_reason, text_bytes, encoded_bytes, expected_item_count, occurrences, blocks`；`PrefixBounds` 具有 `lower_text_bytes, upper_text_bytes, first_difference_index`；`Evaluation` 具有 `evaluation_id, rule_id, rule_version, threshold_version, input_revision, snapshot_id, state, values, gaps, refs, findings`。未知值用 None，禁止 raw_text/prompt/arguments/result 正文字段。
+- [x] 为后续任务冻结 helper 合同：SWE `capture_context(messages, tools, scope, config, *, context_id, context_role)`；Monitor `compare_prefix(current, historical)`、`aggregate_prefix(comparisons)`、`evaluate_context_rules(snapshot)`。上述均在对应任务定义，不能在 Task 1 写空实现。
+- [x] 配置边界测试使用 `dataclasses.replace(config, context_enabled=True)`，确认负数、无效字符串、超大上限不扩大已批准预算。队列及 retention 仍沿用 A 默认值。
 
 ```python
 def test_rule_ids_do_not_replace_legacy_rules():
@@ -466,4 +466,10 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 
 编写阶段已核对：任务引用与文件责任一致，13 张 B 表+11 张 A 表为24张；全部16项设计决定有覆盖；旧五规则、专项核对暂缓及C边界未扩大。所有复合测试示例明确要求从实际 fixture/服务结果取得变量，不能复制断言后伪造响应使其通过。
 
-执行记录从实际开发开始填写，当前所有任务未执行。每项至少记录变更范围、先失败/后通过测试、图分析限制和未运行检查。未经真实验证，不标记任务完成或宣称页面已上线。
+执行记录从实际开发开始填写。每项记录变更范围、先失败/后通过测试、图分析限制和未运行检查。未经真实验证，不标记任务完成或宣称页面已上线。
+
+- A 基线：修复恢复执行计数重置，使用独立 accounting_fragment 事件在异步事务中合计预期次数、合并子分支期望；锁定读取避免 MySQL RR 快照遗漏。回归先失败预期 2!=3，修复后基线范围 96 passed（含 B 契约）。本地提交 `6e0a38911`（设计/计划）及 `9c2fe03d1`（A 基线）。全部提交钩子通过。真实 MySQL 尚未运行。
+- Task 1：B 默认关闭、1.0/1.1 支持、固定预算与 DTO。先失败 24 项，再通过 31 项（契约+foundation）。独立检视通过；Task 3 接口检视补齐 Evaluation 的 object_type/object_id，并通过契约与存储联合测试。
+- Task 2：实现完成，正在修复检视发现的异步来源引用生命周期问题，尚未勾选或提交。59 项聚焦测试及随机 Unicode/块边界检视通过；真实大输入协作预算约 5ms 后返回 partial，不承诺硬延迟界限。
+- Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已实现，正在复核。旧快照重试回退 head 的回归先失败，修复后通过。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。
+- Tasks 4–14：尚未实施，不表示 API、规则或三个页面已经交付。
