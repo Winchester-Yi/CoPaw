@@ -5,6 +5,7 @@ import asyncio
 import logging
 
 from .analysis import Analyzer
+from .diagnostic_queries import DiagnosticQueryService
 from .query_service import TokenQueryService
 from .store import TokenStore
 from ....config.constant import EnvVarLoader
@@ -32,6 +33,7 @@ async def maintain(store):
 
 async def start_services(app):
     app.state.token_queries = None
+    app.state.token_diagnostic_queries = None
     if not EnvVarLoader.get_bool("SWE_TRACING_ENABLED", False):
         return
     store = TokenStore(
@@ -45,11 +47,14 @@ async def start_services(app):
     app.state.token_store = store
     app.state.token_analyzer = analyzer
     app.state.token_queries = TokenQueryService(store)
+    if store.context_enabled:
+        app.state.token_diagnostic_queries = DiagnosticQueryService(store)
     app.state.token_retention = asyncio.create_task(maintain(store))
 
 
 async def close_services(app):
     app.state.token_queries = None
+    app.state.token_diagnostic_queries = None
     retention = getattr(app.state, "token_retention", None)
     if retention:
         retention.cancel()
