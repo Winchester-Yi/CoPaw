@@ -1,0 +1,80 @@
+.filterBar {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--console-management-border);
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+}
+.fields {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.field {
+  display: flex;
+  flex: 1 1 160px;
+  min-width: 0;
+  max-width: 260px;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--console-management-text-secondary);
+  input,
+  select {
+    width: 100%;
+    min-width: 0;
+    height: 32px;
+    border: 1px solid var(--console-management-border-strong);
+    border-radius: 8px;
+    color: var(--console-management-text);
+    background: var(--console-management-surface);
+    font-family: inherit;
+    padding: 4px 10px;
+    &:focus-visible {
+      outline: 2px solid var(--console-management-primary);
+      outline-offset: 2px;
+    }
+  }
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  button:focus-visible {
+    outline: 2px solid var(--console-management-primary);
+    outline-offset: 2px;
+  }
+}
+.hint {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--console-management-text-secondary);
+  overflow-wrap: anywhere;
+}
+.error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--console-management-error);
+}
+.evidenceState {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--console-management-text-secondary);
+  overflow-wrap: anywhere;
+  span {
+    min-width: 0;
+  }
+}
+@media (max-width: 600px) {
+  .field {
+    flex-basis: calc(50% - 12px);
+    max-width: none;
+  }
+  .actions {
+    width: 100%;
+  }
+}
