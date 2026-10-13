@@ -124,11 +124,11 @@ def test_rule_ids_do_not_replace_legacy_rules():
 
 **Files:** 新建 SWE `context_capture.py`；修改 `input_capture.py`、`provenance.py`；测试 `tests/unit/token_diagnostics/test_context_capture.py`。
 
-- [ ] 写测试覆盖工具数组顺序、消息角色、文本空白/Unicode、Schema 键顺序规范化、不同来源相同内容、缺密钥、媒体/未知块、短尾块和 256KiB/1024 块边界。
-- [ ] 实现增量表示迭代器：工具条目在前，消息/块在后；Schema 对象键固定排序，数组不排序；保留文本原样。结构边界使用固定标签和无歧义转义编码；编码按小块产出，不先对整个大对象调用 json.dumps/encode。
-- [ ] occurrence 保存 `source_object_id`/`source_version`（可得时）、来源类别、content/structure digest、原点引用、顺序及估算/字节区间。没有可靠身份时 source_object_id 为 None，作用域 source_id/tenant_id 始终非空；消息位置不得作为跨轮稳定身份。HMAC 查找只校验内容，不能仅因摘要相同继承另一个来源身份。
-- [ ] 链式 HMAC 计入 scope/key/representation/index 和前块摘要，实际消息/操作 ID 不计入内容指纹。每块保存编码起止及文本累计起止，块大小含结构标记，比例只用文本字节。
-- [ ] 实现 deadline/长度/条目预算，每块前检查，不遍历剩余输入补总数；`expected_item_count=None` 在总数不可得时合法。超限返回 partial 和具体 reason，不能伪装 complete。原输入不被修改，原文不进入返回值或日志。
+- [x] 写测试覆盖工具数组顺序、消息角色、文本空白/Unicode、Schema 键顺序规范化、不同来源相同内容、缺密钥、媒体/未知块、短尾块和 256KiB/1024 块边界。
+- [x] 实现增量表示迭代器：工具条目在前，消息/块在后；Schema 对象键固定排序，数组不排序；保留文本原样。结构边界使用固定标签和无歧义转义编码；编码按小块产出，不先对整个大对象调用 json.dumps/encode。
+- [x] occurrence 保存 `source_object_id`/`source_version`（可得时）、来源类别、content/structure digest、原点引用、顺序及估算/字节区间。没有可靠身份时 source_object_id 为 None，作用域 source_id/tenant_id 始终非空；消息位置不得作为跨轮稳定身份。HMAC 查找只校验内容，不能仅因摘要相同继承另一个来源身份。
+- [x] 链式 HMAC 计入 scope/key/representation/index 和前块摘要，实际消息/操作 ID 不计入内容指纹。每块保存编码起止及文本累计起止，块大小含结构标记，比例只用文本字节。
+- [x] 实现 deadline/长度/条目预算，每块前检查，不遍历剩余输入补总数；`expected_item_count=None` 在总数不可得时合法。超限返回 partial 和具体 reason，不能伪装 complete。原输入不被修改，原文不进入返回值或日志。
 
 ```python
 def test_same_text_does_not_prove_same_source():
@@ -469,7 +469,7 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 执行记录从实际开发开始填写。每项记录变更范围、先失败/后通过测试、图分析限制和未运行检查。未经真实验证，不标记任务完成或宣称页面已上线。
 
 - A 基线：修复恢复执行计数重置，使用独立 accounting_fragment 事件在异步事务中合计预期次数、合并子分支期望；锁定读取避免 MySQL RR 快照遗漏。回归先失败预期 2!=3，修复后基线范围 96 passed（含 B 契约）。本地提交 `6e0a38911`（设计/计划）及 `9c2fe03d1`（A 基线）。全部提交钩子通过。真实 MySQL 尚未运行。
-- Task 1：B 默认关闭、1.0/1.1 支持、固定预算与 DTO。先失败 24 项，再通过 31 项（契约+foundation）。独立检视通过；Task 3 接口检视补齐 Evaluation 的 object_type/object_id，并通过契约与存储联合测试。
-- Task 2：实现完成，正在修复检视发现的异步来源引用生命周期问题，尚未勾选或提交。59 项聚焦测试及随机 Unicode/块边界检视通过；真实大输入协作预算约 5ms 后返回 partial，不承诺硬延迟界限。
+- Task 1：B 默认关闭、1.0/1.1 支持、固定预算与 DTO。先失败 24 项，再通过 31 项（契约+foundation）。独立检视通过；Task 3 接口检视补齐 Evaluation 的 object_type/object_id，并通过契约与存储联合测试。提交钩子 Pylint/Astroid 在 Python 3.14 解析标准库崩溃，同规则 Python 3.12 检查通过；其余钩子通过。
+- Task 2：增量表示、HMAC 链及来源借用已完成，独立检视 READY。共享借用 lease 在退出时失效，继承 ContextVar 的异步任务不能继续持有正文或来源身份。当前采集/fragment/foundation 联合回归 73 passed；随机 Unicode/块边界检视通过。13MB 输入 median 5.026ms、max 5.038ms 后返回 partial/time_budget，不承诺硬延迟界限。
 - Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已实现，正在复核。旧快照重试回退 head 的回归先失败，修复后通过。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。
 - Tasks 4–14：尚未实施，不表示 API、规则或三个页面已经交付。
