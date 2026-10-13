@@ -109,8 +109,9 @@ def valid_claim(row, token):
 
 
 class TokenStore:
-    def __init__(self, pool=None):
+    def __init__(self, pool=None, *, context_enabled=False):
         self.pool = pool
+        self.context_enabled = context_enabled
         self._pool_lock = asyncio.Lock()
 
     async def ensure_pool(self):
@@ -134,13 +135,27 @@ class TokenStore:
     async def transaction(self):
         await self.ensure_pool()
         async with self.pool.acquire() as connection:
+            if self.context_enabled:
+                async with connection.cursor(aiomysql.DictCursor) as cursor:
+                    await cursor.execute(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                    )
             await connection.begin()
             try:
                 async with connection.cursor(aiomysql.DictCursor) as cursor:
                     yield cursor
                 await connection.commit()
+            except asyncio.CancelledError:
+                connection.close()
+                raise
             except BaseException:
-                await connection.rollback()
+                try:
+                    await connection.rollback()
+                except asyncio.CancelledError:
+                    connection.close()
+                    raise
+                except Exception:
+                    connection.close()
                 raise
 
     async def rows(self, query, params=()):
@@ -263,13 +278,20 @@ class TokenStore:
             )
             return bool(cursor.rowcount)
 
-    async def analysis_data(self, claim):
+    async def analysis_data(self, claim, *, deadline=None):
         async with self.transaction() as cursor:
             await cursor.execute(
-                f"SELECT {select_columns('swe_token_runs')} FROM swe_token_runs WHERE branch_run_id=%s FOR UPDATE",
-                (claim["branch_run_id"],),
+                f"SELECT {select_columns('swe_token_runs')} FROM swe_token_runs WHERE branch_run_id=%s AND source_id=%s AND tenant_id=%s FOR UPDATE",
+                (
+                    claim["branch_run_id"],
+                    claim["source_id"],
+                    claim["tenant_id"],
+                ),
             )
-            run = decode_row(await cursor.fetchone())
+            saved_run = await cursor.fetchone()
+            if saved_run is None:
+                raise ValueError("analysis_scope_missing")
+            run = decode_row(saved_run)
             await self._attach_runs(cursor, [run])
             data = {"run": run, "truncated": False}
             for key, table, limit, order in (
@@ -288,12 +310,21 @@ class TokenStore:
                 ("events", "swe_token_execution_events", 1000, "event_seq"),
             ):
                 await cursor.execute(
-                    f"SELECT {select_columns(table)} FROM {table} WHERE branch_run_id=%s ORDER BY {order} LIMIT %s",
-                    (claim["branch_run_id"], limit + 1),
+                    f"SELECT {select_columns(table)} FROM {table} WHERE branch_run_id=%s AND source_id=%s AND tenant_id=%s ORDER BY {order} LIMIT %s",
+                    (
+                        claim["branch_run_id"],
+                        claim["source_id"],
+                        claim["tenant_id"],
+                        limit + 1,
+                    ),
                 )
                 rows = [decode_row(row) for row in await cursor.fetchall()]
                 data["truncated"] = data["truncated"] or len(rows) > limit
                 data[key] = rows[:limit]
+            if self.context_enabled:
+                from .diagnostic_analysis import attach_snapshot
+
+                await attach_snapshot(cursor, data, deadline)
             return data
 
     async def commit_analysis(self, claim, revision, result):
@@ -304,6 +335,11 @@ class TokenStore:
             )
             row = await cursor.fetchone()
             if not valid_claim(row, claim["claim_token"]):
+                return False
+            if any(
+                row.get(key, claim[key]) != claim[key]
+                for key in ("source_id", "tenant_id")
+            ):
                 return False
             await self._write_evaluations(
                 cursor,
@@ -318,9 +354,27 @@ class TokenStore:
                     revision,
                     issue,
                 )
+            if "diagnostic_evaluations" in result:
+                from .diagnostic_storage import (
+                    append_evaluations,
+                    write_prefix_comparison,
+                )
+
+                for comparison in result.get("prefix_comparisons", []):
+                    await write_prefix_comparison(cursor, comparison)
+                await append_evaluations(
+                    cursor,
+                    {**row, **claim},
+                    result["diagnostic_evaluations"],
+                )
+                if not valid_claim(row, claim["claim_token"]):
+                    raise ValueError("analysis_lease_expired")
             incomplete = any(
                 rule["state"] == "insufficient_evidence"
                 for rule in result["rules"]
+            ) or any(
+                evaluation["state"] == "insufficient_evidence"
+                for evaluation in result.get("diagnostic_evaluations", [])
             )
             state = "insufficient_evidence" if incomplete else "ready"
             dirty = int(row["data_revision"] > revision)
@@ -432,7 +486,23 @@ class TokenStore:
             if not identities:
                 return 0
             marks = ",".join(["%s"] * len(identities))
+            b_tables = (
+                "swe_token_diagnostic_refs",
+                "swe_token_diagnostic_gaps",
+                "swe_token_diagnostic_values",
+                "swe_token_diagnostic_findings",
+                "swe_token_diagnostic_heads",
+                "swe_token_diagnostic_evaluations",
+                "swe_token_prefix_candidates",
+                "swe_token_prefix_comparisons",
+                "swe_token_operation_segments",
+                "swe_token_context_operations",
+                "swe_token_prefix_blocks",
+                "swe_token_context_occurrences",
+                "swe_token_contexts",
+            )
             for table in (
+                *b_tables,
                 "swe_token_finding_calls",
                 "swe_token_finding_operations",
                 "swe_token_finding_sources",
@@ -445,10 +515,18 @@ class TokenStore:
                 "swe_token_execution_events",
                 "swe_token_runs",
             ):
-                await cursor.execute(
-                    f"DELETE FROM {table} WHERE branch_run_id IN ({marks})",
-                    tuple(identities),
-                )
+                try:
+                    await cursor.execute(
+                        f"DELETE FROM {table} WHERE branch_run_id IN ({marks})",
+                        tuple(identities),
+                    )
+                except aiomysql.ProgrammingError as exc:
+                    if (
+                        self.context_enabled
+                        or table not in b_tables
+                        or exc.args[0] != 1146
+                    ):
+                        raise
             return len(identities)
 
     async def close(self):

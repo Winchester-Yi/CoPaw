@@ -322,7 +322,11 @@ async def test_write_then_read_restores_runtime_facts_and_scoped_children(
     ]
     for key, value in call["items"][0].items():
         assert saved_item[key] == value
-    claim = {"branch_run_id": "branch"}
+    claim = {
+        "branch_run_id": "branch",
+        "source_id": "source",
+        "tenant_id": "tenant",
+    }
     snapshot = await Store().analysis_data(claim)
     for key in event.keys() - {"started_at", "ended_at"}:
         assert snapshot["events"][0][key] == event[key], key

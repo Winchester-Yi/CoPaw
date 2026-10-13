@@ -3,10 +3,12 @@
 
 import asyncio
 import logging
+from time import monotonic
 
 from .rules import analyze_branch
 
 logger = logging.getLogger(__name__)
+FAILURE_WRITE_SECONDS = 3.0
 
 
 class Analyzer:
@@ -20,6 +22,24 @@ class Analyzer:
             return False
         heartbeat = asyncio.create_task(self._heartbeat(claim))
         try:
+            if getattr(self.store, "context_enabled", False):
+                from .diagnostic_analysis import analyze_snapshot
+
+                deadline = monotonic() + 5
+                async with asyncio.timeout(5):
+                    snapshot = await self.store.analysis_data(
+                        claim,
+                        deadline=deadline,
+                    )
+                    result = await analyze_snapshot(
+                        snapshot,
+                        deadline=deadline,
+                    )
+                    return await self.store.commit_analysis(
+                        claim,
+                        snapshot["run"]["data_revision"],
+                        result,
+                    )
             snapshot = await self.store.analysis_data(claim)
             result = await asyncio.to_thread(
                 analyze_branch,
@@ -32,12 +52,28 @@ class Analyzer:
                     rule["state"] = "insufficient_evidence"
                     rule["missing_fields"].append("analysis_window_limited")
             return await self.store.commit_analysis(
-                claim, snapshot["run"]["data_revision"], result
+                claim,
+                snapshot["run"]["data_revision"],
+                result,
             )
         except Exception as exc:
-            await self.store.fail_analysis(claim, type(exc).__name__)
+            try:
+                await asyncio.wait_for(
+                    self.store.fail_analysis(
+                        claim,
+                        (
+                            "analysis_timeout"
+                            if isinstance(exc, TimeoutError)
+                            else "analysis_failed"
+                        ),
+                    ),
+                    FAILURE_WRITE_SECONDS,
+                )
+            except Exception:
+                logger.warning("Token analysis failure status unavailable")
             logger.warning(
-                "Token rule analysis failed: %s", type(exc).__name__
+                "Token rule analysis failed: %s",
+                type(exc).__name__,
             )
             return False
         finally:
@@ -66,7 +102,8 @@ class Analyzer:
                 backoff = 2
             except Exception as exc:
                 logger.warning(
-                    "Token analyzer unavailable: %s", type(exc).__name__
+                    "Token analyzer unavailable: %s",
+                    type(exc).__name__,
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(30, backoff * 2)

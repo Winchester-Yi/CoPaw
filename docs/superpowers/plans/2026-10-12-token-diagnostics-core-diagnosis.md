@@ -277,12 +277,12 @@ def test_prefix_interval_crossing_threshold_is_insufficient():
 
 **Files:** Monitor `diagnostic_analysis.py`、`diagnostic_storage.py`、`analysis.py`、`store.py`、`lifecycle.py`。测试 `tests/unit/token_diagnostics/test_b_analysis.py`、`test_b_retention.py`。
 
-- [ ] 新测试复用实际 DB adapter：同 lease 两次提交不重复命中、失效/被替代 lease 不能改 heads、输入修订增长时旧评估只进历史、显式重分析生成新 snapshot、late candidates 只影响新分析。
-- [ ] 分支同一次 claim 执行旧五规则和 B 分析；保留旧分析存储路径，将 B history/head 提交接到同一租约验证。每请求 prefix 独立 comparison，规则评估引用对应 revision/snapshot。
-- [ ] 后台总分析 deadline 5 秒，DB 查询超时及计算协作式 deadline 一致；避免仅 `wait_for(to_thread())` 然后让工作线程无限继续。纯计算定期检查时间并终止，禁止发布部分“当前完成”结果。
-- [ ] `_write_evaluation` 原子插入 values/gaps/refs/findings 与头指针；同输入/规则/阈值/snapshot 重试复用唯一键，新的快照不覆盖旧历史。逐 branch 检查数据修订，不能以 sum(revisions) 判断 Task 追平。
-- [ ] cleanup 覆盖全部 24 表，明细→比较/评估→Context/operation/heads→旧根记录，保留活动/近期 child 保护；共享历史候选引用过期后仍标记 evidence_expired，不从其他租户补证据。
-- [ ] enabled 但 B 表缺失/契约不支持时分析 failed/unavailable，有受控错误码；生命周期退避和关闭有限等待不影响旧服务。关闭 B 后五规则和旧读接口照常工作。
+- [x] 新测试复用实际 DB adapter：同 lease 两次提交不重复命中、失效/被替代 lease 不能改 heads、输入修订增长时旧评估只进历史、显式重分析生成新 snapshot、late candidates 只影响新分析。
+- [x] 分支同一次 claim 执行旧五规则和 B 分析；保留旧分析存储路径，将 B history/head 提交接到同一租约验证。每请求 prefix 独立 comparison，规则评估引用对应 revision/snapshot。
+- [x] 后台总分析 deadline 5 秒，DB 查询超时及计算协作式 deadline 一致；避免仅 `wait_for(to_thread())` 然后让工作线程无限继续。纯计算定期检查时间并终止，禁止发布部分“当前完成”结果。
+- [x] `_write_evaluation` 原子插入 values/gaps/refs/findings 与头指针；同输入/规则/阈值/snapshot 重试复用唯一键，新的快照不覆盖旧历史。逐 branch 检查数据修订，不能以 sum(revisions) 判断 Task 追平。
+- [x] cleanup 覆盖全部 24 表，明细→比较/评估→Context/operation/heads→旧根记录，保留活动/近期 child 保护；共享历史候选引用过期后仍标记 evidence_expired，不从其他租户补证据。
+- [x] enabled 但 B 表缺失/契约不支持时分析 failed/unavailable，有受控错误码；生命周期退避和关闭有限等待不影响旧服务。关闭 B 后五规则和旧读接口照常工作。
 
 测试的关键事务断言应对实际 adapter 查询，不只验证 mock 被调用：
 
@@ -472,6 +472,8 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 - Task 1：B 默认关闭、1.0/1.1 支持、固定预算与 DTO。先失败 24 项，再通过 31 项（契约+foundation）。独立检视通过；Task 3 接口检视补齐 Evaluation 的 object_type/object_id，并通过契约与存储联合测试。提交钩子 Pylint/Astroid 在 Python 3.14 解析标准库崩溃，同规则 Python 3.12 检查通过；其余钩子通过。
 - Task 2：增量表示、HMAC 链及来源借用已完成，独立检视 READY。共享借用 lease 在退出时失效，继承 ContextVar 的异步任务不能继续持有正文或来源身份。当前采集/fragment/foundation 联合回归 73 passed；随机 Unicode/块边界检视通过。13MB 输入 median 5.026ms、max 5.038ms 后返回 partial/time_budget，不承诺硬延迟界限。
 - Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已完成，独立检视 READY。旧快照重试回退 head 的回归先失败，修复后通过。契约/存储联合 35 passed，旧存储边界 12 passed；完整 Token 回归 171 passed。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。租约校验及生产分析集成待 Task 7。
-- Task 5：前缀比较、24h/100 候选检索及字节加权聚合已完成；规范及代码质量复核 READY。21 项测试通过，另有 300 个 Unicode/控制字符/短尾随机样例通过。当前请求运行中/无结束时间、无历史、候选超限及最后候选跨 deadline 均保持不可用或受限。
+- Task 5：前缀比较、24h/100 候选检索及字节加权聚合已完成；规范及代码质量复核 READY。终态 allowlist 加固后 24 项测试通过，另有 300 个 Unicode/控制字符/短尾随机样例通过。当前请求运行中/无结束时间、无历史、候选超限及最后候选跨 deadline 均保持不可用或受限。
 - Task 4：真实请求 prepared Context、队列完整预算、三处操作边界及显式摘要关联完成。独立规范检视发现 A 预算降级与观测工厂 fail-open 两处缺口，新增 5 项红→绿回归修复，root 独立重跑；代码质量检视 READY、独立 52 passed。完整相关范围 143 passed、1 deselected；B 新测试 36 passed。排除项 source disabled config 测试经 HEAD 原函数复现为既有失败。B 打开时旧输入证据 unavailable（避免旧全量序列化），真实 Usage 独立保留；legacy after 明确缺失，无额外完整 memory 读取。
 - Task 6：八规则及记录型建议完成，规范与代码质量检视 READY。R01 可靠分组碰撞新增 10 项红→绿回归；仅可靠静态来源/版本/类别/结构形成签名，动态或缺身份的候选保留独立实例。规则测试 74 passed；规则/旧规则/分析联测 96 passed，scoped pre-commit 通过。Task 7–9 实施及检视进行中；三个页面尚未开发。
+
+- Task 7：同一 REPEATABLE READ 快照、5 秒分析/3 秒失败落库预算、租约写前/写后保护及 24 表清理完成。规范 READY；代码检视发现取消时回滚异常覆盖原信号，3 项实际 aiomysql 方法受控回归先红后绿修复，独立检视 155 passed 并 READY。真实 MySQL 与双实例竞争未运行；受控网络读取不能替代实库验证。

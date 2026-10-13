@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Own pool, analyzer and bounded retention job; no Trace dependency."""
 
 import asyncio
@@ -13,14 +14,18 @@ logger = logging.getLogger(__name__)
 
 async def maintain(store):
     days = EnvVarLoader.get_int(
-        "SWE_TOKEN_DIAGNOSTICS_RETENTION_DAYS", 30, min_value=1, max_value=365
+        "SWE_TOKEN_DIAGNOSTICS_RETENTION_DAYS",
+        30,
+        min_value=1,
+        max_value=365,
     )
     while True:
         try:
             await asyncio.wait_for(store.cleanup(days), 5)
         except Exception as exc:
             logger.warning(
-                "Token retention unavailable: %s", type(exc).__name__
+                "Token retention unavailable: %s",
+                type(exc).__name__,
             )
         await asyncio.sleep(60)
 
@@ -29,7 +34,12 @@ async def start_services(app):
     app.state.token_queries = None
     if not EnvVarLoader.get_bool("SWE_TRACING_ENABLED", False):
         return
-    store = TokenStore()
+    store = TokenStore(
+        context_enabled=EnvVarLoader.get_bool(
+            "SWE_TOKEN_DIAGNOSTICS_CONTEXT_ENABLED",
+            False,
+        ),
+    )
     analyzer = Analyzer(store)
     analyzer.start()
     app.state.token_store = store
@@ -56,5 +66,6 @@ async def close_services(app):
             await asyncio.wait_for(store.close(), 3)
         except Exception as exc:
             logger.warning(
-                "Token pool close incomplete: %s", type(exc).__name__
+                "Token pool close incomplete: %s",
+                type(exc).__name__,
             )

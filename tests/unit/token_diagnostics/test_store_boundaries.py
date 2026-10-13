@@ -132,7 +132,7 @@ async def test_retention_owns_only_token_tables_and_retains_active_or_recent_chi
     assert "r.parent_branch_run_id IS NULL" in query
     assert "LIMIT 20 FOR UPDATE" in query
     deletes = [sql for sql, _ in cursor.queries if sql.startswith("DELETE")]
-    assert len(deletes) == 11
+    assert len(deletes) == 24
     assert all("swe_token_" in sql and "tracing" not in sql for sql in deletes)
 
 

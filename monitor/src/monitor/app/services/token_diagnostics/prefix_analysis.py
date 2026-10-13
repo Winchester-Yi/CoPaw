@@ -137,7 +137,7 @@ async def select_history(cursor, current, *, deadline=None):
     start = utc_time(current.get("request_started_at"))
     group = " AND ".join(f"{field}=%s" for field in GROUP_FIELDS)
     await cursor.execute(
-        f"SELECT {select_columns('swe_token_contexts')} FROM swe_token_contexts WHERE {group} AND context_role='prepared' AND capture_state='complete' AND execution_state<>'running' AND request_ended_at<%s AND request_ended_at>=%s ORDER BY request_ended_at DESC,call_id DESC LIMIT %s",
+        f"SELECT {select_columns('swe_token_contexts')} FROM swe_token_contexts WHERE {group} AND context_role='prepared' AND capture_state='complete' AND execution_state IN ('completed','error','cancelled') AND request_ended_at<%s AND request_ended_at>=%s ORDER BY request_ended_at DESC,call_id DESC LIMIT %s",
         (
             *[current[field] for field in GROUP_FIELDS],
             start,
@@ -250,10 +250,9 @@ def build_comparison(
 
 
 def comparison_reason(current, candidates, limited):
-    if (
-        not current.get("request_ended_at")
-        or current.get("execution_state") == "running"
-    ):
+    if not current.get("request_ended_at") or current.get(
+        "execution_state",
+    ) not in {"completed", "error", "cancelled"}:
         return "missing_progress"
     if current.get("capture_state") != "complete":
         return current.get("capture_reason") or "partial_context"

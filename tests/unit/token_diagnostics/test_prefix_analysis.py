@@ -344,6 +344,23 @@ def test_unfinished_request_and_empty_deadline_are_not_ready():
         )
 
 
+@pytest.mark.parametrize("state", [None, "pending", "unknown"])
+def test_unknown_request_state_cannot_be_eligible(state):
+    from monitor.app.services.token_diagnostics.prefix_analysis import (
+        build_comparison,
+    )
+
+    current = {
+        **captured("text"),
+        "context_revision": 1,
+        "request_ended_at": "2026-10-12T12:00:00Z",
+        "execution_state": state,
+    }
+    value = build_comparison(current, [], snapshot_id="s", input_revision=1)
+    assert value["reason_code"] == "missing_progress"
+    assert value["eligible"] is False
+
+
 def test_saved_no_history_is_separate_exclusion():
     from monitor.app.services.token_diagnostics.prefix_analysis import (
         build_comparison,
