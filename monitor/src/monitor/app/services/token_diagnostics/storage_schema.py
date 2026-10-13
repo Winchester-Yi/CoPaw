@@ -70,6 +70,90 @@ COLUMNS = {
     "swe_token_finding_sources": tuple(
         "finding_id branch_run_id source_id tenant_id occurrence_index source_ref".split(),
     ),
+    "swe_token_contexts": tuple(
+        "context_id task_run_id branch_run_id source_id tenant_id "
+        "capture_fragment_id agent_id provider_id model_name call_id "
+        "operation_id context_role assembly_stage representation_version "
+        "estimator_version key_version compatibility_digest capture_state "
+        "capture_reason text_bytes encoded_bytes estimated_tokens "
+        "expected_item_count context_revision revision request_started_at "
+        "request_ended_at execution_state".split(),
+    ),
+    "swe_token_context_occurrences": tuple(
+        "context_id occurrence_index task_run_id branch_run_id source_id "
+        "tenant_id source_object_id source_version source_ref "
+        "producer_operation_id business_step_id category attribution "
+        "lifecycle_state data_version content_digest structure_digest "
+        "text_start text_end encoded_start encoded_end token_start "
+        "token_end estimated_tokens".split(),
+    ),
+    "swe_token_prefix_blocks": tuple(
+        "context_id block_index task_run_id branch_run_id source_id "
+        "tenant_id chained_digest encoded_start encoded_end text_start "
+        "text_end representation_version key_version".split(),
+    ),
+    "swe_token_context_operations": tuple(
+        "operation_id task_run_id branch_run_id source_id tenant_id "
+        "capture_fragment_id operation_type operation_state "
+        "trigger_reason started_at ended_at before_context_id "
+        "after_context_id summary_call_id missing_before missing_after "
+        "capture_state revision".split(),
+    ),
+    "swe_token_operation_segments": tuple(
+        "operation_id relation_index task_run_id branch_run_id source_id "
+        "tenant_id relation_type before_context_id "
+        "before_occurrence_index after_context_id after_occurrence_index "
+        "source_object_id source_version".split(),
+    ),
+    "swe_token_prefix_comparisons": tuple(
+        "comparison_id task_run_id branch_run_id source_id tenant_id "
+        "current_context_id current_context_revision call_id snapshot_id "
+        "input_revision representation_version key_version "
+        "compatibility_digest window_hours candidate_limit "
+        "candidate_count candidate_limited selection_version "
+        "best_lower_context_id max_upper_context_id lower_text_bytes "
+        "upper_text_bytes total_text_bytes first_difference_index "
+        "analysis_state reason_code eligible created_at".split(),
+    ),
+    "swe_token_prefix_candidates": tuple(
+        "comparison_id candidate_index task_run_id branch_run_id "
+        "source_id tenant_id historical_context_id "
+        "historical_context_revision historical_call_id "
+        "historical_ended_at lower_text_bytes upper_text_bytes "
+        "first_difference_index".split(),
+    ),
+    "swe_token_diagnostic_evaluations": tuple(
+        "evaluation_id task_run_id branch_run_id source_id tenant_id "
+        "object_type object_id rule_id rule_version threshold_version "
+        "input_revision snapshot_id state created_at "
+        "replaces_evaluation_id".split(),
+    ),
+    "swe_token_diagnostic_findings": tuple(
+        "finding_id task_run_id branch_run_id source_id tenant_id "
+        "evaluation_id instance_key signature signature_version "
+        "reliable_grouping recommendation_code rule_id rule_version "
+        "threshold_version agent_id provider_id model_name call_id "
+        "context_id step_id operation_id created_at".split(),
+    ),
+    "swe_token_diagnostic_values": tuple(
+        "evaluation_id value_key task_run_id branch_run_id source_id "
+        "tenant_id unit value_type integer_value decimal_value enum_value "
+        "lower_bound upper_bound threshold".split(),
+    ),
+    "swe_token_diagnostic_gaps": tuple(
+        "evaluation_id reason_code task_run_id branch_run_id source_id "
+        "tenant_id".split(),
+    ),
+    "swe_token_diagnostic_refs": tuple(
+        "evaluation_id reference_index task_run_id branch_run_id "
+        "source_id tenant_id reference_type object_id context_id "
+        "occurrence_index".split(),
+    ),
+    "swe_token_diagnostic_heads": tuple(
+        "task_run_id branch_run_id source_id tenant_id object_type "
+        "object_id rule_id evaluation_id input_revision snapshot_id "
+        "rule_version threshold_version updated_at".split(),
+    ),
 }
 
 DEFAULTS = {
@@ -123,6 +207,11 @@ USAGE_DETAIL_FIELDS = (
     "reasoning_tokens",
 )
 BOOLEAN_FIELDS = (
+    "missing_before",
+    "missing_after",
+    "candidate_limited",
+    "eligible",
+    "reliable_grouping",
     "gap_tracking_limited",
     "fingerprint_available",
     "external_usage_unavailable",

@@ -152,7 +152,7 @@ def test_same_text_does_not_prove_same_source():
 
 **Files:** 两侧 `storage_schema.py`，SWE `context_storage.py`/`store.py`，Monitor `diagnostic_storage.py`/`store.py`，`scripts/sql/token_diagnostics_tables.sql`。测试 `tests/unit/token_diagnostics/test_b_storage.py`、既有 `test_relational_storage.py`。
 
-- [ ] 先扩展 schema/parity 测试：A 11 表保持，新增 13 表，下列集合全部存在；PK、列/表注释、显式 SELECT、无禁用类型/外键/视图。两侧 COLUMNS/DEFAULTS 完全一致。
+- [x] 先扩展 schema/parity 测试：A 11 表保持，新增 13 表，下列集合全部存在；PK、列/表注释、显式 SELECT、无禁用类型/外键/视图。两侧 COLUMNS/DEFAULTS 完全一致。
 
 ```python
 B_TABLES = {
@@ -166,11 +166,11 @@ B_TABLES = {
 }
 ```
 
-- [ ] 按设计存储表逐项写 DDL：ID VARCHAR(36)，source VARCHAR(64)/tenant VARCHAR(128) NOT NULL，受控状态/原因 VARCHAR，HMAC CHAR(64)，计数/字节 BIGINT，比例 DOUBLE，时间 DATETIME(6)；禁止正文列。复合主键/唯一键必须覆盖对象/版本/修订或明细序号。
-- [ ] Context 增加 `context_revision, agent_id, provider_id, model_name, assembly_stage, representation_version, key_version, call_id, operation_id, request_started_at, request_ended_at`；操作快照没有 call 请求时间，不进入候选。兼容组摘要只用于检索加速，读取后核对全部标量组条件。
-- [ ] 让 `TokenStore._write_record` 分派 `context`/`context_operation`；一个 Context 头和 occurrences/blocks 原子写入，旧修订不可覆盖新修订。operation 初始/完成按修订更新，关系行同事务；A call/input_items 仍可读，不删除旧五规则表。
-- [ ] prefix candidates 保存每候选修订、界限、首差、排序时间；comparison 保存下界最佳与上界最大两个独立候选引用。evaluations 追加历史，heads 原子更新，refs/values/gaps 类型化落库。
-- [ ] 回归故障测试：插入第 N 个 block 时抛异常，事务回滚后无 complete 头；operation 缺 after 可读但不可成对；多租户同引用查不到其他域；输入/分析幂等唯一键不重复写命中。
+- [x] 按设计存储表逐项写 DDL：ID VARCHAR(36)，source VARCHAR(64)/tenant VARCHAR(128) NOT NULL，受控状态/原因 VARCHAR，HMAC CHAR(64)，计数/字节 BIGINT，比例 DOUBLE，时间 DATETIME(6)；禁止正文列。复合主键/唯一键必须覆盖对象/版本/修订或明细序号。
+- [x] Context 增加 `context_revision, agent_id, provider_id, model_name, assembly_stage, representation_version, key_version, call_id, operation_id, request_started_at, request_ended_at`；操作快照没有 call 请求时间，不进入候选。兼容组摘要只用于检索加速，读取后核对全部标量组条件。
+- [x] 让 `TokenStore._write_record` 分派 `context`/`context_operation`；一个 Context 头和 occurrences/blocks 原子写入，旧修订不可覆盖新修订。operation 初始/完成按修订更新，关系行同事务；A call/input_items 仍可读，不删除旧五规则表。
+- [x] prefix candidates 保存每候选修订、界限、首差、排序时间；comparison 保存下界最佳与上界最大两个独立候选引用。evaluations 追加历史，heads 原子更新，refs/values/gaps 类型化落库。
+- [x] 回归故障测试：插入第 N 个 block 时抛异常，事务回滚后无 complete 头；operation 缺 after 可读但不可成对；多租户同引用查不到其他域；输入/分析幂等唯一键不重复写命中。
 
 ```python
 def test_initial_schema_contains_b_tables():
@@ -471,5 +471,5 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 - A 基线：修复恢复执行计数重置，使用独立 accounting_fragment 事件在异步事务中合计预期次数、合并子分支期望；锁定读取避免 MySQL RR 快照遗漏。回归先失败预期 2!=3，修复后基线范围 96 passed（含 B 契约）。本地提交 `6e0a38911`（设计/计划）及 `9c2fe03d1`（A 基线）。全部提交钩子通过。真实 MySQL 尚未运行。
 - Task 1：B 默认关闭、1.0/1.1 支持、固定预算与 DTO。先失败 24 项，再通过 31 项（契约+foundation）。独立检视通过；Task 3 接口检视补齐 Evaluation 的 object_type/object_id，并通过契约与存储联合测试。提交钩子 Pylint/Astroid 在 Python 3.14 解析标准库崩溃，同规则 Python 3.12 检查通过；其余钩子通过。
 - Task 2：增量表示、HMAC 链及来源借用已完成，独立检视 READY。共享借用 lease 在退出时失效，继承 ContextVar 的异步任务不能继续持有正文或来源身份。当前采集/fragment/foundation 联合回归 73 passed；随机 Unicode/块边界检视通过。13MB 输入 median 5.026ms、max 5.038ms 后返回 partial/time_budget，不承诺硬延迟界限。
-- Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已实现，正在复核。旧快照重试回退 head 的回归先失败，修复后通过。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。
+- Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已完成，独立检视 READY。旧快照重试回退 head 的回归先失败，修复后通过。契约/存储联合 35 passed，旧存储边界 12 passed；完整 Token 回归 171 passed。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。租约校验及生产分析集成待 Task 7。
 - Tasks 4–14：尚未实施，不表示 API、规则或三个页面已经交付。

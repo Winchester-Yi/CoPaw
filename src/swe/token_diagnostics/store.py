@@ -4,6 +4,7 @@
 import os
 from datetime import datetime, timezone
 
+from .contract import validate_schema_version
 from .storage_schema import (
     COLUMNS,
     DEFAULTS,
@@ -20,6 +21,8 @@ _TABLES = {
     "call": ("swe_token_model_calls", "call_id"),
     "run": ("swe_token_runs", "branch_run_id"),
     "event": ("swe_token_execution_events", "event_id"),
+    "context": ("swe_token_contexts", "context_id"),
+    "context_operation": ("swe_token_context_operations", "operation_id"),
 }
 
 
@@ -32,7 +35,7 @@ def scalar_values(columns, data):
             # Explicitly unknown event starts are observations, not branch defaults.
             if (
                 column == "started_at"
-                and "event_id" in columns
+                and ("event_id" in columns or "operation_id" in columns)
                 and column in data
             ):
                 default_required = False
@@ -120,20 +123,38 @@ class TokenStore:
             ),
         )
         await cursor.execute(
-            "SELECT branch_run_id FROM swe_token_runs WHERE branch_run_id=%s FOR UPDATE",
+            "SELECT branch_run_id,source_id,tenant_id,task_run_id FROM swe_token_runs WHERE branch_run_id=%s FOR UPDATE",
             (data["branch_run_id"],),
         )
-        await cursor.fetchone()
+        row = await cursor.fetchone()
+        if row and any(
+            row.get(key, data[key]) != data[key]
+            for key in ("source_id", "tenant_id", "task_run_id")
+        ):
+            raise ValueError("token_record_scope_mismatch")
 
     async def _write_record(self, cursor, record):
         kind, data = record["kind"], record["data"]
+        validate_schema_version(data.get("schema_version", "1.0"))
+        if kind == "context":
+            data = {**data, "revision": data["context_revision"]}
         await self._ensure_run(cursor, data)
         table, key = _TABLES[kind]
         await cursor.execute(
-            f"SELECT revision FROM {table} WHERE {key}=%s FOR UPDATE",
+            f"SELECT revision,source_id,tenant_id,task_run_id,branch_run_id FROM {table} WHERE {key}=%s FOR UPDATE",
             (data[key],),
         )
         previous = await cursor.fetchone()
+        if previous and any(
+            previous.get(column, data[column]) != data[column]
+            for column in (
+                "source_id",
+                "tenant_id",
+                "task_run_id",
+                "branch_run_id",
+            )
+        ):
+            raise ValueError("token_record_scope_mismatch")
         if previous and previous["revision"] >= data.get("revision", 1):
             await self._write_replay_gaps(cursor, data)
             return
@@ -141,6 +162,13 @@ class TokenStore:
             await self._write_run(cursor, data)
         elif kind == "call":
             await self._write_call(cursor, data)
+        elif kind in {"context", "context_operation"}:
+            from .context_storage import write_context, write_operation
+
+            if kind == "context":
+                await write_context(cursor, data)
+            else:
+                await write_operation(cursor, data)
         else:
             await self._write_event(cursor, data)
         await cursor.execute(
