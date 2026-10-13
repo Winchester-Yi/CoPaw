@@ -217,11 +217,11 @@ else:
 
 **Files:** Monitor `prefix_analysis.py`、`diagnostic_storage.py`。测试 `tests/unit/token_diagnostics/test_prefix_analysis.py`。
 
-- [ ] 写可复现序列测试：相同开头、首块差异、条目末尾变化、块跨条目、短序列结束、UTF-8；已知真实首差必须落在输出区间内，结构标记不混入文本字节。
-- [ ] `compare_prefix` 对链式摘要从起点二分查首差；内容不同后不再累计。若起点的首条目即不同但只知首块摘要，返回 `[0, first_block_text_end]` 而不是伪造精确 0；只有可证明首个文本位置不等才返回精确零。
-- [ ] 查询完整 prepared/已结束请求：source/tenant/实际 Agent/Provider/model/assembly/representation/key 兼容，ended_at < 当前 started_at，历史结束在 `[当前开始−24h, 当前开始)`。按 ended_at DESC、call_id DESC，LIMIT 101，仅比较前 100 个；operation 不进入查询。
-- [ ] 分析事务固定可见快照；保存 snapshot ID、实际候选引用/修订、策略/上限及超限标志；late arrival 不暗中替换历史。候选 99/100/101 与同时间排序分别测试。
-- [ ] `aggregate_prefix` 只选完整输入、有候选、检索成功且未超限的非空文本请求；sum lower / sum text_bytes，返回 byte 分子分母、参与数和互斥主原因计数。0 个参与显示 null；候选限制不计成零。
+- [x] 写可复现序列测试：相同开头、首块差异、条目末尾变化、块跨条目、短序列结束、UTF-8；已知真实首差必须落在输出区间内，结构标记不混入文本字节。
+- [x] `compare_prefix` 对链式摘要从起点二分查首差；内容不同后不再累计。若起点的首条目即不同但只知首块摘要，返回 `[0, first_block_text_end]` 而不是伪造精确 0；只有可证明首个文本位置不等才返回精确零。
+- [x] 查询完整 prepared/已结束请求：source/tenant/实际 Agent/Provider/model/assembly/representation/key 兼容，ended_at < 当前 started_at，历史结束在 `[当前开始−24h, 当前开始)`。按 ended_at DESC、call_id DESC，LIMIT 101，仅比较前 100 个；operation 不进入查询。
+- [x] 分析事务固定可见快照；保存 snapshot ID、实际候选引用/修订、策略/上限及超限标志；late arrival 不暗中替换历史。候选 99/100/101 与同时间排序分别测试。
+- [x] `aggregate_prefix` 只选完整输入、有候选、检索成功且未超限的非空文本请求；sum lower / sum text_bytes，返回 byte 分子分母、参与数和互斥主原因计数。0 个参与显示 null；候选限制不计成零。
 
 ```python
 def test_prefix_total_uses_byte_weighting():
@@ -472,4 +472,5 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 - Task 1：B 默认关闭、1.0/1.1 支持、固定预算与 DTO。先失败 24 项，再通过 31 项（契约+foundation）。独立检视通过；Task 3 接口检视补齐 Evaluation 的 object_type/object_id，并通过契约与存储联合测试。提交钩子 Pylint/Astroid 在 Python 3.14 解析标准库崩溃，同规则 Python 3.12 检查通过；其余钩子通过。
 - Task 2：增量表示、HMAC 链及来源借用已完成，独立检视 READY。共享借用 lease 在退出时失效，继承 ContextVar 的异步任务不能继续持有正文或来源身份。当前采集/fragment/foundation 联合回归 73 passed；随机 Unicode/块边界检视通过。13MB 输入 median 5.026ms、max 5.038ms 后返回 partial/time_budget，不承诺硬延迟界限。
 - Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已完成，独立检视 READY。旧快照重试回退 head 的回归先失败，修复后通过。契约/存储联合 35 passed，旧存储边界 12 passed；完整 Token 回归 171 passed。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。租约校验及生产分析集成待 Task 7。
-- Tasks 4–14：尚未实施，不表示 API、规则或三个页面已经交付。
+- Task 5：前缀比较、24h/100 候选检索及字节加权聚合已完成；规范及代码质量复核 READY。21 项测试通过，另有 300 个 Unicode/控制字符/短尾随机样例通过。当前请求运行中/无结束时间、无历史、候选超限及最后候选跨 deadline 均保持不可用或受限。
+- Tasks 4、6–14：尚未实施，不表示 API、规则或三个页面已经交付。
