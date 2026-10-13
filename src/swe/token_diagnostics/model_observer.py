@@ -38,7 +38,8 @@ async def close_iterator(iterator):
             await close()
         except Exception as exc:
             logger.warning(
-                "Token provider stream close failed: %s", type(exc).__name__
+                "Token provider stream close failed: %s",
+                type(exc).__name__,
             )
 
 
@@ -106,6 +107,10 @@ class AttemptObserver(ModelProxy):
                 "capture_state": "unavailable",
                 "expected_item_count": None,
                 "estimated_input_tokens": None,
+                "assembly_stage": "messages_only",
+                "prompt_format_confidence": "message_approx",
+                "context_builder_version": "prepared-messages-v1",
+                "prompt_modality": "unknown",
             }
         size = len(json.dumps(capture).encode())
         if not branch.collector.reserve(size):
@@ -116,6 +121,10 @@ class AttemptObserver(ModelProxy):
             **branch.fields,
             **capture,
             "call_id": str(uuid4()),
+            "step_id": str(uuid4()),
+            "parent_step_id": branch.fields["branch_run_id"],
+            "context_id": str(uuid4()),
+            "assembled_at": now(),
             "logical_call_id": logical.call_id,
             "logical_seq": logical.sequence,
             "attempt_no": logical.attempt_no,
@@ -127,15 +136,17 @@ class AttemptObserver(ModelProxy):
             "max_output_tokens": token_count(
                 kwargs.get("max_tokens")
                 or kwargs.get("max_output_tokens")
-                or self.metadata.get("max_output_tokens")
+                or self.metadata.get("max_output_tokens"),
             ),
             "max_input_tokens": token_count(
                 branch.fields.get("max_input_tokens")
-                or self.metadata.get("max_input_tokens")
+                or self.metadata.get("max_input_tokens"),
             ),
             "revision": 1,
             "execution_state": "running",
             "usage_status": "pending",
+            "usage_origin": "unknown",
+            "usage_accuracy": "unavailable",
             "input_tokens": None,
             "output_tokens": None,
             "started_at": now(),
@@ -252,7 +263,10 @@ class LogicalObserver(ModelProxy):
                 return ManagedStream(
                     self._stream(result, logical, owned),
                     lambda: self._finish_stream(
-                        result, logical, owned, "cancelled"
+                        result,
+                        logical,
+                        owned,
+                        "cancelled",
                     ),
                 )
             if owned:
@@ -261,10 +275,12 @@ class LogicalObserver(ModelProxy):
         except BaseException as exc:
             if owned:
                 branch.finish(
-                    "cancelled"
-                    if type(exc).__name__
-                    in {"CancelledError", "GeneratorExit"}
-                    else "error"
+                    (
+                        "cancelled"
+                        if type(exc).__name__
+                        in {"CancelledError", "GeneratorExit"}
+                        else "error"
+                    ),
                 )
             raise
 

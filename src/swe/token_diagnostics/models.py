@@ -27,4 +27,10 @@ class UsageSnapshot:
             "usage_status": self.status,
             "usage_details": self.details,
             "finish_reason": self.finish_reason,
+            "usage_origin": (
+                "provider" if self.status != "unavailable" else "unknown"
+            ),
+            "usage_accuracy": (
+                "reported" if self.status != "unavailable" else "unavailable"
+            ),
         }

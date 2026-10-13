@@ -35,7 +35,7 @@ def _parts(messages, tools):
             media = contains_media(block)
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 category, operation = "tool_result", block.get(
-                    "tool_use_id"
+                    "tool_use_id",
                 ) or block.get("id")
             value = (
                 block.get("text")
@@ -43,7 +43,7 @@ def _parts(messages, tools):
                 else block
             )
             yield category, str(
-                operation or ""
+                operation or "",
             ), f"message:{index}", value, media
         if message.get("tool_calls"):
             yield "assistant", "", f"tool-arguments:{index}", message[
@@ -57,7 +57,10 @@ def _parts(messages, tools):
 def capture_inputs(messages, tools, scope, config) -> dict:
     items, expected, total, payload_bytes = [], 0, 0, 0
     complete = True
+    modality = "text"
     for category, operation, source, value, media in _parts(messages, tools):
+        if media:
+            modality = "multimodal"
         expected += 1
         if len(items) >= config.max_items:
             complete = False
@@ -66,11 +69,11 @@ def capture_inputs(messages, tools, scope, config) -> dict:
         byte_count = len(text.encode("utf-8"))
         estimate = None if media else int(byte_count / config.divisor + 0.5)
         identity = None if media else fingerprint(text, scope, config)
-        origin = find_origin(identity) if identity else None
+        origin = (find_origin(identity) if identity else None) or {}
         item = {
             "occurrence_index": expected - 1,
-            "category": origin["category"] if origin else category,
-            "source_ref": origin["source_ref"] if origin else source,
+            "category": origin.get("category", category),
+            "source_ref": origin.get("source_ref", source),
             "producer_operation_id": operation[:64] or None,
             "fingerprint": identity,
             "key_version": config.key_version,
@@ -95,4 +98,8 @@ def capture_inputs(messages, tools, scope, config) -> dict:
         "capture_state": "complete" if complete else "partial",
         "fingerprint_available": bool(config.fingerprint_key),
         "estimator_version": f"utf8-density-v1:{config.divisor}",
+        "assembly_stage": "messages_only",
+        "prompt_format_confidence": "message_approx",
+        "context_builder_version": "prepared-messages-v1",
+        "prompt_modality": modality,
     }

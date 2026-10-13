@@ -27,7 +27,8 @@ def safe_call(function, *args, **kwargs):
         return function(*args, **kwargs)
     except Exception as exc:
         logger.warning(
-            "Token diagnostic adapter skipped: %s", type(exc).__name__
+            "Token diagnostic adapter skipped: %s",
+            type(exc).__name__,
         )
         branch = current_branch()
         if branch:
@@ -48,6 +49,13 @@ def accounting_query(function):
             "session_id": getattr(request, "session_id", None),
             "chat_id": channel_meta.get("chat_id"),
             "trace_id": getattr(request, "trace_id", None),
+            "answer_turn_identity": channel_meta.get("answer_turn_identity"),
+            "execution_origin": getattr(request, "execution_origin", None),
+            "cron_persistence_key": getattr(
+                request,
+                "cron_persistence_key",
+                None,
+            ),
         }
         branch = safe_call(create_branch, metadata)
         iterator = function(self, msgs, request=request, **kwargs)
@@ -111,7 +119,9 @@ def configure_agent(running, system_prompt):
     branch = current_branch()
     if branch:
         branch.fields["max_input_tokens"] = getattr(
-            running, "max_input_length", None
+            running,
+            "max_input_length",
+            None,
         )
         safe_call(
             register_origin,
@@ -150,6 +160,9 @@ def external_call(purpose):
         data = {
             **branch.fields,
             "call_id": str(uuid4()),
+            "step_id": str(uuid4()),
+            "parent_step_id": branch.fields["branch_run_id"],
+            "context_id": None,
             "logical_call_id": str(uuid4()),
             "logical_seq": branch.logical_seq,
             "attempt_no": 1,
@@ -160,6 +173,8 @@ def external_call(purpose):
             "started_at": now(),
             "execution_state": "running",
             "usage_status": "pending",
+            "usage_origin": "unknown",
+            "usage_accuracy": "unavailable",
             "capture_state": "unavailable",
             "input_tokens": None,
             "output_tokens": None,

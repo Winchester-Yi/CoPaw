@@ -4,6 +4,8 @@
 import base64
 import json
 
+from .store import select_columns
+
 
 def summarize_records(runs, calls):
     counts = {"reported": 0, "partial": 0, "unavailable": 0, "pending": 0}
@@ -60,7 +62,7 @@ class TokenQueryService:
         )
         if cursor:
             decoded = json.loads(
-                base64.urlsafe_b64decode(cursor.encode()).decode()
+                base64.urlsafe_b64decode(cursor.encode()).decode(),
             )
             where += " AND (started_at,branch_run_id)<(%s,%s)"
             params.extend(decoded)
@@ -68,14 +70,17 @@ class TokenQueryService:
             where += " AND EXISTS (SELECT 1 FROM swe_token_model_calls c WHERE c.task_run_id=swe_token_runs.task_run_id AND c.source_id=%s AND c.tenant_id=%s AND c.model_name=%s)"
             params.extend((*scope, model))
         rows = await self.store.rows(
-            f"SELECT * FROM swe_token_runs WHERE {where} ORDER BY started_at DESC,branch_run_id DESC LIMIT %s",
+            f"SELECT {select_columns('swe_token_runs')} FROM swe_token_runs WHERE {where} ORDER BY started_at DESC,branch_run_id DESC LIMIT %s",
             tuple(params) + (limit + 1,),
         )
         has_more, rows = len(rows) > limit, rows[:limit]
         summaries = await self._list_totals(rows, scope)
         for row in rows:
             row.update(
-                summaries.get(row["task_run_id"], summarize_records([row], []))
+                summaries.get(
+                    row["task_run_id"],
+                    summarize_records([row], []),
+                ),
             )
         next_cursor = None
         if has_more and rows:
@@ -84,8 +89,8 @@ class TokenQueryService:
                     [
                         rows[-1]["started_at"].replace("T", " ").rstrip("Z"),
                         rows[-1]["branch_run_id"],
-                    ]
-                ).encode()
+                    ],
+                ).encode(),
             ).decode()
         return {"items": rows, "next_cursor": next_cursor}
 
@@ -110,13 +115,13 @@ class TokenQueryService:
 
     async def get_run(self, identity, scope):
         runs = await self.store.rows(
-            "SELECT * FROM swe_token_runs WHERE source_id=%s AND tenant_id=%s AND task_run_id=%s ORDER BY parent_branch_run_id IS NOT NULL,started_at LIMIT 1001",
+            f"SELECT {select_columns('swe_token_runs')} FROM swe_token_runs WHERE source_id=%s AND tenant_id=%s AND task_run_id=%s ORDER BY parent_branch_run_id IS NOT NULL,started_at LIMIT 1001",
             (*scope, identity),
         )
         if not runs:
             return None
         calls = await self.store.rows(
-            "SELECT * FROM swe_token_model_calls WHERE source_id=%s AND tenant_id=%s AND task_run_id=%s ORDER BY branch_run_id,logical_seq,attempt_no LIMIT 1001",
+            f"SELECT {select_columns('swe_token_model_calls')} FROM swe_token_model_calls WHERE source_id=%s AND tenant_id=%s AND task_run_id=%s ORDER BY branch_run_id,logical_seq,attempt_no LIMIT 1001",
             (*scope, identity),
         )
         items = await self.store.rows(
@@ -129,7 +134,8 @@ class TokenQueryService:
         if limited:
             summary.update(capture_state="unverified", usage_complete=False)
             totals = await self._list_totals(
-                [{"task_run_id": identity}], scope
+                [{"task_run_id": identity}],
+                scope,
             )
             summary.update(totals.get(identity, {}))
         summary["composition_complete"] = (
@@ -168,13 +174,18 @@ class TokenQueryService:
             where += " AND branch_run_id=%s"
             params.append(branch)
         rows = await self.store.rows(
-            f"SELECT * FROM swe_token_model_calls WHERE {where} ORDER BY branch_run_id,logical_seq,attempt_no LIMIT %s OFFSET %s",
+            f"SELECT {select_columns('swe_token_model_calls')} FROM swe_token_model_calls WHERE {where} ORDER BY branch_run_id,logical_seq,attempt_no LIMIT %s OFFSET %s",
             tuple(params) + (limit + 1, offset),
         )
         return {"items": rows[:limit], "has_more": len(rows) > limit}
 
     async def inputs(
-        self, identity, scope, category=None, limit=100, offset=0
+        self,
+        identity,
+        scope,
+        category=None,
+        limit=100,
+        offset=0,
     ):
         where, params = "source_id=%s AND tenant_id=%s AND call_id=%s", [
             *scope,
@@ -184,14 +195,14 @@ class TokenQueryService:
             where += " AND category=%s"
             params.append(category)
         rows = await self.store.rows(
-            f"SELECT * FROM swe_token_input_items WHERE {where} ORDER BY occurrence_index LIMIT %s OFFSET %s",
+            f"SELECT {select_columns('swe_token_input_items')} FROM swe_token_input_items WHERE {where} ORDER BY occurrence_index LIMIT %s OFFSET %s",
             tuple(params) + (limit + 1, offset),
         )
         return {"items": rows[:limit], "has_more": len(rows) > limit}
 
     async def findings(self, identity, scope):
         return await self.store.rows(
-            "SELECT * FROM swe_token_findings WHERE source_id=%s AND tenant_id=%s AND task_run_id=%s AND state='active' ORDER BY updated_at DESC LIMIT 500",
+            f"SELECT {select_columns('swe_token_findings')} FROM swe_token_findings WHERE source_id=%s AND tenant_id=%s AND task_run_id=%s AND state='active' ORDER BY updated_at DESC LIMIT 500",
             (*scope, identity),
         )
 

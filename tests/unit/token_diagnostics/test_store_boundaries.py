@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Transaction replay, ownership and concurrent analysis revision checks."""
 
 from contextlib import asynccontextmanager
@@ -8,7 +9,8 @@ import sys
 import pytest
 
 sys.path.insert(
-    0, str(Path(__file__).resolve().parents[3] / "monitor" / "src")
+    0,
+    str(Path(__file__).resolve().parents[3] / "monitor" / "src"),
 )
 
 
@@ -80,7 +82,7 @@ async def test_new_data_during_analysis_keeps_branch_dirty_and_unknown_rules_do_
                 "rule_version": 1,
                 "state": "insufficient_evidence",
                 "missing_fields": ["fingerprint"],
-            }
+            },
         ],
     }
     assert await Store().commit_analysis(
@@ -100,7 +102,7 @@ async def test_new_data_during_analysis_keeps_branch_dirty_and_unknown_rules_do_
         if "SET analyzed_revision" in sql
     )
     assert update[0] == 7
-    assert update[2:4] == ("pending", 1)
+    assert update[1:3] == ("pending", 1)
 
 
 @pytest.mark.asyncio
@@ -130,5 +132,51 @@ async def test_retention_owns_only_token_tables_and_retains_active_or_recent_chi
     assert "r.parent_branch_run_id IS NULL" in query
     assert "LIMIT 20 FOR UPDATE" in query
     deletes = [sql for sql, _ in cursor.queries if sql.startswith("DELETE")]
-    assert len(deletes) == 5
+    assert len(deletes) == 11
     assert all("swe_token_" in sql and "tracing" not in sql for sql in deletes)
+
+
+@pytest.mark.asyncio
+async def test_related_run_reads_share_one_token_transaction():
+    from monitor.app.services.token_diagnostics.store import TokenStore
+
+    events = []
+
+    class Cursor:
+        sql = ""
+
+        async def execute(self, sql, params=()):
+            self.sql = sql
+            events.append(sql)
+
+        async def fetchall(self):
+            if "FROM swe_token_runs" in self.sql:
+                return [
+                    {
+                        "branch_run_id": "b",
+                        "source_id": "s",
+                        "tenant_id": "t",
+                        "analysis_state": "pending",
+                    },
+                ]
+            return []
+
+    class Store(TokenStore):
+        @asynccontextmanager
+        async def transaction(self):
+            events.append("begin")
+            yield Cursor()
+            events.append("commit")
+
+        async def ensure_pool(self):
+            pytest.fail(
+                "Projection bypassed the independent token transaction",
+            )
+
+    rows = await Store().rows(
+        "SELECT branch_run_id,source_id,tenant_id,analysis_state FROM swe_token_runs",
+    )
+    assert rows[0]["expected_child_branches"] == []
+    assert rows[0]["analysis_summary"] == []
+    assert events[0] == "begin" and events[-1] == "commit"
+    assert len(events) == 6  # Base projection and three typed child relations.

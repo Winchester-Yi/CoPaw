@@ -8,7 +8,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from swe.__version__ import __version__
+
 from .collector import get_collector
+from .contract import (
+    SCHEMA_VERSION,
+    TELEMETRY_SOURCE,
+    execution_identity,
+    scoped_run_id,
+)
 from .provenance import bind_origins, fingerprint, reset_origins
 
 _scope = ContextVar("token_diagnostic_scope", default=None)
@@ -61,6 +69,20 @@ class Branch:
             self.fields["ended_at"] = now()
             self.revision += 1
             self.collector.emit("run", self.snapshot(state))
+            self.publish_fragment(state)
+
+    def publish_fragment(self, state="running"):
+        self.collector.emit(
+            "event",
+            {
+                **self.snapshot(state),
+                "event_id": self.fields["capture_fragment_id"],
+                "event_type": "accounting_fragment",
+                "revision": 1 if state == "running" else 2,
+                "event_seq": 0,
+                "created_at": now(),
+            },
+        )
 
 
 def current_branch():
@@ -87,7 +109,7 @@ def create_branch(metadata, collector=None, parent=None):
     fields.update(
         source_id=str(metadata.get("source_id") or "default")[:64],
         tenant_id=str(
-            metadata.get("tenant_id") or metadata.get("user_id") or "default"
+            metadata.get("tenant_id") or metadata.get("user_id") or "default",
         )[:128],
         trace_id=str(metadata.get("trace_id") or "")[:64] or None,
         role=str(metadata.get("role") or metadata.get("agent_role") or "main")[
@@ -95,17 +117,48 @@ def create_branch(metadata, collector=None, parent=None):
         ],
         purpose=str(metadata.get("purpose") or "main")[:32],
         started_at=now(),
-        branch_run_id=str(uuid4()),
-        task_run_id=str(uuid4()),
         parent_branch_run_id=None,
+    )
+    execution_id, identity_source = execution_identity(metadata)
+    execution_origin = str(metadata.get("execution_origin") or "interactive")[
+        :32
+    ]
+    run_id = scoped_run_id(
+        fields["source_id"],
+        fields["tenant_id"],
+        identity_source,
+        execution_id,
+        execution_origin,
+    )
+    fields.update(
+        task_run_id=run_id,
+        branch_run_id=run_id,
+        schema_version=SCHEMA_VERSION,
+        telemetry_source=TELEMETRY_SOURCE,
+        execution_origin=execution_origin,
+        execution_id=execution_id,
+        identity_source=identity_source,
+        agent_version=__version__,
     )
     if parent and all(
         parent.get(k) == fields[k] for k in ("source_id", "tenant_id")
     ):
-        for key in ("task_run_id", "branch_run_id", "parent_branch_run_id"):
+        for key in (
+            "task_run_id",
+            "branch_run_id",
+            "parent_branch_run_id",
+            "execution_id",
+            "identity_source",
+            "execution_origin",
+            "schema_version",
+            "telemetry_source",
+            "agent_version",
+        ):
             fields[key] = parent[key]
     branch = Branch(fields, collector)
+    fields["capture_fragment_id"] = str(uuid4())
     collector.emit("run", branch.snapshot())
+    branch.publish_fragment()
     return branch
 
 
@@ -196,7 +249,11 @@ def record_event(event_type, **values):
             "event_seq": branch.event_seq,
             "compaction_epoch": branch.epoch,
             "created_at": now(),
+            "started_at": None,
+            "ended_at": None,
             "revision": 1,
+            "step_id": str(uuid4()),
+            "parent_step_id": branch.fields["branch_run_id"],
             **values,
         },
     )
@@ -207,6 +264,12 @@ def tool_started(tool_call):
     if branch is None:
         return None
     metadata = {
+        "step_id": str(uuid4()),
+        "started_at": now(),
+        "tool_kind": "unknown",
+        "idempotency_class": "unknown",
+        "is_cacheable": False,
+        "data_version": None,
         "producer_operation_id": str(tool_call.get("id") or uuid4())[:64],
         "tool_name": str(tool_call.get("name") or "unknown")[:128],
         "key_version": branch.collector.config.key_version,
@@ -227,8 +290,11 @@ def tool_completed(metadata, output, error_code=None):
         record_event(
             "tool_completed",
             **metadata,
+            ended_at=now(),
             result_fingerprint=fingerprint(
-                output, branch.scope_key, branch.collector.config
+                output,
+                branch.scope_key,
+                branch.collector.config,
             ),
             error_code=error_code,
             result_status="error" if error_code else "success",
@@ -239,4 +305,4 @@ def compaction_completed():
     branch = current_branch()
     if branch:
         branch.epoch += 1
-        record_event("compaction")
+        record_event("compaction", ended_at=now())
