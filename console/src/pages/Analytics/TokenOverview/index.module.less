@@ -1,0 +1,135 @@
+.page {
+  min-width: 0;
+  min-height: 100%;
+  padding: 24px;
+  background: var(--console-management-canvas, #fff);
+  color: var(--console-management-text, #111827);
+  font-family: var(--console-font-ui);
+  h1 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+  }
+  h2 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 600;
+  }
+  h3 {
+    margin: 16px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  a {
+    overflow-wrap: anywhere;
+  }
+  section:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--console-management-primary, #3769fc);
+    outline-offset: 3px;
+  }
+  :global(.ant-table-wrapper) {
+    min-width: 0;
+  }
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.caption,
+.metadata,
+.cellHint {
+  color: var(--console-management-text-secondary, #4b5563);
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.caption {
+  margin: 4px 0 12px;
+}
+.metadata {
+  margin: 16px 0 8px;
+}
+.cellHint {
+  display: block;
+}
+.taskCount {
+  margin: 12px 0;
+  font-weight: 600;
+}
+.section {
+  min-width: 0;
+  border-top: 1px solid var(--console-management-border, #e5e7eb);
+  padding-top: 20px;
+  margin-top: 24px;
+  scroll-margin-top: 24px;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.metric {
+  min-width: 0;
+  padding: 12px 0;
+  span {
+    display: block;
+    color: var(--console-management-text-secondary, #4b5563);
+    font-size: 12px;
+  }
+  strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+}
+.split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+.prefixValue {
+  display: block;
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 600;
+}
+.inlineMetrics,
+.exclusions {
+  display: flex;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.unavailable {
+  color: var(--console-management-warning, #a56a24);
+  font-size: 12px;
+}
+.id {
+  font-family: var(--console-font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1000px) {
+  .split {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+@media (max-width: 720px) {
+  .page {
+    padding: 16px;
+  }
+  .metric strong {
+    font-size: 18px;
+  }
+}

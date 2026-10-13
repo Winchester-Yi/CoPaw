@@ -86,6 +86,9 @@ const pathToKey: Record<string, string> = {
   "/analytics/messages": "analytics-messages",
   "/analytics/traces": "analytics-traces",
   "/analytics/token-diagnostics": "analytics-token-diagnostics",
+  "/analytics/token-overview": "analytics-token-overview",
+  "/analytics/token-executions": "analytics-token-executions",
+  "/analytics/token-issues": "analytics-token-issues",
   "/analytics/business-overview": "analytics-business-overview",
   "/analytics/claw-data-overview": "analytics-claw-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
@@ -107,7 +110,10 @@ const pathToKey: Record<string, string> = {
 export default function MainLayout() {
   const location = useLocation();
   const currentPath = location.pathname;
-  const selectedKey = pathToKey[currentPath] || "chat";
+  const selectedKey =
+    (currentPath.startsWith("/analytics/token-executions/")
+      ? "analytics-token-executions"
+      : pathToKey[currentPath]) || "chat";
 
   // 动态渲染模版上下文
   const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子

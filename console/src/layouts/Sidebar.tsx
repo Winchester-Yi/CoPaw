@@ -9,7 +9,7 @@ import {
   type MenuProps,
 } from "antd";
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "../hooks/useAppMessage";
 // ==================== 选择智能体 (Kun He) - 已注释 ====================
@@ -74,6 +74,34 @@ export default function Sidebar({
   withoutHeader = false,
 }: SidebarProps) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const navigatePath = (path: string) => {
+    if (
+      !path.startsWith("/analytics/token-") ||
+      path === "/analytics/token-diagnostics"
+    ) {
+      navigate(path);
+      return;
+    }
+    const search = new URLSearchParams(location.search);
+    for (const key of [
+      "cursor",
+      "relation_cursor",
+      "branch_run_id",
+      "call_id",
+      "context_id",
+      "evaluation_id",
+      "operation_id",
+      "step_id",
+      "group_id",
+      "finding_id",
+      "returnTo",
+      "rule_id",
+      "state",
+    ])
+      search.delete(key);
+    navigate(`${path}${search.size ? `?${search}` : ""}`);
+  };
   const { t } = useTranslation();
   const { message } = useAppMessage();
   const { isDark } = useTheme();
@@ -292,6 +320,24 @@ export default function Sidebar({
         ]
       : []),
     // 洞察中心
+    {
+      key: "analytics-token-overview",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/token-overview",
+      label: t("nav.analyticsTokenOverview", "Token 总览"),
+    },
+    {
+      key: "analytics-token-executions",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/token-executions",
+      label: t("nav.analyticsTokenExecutions", "Token 执行"),
+    },
+    {
+      key: "analytics-token-issues",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/token-issues",
+      label: t("nav.analyticsTokenIssues", "Token 问题"),
+    },
     {
       key: "analytics-token-diagnostics",
       icon: <SparkBarChartLine size={18} />,
@@ -533,8 +579,29 @@ export default function Sidebar({
           icon: <SparkBarChartLine size={16} />,
         },
         {
+          key: "analytics-token-overview",
+          label: collapsed
+            ? null
+            : t("nav.analyticsTokenOverview", "Token 总览"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
+          key: "analytics-token-executions",
+          label: collapsed
+            ? null
+            : t("nav.analyticsTokenExecutions", "Token 执行"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
+          key: "analytics-token-issues",
+          label: collapsed ? null : t("nav.analyticsTokenIssues", "Token 问题"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
           key: "analytics-token-diagnostics",
-          label: collapsed ? null : t("nav.analyticsTokenDiagnostics", "Token 记录与诊断"),
+          label: collapsed
+            ? null
+            : t("nav.analyticsTokenDiagnostics", "Token 记录与诊断"),
           icon: <SparkBarChartLine size={16} />,
         },
         {
@@ -648,7 +715,8 @@ export default function Sidebar({
                   className={`${styles.collapsedNavItem} ${
                     isActive ? styles.collapsedNavItemActive : ""
                   }`}
-                  onClick={() => navigate(item.path)}
+                  aria-label={item.label}
+                  onClick={() => navigatePath(item.path)}
                 >
                   {item.icon}
                 </button>
@@ -664,7 +732,7 @@ export default function Sidebar({
           onOpenChange={(keys) => setOpenKeys(keys.map(String))}
           onClick={({ key }) => {
             const path = KEY_TO_PATH[String(key)];
-            if (path) navigate(path);
+            if (path) navigatePath(path);
           }}
           items={menuItems}
           expandIcon={renderExpandIcon}
