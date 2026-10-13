@@ -189,12 +189,12 @@ def test_initial_schema_contains_b_tables():
 
 **Files:** SWE `context_operations.py`、`model_observer.py`、`collector.py`、`writer.py`、`runtime.py`、`context.py`，`src/swe/agents/hooks/memory_compaction.py`。测试 `tests/unit/token_diagnostics/test_b_runtime.py`。
 
-- [ ] 在 AttemptObserver 调用前使用同一个 call.context_id 生成 prepared Context；disabled 时只走 A。上下文哈希失败仍调用原模型、保留 Usage；Context 和 attempt 不重复 reserve 同一内存。增大 DTO 时队列计入真实全部元数据大小。
-- [ ] 扩展 writer kind identity 映射，`context→context_id`，`context_operation→operation_id`，维持 pending/active/inflight 合计预算、旧修订覆盖及退避。Context 作为一个有界记录，不能半头半块分别入队。
-- [ ] 定义 `begin_context_operation`/`finish_context_operation`：返回 operation ID、before Context 引用和原点身份；finish 捕获 after 或记录 error/skipped/missing。所有 adapters fail-open，取消继续传播，不吞业务取消。缺口计数沿用 A 的有限保证。
-- [ ] 在 `_compact_tool_results_if_enabled` 的真实变换、`_install_checkpoint_stage` 的安装、legacy `_run_context_compaction` 到 `_persist_compaction_result` 的操作区间接入 before/after。后台只生成待安装摘要时不当成在线上下文已改变；安装边界才捕获在线变化。legacy 空摘要为失败/跳过，不捏造 after。
-- [ ] 操作快照捕获同一业务输入层、相同表示/估算器版本；不为观测额外请求模型或无界复制全 memory。运行时拿不到安全快照时保留事实/缺侧。summary attempt 能取得 operation 关联时保存，异步跨 scope 时明确不可关联，不按时间猜测。
-- [ ] 覆盖原工具返回与注入差异、同来源版本改变、明确 removed/created/replaced 关系；缺关联不生成替换事实。真实 Step 缺失时不把 A 的随机 call.step_id 改名成逻辑 Step；R03/R05 保持证据不足。
+- [x] 在 AttemptObserver 调用前使用同一个 call.context_id 生成 prepared Context；disabled 时只走 A。上下文哈希失败仍调用原模型、保留 Usage；Context 和 attempt 不重复 reserve 同一内存。增大 DTO 时队列计入真实全部元数据大小。
+- [x] 扩展 writer kind identity 映射，`context→context_id`，`context_operation→operation_id`，维持 pending/active/inflight 合计预算、旧修订覆盖及退避。Context 作为一个有界记录，不能半头半块分别入队。
+- [x] 定义 `begin_context_operation`/`finish_context_operation`：返回 operation ID、before Context 引用和原点身份；finish 捕获 after 或记录 error/skipped/missing。所有 adapters fail-open，取消继续传播，不吞业务取消。缺口计数沿用 A 的有限保证。
+- [x] 在 `_compact_tool_results_if_enabled` 的真实变换、`_install_checkpoint_stage` 的安装、legacy `_run_context_compaction` 到 `_persist_compaction_result` 的操作区间接入 before/after。后台只生成待安装摘要时不当成在线上下文已改变；安装边界才捕获在线变化。legacy 空摘要为失败/跳过，不捏造 after。
+- [x] 操作快照捕获同一业务输入层、相同表示/估算器版本；不为观测额外请求模型或无界复制全 memory。运行时拿不到安全快照时保留事实/缺侧。summary attempt 能取得 operation 关联时保存，异步跨 scope 时明确不可关联，不按时间猜测。
+- [x] 覆盖原工具返回与注入差异、同来源版本改变、明确 removed/created/replaced 关系；缺关联不生成替换事实。真实 Step 缺失时不把 A 的随机 call.step_id 改名成逻辑 Step；R03/R05 保持证据不足。
 
 关键接入形态（实际 snapshot 来源按上述三个边界传入，不改业务参数）：
 
@@ -473,4 +473,5 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 - Task 2：增量表示、HMAC 链及来源借用已完成，独立检视 READY。共享借用 lease 在退出时失效，继承 ContextVar 的异步任务不能继续持有正文或来源身份。当前采集/fragment/foundation 联合回归 73 passed；随机 Unicode/块边界检视通过。13MB 输入 median 5.026ms、max 5.038ms 后返回 partial/time_budget，不承诺硬延迟界限。
 - Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已完成，独立检视 READY。旧快照重试回退 head 的回归先失败，修复后通过。契约/存储联合 35 passed，旧存储边界 12 passed；完整 Token 回归 171 passed。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。租约校验及生产分析集成待 Task 7。
 - Task 5：前缀比较、24h/100 候选检索及字节加权聚合已完成；规范及代码质量复核 READY。21 项测试通过，另有 300 个 Unicode/控制字符/短尾随机样例通过。当前请求运行中/无结束时间、无历史、候选超限及最后候选跨 deadline 均保持不可用或受限。
-- Tasks 4、6–14：尚未实施，不表示 API、规则或三个页面已经交付。
+- Task 4：真实请求 prepared Context、队列完整预算、三处操作边界及显式摘要关联完成。独立规范检视发现 A 预算降级与观测工厂 fail-open 两处缺口，新增 5 项红→绿回归修复，root 独立重跑；代码质量检视 READY、独立 52 passed。完整相关范围 143 passed、1 deselected；B 新测试 36 passed。排除项 source disabled config 测试经 HEAD 原函数复现为既有失败。B 打开时旧输入证据 unavailable（避免旧全量序列化），真实 Usage 独立保留；legacy after 明确缺失，无额外完整 memory 读取。
+- Tasks 6–7：实施及检视进行中；Tasks 8–14 尚未实施，不表示 API、规则或三个页面已经交付。

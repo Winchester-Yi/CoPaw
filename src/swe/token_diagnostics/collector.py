@@ -28,11 +28,14 @@ class Collector:
             self.writer.gaps[data.get("branch_run_id", "unknown")] += 1
             return False
 
-    def reserve(self, size):
+    def reserve(self, size, count=1):
         writer = self.writer
         if (
-            writer.active_count + writer.inflight_count + len(writer.pending)
-            >= self.config.max_records
+            writer.active_count
+            + writer.inflight_count
+            + len(writer.pending)
+            + count
+            > self.config.max_records
         ):
             return False
         if (
@@ -44,13 +47,13 @@ class Collector:
         ):
             return False
         writer.active_bytes += size
-        writer.active_count += 1
+        writer.active_count += count
         return True
 
-    def release(self, size):
+    def release(self, size, count=1):
         self.writer.active_bytes = max(0, self.writer.active_bytes - size)
         if size:
-            self.writer.active_count = max(0, self.writer.active_count - 1)
+            self.writer.active_count = max(0, self.writer.active_count - count)
 
     async def close(self):
         await self.writer.close()
@@ -73,7 +76,8 @@ def apply_worker_snapshot(snapshot):
     global _collector
     if snapshot and type(snapshot.get("capture_enabled")) is bool:
         config = replace(
-            DiagnosticConfig.from_env(), enabled=snapshot["capture_enabled"]
+            DiagnosticConfig.from_env(),
+            enabled=snapshot["capture_enabled"],
         )
         _collector = Collector(config)
 

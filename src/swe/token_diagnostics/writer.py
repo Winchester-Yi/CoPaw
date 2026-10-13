@@ -9,7 +9,18 @@ import time
 from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
-_ID_FIELD = {"run": "branch_run_id", "call": "call_id", "event": "event_id"}
+_ID_FIELD = {
+    "run": "branch_run_id",
+    "call": "call_id",
+    "event": "event_id",
+    "context": "context_id",
+    "context_operation": "operation_id",
+}
+
+
+def record_revision(record):
+    key = "context_revision" if record["kind"] == "context" else "revision"
+    return record["data"].get(key, 1)
 
 
 class GapCounters(OrderedDict):
@@ -52,13 +63,19 @@ class DiagnosticWriter:
             self._gap(record)
             return False
         data = copy.deepcopy(record)
+        branch_id = data["data"].get("branch_run_id", "unknown")
+        data["data"].update(
+            gap_count=self.gaps[branch_id],
+            gap_tracking_limited=self.gaps.limited,
+        )
         key = (data["kind"], data["data"][_ID_FIELD[data["kind"]]])
         old = self.pending.get(key)
-        if old and old[0]["data"].get("revision", 1) >= data["data"].get(
-            "revision", 1
-        ):
+        if old and record_revision(old[0]) >= record_revision(data):
             return True
         size = len(json.dumps(data, ensure_ascii=False).encode())
+        if size > self.config.max_record_bytes:
+            self._gap(data)
+            return False
         previous_size = old[2] if old else 0
         count_full = (
             not old
@@ -99,6 +116,17 @@ class DiagnosticWriter:
                 record["data"]["branch_run_id"]
             ]
             record["data"]["gap_tracking_limited"] = self.gaps.limited
+            size = len(json.dumps(record, ensure_ascii=False).encode())
+            if (
+                size > self.config.max_record_bytes
+                or self.buffer_bytes
+                + self.active_bytes
+                + sum(x[3] for x in batch)
+                + size
+                > self.config.max_bytes
+            ):
+                self._gap(record)
+                continue
             batch.append((key, record, created, size))
         if not batch:
             return True
@@ -112,7 +140,8 @@ class DiagnosticWriter:
             return True
         except (Exception, asyncio.CancelledError) as exc:
             logger.warning(
-                "Token diagnostic write failed: %s", type(exc).__name__
+                "Token diagnostic write failed: %s",
+                type(exc).__name__,
             )
             for key, record, created, size in reversed(batch):
                 newer = self.pending.get(key)
@@ -150,7 +179,8 @@ class DiagnosticWriter:
         if self.task:
             self.task.cancel()
             done, _ = await asyncio.wait(
-                {self.task}, timeout=max(0, deadline - time.monotonic())
+                {self.task},
+                timeout=max(0, deadline - time.monotonic()),
             )
             if done:
                 try:
@@ -165,15 +195,18 @@ class DiagnosticWriter:
                         break
 
             await asyncio.wait_for(
-                drain(), max(0.001, deadline - time.monotonic())
+                drain(),
+                max(0.001, deadline - time.monotonic()),
             )
         except (Exception, asyncio.CancelledError) as exc:
             logger.warning(
-                "Token diagnostics close incomplete: %s", type(exc).__name__
+                "Token diagnostics close incomplete: %s",
+                type(exc).__name__,
             )
         try:
             await asyncio.wait_for(
-                self.store.close(), max(0.001, deadline - time.monotonic())
+                self.store.close(),
+                max(0.001, deadline - time.monotonic()),
             )
         except (Exception, asyncio.CancelledError) as exc:
             logger.warning(

@@ -239,35 +239,60 @@ class MemoryCompactionHook:
         remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
     ) -> bool:
         """Install ready or degraded state and decide whether legacy flow stops."""
-        installed = await self.memory_manager.install_ready_precompaction(
-            chat_id=chat_id,
-            messages=messages,
-            memory=agent.memory,
+        from ...token_diagnostics.runtime import (
+            begin_context_operation,
+            finish_context_operation,
         )
-        if installed:
-            return await self._is_legacy_fallback_avoided(
+
+        getter = getattr(remeasure_projected_tokens, "__dict__", {}).get(
+            "diagnostic_snapshot",
+        )
+        operation = begin_context_operation(getter, "checkpoint_install")
+        state, after = "skipped", None
+        try:
+            installed = await self.memory_manager.install_ready_precompaction(
+                chat_id=chat_id,
+                messages=messages,
+                memory=agent.memory,
+            )
+            if installed:
+                state = "completed"
+                result = await self._is_legacy_fallback_avoided(
+                    running_config,
+                    remeasure_projected_tokens,
+                )
+                after = getter
+                return result
+            if decision.stage != "emergency":
+                return False
+            install_degraded = getattr(
+                self.memory_manager,
+                "install_degraded_checkpoint",
+                None,
+            )
+            if install_degraded is None:
+                return False
+            await install_degraded(
+                chat_id=chat_id,
+                messages=messages,
+                memory=agent.memory,
+            )
+            state = "completed"
+            result = await self._is_legacy_fallback_avoided(
                 running_config,
                 remeasure_projected_tokens,
+                default_result=False,
             )
-        if decision.stage != "emergency":
-            return False
-        install_degraded = getattr(
-            self.memory_manager,
-            "install_degraded_checkpoint",
-            None,
-        )
-        if install_degraded is None:
-            return False
-        await install_degraded(
-            chat_id=chat_id,
-            messages=messages,
-            memory=agent.memory,
-        )
-        return await self._is_legacy_fallback_avoided(
-            running_config,
-            remeasure_projected_tokens,
-            default_result=False,
-        )
+            after = getter
+            return result
+        except asyncio.CancelledError:
+            state = "cancelled"
+            raise
+        except Exception:
+            state = "error"
+            raise
+        finally:
+            finish_context_operation(operation, after, state)
 
     @staticmethod
     async def _is_legacy_fallback_avoided(
@@ -362,14 +387,27 @@ class MemoryCompactionHook:
         )
         if not trc.enabled:
             return
-
-        await self.memory_manager.compact_tool_result(
-            messages=messages,
-            recent_n=trc.recent_n,
-            old_max_bytes=trc.old_max_bytes,
-            recent_max_bytes=trc.recent_max_bytes,
-            retention_days=trc.retention_days,
+        from ...token_diagnostics.runtime import (
+            begin_context_operation,
+            finish_context_operation,
         )
+
+        operation = begin_context_operation(messages, "tool_result_compaction")
+        try:
+            await self.memory_manager.compact_tool_result(
+                messages=messages,
+                recent_n=trc.recent_n,
+                old_max_bytes=trc.old_max_bytes,
+                recent_max_bytes=trc.recent_max_bytes,
+                retention_days=trc.retention_days,
+            )
+        except asyncio.CancelledError:
+            finish_context_operation(operation, None, "cancelled")
+            raise
+        except Exception:
+            finish_context_operation(operation, None, "error")
+            raise
+        finish_context_operation(operation, messages, "completed")
 
     @staticmethod
     def _compactable_messages_for_invalid_context(
@@ -560,7 +598,10 @@ class MemoryCompactionHook:
                 + (memory.get_compressed_summary() or ""),
             )
 
+            refreshed_messages = messages
+
             async def remeasure_projected_tokens() -> int:
+                nonlocal refreshed_messages
                 refreshed_messages = await memory.get_memory(
                     prepend_summary=False,
                 )
@@ -570,6 +611,25 @@ class MemoryCompactionHook:
                     (agent.sys_prompt or "")
                     + (memory.get_compressed_summary() or ""),
                 )
+
+            from ...token_diagnostics.context_operations import (
+                snapshot_messages,
+            )
+            from ...token_diagnostics.runtime import (
+                begin_context_operation,
+                finish_context_operation,
+            )
+
+            def online_snapshot():
+                return snapshot_messages(
+                    refreshed_messages,
+                    (
+                        ("system", agent.sys_prompt or ""),
+                        ("system", memory.get_compressed_summary() or ""),
+                    ),
+                )
+
+            remeasure_projected_tokens.diagnostic_snapshot = online_snapshot
 
             if await self._apply_checkpoint_budget_stage(
                 agent,
@@ -597,19 +657,46 @@ class MemoryCompactionHook:
                 running_config,
                 messages_to_compact,
             )
-            compact_content = await self._run_context_compaction(
-                agent,
-                messages_to_compact,
-                running_config,
+            operation = begin_context_operation(
+                lambda: snapshot_messages(
+                    messages,
+                    (
+                        ("system", agent.sys_prompt or ""),
+                        ("system", memory.get_compressed_summary() or ""),
+                    ),
+                ),
+                "legacy_compaction",
             )
-            if not compact_content:
-                return None
+            from ...token_diagnostics.context_operations import (
+                bind_context_operation,
+            )
 
-            boundary = await self._persist_compaction_result(
-                memory,
-                messages_to_compact,
-                compact_content,
-            )
+            state = "skipped"
+            try:
+                with bind_context_operation(operation):
+                    compact_content = await self._run_context_compaction(
+                        agent,
+                        messages_to_compact,
+                        running_config,
+                    )
+                if not compact_content:
+                    return None
+                boundary = await self._persist_compaction_result(
+                    memory,
+                    messages_to_compact,
+                    compact_content,
+                )
+                state = "completed"
+            except asyncio.CancelledError:
+                state = "cancelled"
+                raise
+            except Exception:
+                state = "error"
+                raise
+            finally:
+                # Persistence changes online memory, but this legacy seam has
+                # no safe refreshed full snapshot without an additional read.
+                finish_context_operation(operation, None, state)
             if boundary is not None:
                 await self._print_status_message(
                     agent,

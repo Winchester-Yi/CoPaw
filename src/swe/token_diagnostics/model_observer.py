@@ -17,10 +17,86 @@ from .context import (
     now,
 )
 from .input_capture import capture_inputs
+from .contract import context_capture_enabled, schema_version
+from .context_capture import capture_context
+from .context_operations import (
+    associate_summary_attempt,
+    bound_context_operation,
+)
+from .runtime import safe_call
+from .context_contract import REPRESENTATION_VERSION
 from .models import UsageSnapshot
 from .usage import extract_usage, token_count
 
 logger = logging.getLogger(__name__)
+LEGACY_PROJECTION_UNAVAILABLE = (
+    "bounded_context_v1_legacy_projection_unavailable"
+)
+
+
+def unavailable_input():
+    return {
+        "items": [],
+        "capture_state": "unavailable",
+        "expected_item_count": None,
+        "estimated_input_tokens": None,
+        "assembly_stage": "messages_only",
+        "prompt_format_confidence": "message_approx",
+        "context_builder_version": "prepared-messages-v1",
+        "prompt_modality": "unknown",
+    }
+
+
+def prepared_snapshot(branch, call, messages, tools):
+    config = branch.collector.config
+    try:
+        context = capture_context(
+            messages,
+            tools,
+            (call["source_id"], call["tenant_id"]),
+            config,
+            context_id=call["context_id"],
+            context_role="prepared",
+        )
+    except Exception:
+        context = {
+            "context_id": call["context_id"],
+            "context_role": "prepared",
+            "capture_state": "unavailable",
+            "capture_reason": "capture_error",
+            "occurrences": [],
+            "blocks": [],
+            "text_bytes": None,
+            "encoded_bytes": None,
+            "expected_item_count": None,
+            "representation_version": REPRESENTATION_VERSION,
+            "estimator_version": "unavailable",
+            "key_version": config.key_version,
+        }
+    occurrences = context["occurrences"]
+    operation = bound_context_operation(branch)
+    return {
+        **branch.fields,
+        **context,
+        "schema_version": schema_version(config),
+        "call_id": call["call_id"],
+        "operation_id": (
+            operation.operation_id if operation is not None else None
+        ),
+        "context_revision": 1,
+        "revision": 1,
+        "request_started_at": call["started_at"],
+        "request_ended_at": None,
+        "assembly_stage": call["assembly_stage"],
+        "execution_state": "running",
+        "provider_id": call["provider_id"],
+        "model_name": call["model_name"],
+        "estimated_tokens": (
+            occurrences[-1]["token_end"]
+            if occurrences
+            else (0 if context["capture_state"] == "complete" else None)
+        ),
+    }
 
 
 def observe_usage(result):
@@ -94,29 +170,32 @@ class AttemptObserver(ModelProxy):
         branch = logical.branch
         logical.attempt_no += 1
         branch.attempts += 1
+        b_enabled = context_capture_enabled(branch.collector.config)
         try:
-            capture = capture_inputs(
-                messages,
-                kwargs.get("tools", []),
-                branch.scope_key,
-                branch.collector.config,
+            capture = (
+                unavailable_input()
+                if b_enabled
+                else capture_inputs(
+                    messages,
+                    kwargs.get("tools", []),
+                    branch.scope_key,
+                    branch.collector.config,
+                )
             )
         except Exception:
-            capture = {
-                "items": [],
-                "capture_state": "unavailable",
-                "expected_item_count": None,
-                "estimated_input_tokens": None,
-                "assembly_stage": "messages_only",
-                "prompt_format_confidence": "message_approx",
-                "context_builder_version": "prepared-messages-v1",
-                "prompt_modality": "unknown",
-            }
-        size = len(json.dumps(capture).encode())
-        if not branch.collector.reserve(size):
-            capture["items"] = []
-            capture["capture_state"] = "partial"
-            size = 0
+            capture = unavailable_input()
+        if b_enabled:
+            # B's representation and A's five legacy input rules are not
+            # interchangeable. Keep the old fields explicitly unavailable.
+            capture.update(
+                items=[],
+                expected_item_count=None,
+                estimated_input_tokens=None,
+                capture_state="unavailable",
+                capture_reason=LEGACY_PROJECTION_UNAVAILABLE,
+                fingerprint_available=False,
+                context_builder_version=REPRESENTATION_VERSION,
+            )
         call = {
             **branch.fields,
             **capture,
@@ -151,14 +230,55 @@ class AttemptObserver(ModelProxy):
             "output_tokens": None,
             "started_at": now(),
         }
+        prepared_context = (
+            safe_call(
+                prepared_snapshot,
+                branch,
+                call,
+                messages,
+                kwargs.get("tools", []),
+            )
+            if b_enabled
+            else None
+        )
+        count = 2 if prepared_context is not None else 1
+        size = len(
+            json.dumps(
+                {"call": call, "context": prepared_context},
+                ensure_ascii=False,
+            ).encode(),
+        )
+        if not branch.collector.reserve(size, count=count):
+            # Preserve A's bounded fallback: drop the input items, retain
+            # model/usage facts, and reserve only the reduced call record.
+            call.update(
+                items=[],
+                capture_state="partial",
+                expected_item_count=None,
+                estimated_input_tokens=None,
+            )
+            prepared_context = None
+            count = 1
+            size = len(json.dumps({"call": call}, ensure_ascii=False).encode())
+            if not branch.collector.reserve(size, count=count):
+                branch.collector.writer.gaps[
+                    branch.fields["branch_run_id"]
+                ] += 1
+                return await self._model(messages, **kwargs)
         attempt = {
             "call": call,
             "usage": UsageSnapshot(),
             "iterator": None,
             "size": size,
+            "count": count,
+            "context": prepared_context,
         }
         logical.active[call["call_id"]] = attempt
+        if prepared_context is not None:
+            safe_call(associate_summary_attempt, branch, call["call_id"])
         branch.collector.emit("call", call)
+        if prepared_context is not None:
+            branch.collector.emit("context", prepared_context)
         try:
             result = await self._model(messages, **kwargs)
             if hasattr(result, "__aiter__"):
@@ -186,7 +306,10 @@ class AttemptObserver(ModelProxy):
         if identity not in logical.active:
             return
         logical.active.pop(identity)
-        logical.branch.collector.release(attempt["size"])
+        logical.branch.collector.release(
+            attempt["size"],
+            count=attempt["count"],
+        )
         data = {
             **attempt["call"],
             **attempt["usage"].as_dict(),
@@ -198,6 +321,15 @@ class AttemptObserver(ModelProxy):
         if state != "completed" and data["usage_status"] == "reported":
             data["usage_status"] = "partial"
         logical.branch.collector.emit("call", data)
+        context = attempt.get("context")
+        if context is not None:
+            context.update(
+                context_revision=2,
+                revision=2,
+                request_ended_at=data["ended_at"],
+                execution_state=state,
+            )
+            logical.branch.collector.emit("context", context)
 
     async def _stream(self, iterator, logical, attempt):
         state, error = "cancelled", None

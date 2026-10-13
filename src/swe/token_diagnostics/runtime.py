@@ -18,6 +18,8 @@ from .context import (
     tool_started,
 )
 from .provenance import register_origin
+from . import context_operations
+from .contract import context_capture_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,34 @@ def notify_tool_completed(metadata, output, error_code=None):
 
 def notify_compaction():
     safe_call(compaction_completed)
+
+
+def begin_context_operation(before, operation_type, **kwargs):
+    branch = current_branch()
+    if branch is None or not context_capture_enabled(branch.collector.config):
+        return None
+    if callable(before):
+        before = safe_call(before)
+    return safe_call(
+        context_operations.begin_context_operation,
+        before,
+        operation_type,
+        **kwargs,
+    )
+
+
+def finish_context_operation(operation, after, state="completed", **kwargs):
+    if operation is None or operation.finished:
+        return None
+    if callable(after):
+        after = safe_call(after)
+    return safe_call(
+        context_operations.finish_context_operation,
+        operation,
+        after,
+        state,
+        **kwargs,
+    )
 
 
 def configure_agent(running, system_prompt):

@@ -12,10 +12,10 @@ from swe.__version__ import __version__
 
 from .collector import get_collector
 from .contract import (
-    SCHEMA_VERSION,
     TELEMETRY_SOURCE,
     execution_identity,
     scoped_run_id,
+    schema_version,
 )
 from .provenance import bind_origins, fingerprint, reset_origins
 
@@ -133,7 +133,7 @@ def create_branch(metadata, collector=None, parent=None):
     fields.update(
         task_run_id=run_id,
         branch_run_id=run_id,
-        schema_version=SCHEMA_VERSION,
+        schema_version=schema_version(collector.config),
         telemetry_source=TELEMETRY_SOURCE,
         execution_origin=execution_origin,
         execution_id=execution_id,
