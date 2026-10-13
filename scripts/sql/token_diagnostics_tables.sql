@@ -479,7 +479,7 @@ CREATE TABLE IF NOT EXISTS swe_token_diagnostic_evaluations (
   replaces_evaluation_id VARCHAR(36) NULL COMMENT 'Replaces evaluation id',
   PRIMARY KEY(evaluation_id),
   INDEX b_diagnostic_evaluations_branch(source_id,tenant_id,branch_run_id),
-  UNIQUE KEY b_evaluation_identity(source_id,tenant_id,object_type,object_id,rule_id,rule_version,threshold_version,input_revision,snapshot_id)
+  UNIQUE KEY b_evaluation_identity(source_id,tenant_id,branch_run_id,object_type,object_id,rule_id,rule_version,threshold_version,input_revision,snapshot_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='B diagnostic evaluations evidence';
 
 CREATE TABLE IF NOT EXISTS swe_token_diagnostic_findings (
@@ -570,6 +570,6 @@ CREATE TABLE IF NOT EXISTS swe_token_diagnostic_heads (
   rule_version BIGINT NULL COMMENT 'Rule version',
   threshold_version BIGINT NULL COMMENT 'Threshold version',
   updated_at DATETIME(6) NULL COMMENT 'Updated at',
-  PRIMARY KEY(source_id,tenant_id,object_type,object_id,rule_id),
+  PRIMARY KEY(source_id,tenant_id,branch_run_id,object_type,object_id,rule_id),
   INDEX b_diagnostic_heads_branch(source_id,tenant_id,branch_run_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='B diagnostic heads evidence';

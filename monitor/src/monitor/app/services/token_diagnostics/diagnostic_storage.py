@@ -93,7 +93,7 @@ async def read_operation(cursor, identity, scope):
 
 
 def evaluation_identity(run, evaluation):
-    fields = [run["source_id"], run["tenant_id"]] + [
+    fields = [run["source_id"], run["tenant_id"], run["branch_run_id"]] + [
         evaluation[key]
         for key in (
             "object_type",
@@ -156,10 +156,11 @@ async def append_evaluations(cursor, run, evaluations):
 
 async def read_head(cursor, scope, evaluation):
     await cursor.execute(
-        f"SELECT {select_columns('swe_token_diagnostic_heads')} FROM swe_token_diagnostic_heads WHERE source_id=%s AND tenant_id=%s AND object_type=%s AND object_id=%s AND rule_id=%s FOR UPDATE",
+        f"SELECT {select_columns('swe_token_diagnostic_heads')} FROM swe_token_diagnostic_heads WHERE source_id=%s AND tenant_id=%s AND branch_run_id=%s AND object_type=%s AND object_id=%s AND rule_id=%s FOR UPDATE",
         (
             scope["source_id"],
             scope["tenant_id"],
+            scope["branch_run_id"],
             evaluation["object_type"],
             evaluation["object_id"],
             evaluation["rule_id"],
