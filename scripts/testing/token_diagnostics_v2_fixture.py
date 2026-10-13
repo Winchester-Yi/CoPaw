@@ -72,11 +72,12 @@ async def prepare(db):
             },
         )
         db.execute(
-            "UPDATE swe_token_model_calls SET context_id=?,logical_seq=?,output_tokens=?,ended_at=? WHERE call_id=?",
+            "UPDATE swe_token_model_calls SET context_id=?,logical_seq=?,output_tokens=?,usage_status=?,ended_at=? WHERE call_id=?",
             (
                 f"ctx-{i}",
                 i,
                 None if i == 3 else 0,
+                "partial" if i == 3 else "reported",
                 f"2026-10-12T1{i}:00:30Z",
                 f"call-{i}",
             ),
