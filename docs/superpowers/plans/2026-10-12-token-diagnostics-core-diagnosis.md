@@ -243,12 +243,12 @@ def test_prefix_total_uses_byte_weighting():
 
 **Files:** Monitor `diagnostic_rules.py`、`recommendations.py`、`diagnostic_contract.py`。测试 `tests/unit/token_diagnostics/test_context_rules.py`。
 
-- [ ] 按设计八规则表分别建立边界样本，包含阈值前/等于/超过值、缺字段、缺分母、调用缺口/重试、已证明不适用；把评估对象绑定至实际 branch/call/Step，不跨分支构造连续窗口。
-- [ ] `evaluate_context_rules(snapshot)` 返回八规则评估及其 values/gaps/refs/findings。先验证适用性和完整性；增长序列仅同单位/估算器，源身份与版本相同才生成 R02 生命周期候选；R03 需要真正业务 Step 终态，工具结束不能替代。
-- [ ] R04 不猜工具安全属性；R05 只做确定性行动/结果签名重复，进展未知仅可疑；R08 本轮固定缺失 cohort/complexity/quality 证据，不输出统计异常。缺真实逻辑 Step 的 R05 不触发。
-- [ ] R06 验证当前+至少两历史完整请求、可靠静态来源至少 2000 estimated tokens，max(candidate.upper/current.text_bytes) < 0.2；候选超限、区间跨阈值或上界不可得为不足。静态重复证据不从 prefix 匹配反推。
-- [ ] 对每条规则提供不可自动执行的建议记录：action_code、运行位置、前提、例外、风险及验证步骤。R01 摘要/预算；R02 来源摘要；R03 工具投影；R04 只读复用前置检查；R05 排查重试/进展；R06 稳定结构；R07 按需工具/指令；R08 业务可比组及评测。
-- [ ] 签名仅可靠结构/配置身份形成，包含 scope、Agent/Provider/model、rule/threshold/signature version；unknown 实例保留独立 finding ID。同一来源的 operation ID 仅实例定位，不用于跨 Task 聚合。
+- [x] 按设计八规则表分别建立边界样本，包含阈值前/等于/超过值、缺字段、缺分母、调用缺口/重试、已证明不适用；把评估对象绑定至实际 branch/call/Step，不跨分支构造连续窗口。
+- [x] `evaluate_context_rules(snapshot)` 返回八规则评估及其 values/gaps/refs/findings。先验证适用性和完整性；增长序列仅同单位/估算器，源身份与版本相同才生成 R02 生命周期候选；R03 需要真正业务 Step 终态，工具结束不能替代。
+- [x] R04 不猜工具安全属性；R05 只做确定性行动/结果签名重复，进展未知仅可疑；R08 本轮固定缺失 cohort/complexity/quality 证据，不输出统计异常。缺真实逻辑 Step 的 R05 不触发。
+- [x] R06 验证当前+至少两历史完整请求、可靠静态来源至少 2000 estimated tokens，max(candidate.upper/current.text_bytes) < 0.2；候选超限、区间跨阈值或上界不可得为不足。静态重复证据不从 prefix 匹配反推。
+- [x] 对每条规则提供不可自动执行的建议记录：action_code、运行位置、前提、例外、风险及验证步骤。R01 摘要/预算；R02 来源摘要；R03 工具投影；R04 只读复用前置检查；R05 排查重试/进展；R06 稳定结构；R07 按需工具/指令；R08 业务可比组及评测。
+- [x] 签名仅可靠结构/配置身份形成，包含 scope、Agent/Provider/model、rule/threshold/signature version；unknown 实例保留独立 finding ID。同一来源的 operation ID 仅实例定位，不用于跨 Task 聚合。
 
 R06 核心边界 helper 与测试（在 `diagnostic_rules.py` 定义，不另建通用规则 DSL）：
 
@@ -474,4 +474,4 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 - Task 3：24 表及原子 Context/operation、不可变分析/候选历史、输入修订保护已完成，独立检视 READY。旧快照重试回退 head 的回归先失败，修复后通过。契约/存储联合 35 passed，旧存储边界 12 passed；完整 Token 回归 171 passed。MySQL 测试 DSN 未配置，Docker daemon 不在线；当前关系测试为 SQLite 适配路径。租约校验及生产分析集成待 Task 7。
 - Task 5：前缀比较、24h/100 候选检索及字节加权聚合已完成；规范及代码质量复核 READY。21 项测试通过，另有 300 个 Unicode/控制字符/短尾随机样例通过。当前请求运行中/无结束时间、无历史、候选超限及最后候选跨 deadline 均保持不可用或受限。
 - Task 4：真实请求 prepared Context、队列完整预算、三处操作边界及显式摘要关联完成。独立规范检视发现 A 预算降级与观测工厂 fail-open 两处缺口，新增 5 项红→绿回归修复，root 独立重跑；代码质量检视 READY、独立 52 passed。完整相关范围 143 passed、1 deselected；B 新测试 36 passed。排除项 source disabled config 测试经 HEAD 原函数复现为既有失败。B 打开时旧输入证据 unavailable（避免旧全量序列化），真实 Usage 独立保留；legacy after 明确缺失，无额外完整 memory 读取。
-- Tasks 6–7：实施及检视进行中；Tasks 8–14 尚未实施，不表示 API、规则或三个页面已经交付。
+- Task 6：八规则及记录型建议完成，规范与代码质量检视 READY。R01 可靠分组碰撞新增 10 项红→绿回归；仅可靠静态来源/版本/类别/结构形成签名，动态或缺身份的候选保留独立实例。规则测试 74 passed；规则/旧规则/分析联测 96 passed，scoped pre-commit 通过。Task 7–9 实施及检视进行中；三个页面尚未开发。
