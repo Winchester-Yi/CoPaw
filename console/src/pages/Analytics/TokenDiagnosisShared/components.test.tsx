@@ -110,6 +110,94 @@ describe("common diagnosis controls", () => {
     });
     expect(onChange.mock.calls[0][0].cursor).toBeUndefined();
   });
+  it("uses the exact window when it arrives after the filter mounts", () => {
+    const onChange = vi.fn();
+    const window = {
+      start: "2026-10-11T10:24:59.123456Z",
+      end: "2026-10-12T10:24:59.654321Z",
+      semantics: "UTC half-open [start,end)",
+    };
+    const { rerender } = render(
+      <FilterBar filters={{ model_name: "old" }} onChange={onChange} />,
+    );
+    rerender(
+      <FilterBar
+        filters={{ model_name: "old" }}
+        window={window}
+        onChange={onChange}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("模型"), {
+      target: { value: "new" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+    expect(onChange.mock.calls[0][0]).toMatchObject({
+      model_name: "new",
+      start: window.start,
+      end: window.end,
+    });
+  });
+  it("keeps a draft through pinned window hydration and refresh", () => {
+    const onChange = vi.fn();
+    const start = "2026-10-11T10:24:59.123456Z";
+    const end = "2026-10-12T10:24:59.654321Z";
+    const filters = { start, end, model_name: "old" };
+    const window = { start, end, semantics: "UTC half-open [start,end)" };
+    const { rerender } = render(
+      <FilterBar filters={filters} onChange={onChange} />,
+    );
+    fireEvent.change(screen.getByLabelText("模型"), {
+      target: { value: "draft-model" },
+    });
+    fireEvent.change(screen.getByLabelText("执行 Agent"), {
+      target: { value: "draft-agent" },
+    });
+    rerender(
+      <FilterBar filters={filters} window={window} onChange={onChange} />,
+    );
+    rerender(<FilterBar filters={filters} onChange={onChange} />);
+    rerender(
+      <FilterBar filters={filters} window={window} onChange={onChange} />,
+    );
+    expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
+    expect(screen.getByLabelText("执行 Agent")).toHaveValue("draft-agent");
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+    expect(onChange.mock.calls[0][0]).toMatchObject({
+      start,
+      end,
+      model_name: "draft-model",
+      agent_id: "draft-agent",
+    });
+  });
+  it("keeps a draft when window metadata changes without changing bounds", () => {
+    const onChange = vi.fn();
+    const filters = { model_name: "old" };
+    const window = {
+      start: "2026-10-11T10:24:59.123456Z",
+      end: "2026-10-12T10:24:59.654321Z",
+      semantics: "UTC half-open [start,end)",
+    };
+    const { rerender } = render(
+      <FilterBar filters={filters} window={window} onChange={onChange} />,
+    );
+    fireEvent.change(screen.getByLabelText("模型"), {
+      target: { value: "draft-model" },
+    });
+    rerender(
+      <FilterBar
+        filters={filters}
+        window={{ ...window, semantics: "updated metadata" }}
+        onChange={onChange}
+      />,
+    );
+    expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+    expect(onChange.mock.calls[0][0]).toMatchObject({
+      start: window.start,
+      end: window.end,
+      model_name: "draft-model",
+    });
+  });
   it("editing one boundary preserves the exact untouched boundary", () => {
     const onChange = vi.fn();
     render(

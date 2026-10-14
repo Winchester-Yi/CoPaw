@@ -10,6 +10,7 @@ import ContinuousGovernancePage from "./ContinuousGovernance";
 import TokenDiagnosticsPage from "./TokenDiagnostics";
 import TokenOverviewPage from "./TokenOverview";
 import TokenExecutionsPage from "./TokenExecutions";
+import TokenIssuesPage from "./TokenIssues";
 
 export default function AnalyticsPage() {
   const location = useLocation();
@@ -39,6 +40,7 @@ export default function AnalyticsPage() {
           />
         }
       />
+      <Route path="token-issues" element={<TokenIssuesPage />} />
       <Route path="business-overview" element={<BusinessOverviewPage />} />
       <Route path="claw-data-overview" element={<ClawDataOverviewPage />} />
       <Route path="cron-job-overview" element={<CronJobOverviewPage />} />

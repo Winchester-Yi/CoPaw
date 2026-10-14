@@ -179,7 +179,11 @@ function FilterFields({
 export function FilterBar(props: FilterBarProps) {
   return (
     <FilterFields
-      key={JSON.stringify([props.filters, props.window])}
+      key={JSON.stringify([
+        props.filters,
+        props.filters.start || props.window?.start,
+        props.filters.end || props.window?.end,
+      ])}
       {...props}
     />
   );
