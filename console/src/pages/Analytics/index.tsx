@@ -9,6 +9,7 @@ import ClawDataOverviewPage from "./ClawDataOverview";
 import ContinuousGovernancePage from "./ContinuousGovernance";
 import TokenDiagnosticsPage from "./TokenDiagnostics";
 import TokenOverviewPage from "./TokenOverview";
+import TokenExecutionsPage from "./TokenExecutions";
 
 export default function AnalyticsPage() {
   const location = useLocation();
@@ -21,6 +22,10 @@ export default function AnalyticsPage() {
       <Route path="traces" element={<TracesPage />} />
       <Route path="token-diagnostics" element={<TokenDiagnosticsPage />} />
       <Route path="token-overview" element={<TokenOverviewPage />} />
+      <Route
+        path="token-executions/:taskId"
+        element={<TokenExecutionsPage />}
+      />
       <Route
         path="token-executions"
         element={
