@@ -4,6 +4,16 @@ from pydantic import ValidationError
 from swe.jev.config import JevConfig
 
 
+def test_jev_service_model_survives_agent_config_roundtrip():
+    from swe.config.config import AgentProfileConfig
+
+    agent = AgentProfileConfig.model_validate(
+        {"id": "test", "name": "Test", "jev": {"model": "jev-deployed-model"}},
+    )
+    restored = AgentProfileConfig.model_validate_json(agent.model_dump_json())
+    assert restored.jev.model == "jev-deployed-model"
+
+
 def test_disabled_config_needs_no_service():
     config = JevConfig()
     assert not config.skill_selection.enabled

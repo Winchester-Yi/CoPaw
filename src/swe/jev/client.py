@@ -13,6 +13,7 @@ import httpx
 from .config import JevConfig
 
 logger = logging.getLogger(__name__)
+_MAX_ERROR_BODY_CHARS = 2000
 
 
 def _parse_answers(questions: dict, payload: Any) -> dict:
@@ -91,9 +92,12 @@ class JevClient:
 
     async def _request(self, state: str, questions: dict) -> dict | None:
         started = time.monotonic()
+        body = {"state": state, "questions": questions}
+        if self.config.model:
+            body["model"] = self.config.model
         try:
             payload = await asyncio.wait_for(
-                self._post({"state": state, "questions": questions}),
+                self._post(body),
                 timeout=self.config.timeout_seconds,
             )
             values = _parse_answers(questions, payload)
@@ -112,11 +116,24 @@ class JevClient:
             KeyError,
             asyncio.TimeoutError,
         ) as exc:
-            logger.warning(
-                "jev_fallback reason=%s elapsed_ms=%d",
-                type(exc).__name__,
-                int((time.monotonic() - started) * 1000),
-            )
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if isinstance(exc, httpx.HTTPStatusError):
+                response_body = exc.response.text
+                logger.warning(
+                    "jev_fallback reason=%s elapsed_ms=%d status_code=%d "
+                    "response_body=%r response_truncated=%s",
+                    type(exc).__name__,
+                    elapsed_ms,
+                    exc.response.status_code,
+                    response_body[:_MAX_ERROR_BODY_CHARS],
+                    len(response_body) > _MAX_ERROR_BODY_CHARS,
+                )
+            else:
+                logger.warning(
+                    "jev_fallback reason=%s elapsed_ms=%d",
+                    type(exc).__name__,
+                    elapsed_ms,
+                )
             return None
 
     async def _post(self, body: dict) -> Any:

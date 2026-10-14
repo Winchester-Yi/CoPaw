@@ -7,6 +7,7 @@
 | 文档 | 摘要 |
 |------|------|
 | [agent-config-read-consistency.md](agent-config-read-consistency.md) | agent 控制面读写一致性边界、排查入口和与 console agent switching 的职责分界 |
+| [jev-decisions.md](jev-decisions.md) | Jev 配置、技能发现、搜索并集、模型选择与回退排查 |
 | [common-errors.md](common-errors.md) | 常见报错模式、典型触发点和第一落点 |
 | [external-job-list.md](external-job-list.md) | 外部 jobs 列表的无初始化接口、原接口契约及任务绑定的只读边界 |
 | [location-paths.md](location-paths.md) | 按问题类型给出代码、配置与命令入口，包含财富任务动态指标与经营分组 |

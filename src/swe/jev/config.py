@@ -34,6 +34,7 @@ class JevSearchConfig(JevSkillConfig):
 
 class JevConfig(BaseModel):
     endpoint: str = ""
+    model: str = ""
     auth_token_env: str = ""
     timeout_seconds: float | None = Field(
         default=None,
