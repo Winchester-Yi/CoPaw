@@ -1,6 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# AGENTS.md
 
 ## 项目架构
 
@@ -71,20 +69,6 @@ CLI / HTTP / Channel Request
 | 安全、审批与治理边界 | 覆盖 Tool Guard、技能扫描、路径边界、认证与审批服务 | [analysis/security-and-governance.md](analysis/security-and-governance.md) |
 | 观测能力与支撑系统 | 覆盖 Tracing、Token Usage、Cron、备份、Tunnel、Deploy、Scripts | [analysis/observability-and-supporting-systems.md](analysis/observability-and-supporting-systems.md) |
 
-### 技能管理服务边界
-
-技能管理功能由两个服务协作完成：
-
-| 功能 | API 端点 | 服务 | 说明 |
-|------|----------|------|------|
-| 用户技能 CRUD | `/market/skills/*` | market | 用户技能创建、删除、启用/禁用、文件编辑 |
-| 工作空间技能列表 | `/skills` | src/swe | Agent 运行时技能状态查询（只读） |
-| 技能池管理 | `/skills/pool/*` | src/swe | 管理员管理共享技能池 |
-| Hub 导入 | `/skills/hub/*` | src/swe | 从外部 Hub 导入技能 |
-| Agent 重载回调 | `/api/internal/agents/{id}/reload` | src/swe | Market 服务修改技能后回调通知 |
-
-**服务间通信：** Market 服务通过 HTTP 回调触发 SWE 服务的 Agent 重载，确保技能配置实时生效。
-
 ## 经验累积
 
 经验类文档统一放在 `analysis/playbook/`，用于沉淀排查入口和重复问题处理方式。
@@ -100,21 +84,19 @@ CLI / HTTP / Channel Request
 
 ## 开发环境
 
-### 部署环境
-
 - OS: Linux 3.15 内核
 - 部署方式: Kubernetes 容器多实例部署
 - 外部依赖:
-  - Redis 集群（可连接）
   - MySQL 数据库（可连接）
 
-### 仓库结构
+## 数据库规范
 
-- 核心 Python 代码位于 `src/swe/`
-- 主控制台前端位于 `console/`
-- 测试位于 `tests/`
-- 部署与安装资源位于 `deploy/` 和 `scripts/`
-- 长文档设计稿位于 `docs/superpowers/specs/`
+1. 数据表必须定义主键
+2. 所有表和字段都需要添加注释
+3. 禁止使用 ENUM、SET、JSON、LOB、BLOB、CLOB 类型字段
+4. 禁止使用外键与级联
+5. 禁止使用存储过程、自定义函数、触发器、定时作业、视图
+6. 在查询语句中禁止使用 * 作为查询的字段列表
 
 ### 多用户并发支持
 
@@ -168,132 +150,16 @@ Provider 配置按租户独立存放：
 - 新租户首次访问时可继承默认租户配置
 - CLI 支持 `--tenant-id` 进行多租户管理
 
-### 案例配置
-
-案例配置用于在首页展示不同的业务场景案例，支持按用户进行案例列表隔离：
-
-```text
-~/.swe/
-├── cases.json           # 案例定义（iframe_url、标题、步骤等）
-└── user_cases.json      # 用户-案例映射（userId -> caseIds）
-```
-
-**案例定义结构 (`cases.json`)：**
-
-```json
-{
-  "cases": [
-    {
-      "id": "case-deposit-maturity",
-      "label": "他行存款到期潜力客户名单",
-      "value": "帮我分析...",
-      "sort_order": 0,
-      "is_active": true,
-      "detail": {
-        "iframe_url": "https://...",
-        "iframe_title": "详情面板标题",
-        "steps": [
-          { "title": "步骤1", "content": "步骤说明" }
-        ]
-      }
-    }
-  ]
-}
-```
-
-**用户映射结构 (`user_cases.json`)：**
-
-```json
-{
-  "user_cases": {
-    "default": ["case-deposit-maturity", "case-fund-sales"],
-    "alice": ["case-deposit-maturity"],
-    "bob": []
-  }
-}
-```
-
-**userId 过滤逻辑：**
-
-1. API 读取 `X-User-Id` 请求头
-2. 若无则读取 `user_id` 查询参数
-3. 若无则使用 `default` 映射
-4. 返回映射数组中对应的案例列表
-
-**管理页面：**
-
-Console 提供 `/cases-management` 页面，包含两个标签页：
-- 案例定义：创建/编辑/删除案例
-- 用户分配：配置 userId 可见案例列表
-
-### 代码风格
-
-- Python 使用 4 空格缩进、`snake_case` 模块名、Black 79 列
-- 目录与文件命名遵循现有模式，例如 `channel.py`、`registry.py`、`test_*.py`
-
 ### Sonar 规范
 
 - 控制函数圈复杂度，普通函数建议不超过 `15`
 - 控制函数参数数量，普通函数建议不超过 `7`
 - 对重复出现的错误文案、状态文案、字段描述文案，优先提取为模块级常量或小型 helper，避免散落的重复字面量
 
-### 代码注释规范
-
-#### 基本要求
-
-- **语言要求**：所有注释必须使用简体中文，包括 docstring、行内注释、TODO/FIXME 标记
-
-#### 注释时机（以下情况必须添加注释）
-
-- **模块级**：每个 Python 模块文件开头应有简短说明，描述模块职责和主要功能
-- **类级**：类定义应有 docstring，说明类的用途、关键属性、使用示例（如适用）
-- **函数/方法级**：公共函数和类方法必须有 docstring，说明功能、参数含义、返回值、可能的异常
-- **行内注释**：
-  - 复杂算法或非直观逻辑的实现步骤
-  - 业务规则或业务逻辑的决策依据
-  - 边界条件处理、异常捕获的原因
-  - 性能优化相关的技术决策
-  - 临时方案或已知限制（配合 TODO/FIXME）
-  - 正则表达式、复杂公式等难以直接理解的代码片段
-
-#### 注释内容要求
-
-- 注释应解释 **WHY（为什么这样做）**，而非简单重复 **WHAT（代码做什么）**
-- 注释应提供代码本身无法表达的信息：设计意图、约束原因、相关背景
-- 避免无意义注释（如 `# 循环遍历列表` 对应 `for item in list`）
-
-#### 注释维护
-
-- **同步更新原则**：修改代码时，相关注释必须同步更新，确保注释与代码一致
-- 删除代码时，相关注释一并删除，不要保留过时的注释
-- 发现注释与代码不一致时，优先检查代码正确性，然后修正注释
-
-#### 禁止事项
-
-- 不要保留注释掉的代码块，使用版本控制管理历史代码
-- 不要添加已废弃或不再生效的注释
-- 不要在注释中包含敏感信息（密码、密钥、内部 IP 等）
-- 不要用注释掩盖代码质量问题（应直接修复代码）
-- **不要在注释中出现"中文注释"、"以下是注释"等无意义的标签式文字**，注释应直接表达实质内容
-- 不要添加显而易见的注释（如 `# 定义变量 x` 对应 `x = 1`）
-- 不要在注释中重复函数名或变量名（如 `# 调用 get_user_info 获取用户信息`）
-
-#### 特殊标记
-
-- **TODO**：标记待完成的功能或优化项，格式：`# TODO: 简要描述待完成内容`
-- **FIXME**：标记已知问题或待修复的 bug，格式：`# FIXME: 简要描述问题及影响`
-- **HACK**：标记临时方案或 workaround，格式：`# HACK: 简要描述临时方案及后续计划`
-- 以上标记应在后续迭代中及时处理和清理
-
-### Subagent 工作方式
-
-- 默认直接在当前仓库中处理开发内容，不使用 worktree；如需隔离工作区，需由用户明确提出
-
 ## 测试要求
 
 ### 基本要求
 
-- 所有测试位于 `tests/`
 - Python 测试统一使用 `pytest`
 - 优先将测试放在对应子系统附近，例如 `tests/unit/app/`、`tests/unit/providers/`、`tests/unit/workspace/`
 
@@ -315,47 +181,99 @@ venv/bin/python -m pytest tests/unit/tenant_models/ -v
 venv/bin/python -m pytest -m "not slow"
 ```
 
-### 前端与交付校验
+### 交付校验
 
-- Console 变更至少需要通过格式化、Lint 和构建检查
 - 提交前建议执行 `pre-commit run --all-files` 与必要范围的 `pytest`
 
-### Commit 与 PR
+# coding guidelines
 
-- 提交信息使用 Conventional Commits：`feat(scope): summary`、`fix(scope): summary`、`docs(scope): summary`
+## 1. Think Before Coding
 
-### 开发规范（按照难易程度选择开发范式）
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-- 对简单问题或者 bugfix，直接进行开发和修复
-- 对于较复杂的问题，使用 brainstorm 和 superpowers 工具进行规划和开发
-- 对于横跨多个模块的特性开发和问题处理，请先使用 openspec 工具进行深入分析和指定计划，再使用 TDD 的范式进行开发和实现
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **CoPaw** (45977 symbols, 75187 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **CoPaw** (72839 symbols, 129406 relationships, 892 execution flows).
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
+- **MUST run impact before editing.** Use `impact({target: "symbolName", direction: "upstream"})` or `node .gitnexus/run.cjs impact "symbolName" --direction upstream --repo .`; report callers, processes, and risk. Never substitute grep for graph analysis.
+- **MUST analyze graph changes before committing.** Use `detect_changes({scope: "all"})` (MCP) or `node .gitnexus/run.cjs detect-changes --scope all --repo .` (CLI fallback). `partial: true` or `truncated: true` is not a clean check — a zero means unseen, not unaffected; re-run it. For regression review: `detect_changes({scope: "compare", base_ref: "main"})` or `node .gitnexus/run.cjs detect-changes --scope compare --base-ref "main" --repo .`.
+- MUST warn on HIGH/CRITICAL `risk` pre-edit; never use `riskSharedAxes` to waive a HIGH/CRITICAL `risk` warning. Compare File/symbol: MCP File omits axes; Graph-RAG expands File.
+- **MUST treat `risk: UNKNOWN` as unresolved, not as low.** An empty caller set is not evidence the symbol is unused — it can also mean the callers are not resolvable by the index (plain-object property access, dynamic dispatch, cross-language calls). `impact` pairs `UNKNOWN` with a `riskNote` saying so. Confirm with a text search before treating the symbol as safe to change or delete; do not proceed on the strength of a zero.
+- **MUST use `query({search_query: "concept"})` for concepts/flows, `context({name: "symbolName"})` for a named symbol, or `impact` for blast radius, on read-only callers, dependencies, imports, or execution flow.** Graph first; text search only for empty/`UNKNOWN`/literals.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
+- NEVER edit a function, class, or method before MCP/CLI impact analysis.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis, and never read `UNKNOWN` as an all-clear — it means the walk could not answer, which is the one verdict that requires confirming by other means.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit before MCP/CLI graph change analysis.
 
 ## Resources
 
 | Resource | Use for |
-|----------|---------|
+| --- | --- |
 | `gitnexus://repo/CoPaw/context` | Codebase overview, check index freshness |
 | `gitnexus://repo/CoPaw/clusters` | All functional areas |
 | `gitnexus://repo/CoPaw/processes` | All execution flows |
@@ -364,12 +282,12 @@ This project is indexed by GitNexus as **CoPaw** (45977 symbols, 75187 relations
 ## CLI
 
 | Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+| --- | --- |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
