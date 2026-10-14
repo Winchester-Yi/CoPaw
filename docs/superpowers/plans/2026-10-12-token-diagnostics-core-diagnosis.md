@@ -302,12 +302,12 @@ assert task_state["stale_branch_count"] == 1
 
 **Files:** Monitor `diagnostic_queries.py`、`diagnostic_filters.py`、`query_service.py`、`lifecycle.py`。测试 `tests/unit/token_diagnostics/test_b_queries.py`。
 
-- [ ] 用跨窗口 Task、两个模型、根/子 Agent、未知/部分 Usage、完整/缺子分支数据建立 adapter 样本；断言窗口尝试总量不等于 Task 全生命周期规模，模型筛选不串入另一模型用量。
-- [ ] 查询 `dashboard/tasks/task/branches/calls/context/prefix/operations/issues/instances/evaluation`，对应 Task 9 端点。范围 UTC 半开、默认 24h、最多 30d；每次读返回 scope/window/as_of。root Agent 归属与实际执行 Agent 过滤分开命名。
-- [ ] Task summary 用整个生命周期尝试汇总，同时显示模型筛选贡献；分布仅终态/完整采集/完整 Usage，展示样本数。统计 SQL aggregate 不依靠当前页 50 个对象代表全局；查询预算不足显示 limited/unavailable。
-- [ ] head 输入修订与当前对象逐个比较，落后结果只显示历史，不进入当前问题统计。问题组仅当前可靠签名 grouping，unknown 实例以 finding ID 单列；count hits 与 count distinct tasks 分开。
-- [ ] 统一游标编码 `{scope_hash, filter_hash, sort_time, sort_id}`；结构校验、长度上限、修改筛选拒绝旧游标。游标只是分页，scope 始终来自认证头，不能信任游标授权。
-- [ ] Context occurrences 和 operation relations 分页；prefix 不返回 raw、HMAC key 或其他域 identity。前后变化只在成功、成对完整、同表示/估算器下计算，否则 null + reason。
+- [x] 用跨窗口 Task、两个模型、根/子 Agent、未知/部分 Usage、完整/缺子分支数据建立 adapter 样本；断言窗口尝试总量不等于 Task 全生命周期规模，模型筛选不串入另一模型用量。
+- [x] 查询 `dashboard/tasks/task/branches/calls/context/prefix/operations/issues/instances/evaluation`，对应 Task 9 端点。范围 UTC 半开、默认 24h、最多 30d；每次读返回 scope/window/as_of。root Agent 归属与实际执行 Agent 过滤分开命名。
+- [x] Task summary 用整个生命周期尝试汇总，同时显示模型筛选贡献；分布仅终态/完整采集/完整 Usage，展示样本数。统计 SQL aggregate 不依靠当前页 50 个对象代表全局；查询预算不足显示 limited/unavailable。
+- [x] head 输入修订与当前对象逐个比较，落后结果只显示历史，不进入当前问题统计。问题组仅当前可靠签名 grouping，unknown 实例以 finding ID 单列；count hits 与 count distinct tasks 分开。
+- [x] 统一游标编码 `{scope_hash, filter_hash, sort_time, sort_id}`；结构校验、长度上限、修改筛选拒绝旧游标。游标只是分页，scope 始终来自认证头，不能信任游标授权。
+- [x] Context occurrences 和 operation relations 分页；prefix 不返回 raw、HMAC key 或其他域 identity。前后变化只在成功、成对完整、同表示/估算器下计算，否则 null + reason。
 
 ```python
 def test_window_and_task_totals_are_distinct():
@@ -327,11 +327,11 @@ def test_window_and_task_totals_are_distinct():
 
 **Files:** `monitor/src/monitor/app/routers/token_diagnostics_v2.py`、`routers/__init__.py`；测试 `tests/unit/token_diagnostics/test_b_routes.py`。
 
-- [ ] 创建 APIRouter prefix `/token-diagnostics/v2`，复用现有 `request_scope`/安全 read helper；app 外层 `/api` 前缀不重复加。11 个端点全部 GET，禁止反馈写端点。
-- [ ] 精确路径：`/dashboard`、`/tasks`、`/tasks/{task_id}`、`/tasks/{task_id}/branches`、`/tasks/{task_id}/calls`、`/contexts/{context_id}`、`/calls/{call_id}/prefix`、`/tasks/{task_id}/operations`、`/issues`、`/issues/{group_key}/instances`、`/evaluations/{evaluation_id}`。
-- [ ] 入参在 `diagnostic_filters.py` 合成 immutable query；约束 ID/字符串长度、limit 1–100、日期合法性及范围≤30d、rule/state allowlist。不存在/越权按 404，身份不匹配按 403，无服务/DB timeout 按 503，bad cursor/filter 按 400。
-- [ ] ASGI 行为测试覆盖每个端点的 scope、身份 headers、方法 405、异常安全消息及 SQL 不可用。必须测试 role=admin 不能扩大 source/tenant、group_key/cursor 不能带来跨租户结果。
-- [ ] 注册 v2 router，保留旧 router；不改变 proxy/auth middleware。`/api` direct 与 Console helper `/monitor` 是部署映射，测试正确相对路径，不在 helper 里再次写 `/api`。
+- [x] 创建 APIRouter prefix `/token-diagnostics/v2`，复用现有 `request_scope`/安全 read helper；app 外层 `/api` 前缀不重复加。11 个端点全部 GET，禁止反馈写端点。
+- [x] 精确路径：`/dashboard`、`/tasks`、`/tasks/{task_id}`、`/tasks/{task_id}/branches`、`/tasks/{task_id}/calls`、`/contexts/{context_id}`、`/calls/{call_id}/prefix`、`/tasks/{task_id}/operations`、`/issues`、`/issues/{group_key}/instances`、`/evaluations/{evaluation_id}`。
+- [x] 入参在 `diagnostic_filters.py` 合成 immutable query；约束 ID/字符串长度、limit 1–100、日期合法性及范围≤30d、rule/state allowlist。不存在/越权按 404，身份不匹配按 403，无服务/DB timeout 按 503，bad cursor/filter 按 400。
+- [x] ASGI 行为测试覆盖每个端点的 scope、身份 headers、方法 405、异常安全消息及 SQL 不可用。必须测试 role=admin 不能扩大 source/tenant、group_key/cursor 不能带来跨租户结果。
+- [x] 注册 v2 router，保留旧 router；不改变 proxy/auth middleware。`/api` direct 与 Console helper `/monitor` 是部署映射，测试正确相对路径，不在 helper 里再次写 `/api`。
 
 ```python
 @pytest.mark.asyncio
@@ -350,10 +350,10 @@ async def test_v2_is_read_only(client):
 
 **Files:** `console/src/api/modules/tokenDiagnosisV2.ts`/`tokenDiagnosisV2.test.ts`，`TokenDiagnosisShared`五个文件及 `presentation.test.ts`/`useDiagnosisResource.test.tsx`。
 
-- [ ] 从 Task 9 实际响应定义 Dashboard/Task/Call/Context/Prefix/Operation/IssueGroup/Evaluation DTO，unknown 数值明确 `number | null`；不使用 `any` 或把字符串 payload 假装成结构化字段。
-- [ ] API root 为 `/monitor/token-diagnostics/v2`，通过现有 request helper：所有资源 ID encodeURIComponent，query URLSearchParams，所有请求可 AbortSignal。测试路径/query 不含重复 `/api`，旧 tokenDiagnostics 模块不改。
-- [ ] `useDiagnosisResource` 管理 loading/error/unavailable/ready 与取消；筛选/定位变化取消旧请求，迟到响应不能覆写新资源。不要跨作用域保存缓存，不使用页面 localStorage 持久化诊断数据。
-- [ ] `presentation.ts` 分离 null/0、actual/estimate、complete/partial/unknown、stale/failed 显示；`EvidenceState` 明确缺字段/超限/过期，颜色之外有文字。FilterBar 绑定时间/Agent/model/规则筛选并清空失效 cursor。
+- [x] 从 Task 9 实际响应定义 Dashboard/Task/Call/Context/Prefix/Operation/IssueGroup/Evaluation DTO，unknown 数值明确 `number | null`；不使用 `any` 或把字符串 payload 假装成结构化字段。
+- [x] API root 为 `/monitor/token-diagnostics/v2`，通过现有 request helper：所有资源 ID encodeURIComponent，query URLSearchParams，所有请求可 AbortSignal。测试路径/query 不含重复 `/api`，旧 tokenDiagnostics 模块不改。
+- [x] `useDiagnosisResource` 管理 loading/error/unavailable/ready 与取消；筛选/定位变化取消旧请求，迟到响应不能覆写新资源。不要跨作用域保存缓存，不使用页面 localStorage 持久化诊断数据。
+- [x] `presentation.ts` 分离 null/0、actual/estimate、complete/partial/unknown、stale/failed 显示；`EvidenceState` 明确缺字段/超限/过期，颜色之外有文字。FilterBar 绑定时间/Agent/model/规则筛选并清空失效 cursor。
 
 ```typescript
 export function formatCount(value: number | null): string {
@@ -372,11 +372,11 @@ it("keeps unknown different from zero", () => {
 
 **Files:** `console/src/pages/Analytics/TokenOverview/{index.tsx,index.module.less,index.test.tsx}`；`console/src/pages/Analytics/index.tsx`、`console/src/layouts/Sidebar.tsx`、`layouts/constants.ts`、`layouts/MainLayout/index.tsx`、`console/src/locales/zh.json`。
 
-- [ ] 先写页面行为 tests：部分报告标题是已知用量，前缀为字节加权保守比例，0参与为不可用，pending/failed 覆盖可见，点击 Task 携带筛选跳执行页；503 不显示零问题。
-- [ ] 主体展示已知输入/输出、窗口 Usage 完整率的分子分母、已记录 Task、Agent 归属用量、Task 分布及样本、八规则评估覆盖、前缀参与/排除情况；输入压力仅有预算时用正确名称。
-- [ ] 图表和列表使用服务端真实 projection，不能在组件 sum 当前页得到全局。排序叫用量分布，不能写效率/质量排名；单元清晰显示“估算/已知/完整生命周期”。
-- [ ] 注册 `/analytics/token-overview`，为三页准备稳定导航 key/title；旧 `/analytics/token-diagnostics` 继续可用。执行导航入口无 Task 时落到本页的任务列表，不虚构 default Task。
-- [ ] 使用既有 AntD/Less 和 `console/DESIGN.md`，保留中文长名/英文 ID、空列表、窄 iframe 布局；不要把设计预览里的模拟数值写入生产组件。
+- [x] 先写页面行为 tests：部分报告标题是已知用量，前缀为字节加权保守比例，0参与为不可用，pending/failed 覆盖可见，点击 Task 携带筛选跳执行页；503 不显示零问题。
+- [x] 主体展示已知输入/输出、窗口 Usage 完整率的分子分母、已记录 Task、Agent 归属用量、Task 分布及样本、八规则评估覆盖、前缀参与/排除情况；输入压力仅有预算时用正确名称。
+- [x] 图表和列表使用服务端真实 projection，不能在组件 sum 当前页得到全局。排序叫用量分布，不能写效率/质量排名；单元清晰显示“估算/已知/完整生命周期”。
+- [x] 注册 `/analytics/token-overview`，为三页准备稳定导航 key/title；旧 `/analytics/token-diagnostics` 继续可用。执行导航入口无 Task 时落到本页的任务列表，不虚构 default Task。
+- [x] 使用既有 AntD/Less 和 `console/DESIGN.md`，保留中文长名/英文 ID、空列表、窄 iframe 布局；不要把设计预览里的模拟数值写入生产组件。
 
 页面 test 的可观测断言：
 
@@ -393,12 +393,12 @@ expect(screen.queryByText("预计节省金额")).not.toBeInTheDocument();
 
 **Files:** `console/src/pages/Analytics/TokenExecutions/{index.tsx,index.module.less,index.test.tsx}`；Analytics 路由与已定义导航映射。
 
-- [ ] 注册 `/analytics/token-executions/:taskId`；读取 branch/call/context/evaluation 和 returnTo query，validate returnTo 仅允许本应用 analytics 路径；无 Task 转到 Task 列表。
-- [ ] 先写切换 tests：选择调用 3 使构成、Usage、Context、前缀、规则实例全部切换，unknown output 保留，分支汇总有范围标签；详情关联不得固定调用 2。
-- [ ] 分支独立顺序，调用按 logical_seq/attempt_no 展示；重试显示 attempts，缺 Step 不造 Step。不同模型/阶段分组，Tool 来源可靠性按条目显示，unknown 生命周期明确。
-- [ ] 前缀 panel 展示真实当前/历史 Context、实际比较数、超限、表示/密钥版本、下界/上界、首差条目/区间；不显示 cache hit/miss。缺历史、缺指纹、失败、超限分别可见。
-- [ ] Operation panel 显示 before/after 与变换关系，只有合同条件齐备显示规模变化。summary call 单独链接 Usage，缺关联显示未知；业务质量未知始终可见。
-- [ ] 请求分开分页，切 call/branch 取消过时 fetch，受限列表不冒充完整树。调用选取可键盘操作，图形选择有名字及选中状态。
+- [x] 注册 `/analytics/token-executions/:taskId`；读取 branch/call/context/evaluation 和 returnTo query，validate returnTo 仅允许本应用 analytics 路径；无 Task 转到 Task 列表。
+- [x] 先写切换 tests：选择调用 3 使构成、Usage、Context、前缀、规则实例全部切换，unknown output 保留，分支汇总有范围标签；详情关联不得固定调用 2。
+- [x] 分支独立顺序，调用按 logical_seq/attempt_no 展示；重试显示 attempts，缺 Step 不造 Step。不同模型/阶段分组，Tool 来源可靠性按条目显示，unknown 生命周期明确。
+- [x] 前缀 panel 展示真实当前/历史 Context、实际比较数、超限、表示/密钥版本、下界/上界、首差条目/区间；不显示 cache hit/miss。缺历史、缺指纹、失败、超限分别可见。
+- [x] Operation panel 显示 before/after 与变换关系，只有合同条件齐备显示规模变化。summary call 单独链接 Usage，缺关联显示未知；业务质量未知始终可见。
+- [x] 请求分开分页，切 call/branch 取消过时 fetch，受限列表不冒充完整树。调用选取可键盘操作，图形选择有名字及选中状态。
 
 ```typescript
 await user.click(screen.getByRole("button", { name: /调用 3/ }));
@@ -415,11 +415,11 @@ test 使用受控三个调用不同 prefix/contexts 响应，另测试旧请求�
 
 **Files:** `console/src/pages/Analytics/TokenIssues/{index.tsx,index.module.less,index.test.tsx}`；Analytics 路由/导航最终注册。
 
-- [ ] 注册 `/analytics/token-issues`，URL 保留筛选和页游标；页变化不丢作用域，规则/模型/时间变化清 cursor。请求少依赖、取消旧请求。
-- [ ] 展示可靠问题组的 hits/distinct Task/first/latest 和不可聚合实例；只有同可靠签名展示分组，无共同根因已确认标签。涉及估算量注明重叠，不相加为节省。
-- [ ] 点击组加载该组真实实例分页；点击实例用其 Task/branch/call/context/evaluation 精确定位，并携带当前问题页 returnTo。返回原筛选/分页，越权/已过期状态不可跳转到其他 Task。
-- [ ] 详情显示观察值/上下界、当时阈值、版本、建议前提/风险/验证步骤；不足/不适用/待评估/failed 单列，不记命中。历史结果可查看但不混入当前组统计。
-- [ ] 不增加确认/误报、处理人、缓存/裁剪/停止执行按钮；Keyboard 和分页/窄屏可操作，保留 A 入口。
+- [x] 注册 `/analytics/token-issues`，URL 保留筛选和页游标；页变化不丢作用域，规则/模型/时间变化清 cursor。请求少依赖、取消旧请求。
+- [x] 展示可靠问题组的 hits/distinct Task/first/latest 和不可聚合实例；只有同可靠签名展示分组，无共同根因已确认标签。涉及估算量注明重叠，不相加为节省。
+- [x] 点击组加载该组真实实例分页；点击实例用其 Task/branch/call/context/evaluation 精确定位，并携带当前问题页 returnTo。返回原筛选/分页，越权/已过期状态不可跳转到其他 Task。
+- [x] 详情显示观察值/上下界、当时阈值、版本、建议前提/风险/验证步骤；不足/不适用/待评估/failed 单列，不记命中。历史结果可查看但不混入当前组统计。
+- [x] 不增加确认/误报、处理人、缓存/裁剪/停止执行按钮；Keyboard 和分页/窄屏可操作，保留 A 入口。
 
 ```typescript
 expect(screen.getByText("12 次命中 / 4 个 Task")).toBeInTheDocument();
@@ -434,15 +434,15 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 
 **Files:** 以上新增行为测试；`docs/deploy/token-diagnostics.md`、`analysis/playbook/token-diagnostics.md`、本计划。
 
-- [ ] 跑完整 Token 子系统：`venv/bin/python -m pytest tests/unit/token_diagnostics/ -q`。期望 A/B 全部通过，报告实际数量；不沿用 A 的历史“70 passed”作为 B 结果。
-- [ ] 用已有 `TEST_TOKEN_MYSQL_DSN` opt-in disposable fixture执行 `test_b_storage.py`/`test_b_analysis.py`/`test_b_retention.py`，验证 24 表创建、事务回滚、唯一键、真实两实例 lease 竞争及清理；禁止业务库/生产凭据。缺服务时记录该项未运行，不能把 SQLite 当 MySQL 结论。
-- [ ] 跑 `pnpm --dir console test:run src/pages/Analytics/TokenOverview src/pages/Analytics/TokenExecutions src/pages/Analytics/TokenIssues src/pages/Analytics/TokenDiagnosisShared src/pages/Analytics/TokenDiagnostics src/api/modules/tokenDiagnosisV2.test.ts` 及 `pnpm --dir console run build`。新失败逐项定位，预存问题必须有证据及隔离说明。
-- [ ] 浏览器按项目 Console 规范检查桌面及窄 iframe/`hideMenu=true`，使用本地 ASGI/受控 API 测试数据联调；实际看板→Task→调用→问题→实例→返回，验证三调用证据切换、error/partial/stale/no-candidates/limited/expired、键盘及长 ID。发现问题修复后重验相关路径，不以 HTML 线框截图代替。
-- [ ] 接入 frontend-design/copaw-f2e-review（受 `console/DESIGN.md` 约束）和 verification-before-completion 技能完成 UI/代码质量及交付验证；执行相应 pytest、Black/flake8 repository flags、前端 typecheck/lint changed files 和 `git diff --check`。需要 pre-commit 时避免自动修复无关用户文件。
-- [ ] 分别注入队列满/缺 key/大输入/时间耗尽/DB timeout/旧 lease/取消/进程退出；每项验证业务返回及有界缓冲，未知不得变零。测量 5ms 协作预算的实际开销并记录超限/缺口比例，不能宣传 hard latency guarantee。
-- [ ] 更新部署顺序：全量初始 DDL→两侧新版本→Monitor 验证→B 开关；不提供 `CREATE IF NOT EXISTS` 迁移承诺。记录 A 旧版本可读、24h/100/256-byte/256KiB/5ms/5s 预算、30d retention、只读页面/身份网关/缺口排查及 C 边界。
-- [ ] GitNexus `detect-changes --scope all --repo .`；必须 `partial=false/truncated=false` 后再描述检查完成。未跟踪实现文件纳入分析；禁止顺手 stage 用户文件。按用户授权小步提交，graph 的动态派发边界单独报告。
-- [ ] 最终评审按设计验收表逐项记录通过/未运行/限制。修复具体验收差异，重跑涉及测试；完成后在本计划的真实记录区填写结果，不提前勾选。
+- [x] 跑完整 Token 子系统：`venv/bin/python -m pytest tests/unit/token_diagnostics/ -q`。期望 A/B 全部通过，报告实际数量；不沿用 A 的历史“70 passed”作为 B 结果。
+- [ ] 用已有 `TEST_TOKEN_MYSQL_DSN` opt-in disposable fixture执行 `test_b_storage.py`/`test_b_analysis.py`/`test_b_retention.py`，验证 24 表创建、事务回滚、唯一键、真实两实例 lease 竞争及清理；禁止业务库/生产凭据。缺服务时记录该项未运行，不能把 SQLite 当 MySQL 结论。 **未运行：专用 DSN/服务均不可用。已增加双 pool 竞争用例，本轮跳过；保留发布前实库验收项。**
+- [x] 跑 `pnpm --dir console test:run src/pages/Analytics/TokenOverview src/pages/Analytics/TokenExecutions src/pages/Analytics/TokenIssues src/pages/Analytics/TokenDiagnosisShared src/pages/Analytics/TokenDiagnostics src/api/modules/tokenDiagnosisV2.test.ts` 及 `pnpm --dir console run build`。新失败逐项定位，预存问题必须有证据及隔离说明。
+- [x] 浏览器按项目 Console 规范检查桌面及窄 iframe/`hideMenu=true`，使用本地 ASGI/受控 API 测试数据联调；实际看板→Task→调用→问题→实例→返回，验证三调用证据切换、error/partial/stale/no-candidates/limited/expired、键盘及长 ID。发现问题修复后重验相关路径，不以 HTML 线框截图代替。
+- [x] 接入 frontend-design/copaw-f2e-review（受 `console/DESIGN.md` 约束）和 verification-before-completion 技能完成 UI/代码质量及交付验证；执行相应 pytest、Black/flake8 repository flags、前端 typecheck/lint changed files 和 `git diff --check`。需要 pre-commit 时避免自动修复无关用户文件。
+- [x] 分别注入队列满/缺 key/大输入/时间耗尽/DB timeout/旧 lease/取消/进程退出；每项验证业务返回及有界缓冲，未知不得变零。测量 5ms 协作预算的实际开销并记录超限/缺口比例，不能宣传 hard latency guarantee。
+- [x] 更新部署顺序：全量初始 DDL→两侧新版本→Monitor 验证→B 开关；不提供 `CREATE IF NOT EXISTS` 迁移承诺。记录 A 旧版本可读、24h/100/256-byte/256KiB/5ms/5s 预算、30d retention、只读页面/身份网关/缺口排查及 C 边界。
+- [x] GitNexus `detect-changes --scope all --repo .`；必须 `partial=false/truncated=false` 后再描述检查完成。未跟踪实现文件纳入分析；禁止顺手 stage 用户文件。按用户授权小步提交，graph 的动态派发边界单独报告。
+- [x] 最终评审按设计验收表逐项记录通过/未运行/限制。修复具体验收差异，重跑涉及测试；完成后在本计划的真实记录区填写结果，不提前勾选。
 
 ## 设计覆盖矩阵
 
@@ -477,3 +477,16 @@ expect(screen.queryByRole("button", { name: "自动优化" })).not.toBeInTheDocu
 - Task 6：八规则及记录型建议完成，规范与代码质量检视 READY。R01 可靠分组碰撞新增 10 项红→绿回归；仅可靠静态来源/版本/类别/结构形成签名，动态或缺身份的候选保留独立实例。规则测试 74 passed；规则/旧规则/分析联测 96 passed，scoped pre-commit 通过。Task 7–9 实施及检视进行中；三个页面尚未开发。
 
 - Task 7：同一 REPEATABLE READ 快照、5 秒分析/3 秒失败落库预算、租约写前/写后保护及 24 表清理完成。规范 READY；代码检视发现取消时回滚异常覆盖原信号，3 项实际 aiomysql 方法受控回归先红后绿修复，独立检视 155 passed 并 READY。真实 MySQL 与双实例竞争未运行；受控网络读取不能替代实库验证。
+
+- Task 8：全局窗口/生命周期投影、UTC 不可变过滤、作用域游标与评估定位完成；规范及质量 READY。四项查询回归修复状态过滤、Step 引用范围、comparison 绑定分页、已分析但证据不足的前缀状态。跨分支同 Step 身份实际回归先失败 len=1，再通过独立历史/head/替换；身份与初始 DDL 同步加分支。root 全 Token 397 passed；独立范围 173 passed。提交 `56f5a2018`、`b7a3d1259`。
+- Task 9：11 个只读端点与注册完成，旧 A 保留，规范/质量 READY。覆盖认证范围、非法过滤/游标、404/503/405、超时与取消；与查询/存储/生命周期联测独立 102 passed。提交 `54fe38524`。GitNexus 提交前均 partial=false/truncated=false；动态派发和跨语言关联仍非完整证明。
+
+- Task 10：11 资源类型/API、作用域隔离与取消 Hook、UTC FilterBar、EvidenceState/URL/返回校验完成。规范检视发现未改时间却丢微秒，3 条红→绿回归修复；质量检视发现 raw Run/Call/Operation nullable 字段，实际接口 strictNullChecks fixture 38 条诊断红→0 修复。两阶段 READY；20 新测试+4 A 页面测试共 24 passed，typecheck/scoped ESLint/Prettier/pre-commit 通过。三个生产页面从 Task 11 开始开发，浏览器验收仍待完成。
+
+- Task 11：总览与三项导航已完成，规格/质量 READY。修复 SPA 锚点实际滚动/聚焦、执行 Agent 与根归属说明及折叠菜单名称；刷新不抢焦点。37 项相关前端测试、typecheck/scoped ESLint/Prettier/pre-commit 通过。真实 iframe 1280/1440/1920/600 无页面横向溢出，hideMenu 生效；无 pageerror，依赖 forwardRef/CSS SSR 警告保留。提交 `0b0cf164e`；图分析 partial=false/truncated=false，动态 JSX 以源码确认。Task 12 开始，三页验收仍待完成。
+
+- Task 12：执行诊断页完成并经规范与质量复审 READY。本轮三处证据绑定回归覆盖历史修订首差区间、操作 before/after 归属及角色、Task/root/外部 branch 身份。root 独立 29 passed；typecheck/scoped ESLint/Prettier 通过。实际 reader 三 Call 切换、第三次输出 unknown、历史前缀 stale、1280/1440/1920/600 iframe 无横向溢出、键盘 Enter 选 Call 已验证。503 不展示任务汇总。提交 `259247f03`；detect_changes partial=false/truncated=false。
+
+- Task 13：三页面问题清单完成，规范及质量复审 READY。精确 group/finding/evaluation 身份、默认 UTC 窗口、独立游标和 returnTo 保留；缺失定位、503、历史/过期保持明确状态。异步窗口回填与 pinned window 刷新草稿保留回归通过。相关前端 root 82 passed / 10 suites，typecheck/ESLint/Prettier/提交钩子通过；提交 `46452deeb`。detect_changes partial=false/truncated=false。
+- Task 14：本地测试 403 passed / 1 skipped；相关前端 82 passed，build exit 0（混合 import/包体积警告保留）。实际 reader iframe 三页完整路径、三 Call 切换与精确返回、四宽度、键盘、255 字符实例、503/stale/expired/limited/no-candidates/no-history 已检查，无 pageerror。五项实际 Observer 故障、旧 lease/取消/子进程退出及协作预算实测见测试报告。MySQL 双 pool 竞争用例经规范/质量复审 READY，专用 DSN 未配置、无 mysqld、Docker socket 不存在，故实库验收未运行。功能报告、测试报告、部署与 playbook 已更新；未操作业务库/Provider/推送/部署。最终规范/质量审查 READY，14 个验收场景逐项记录于测试报告；两处报告表述修正后复核闭环。实库验收保留未运行，不勾选发布前检查。新增测试提交 `0c3f18988`。
+- 最终交付：本计划 Task 1–13 实现完成，Task 14 本地验收及交付完成；真实 MySQL 检查保留未运行。功能报告与测试报告分别位于 `docs/reports/2026-10-13-token-diagnostics-b-function-report.md`、`docs/reports/2026-10-13-token-diagnostics-b-test-report.md`。文档链接与 diff-check 通过，用户文件不暂存，代码仅保留本地分支。

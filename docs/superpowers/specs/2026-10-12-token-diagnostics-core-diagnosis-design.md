@@ -293,12 +293,12 @@ A 的 11 张表及五条旧规则投影保留。B 新增如下类型化表；所
 | `swe_token_operation_segments` | `(operation_id, relation_index)` | 源/目标 occurrence 引用与明确的 removed/created/replaced 关系；未知关系不补造 |
 | `swe_token_prefix_comparisons` | `comparison_id`；评估对象/版本唯一键 | 当前及最佳候选 Context、分析快照、兼容组、窗口、候选数/超限、上下界字节、首差条目/区间、分析状态及修订；索引作用域/请求/分析修订 |
 | `swe_token_prefix_candidates` | `(comparison_id, candidate_index)` | 历史 Context/请求/修订、排序依据、每候选上下界及首差引用；最多 100 条，全部带作用域，保留最佳下界/最大上界的不同引用 |
-| `swe_token_diagnostic_evaluations` | `evaluation_id`；对象/规则/阈值/输入修订/分析快照唯一键 | 评估对象及类型、规则版本、阈值版本、输入/历史快照修订、状态、时间、替代评估引用；历史追加，当前指针在同事务更新 |
+| `swe_token_diagnostic_evaluations` | `evaluation_id`；作用域/分支/对象/规则/阈值/输入修订/分析快照唯一键 | 评估对象及类型、规则版本、阈值版本、输入/历史快照修订、状态、时间、替代评估引用；历史追加，当前指针在同事务更新；同 Step ID 在不同分支具有独立评估身份 |
 | `swe_token_diagnostic_findings` | `finding_id`；`evaluation_id + instance_key` 唯一 | 评估引用、Agent/Provider/model、签名及其版本、可靠聚合标记、定位及建议代码；索引作用域/Agent/规则/签名/时间 |
 | `swe_token_diagnostic_values` | `(evaluation_id, value_key)` | 指标名、单位、整数/小数/受控枚举值、上下界及阈值快照；明确值类型，仅对应类型列有值，原文不可写入 |
 | `swe_token_diagnostic_gaps` | `(evaluation_id, reason_code)` | 必要证据缺失及限制的受控原因代码；不保存任意异常堆栈/敏感文本 |
 | `swe_token_diagnostic_refs` | `(evaluation_id, reference_index)` | Task/branch/Step/Call/Context/occurrence/operation 的类型化证据引用；回查全部验证作用域 |
-| `swe_token_diagnostic_heads` | `(source_id, tenant_id, object_type, object_id, rule_id)` | 当前有效 evaluation 引用、输入修订及规则/阈值版本；通过作用域/对象查找，提交时原子替换指针 |
+| `swe_token_diagnostic_heads` | `(source_id, tenant_id, branch_run_id, object_type, object_id, rule_id)` | 当前有效 evaluation 引用、输入修订及规则/阈值版本；通过作用域/分支/对象查找，提交时原子替换指针 |
 
 表中 source/tenant 必须为非空；关联 IDs 不能绕过作用域检查。Context/operation/评估使用有界 ID，指纹使用固定长度十六进制字段，状态与原因用受控 VARCHAR；正文与任意大字段不进入表。金额字段本轮不建立。
 
@@ -336,7 +336,7 @@ Monitor 直接 HTTP 路径以新的 B 前缀 `/api/token-diagnostics/v2` 隔离�
 
 Task 列表按根请求 started_at 纳入筛选，Task 分布使用已终结且采集与 Usage 均完整的 Task 全部尝试用量，Agent 归属为根请求 Agent，子分支与辅助用量计入其 Task，并说明这是执行规模分布而非同类业务效率排名。看板已知用量按物理尝试 started_at 纳入窗口，不因 Task 跨窗口重复累计；因此窗口用量与窗口内 Task 全生命周期用量不同，标题与提示明确区分。模型筛选只选择对应尝试用量，不将某模型使用过的 Task 的其他模型用量一起算入模型总量。
 
-模型筛选下，Task 仅按是否有该模型尝试纳入列表，摘要分别返回 Task 全模型完整总量及该模型已知贡献；完整 Task 分位分布仍是全模型规模并注明筛选只选样本。Agent 过滤在 Task 用量投影中采用根 Agent；前缀过滤采用实际调用 Agent，页面分别标注根任务归属及执行 Agent，避免子 Agent 使用量归属与前缀隔离组混淆。
+模型筛选下，Task 仅按是否有该模型尝试纳入列表，摘要分别返回 Task 全模型完整总量及该模型已知贡献；完整 Task 分位分布仍是全模型规模并注明筛选只选样本。筛选明确区分 `root_agent_id` 根任务归属与 `agent_id` 实际执行 Agent：前者按根 Agent 选择 Task，后者按生命周期内是否存在匹配尝试选择 Task；选中贡献仅累计匹配执行 Agent/模型的尝试。前缀过滤采用实际调用 Agent，Task 全生命周期总量仍包含全部分支与模型，避免根归属、执行贡献及前缀隔离组混淆。
 
 Usage 完整率分母为窗口内已记录尝试，包括未知/待完成；Task 完整性按完整 Task 生命周期单独计算。类别占比使用当前 Context 完整可归因估算之和；没有可信类别或估算的条目导致分母不足时不形成该比例规则。Provider 输入/估算差额只在两侧都有值时显示，不称为完整账单核对。
 
