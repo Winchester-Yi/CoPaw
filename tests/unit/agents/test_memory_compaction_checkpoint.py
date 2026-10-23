@@ -419,7 +419,7 @@ async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
     message = Msg(name="user", role="user", content="message-1")
     message.id = "message-1"
     store = SimpleNamespace(
-        read_checkpoint_state=AsyncMock(
+        read_checkpoint_prefix=AsyncMock(
             return_value=CheckpointArchiveState(record, (event,), 1),
         ),
         write_pending_candidate=AsyncMock(),
@@ -438,6 +438,7 @@ async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
             chat_checkpoint_store=store,
         ),
     )
+    store.read_checkpoint_prefix.assert_awaited_once_with(chat_id, 1)
     candidate = store.write_pending_candidate.await_args.args[1]
     assert candidate.base_revision == 0
     assert candidate.record.revision == 1
@@ -467,7 +468,7 @@ async def test_schedule_precompaction_rejects_ambiguous_duplicate_online_ids() -
         source_refs=("message:duplicate-id",),
     )
     store = SimpleNamespace(
-        read_checkpoint_state=AsyncMock(
+        read_checkpoint_prefix=AsyncMock(
             return_value=CheckpointArchiveState(record, (event,), 1),
         ),
         write_pending_candidate=AsyncMock(),

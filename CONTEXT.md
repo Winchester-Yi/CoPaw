@@ -665,6 +665,22 @@ _Avoid_: audit database table, hook execution log, full script archive, hook pay
 A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
 _Avoid_: agent-level hook, tenant hook, skill hook
 
+**Stop Appended Message**:
+A separate user-visible text or Markdown message contributed by a Stop Hook after the final completion attempt is approved. It belongs to the same Answer Turn as the approved response and is retained in both Chat history and subsequent model context; rejected attempts contribute no appended messages.
+_Avoid_: Stop Response Replacement, response suffix, new Answer Turn, follow-up model answer
+
+**Stop Append Phase**:
+The post-approval part of completion in which dedicated Stop Handlers produce Stop Appended Messages before the Answer Turn ends. It runs only after Stop validation approves the final response and does not itself require withholding that response's live text.
+_Avoid_: Stop Validation Phase, output transformation, post-request background task
+
+**Best-effort Stop Append**:
+The completion rule under which an append Handler failure contributes no message and neither rejects the approved response nor starts a model follow-up. Other append Handlers remain eligible to contribute messages, and appended content never starts another Stop evaluation.
+_Avoid_: completion veto, fail-closed append, recursive Stop validation
+
+**Stop Append Delivery Boundary**:
+The point at which one Stop Appended Message is durably retained with its Answer Turn and model context before live publication. A message past this boundary remains delivered even when the client has not received it; stopping discards only contributions that have not crossed the boundary.
+_Avoid_: browser receipt acknowledgement, optimistic stream-only delivery, append rollback after commit
+
 **Stop Response Replacement**:
 The complete replacement text supplied by a Stop Hook for one candidate Assistant Response. A replacement-capable Stop Hook makes that candidate subject to Strict Completion Finalization, so only the approved or replacement text is retained and delivered; it is not a patch, token-stream transformation, or an instruction for the Agent to produce a later answer.
 _Avoid_: output patch, stream rewrite, follow-up response, completion block
@@ -1372,11 +1388,11 @@ A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinar
 _Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
 
 **Skill Runtime View**:
-The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**; each query captures this view once at its start as a **Query Skill Snapshot**, and enablement or content changes affect subsequent queries rather than changing that query's selected set.
+The most recently observed set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**; each query acquires this view once as a **Query Skill Snapshot**, and later observations affect subsequent queries without changing that query's selected set.
 _Avoid_: complete skill directory, live in-flight skill view
 
 **Query Skill Snapshot**:
-The immutable, query-scoped selection of effective skills, trusted metadata, resolved package locations, and content signatures captured when a query starts. It is the consistency boundary for that query: later skill lifecycle changes apply to later queries, while a missing or changed package fails closed for the affected skill instead of being silently represented by stale snapshot metadata; the query may continue without unconfirmed Workspace Skills.
+The immutable, query-scoped selection of effective skills, metadata, resolved package locations, and content signatures obtained when a query starts. It may reuse state from the **Skill Freshness Observation Window** and remains fixed across expiry; independent content-identity checks can still reject a missing or changed package, and the query may continue without unconfirmed Workspace Skills.
 _Avoid_: global skill cache, mutable runtime list, full skill-content copy
 
 **Console Skill Selection Panel**:
@@ -1486,6 +1502,10 @@ _Avoid_: process env, backend env, system environment
 **Built-in Shell Execution**:
 The user-invoked shell command execution path owned by Swe for a tenant-scoped request. **Built-in Shell Execution** is distinct from MCP `stdio` server launches and platform maintenance subprocesses.
 _Avoid_: arbitrary subprocess, MCP stdio launch, maintenance worker
+
+**Python Dependency Installation Denial**:
+The platform-mandated rejection, across tenants and Main Agents/SubAgents, of foreground, background, or source-overridden shell invocations whose submitted command visibly requests pip-family dependency installation, or cannot be reliably checked against that policy. It excludes ordinary text references and inspection of script/program internals; rejection occurs before execution with a reason and no approval option, allows the Agent to continue, and cannot be disabled by tenants.
+_Avoid_: installation approval, shell execution failure, terminal turn stop
 
 **Tenant Process Resource Limits**:
 A tenant-scoped policy that caps per-process CPU time and memory consumption for in-scope tenant subprocess launches. **Tenant Process Resource Limits** reduce host resource exhaustion risk; they are not a command intent classifier, command blacklist, or process-group aggregate resource budget.
@@ -1636,15 +1656,27 @@ A bounded hook-facing snapshot of the current session's message list at one Hook
 _Avoid_: full context, transcript contents, agent state dump, reasoning trace
 
 **Session Skill Freshness**:
-The cross-turn behavior that determines when a chat session starts using updated skill content. In this context, **Session Skill Freshness** means skill changes take effect on the next turn, not during an in-flight turn.
+The cross-turn behavior that detects changes to a session's associated skills using the most recently observed skill state. A turn compares that observed state; changes may remain undetected within the **Skill Freshness Observation Window**.
 _Avoid_: skill hot reload, mid-turn skill reload, live skill patch
+
+**Skill Freshness Observation Window**:
+The fixed ten-minute period during which previously observed workspace skill state and freshness tokens may be reused for query assembly, session comparison, and confirmed association records. Reuse does not extend the window, and ordinary managed skill changes need not end it early.
+_Avoid_: sliding expiry, immediate change visibility, full skill-content cache
+
+**Skill Freshness Refresh Cooldown**:
+The thirty-second interval after a wholly unsuccessful skill-state refresh during which new queries continue without Workspace Skills and do not repeat that refresh. It does not authorize reuse of expired skill state; a later query can retry after the interval.
+_Avoid_: stale-cache grace period, successful empty skill set, retry on every query
+
+**Partial Skill Freshness Observation**:
+A refresh result that confirms some workspace skills but cannot confirm others. New queries may use only the confirmed subset for three minutes before a later query retries; unconfirmed absence is not established skill withdrawal and does not erase the session's prior association.
+_Avoid_: complete successful snapshot, expired-skill fallback, confirmed deletion
 
 **Skill Directory Revision**:
 The content identity of one skill across its full directory tree, including `SKILL.md`, scripts, references, and other skill-owned files. A **Skill Directory Revision** changes when any tracked file in that skill directory changes.
 _Avoid_: SKILL.md version, single-file skill update, prompt-only skill change
 
 **Skill Directory Freshness Token**:
-A lightweight change marker for one skill directory, derived from a stable digest of each tracked file's relative path, `mtime_ns`, and size rather than strict content hashing. In this context, next-turn skill freshness checks compare the stored **Skill Directory Freshness Token** to the current one and accept heuristic rather than exact change detection.
+A lightweight change marker for one skill directory, derived from a stable digest of each tracked file's relative path, `mtime_ns`, and size rather than strict content hashing. Session checks compare the stored marker with the most recently observed marker and accept heuristic detection and the **Skill Freshness Observation Window**.
 _Avoid_: strict content revision, canonical content identity, cryptographic signature
 
 **Session Associated Skill Set**:
@@ -1656,7 +1688,7 @@ A session-state record that stores the session's **Session Associated Skill Set*
 _Avoid_: trace-derived skill history, transient detector state, prompt-only cache
 
 **Skill Freshness Refresh**:
-The next-turn refresh step that rebuilds prompt state and requires the model to re-read the current `SKILL.md` when a stored **Session Skill Snapshot** no longer matches the latest **Skill Directory Freshness Token**.
+The turn-boundary refresh step that rebuilds prompt state and requires the model to re-read the current `SKILL.md` when a stored **Session Skill Snapshot** no longer matches the most recently observed **Skill Directory Freshness Token**.
 _Avoid_: mid-turn reload, background hot patch, user-visible skill reset
 
 **Skill Freshness Notice**:
@@ -2204,7 +2236,7 @@ Resolved as represented by retaining the immediate truncation configuration obje
 Resolved as **Scheduled Run Boundary** when discussing runtime behavior. Cron management API requests remain normal HTTP requests and are outside this term.
 
 **"Skill Reload During A Session"**:
-Resolved as **Session Skill Freshness** with next-turn scope. A skill file change must affect the next turn in the same chat session, not the currently running turn.
+Resolved as **Session Skill Freshness** with turn-boundary scope. A change may remain undetected within the **Skill Freshness Observation Window**; the first turn that observes the changed marker applies the freshness notice rather than requiring discovery on the immediately following turn.
 
 **"Skill Update Scope"**:
 Resolved as **Skill Directory Revision**, not `SKILL.md`-only monitoring. Any tracked file change inside the skill directory counts as a skill update.
@@ -3209,9 +3241,29 @@ _Avoid_: 仅 Chat 生效、入口专属参数、Provider 级回退参数
 供应商全量分发复制完整的模型配置字典；激活模型分发复制被激活模型对应的配置。目标租户据此获得与源租户一致的模型调用行为。
 _Avoid_: 只分发模型目录、只分发激活槽位、丢失调用参数的分发
 
+**默认 LLM 管理区**:
+模型管理页面中集中呈现远程活跃模型选择、当前模型配置和激活模型分发；模型提供商卡片不承载这些操作。
+_Avoid_: 在 Provider 卡片中寻找激活入口、把目录维护和默认 LLM 设置混在一起
+
+**激活模型分发操作**:
+管理员从默认 LLM 管理区选择目标租户，将当前远程激活模型及其配置复制过去，并覆盖目标租户已有的对应配置；它不复制整个 Provider 或模型目录。
+_Avoid_: 分发整个 Provider、只同步激活槽位、不覆盖目标模型配置
+
+**模型管理反馈规则**:
+远程模型激活成功通过当前模型选中态和摘要更新表达，不弹成功提示；模型配置保存提供明确的保存反馈；激活模型分发提交显示异步任务提示。任一操作失败都保留最后成功状态并显示错误。
+_Avoid_: 激活成功弹窗、分发静默提交、失败后保留未保存状态
+
+**默认 LLM 空状态**:
+没有可用远程模型时，默认 LLM 管理区显示空状态，模型选择、配置和分发操作均不可用；若服务端当前活跃模型是本地模型或已不在候选目录中，不自动改写状态，提示管理员主动选择可用远程模型。
+_Avoid_: 打开页面自动切换模型、用本地模型填充远程选择器、无候选时显示可操作控件
+
 **模型配置即时生效边界**:
 聊天界面对模型配置的修改立即持久化，并从下一次模型调用开始生效；已开始的流式响应固定使用其启动时的配置快照。
 _Avoid_: 中途重配当前响应、仅页面内暂存、等待会话结束才生效
+
+**管理端模型配置边界**:
+模型管理界面维护模型生成参数与思考能力声明，不设置 `enable_thinking` 或 `reasoning_effort` 的租户级默认值。后两项仅由聊天界面为活跃模型设置；管理端变更能力声明不得覆盖既有默认值。
+_Avoid_: 管理端指定思考默认值、能力声明清空聊天默认值、两套运行配置
 
 **模型输入长度限制**:
 一个模型可接受的最大输入 token 数，也是该模型运行时的上下文预算。它优先于 Agent 级默认上下文预算；未设置时使用 Agent 级默认值。
@@ -3226,24 +3278,92 @@ _Avoid_: 软提示长度、字符数限制、上下文总长度
 _Avoid_: `Temprature` 拼写字段、无界采样参数、未声明强度透传
 
 **模型思考能力声明**:
-模型配置中对 `enable_thinking` 与 `reasoning_effort` 的支持情况及当前选择的声明。它属于一个租户下的具体模型，并由聊天界面选择后用于实际模型调用。
-_Avoid_: 用户级思考偏好、Provider 能力猜测、一次性请求参数
+模型配置中对 `enable_thinking` 与 `reasoning_effort` 的支持情况及当前选择的声明。它属于一个租户下的具体模型；聊天界面对它的修改是该模型的租户级默认值，并用于之后的模型调用。
+_Avoid_: 用户级思考偏好、会话级覆盖、Provider 能力猜测、一次性请求参数
 
 **思考强度支持列表**:
-模型配置中声明该模型支持的 `reasoning_effort` 等级集合。空列表表示不支持该参数；非空列表同时表达支持能力与可选等级。
-_Avoid_: 独立的 reasoning_effort 支持开关、运行时已选等级、Provider 全局等级
+模型配置中声明该模型支持的 `reasoning_effort` 等级集合。空列表表示不支持该参数；非空列表同时表达支持能力与可选等级。管理员只声明此能力，聊天用户为该模型设定租户级默认强度。界面将 `low`、`high`、`max` 分别显示为“低”、“高”、“极高”。
+_Avoid_: 独立的 reasoning_effort 支持开关、管理员选定默认强度、Provider 全局等级、虚构的“中”等级
 
 **思考开关支持声明**:
-模型配置中的布尔能力声明，表示模型是否接受 `enable_thinking` 请求参数。仅声明支持时，聊天界面才展示会话思考开关。
-_Avoid_: 默认启用思考、会话思考偏好、思考强度支持列表
+模型配置中的布尔能力声明，表示模型接受一个思考状态；Provider 适配层按模型族将该状态映射为目标 API 的请求形态。仅声明支持时，聊天界面才展示该模型的租户级默认思考开关。
+_Avoid_: 顶层 `enable_thinking` 参数、默认启用思考、会话思考偏好、思考强度支持列表
 
 **独立思考能力**:
-`enable_thinking` 支持声明与思考强度支持列表相互独立；模型可支持其中任一项。运行时只发送该模型声明支持且已配置的字段。
-_Avoid_: 强制成对支持、未声明参数透传、Provider 统一能力假设
+思考开关支持声明与思考强度支持列表相互独立；模型可支持其中任一项。运行时只发送该模型声明支持且已配置的字段，并按模型 ID 的模型族适配其请求载体。
+_Avoid_: 强制成对支持、未声明参数透传、Provider 统一参数形态
 
 **思考参数联动**:
-对于声明支持 `enable_thinking` 的模型，只有当前思考开关开启且其配置声明支持所选等级时，运行时请求才携带 `reasoning_effort`；关闭思考会清空并停止发送当前等级。仅声明支持思考强度、未声明开关的 reasoning-only 模型，不显示思考开关，并直接发送其已配置的等级。
-_Avoid_: 关闭思考仍发送强度、用户级固定强度、未声明等级透传
+对于声明支持 `enable_thinking` 的模型，只有当前思考开关开启且其配置声明支持所选等级时，运行时请求才携带 `reasoning_effort`；关闭思考会保留已选等级但停止发送，重新开启后恢复该等级。仅声明支持思考强度、未声明开关的 reasoning-only 模型，不显示思考开关，并直接发送其已配置的等级。
+_Avoid_: 关闭思考仍发送强度、关闭时清空强度、用户级固定强度、未声明等级透传
+
+**停用态思考强度**:
+思考开关关闭时保留并展示的模型默认思考强度。它不可修改且不会随本次关闭而丢失；开关重新开启后回到该等级。
+_Avoid_: 隐藏的保留值、关闭即重置、仍可修改的停用配置
+
+**未配置思考强度**:
+`reasoning_effort` 为空时的模型状态，表示该模型没有租户级默认思考强度。只要思考强度支持列表非空，聊天面板仍渲染全部可选等级但不选中，并显示“请选择思考强度”；仅在用户点击等级后持久化，读取或打开面板时不得自动写入默认等级。
+_Avoid_: 自动最低等级、隐藏已声明能力、打开面板即持久化、把未设置显示为低
+
+**聊天活跃模型选择**:
+聊天面板中将一个可用模型设为当前租户活跃模型的立即持久化操作。右侧模型默认配置始终对应活跃模型；切换保存期间面板不可交互，以免模型切换与默认配置更新交叉写入。
+_Avoid_: 未激活模型的聊天配置、暂存模型选择、并发交叉保存
+
+**管理端活跃模型选择**:
+模型管理界面中，默认 LLM 管理区是远程活跃模型的唯一选择入口；它还承载当前激活模型的详细配置与激活模型分发。详细配置通过该区域发起的模型详情弹窗编辑。选择立即持久化，并与聊天活跃模型选择共享同一租户状态。
+_Avoid_: 管理端独立默认模型、Provider 级活跃模型、独立激活按钮、Provider 卡片中的激活或配置入口、常态下展开全部配置字段、失效的本地模型管理入口
+
+**管理端模型目录维护**:
+Provider 卡片中的模型入口仅维护其模型目录，包括发现、添加、删除、连接测试与多模态探测；它不改变活跃模型，也不编辑模型配置。
+_Avoid_: 模型目录即激活模型、在 Provider 卡片配置模型、双重配置入口
+
+**管理端远程模型范围**:
+当前模型管理界面只展示和选择远程 Provider 的模型；默认 LLM 管理区只列出连接已配置且模型目录非空的远程 Provider 模型。本地、未配置或无模型的 Provider 不参与选择。本地 Provider 卡片及本地模型均不在管理端展示。后端保留的本地模型兼容接口不构成管理端可用能力。
+_Avoid_: 隐藏卡片但保留本地选项、可选择但无法调用的模型、并行的暂存选择器、不可用本地占位卡片、把兼容接口当作可操作功能
+
+**聊天模型设置反馈**:
+聊天活跃模型或其默认思考配置成功保存后的界面状态反馈。成功只通过模型选中态和右侧配置的即时更新表达，不弹出提示；保存失败则恢复服务端最后成功状态并显示错误。
+_Avoid_: 成功弹窗、失败后保留未保存选择、静默保存失败
+
+**聊天模型设置权限**:
+当前可打开聊天模型选择器的用户可持久化修改租户级活跃模型及其默认思考配置。该交互不在客户端新增角色限制；服务端拒绝时恢复最后成功状态并显示错误。
+_Avoid_: 客户端猜测角色、前端静默禁止、绕过服务端授权
+
+**聊天思考配置面板**:
+聊天模型选择器中仅在活跃模型声明思考开关支持或至少一个思考强度时显示的右侧区域。两项能力均未声明时不渲染该区域，模型列表占用全部可用空间。
+_Avoid_: 固定空白配置区、无能力模型的禁用控件、无能力即加载失败
+
+**仅强度推理模型**:
+声明至少一个思考强度、但未声明思考开关支持的模型。聊天思考配置面板只显示始终可操作的强度选项，不显示思考模式开关；运行时直接发送所选强度。
+_Avoid_: 虚构的思考开关、关闭后丢弃强度、把已声明强度当成不可用
+
+**聊天模型选择器入口**:
+聊天界面中打开模型选择器的既有模型名称触发控件。点击触发控件打开，点击外部或按 `Esc` 关闭；模型设置面板的重构不改变此交互。
+_Avoid_: 新增独立入口、只能按钮关闭、改变既有触发习惯
+
+**聊天模型列表滚动区**:
+聊天模型选择器左侧容纳约三至四个模型卡片的独立纵向滚动区域。超过可见容量的模型在该区域内滚动，右侧思考配置保持可见，面板高度不随模型数增长。
+_Avoid_: 整页滚动、右侧配置随列表滚走、无限增长的下拉面板
+
+**聊天模型选择器视觉基准**:
+聊天模型选择器以已提供的双栏模型设置图为视觉目标，复刻卡片、选中渐变、分隔线、圆角、层级和布局比例。模型与 Provider 标识复用项目已有资源；缺失时使用统一回退图标，不引入未经授权的第三方素材。
+_Avoid_: 与参考图无关的通用下拉菜单、复制外部品牌素材、独立于 Console 的视觉语言
+
+**聊天模型选择器响应式布局**:
+聊天模型选择器在宽屏使用左右双栏；空间不足时转为上方模型列表、下方思考配置的单列布局，避免压缩卡片、文案、档位或开关。
+_Avoid_: 横向溢出、极窄双栏、裁切配置控件
+
+**聊天模型卡片信息层级**:
+聊天模型选择器中一个模型卡片的两行身份信息。主标题为模型调用标识 `model.id`，副标题为供应商名称与模型展示名称的 `provider.name · model.name`。
+_Avoid_: 从标识字符串猜测厂商、用模型展示名称替代调用标识、缺失供应商上下文
+
+**聊天思考强度选项布局**:
+聊天思考配置面板只渲染模型思考强度支持列表中的等级；未声明的等级不显示且不占空位。已渲染选项均分可用宽度。
+_Avoid_: 未支持等级的禁用项、保留空档位、随意补全能力等级
+
+**思考强度辅助文案**:
+聊天思考配置面板对当前选择强度给出的效果提示：“低”为“更快响应”，“高”为“平衡推理效果与速度”，“极高”为“优先推理质量”；未选择时为“请选择思考强度”。
+_Avoid_: 不匹配的固定文案、虚构的“中”等级说明、未选择即暗示默认等级
 
 ## Example Dialogue
 

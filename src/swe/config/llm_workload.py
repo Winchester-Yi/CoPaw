@@ -35,6 +35,13 @@ def get_current_llm_workload() -> LLMWorkload:
     return _current_llm_workload.get()
 
 
+def capture_llm_workload_context_value() -> (
+    tuple[ContextVar[LLMWorkload], LLMWorkload]
+):
+    """Capture the workload ContextVar and its scalar value for a child task."""
+    return _current_llm_workload, _current_llm_workload.get()
+
+
 @contextmanager
 def bind_llm_workload(
     workload: LLMWorkload,

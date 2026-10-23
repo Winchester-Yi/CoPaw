@@ -313,18 +313,20 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         scope_id = self._summary_task_scope_id()
         task_count = self.memory_manager.get_summary_task_count(scope_id)
-        if task_count == 0:
+        if (
+            task_count == 0
+            and not self.memory_manager.has_summary_task_results(scope_id)
+        ):
             return await self._make_system_msg(
                 "**No Summary Tasks**\n\n"
-                "- No pending summary tasks to wait for",
+                "- No pending tasks or recent summary results",
             )
 
         result = await self.memory_manager.await_summary_tasks(scope_id)
         return await self._make_system_msg(
             f"**Summary Tasks Complete**\n\n"
             f"- Waited for {task_count} summary task(s)\n"
-            f"- {result}"
-            f"- All tasks have finished",
+            f"- {result}",
         )
 
     async def _process_message(

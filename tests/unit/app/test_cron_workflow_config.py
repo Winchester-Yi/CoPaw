@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Workflow binding resolution is versioned and source-scoped."""
 
 from __future__ import annotations
@@ -115,46 +116,33 @@ async def test_workflow_job_binds_first_skill_configuration():
 
 @pytest.mark.asyncio
 async def test_publish_writes_immutable_version_and_moves_pointer():
-    class _Cursor:
-        statements = []
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
+    class _Session:
+        def __init__(self):
+            self.statements = []
+            self.committed = False
+            self.rolled_back = False
 
         async def execute(self, sql, params):
             self.statements.append((sql, params))
+            return 1
 
-        async def fetchone(self):
-            return ("binding-1", 0)
-
-    class _Conn:
-        committed = False
-        rolled_back = False
-
-        async def begin(self):
-            return None
-
-        def cursor(self):
-            return cursor
-
-        async def commit(self):
-            self.committed = True
-
-        async def rollback(self):
-            self.rolled_back = True
+        async def fetch_one(self, sql, params):
+            self.statements.append((sql, params))
+            return {"binding_id": "binding-1", "current_version": 0}
 
     class _PublishDb:
         is_connected = True
 
         @asynccontextmanager
-        async def acquire(self):
-            yield conn
+        async def transaction(self):
+            try:
+                yield conn
+            except BaseException:
+                conn.rolled_back = True
+                raise
+            conn.committed = True
 
-    cursor = _Cursor()
-    conn = _Conn()
+    conn = _Session()
     store = WorkflowConfigStore(
         _PublishDb(),
         allowed_hosts={"workflow.example"},
@@ -177,16 +165,14 @@ async def test_publish_writes_immutable_version_and_moves_pointer():
     assert config.version == 1
     assert conn.committed is True
     assert conn.rolled_back is False
-    assert len(cursor.statements) == 4
+    assert len(conn.statements) == 4
     assert "INSERT IGNORE INTO swe_workflow_bindings" in (
-        cursor.statements[0][0]
+        conn.statements[0][0]
     )
-    assert (
-        "INSERT INTO swe_workflow_binding_versions" in cursor.statements[2][0]
-    )
-    assert "UPDATE swe_workflow_bindings" in cursor.statements[3][0]
-    assert config.binding_id == cursor.statements[2][1][0]
-    stored_config = json.loads(cursor.statements[2][1][3])
+    assert "INSERT INTO swe_workflow_binding_versions" in conn.statements[2][0]
+    assert "UPDATE swe_workflow_bindings" in conn.statements[3][0]
+    assert config.binding_id == conn.statements[2][1][0]
+    stored_config = json.loads(conn.statements[2][1][3])
     assert stored_config["headers"]["API-Key"]["value"] == "test-key"
 
     with pytest.raises(ValueError, match="renderer"):
@@ -217,7 +203,7 @@ async def test_publish_endpoint_requires_manager_and_current_source():
         headers={"X-User-Role": "manager", "X-User-Id": "admin-1"},
         state=state,
         app=SimpleNamespace(
-            state=SimpleNamespace(workflow_config_store=_Store())
+            state=SimpleNamespace(workflow_config_store=_Store()),
         ),
     )
     definition = {"url": "https://workflow.example/run"}

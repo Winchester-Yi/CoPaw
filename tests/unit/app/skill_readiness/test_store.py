@@ -18,50 +18,44 @@ from swe.app.skill_readiness.models import (
 from swe.app.skill_readiness.store import SkillReadinessStore
 
 
-class _CursorContext:
-    def __init__(self, cursor):
-        self.cursor = cursor
-
-    async def __aenter__(self):
-        return self.cursor
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
-class _TransactionCursor:
+class _Session:
     def __init__(self, fetchone_result=None):
         self.calls = []
-        self.rowcount = 1
         self._fetchone_result = fetchone_result
 
     async def execute(self, query, params=None):
         self.calls.append((query, params))
+        return 1
 
-    async def fetchone(self):
+    async def fetch_one(self, query, params=None):
+        self.calls.append((query, params))
         return self._fetchone_result
 
 
 class _Acquire:
-    def __init__(self, conn):
-        self.conn = conn
+    def __init__(self, session):
+        self.session = session
+        self.entered = 0
+        self.exited = 0
+        self.error = None
 
     async def __aenter__(self):
-        return self.conn
+        self.entered += 1
+        return self.session
 
     async def __aexit__(self, exc_type, exc, tb):
+        self.exited += 1
+        self.error = exc
         return False
 
 
 def _install_transaction_connection(mock_db, *, fetchone_result=None):
-    conn = MagicMock()
-    cursor = _TransactionCursor(fetchone_result=fetchone_result)
-    conn.cursor.return_value = _CursorContext(cursor)
-    conn.begin = AsyncMock()
-    conn.commit = AsyncMock()
-    conn.rollback = AsyncMock()
-    mock_db.acquire.return_value = _Acquire(conn)
-    return conn, cursor
+    session = _Session(fetchone_result)
+    context = _Acquire(session)
+    mock_db.acquire.return_value = context
+    mock_db.transaction.return_value = context
+    mock_db.named_lock.return_value = context
+    return context, session
 
 
 @pytest.fixture
@@ -86,13 +80,29 @@ async def test_initialize_executes_required_ddl(mock_db) -> None:
     """初始化应创建四张业务表和必要索引。"""
     await SkillReadinessStore(mock_db).initialize()
 
-    executed_sql = "\n".join(call.args[0] for call in mock_db.execute.await_args_list)
+    executed_sql = "\n".join(
+        call.args[0] for call in mock_db.execute.await_args_list
+    )
 
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_configs" in executed_sql
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_runs" in executed_sql
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_owner_snapshots" in executed_sql
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_user_results" in executed_sql
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_readiness_check_results" in executed_sql
+    assert (
+        "CREATE TABLE IF NOT EXISTS swe_skill_readiness_configs"
+        in executed_sql
+    )
+    assert (
+        "CREATE TABLE IF NOT EXISTS swe_skill_readiness_runs" in executed_sql
+    )
+    assert (
+        "CREATE TABLE IF NOT EXISTS swe_skill_readiness_owner_snapshots"
+        in executed_sql
+    )
+    assert (
+        "CREATE TABLE IF NOT EXISTS swe_skill_readiness_user_results"
+        in executed_sql
+    )
+    assert (
+        "CREATE TABLE IF NOT EXISTS swe_skill_readiness_check_results"
+        in executed_sql
+    )
     assert "idx_skill_readiness_runs_state" in executed_sql
     assert "idx_skill_readiness_check_lookup" in executed_sql
     assert "idx_skill_readiness_check_user" in executed_sql
@@ -178,7 +188,10 @@ async def test_get_owner_snapshot_parses_cached_owners(store, mock_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_owner_snapshot_persists_owner_json(store, mock_db) -> None:
+async def test_record_owner_snapshot_persists_owner_json(
+    store,
+    mock_db,
+) -> None:
     """后台 owner 查询完成后应保存快照，供 overview 下次直接读取。"""
     await store.record_owner_snapshot(
         "source-a",
@@ -227,7 +240,10 @@ async def test_mark_owner_lookup_running_returns_false_for_existing_running(
 
 
 @pytest.mark.asyncio
-async def test_get_or_create_running_run_reuses_existing(store, mock_db) -> None:
+async def test_get_or_create_running_run_reuses_existing(
+    store,
+    mock_db,
+) -> None:
     """同一 source/skill 已有 running run 时应复用。"""
     created_at = datetime.now()
     _install_transaction_connection(
@@ -259,7 +275,9 @@ async def test_get_or_create_running_run_reuses_existing(store, mock_db) -> None
 
     assert result.run_id == "run-existing"
     assert reused is True
-    executed_sql = "\n".join(call.args[0] for call in mock_db.execute.await_args_list)
+    executed_sql = "\n".join(
+        call.args[0] for call in mock_db.execute.await_args_list
+    )
     assert "INSERT INTO swe_skill_readiness_runs" not in executed_sql
 
 
@@ -386,13 +404,16 @@ async def test_record_user_result_uses_transaction(store, mock_db) -> None:
         ),
     )
 
-    conn.begin.assert_awaited_once()
-    conn.commit.assert_awaited_once()
-    conn.rollback.assert_not_awaited()
+    mock_db.transaction.assert_called_once_with()
+    assert conn.entered == conn.exited == 1
+    assert conn.error is None
 
 
 @pytest.mark.asyncio
-async def test_create_index_ignores_duplicate_index_race(store, mock_db) -> None:
+async def test_create_index_ignores_duplicate_index_race(
+    store,
+    mock_db,
+) -> None:
     """多实例同时初始化时，一个实例建好索引后另一个不应启动失败。"""
     mock_db.fetch_one.return_value = {"total": 0}
     mock_db.execute.side_effect = Exception("Duplicate key name")
@@ -489,3 +510,33 @@ async def test_list_user_results_filters_by_check_but_returns_all_checks(
     assert user_params[:3] == ("run-1", "cron_auth_valid", "fail")
     assert "check_name = %s" not in check_query
     assert check_params == ("run-1", "alice")
+
+
+@pytest.mark.asyncio
+async def test_run_lock_release_failure_is_not_suppressed(store, mock_db):
+    from swe.app.skill_readiness.store import SkillReadinessStoreUnavailable
+
+    class FailingRelease(_Acquire):
+        async def __aexit__(self, *_args):
+            raise RuntimeError("lock release was not confirmed")
+
+    mock_db.named_lock.return_value = FailingRelease(_Session())
+    store.get_running_run = AsyncMock(return_value=object())
+    with pytest.raises(
+        SkillReadinessStoreUnavailable,
+        match="release was not confirmed",
+    ):
+        await store.get_or_create_running_run(
+            "source-a",
+            "skill-a",
+            SkillReadinessConfig.model_validate(
+                {"checks": [{"name": "cron_auth_valid"}]},
+            ),
+        )
+    lock_name = mock_db.named_lock.call_args.args[0]
+    assert lock_name.startswith("swe_skill_ready:")
+    assert len(lock_name) == 64
+    assert mock_db.named_lock.call_args.kwargs == {
+        "timeout": 10,
+        "exact_name": True,
+    }

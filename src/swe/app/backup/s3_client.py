@@ -9,6 +9,8 @@ from typing import Optional
 import boto3
 from botocore.exceptions import ClientError
 
+from ...performance_metrics import increment
+
 from .config import BackupEnvironmentConfig
 
 
@@ -117,6 +119,7 @@ class S3BackupClient:
             if continuation_token:
                 params["ContinuationToken"] = continuation_token
 
+            increment("s3_list_pages")
             response = self._s3.list_objects_v2(**params)
 
             if "Contents" in response:

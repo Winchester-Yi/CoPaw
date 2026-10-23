@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { convertArchivedPage, SessionApi } from "./index";
+import { convertArchivedPage, convertMessages, SessionApi } from "./index";
 import { useAgentStore } from "@/stores/agentStore";
 import { currentCronContext } from "@/api/cronTaskContext";
 
@@ -42,6 +42,98 @@ vi.mock("../../../utils/identity", () => ({
 }));
 
 describe("SessionApi identity mapping", () => {
+  it("restores ordered append bubbles with stable IDs and no feedback cards", () => {
+    const messages = convertMessages([
+      {
+        id: "question",
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+      },
+      {
+        id: "body",
+        role: "assistant",
+        content: [{ type: "text", text: "answer" }],
+      },
+      {
+        id: "history-transport-1",
+        role: "assistant",
+        metadata: {
+          metadata: {
+            stop_append: {
+              message_id: "append-1",
+              turn_id: "turn-1",
+              order: 0,
+            },
+          },
+        },
+        content: [{ type: "text", text: "first" }],
+      },
+      {
+        id: "history-transport-2",
+        role: "assistant",
+        metadata: {
+          stop_append: { message_id: "append-2", turn_id: "turn-1", order: 1 },
+        },
+        content: [{ type: "text", text: "second" }],
+      },
+      {
+        id: "replayed-transport",
+        role: "assistant",
+        metadata: {
+          stop_append: { message_id: "append-1", turn_id: "turn-1", order: 0 },
+        },
+        content: [{ type: "text", text: "first updated" }],
+      },
+    ] as never);
+    expect(messages.map((message) => message.id)).toEqual([
+      "question",
+      "history-response-body",
+      "stop-append-append-1",
+      "stop-append-append-2",
+    ]);
+    expect(
+      messages
+        .slice(2)
+        .map((message) => message.cards?.map((card) => card.code)),
+    ).toEqual([
+      ["AgentScopeRuntimeResponseCard"],
+      ["AgentScopeRuntimeResponseCard"],
+    ]);
+    expect(messages[2].cards?.[0].data.output[0]).toMatchObject({
+      id: "replayed-transport",
+      content: [{ text: "first updated" }],
+    });
+  });
+
+  it("does not classify an appended message as a scheduled task result", () => {
+    const sessionApi = new SessionApi();
+    const messages = sessionApi.applyChatSnapshot("chat-1", {
+      messages: [
+        {
+          id: "user",
+          role: "user",
+          content: [{ type: "text", text: "question" }],
+        },
+        {
+          id: "body",
+          role: "assistant",
+          content: [{ type: "text", text: "answer" }],
+        },
+        {
+          id: "runtime-append",
+          role: "assistant",
+          metadata: { stop_append: { message_id: "append-1" } },
+          content: [{ type: "text", text: "append" }],
+        },
+      ],
+    });
+    expect(messages?.map((message) => message.cards?.[0].code)).toEqual([
+      "AgentScopeRuntimeRequestCard",
+      "AgentScopeRuntimeResponseCard",
+      "AgentScopeRuntimeResponseCard",
+    ]);
+  });
+
   beforeEach(() => {
     useAgentStore.setState({ selectedAgent: "default" });
     schedulerMocks.listAll.mockReset();

@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
+from ..database.prepared import PreparedInsert
 from ..utils.bbk import normalize_bbk_id_to_primary
 from .models import (
     EventType,
@@ -41,6 +42,56 @@ logger = logging.getLogger(__name__)
 
 # 需要从统计中排除的 source_id（测试平台等）
 EXCLUDED_SOURCE_IDS = ["default"]
+
+
+_SPAN_INSERT = PreparedInsert(
+    """INSERT INTO swe_tracing_spans (
+        span_id, trace_id, source_id, name, event_type,
+        start_time, end_time, duration_ms, user_id, session_id, channel,
+        model_name, input_tokens, output_tokens, tool_name, skill_name,
+        skill_id, mcp_server, tool_input, tool_output, error, user_name, bbk_id
+    ) VALUES """,
+    "(" + ", ".join(["%s"] * 23) + ")",
+    """ ON DUPLICATE KEY UPDATE
+        end_time = VALUES(end_time), duration_ms = VALUES(duration_ms),
+        input_tokens = VALUES(input_tokens), output_tokens = VALUES(output_tokens),
+        tool_output = VALUES(tool_output), error = VALUES(error),
+        event_type = VALUES(event_type)""",
+)
+
+
+def _span_insert_rows(spans):
+    """Serialize only the next prepared chunk, preserving the stored JSON form."""
+    for span in spans:
+        yield (
+            span.span_id,
+            span.trace_id,
+            span.source_id,
+            span.name,
+            (
+                span.event_type.value
+                if isinstance(span.event_type, EventType)
+                else span.event_type
+            ),
+            span.start_time,
+            span.end_time,
+            span.duration_ms,
+            span.user_id,
+            span.session_id,
+            span.channel,
+            span.model_name,
+            span.input_tokens,
+            span.output_tokens,
+            span.tool_name,
+            span.skill_name,
+            span.skill_id,
+            span.mcp_server,
+            json.dumps(span.tool_input) if span.tool_input else None,
+            span.tool_output,
+            span.error,
+            span.user_name,
+            normalize_bbk_id_to_primary(span.bbk_id),
+        )
 
 
 def _matches_trace_filters(
@@ -455,7 +506,7 @@ class TraceStore:
             spans: List of spans to create
 
         Returns:
-            Number of rows actually inserted
+            Number of spans confirmed, including idempotent retries
         """
         if not spans:
             return 0
@@ -463,58 +514,13 @@ class TraceStore:
         if self.db is None:
             return 0
 
-        query = """
-            INSERT INTO swe_tracing_spans (
-                span_id, trace_id, source_id, name, event_type,
-                start_time, end_time, duration_ms, user_id, session_id, channel,
-                model_name, input_tokens, output_tokens, tool_name, skill_name,
-                skill_id, mcp_server,
-                tool_input, tool_output, error, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        params_list = []
-        for span in spans:
-            params_list.append(
-                (
-                    span.span_id,
-                    span.trace_id,
-                    span.source_id,
-                    span.name,
-                    (
-                        span.event_type.value
-                        if isinstance(span.event_type, EventType)
-                        else span.event_type
-                    ),
-                    span.start_time,
-                    span.end_time,
-                    span.duration_ms,
-                    span.user_id,
-                    span.session_id,
-                    span.channel,
-                    span.model_name,
-                    span.input_tokens,
-                    span.output_tokens,
-                    span.tool_name,
-                    span.skill_name,
-                    span.skill_id,
-                    span.mcp_server,
-                    json.dumps(span.tool_input) if span.tool_input else None,
-                    span.tool_output,
-                    span.error,
-                    span.user_name,
-                    normalize_bbk_id_to_primary(span.bbk_id),
-                ),
-            )
-        rowcount = await self.db.execute_many(query, params_list)
-        # 验证写入结果，帮助排查偶现的 spans 写入失败问题
-        if rowcount != len(params_list):
-            logger.warning(
-                "batch_create_spans: expected %d rows, got %d. "
-                "This may indicate database connection issue or partial write failure.",
-                len(params_list),
-                rowcount,
-            )
-        return rowcount
+        # The facade commits all transport chunks before returning a count.
+        return await self.db.insert_prepared(
+            _SPAN_INSERT,
+            _span_insert_rows(spans),
+            max_rows=self.config.batch_size,
+            max_bytes=self.config.max_batch_bytes,
+        )
 
     # Query operations
 

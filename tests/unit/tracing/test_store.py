@@ -35,7 +35,13 @@ def mock_db():
     db.fetch_one = AsyncMock(return_value=None)
     db.fetch_all = AsyncMock(return_value=[])
     db.execute = AsyncMock(return_value=1)
-    db.execute_many = AsyncMock(return_value=1)
+    db.prepared_rows = []
+
+    async def insert_prepared(_template, rows, **_limits):
+        db.prepared_rows = list(rows)
+        return len(db.prepared_rows)
+
+    db.insert_prepared = AsyncMock(side_effect=insert_prepared)
     db.close = AsyncMock()
     return db
 
@@ -295,7 +301,7 @@ class TestSpanOperations:
         ]
 
         await store.batch_create_spans(spans)
-        mock_db.execute_many.assert_called_once()
+        mock_db.insert_prepared.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_span(self, config, mock_db):

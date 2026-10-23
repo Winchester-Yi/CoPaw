@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import weakref
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable
@@ -18,10 +19,12 @@ from typing import Any, AsyncGenerator, Callable
 from ..answer_turn.models import TurnIdentity
 from .task_progress import TaskProgressPayload, clone_task_progress
 from .tool_output_frames import ToolOutputFrame, bind_tool_output_emitter
+from .sse_replay import ReplayStream, ReplaySubscription, _await_stream_task
 
 logger = logging.getLogger(__name__)
 
 _SENTINEL = None
+_REPLAY_BATCH_SIZE = 64
 Producer = Callable[[TurnIdentity, Any], AsyncGenerator[str, None]]
 
 
@@ -31,8 +34,8 @@ class _RunState:
 
     task: asyncio.Task[None]
     identity: TurnIdentity
-    queues: list[asyncio.Queue] = field(default_factory=list)
-    buffer: list[str] = field(default_factory=list)
+    queues: list[ReplaySubscription] = field(default_factory=list)
+    replay: ReplayStream = field(default_factory=ReplayStream)
     closed: bool = False
 
 
@@ -114,12 +117,18 @@ class TaskTracker:
         except asyncio.TimeoutError:
             return False
 
-    async def attach(self, identity: TurnIdentity) -> asyncio.Queue | None:
+    async def attach(
+        self,
+        identity: TurnIdentity,
+    ) -> ReplaySubscription | None:
         """Attach a subscriber and replay the buffered SSE events."""
         async with self._lock:
-            return self._attach_unlocked(identity)
+            return await self._attach_unlocked(identity)
 
-    def _attach_unlocked(self, identity: TurnIdentity) -> asyncio.Queue | None:
+    async def _attach_unlocked(
+        self,
+        identity: TurnIdentity,
+    ) -> ReplaySubscription | None:
         state = self._runs.get(identity.chat_id)
         if (
             state is None
@@ -128,11 +137,11 @@ class TaskTracker:
             or state.closed
         ):
             return None
-        queue: asyncio.Queue = asyncio.Queue()
-        for sse in state.buffer:
-            queue.put_nowait(sse)
-        state.queues.append(queue)
-        return queue
+        # Cancellation before registration must not leak a subscription.
+        await asyncio.sleep(0)
+        subscriber = state.replay.subscribe()
+        state.queues.append(subscriber)
+        return subscriber
 
     def _has_live_run_unlocked(self, chat_id: str) -> bool:
         state = self._runs.get(chat_id)
@@ -160,16 +169,17 @@ class TaskTracker:
     async def detach_subscriber(
         self,
         identity: TurnIdentity,
-        queue: asyncio.Queue,
+        queue: asyncio.Queue | ReplaySubscription,
     ) -> None:
-        async with self._lock:
-            state = self._runs.get(identity.chat_id)
-            if state is None:
-                return
-            try:
-                state.queues.remove(queue)
-            except ValueError:
-                pass
+        if isinstance(queue, ReplaySubscription):
+            async with self._lock:
+                state = self._runs.get(identity.chat_id)
+                if state is not None and queue in state.queues:
+                    state.queues.remove(queue)
+            queue.stream.detach(queue)
+            if queue.stream.ended and not queue.stream.subscribers:
+                await queue.stream.aclose()
+            return
 
     async def attach_or_start(
         self,
@@ -178,11 +188,11 @@ class TaskTracker:
         producer: Producer,
         *,
         before_start: Callable[[], None] | None = None,
-    ) -> tuple[asyncio.Queue, bool]:
+    ) -> tuple[ReplaySubscription, bool]:
         """Attach to *identity*'s transport or register its producer."""
         async with self._lifecycle_lock(identity):
             async with self._lock:
-                queue = self._attach_unlocked(identity)
+                queue = await self._attach_unlocked(identity)
                 if queue is not None:
                     return queue, False
                 if self._has_live_run_unlocked(identity.chat_id):
@@ -200,7 +210,7 @@ class TaskTracker:
                     )
                     await operation
             async with self._lock:
-                queue = self._attach_unlocked(identity)
+                queue = await self._attach_unlocked(identity)
                 if queue is not None:
                     return queue, False
                 if self._has_live_run_unlocked(identity.chat_id):
@@ -212,12 +222,17 @@ class TaskTracker:
         identity: TurnIdentity,
         payload: Any,
         producer: Producer,
-    ) -> tuple[asyncio.Queue, bool]:
-        queue: asyncio.Queue = asyncio.Queue()
+    ) -> tuple[ReplaySubscription, bool]:
+        replay = ReplayStream()
+        queue = replay.subscribe()
         tracker_ref = weakref.ref(self)
+        batch_writes = os.environ.get("SWE_SSE_BATCH_WRITES", "1") == "1"
 
         async def _producer() -> None:
+            published_since_yield = 0
+
             async def _broadcast_sse(sse: str) -> None:
+                nonlocal published_since_yield
                 tracker = tracker_ref()
                 if tracker is None:
                     return
@@ -225,9 +240,14 @@ class TaskTracker:
                     state = tracker._runs.get(identity.chat_id)
                     if state is None or state.closed:
                         return
-                    state.buffer.append(sse)
-                    for subscriber in state.queues:
-                        subscriber.put_nowait(sse)
+                if batch_writes:
+                    await state.replay.offer(sse)
+                else:
+                    await state.replay.append(sse)
+                published_since_yield += 1
+                if published_since_yield >= _REPLAY_BATCH_SIZE:
+                    published_since_yield = 0
+                    await asyncio.sleep(0)
 
             async def _emit_tool_output_frame(frame: ToolOutputFrame) -> None:
                 await _broadcast_sse(
@@ -250,20 +270,34 @@ class TaskTracker:
                     f"{json.dumps({'error': 'internal server error'})}\n\n",
                 )
             finally:
-                tracker = tracker_ref()
-                if tracker is not None:
-                    async with tracker.lock:
-                        state = tracker._runs.get(identity.chat_id)
-                        if state is not None and state.identity == identity:
-                            for subscriber in state.queues:
-                                subscriber.put_nowait(_SENTINEL)
-                            tracker._task_progress.pop(identity.chat_id, None)
-                            tracker._runs.pop(identity.chat_id, None)
+
+                async def finish_transport():
+                    try:
+                        await replay.end()
+                    finally:
+                        tracker = tracker_ref()
+                        if tracker is not None:
+                            async with tracker.lock:
+                                state = tracker._runs.get(identity.chat_id)
+                                if (
+                                    state is not None
+                                    and state.identity == identity
+                                ):
+                                    tracker._task_progress.pop(
+                                        identity.chat_id,
+                                        None,
+                                    )
+                                    tracker._runs.pop(identity.chat_id, None)
+
+                await _await_stream_task(
+                    asyncio.create_task(finish_transport()),
+                )
 
         task = asyncio.create_task(_producer())
         self._runs[identity.chat_id] = _RunState(
             task=task,
             identity=identity,
+            replay=replay,
             queues=[queue],
         )
         return queue, True
@@ -275,25 +309,29 @@ class TaskTracker:
             if state is None or state.identity != identity or state.closed:
                 return
             state.closed = True
-            subscribers = tuple(state.queues)
+            replay = state.replay
             state.queues.clear()
-        for subscriber in subscribers:
-            subscriber.put_nowait(_SENTINEL)
+        await replay.end()
 
     async def stream(
         self,
         identity: TurnIdentity,
-        queue: asyncio.Queue,
+        queue: asyncio.Queue | ReplaySubscription,
     ) -> AsyncGenerator[str, None]:
         """Yield transport events until the producer or transport closes."""
+        delivered = 0
         try:
             while True:
                 try:
+                    if delivered == _REPLAY_BATCH_SIZE:
+                        await asyncio.sleep(0)
+                        delivered = 0
                     event = await queue.get()
                 except asyncio.CancelledError:
                     break
                 if event is _SENTINEL:
                     break
+                delivered += 1
                 yield event
         finally:
             await self.detach_subscriber(identity, queue)

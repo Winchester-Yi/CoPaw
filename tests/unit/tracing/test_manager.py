@@ -68,7 +68,13 @@ def mock_db():
     db.fetch_one = AsyncMock(return_value=None)
     db.fetch_all = AsyncMock(return_value=[])
     db.execute = AsyncMock(return_value=1)
-    db.execute_many = AsyncMock(side_effect=lambda _q, params: len(params))
+    db.prepared_rows = []
+
+    async def insert_prepared(_template, rows, **_limits):
+        db.prepared_rows = list(rows)
+        return len(db.prepared_rows)
+
+    db.insert_prepared = AsyncMock(side_effect=insert_prepared)
     return db
 
 
@@ -472,8 +478,8 @@ class TestTraceManager:
         await manager.end_trace(trace_id, TraceStatus.COMPLETED)
 
         assert len(manager._span_queue) == 0
-        mock_db.execute_many.assert_called_once()
-        _, params_list = mock_db.execute_many.call_args.args
+        mock_db.insert_prepared.assert_called_once()
+        params_list = mock_db.prepared_rows
         assert len(params_list) == 1
         assert params_list[0][1] == trace_id
         assert params_list[0][15] == "pdf"

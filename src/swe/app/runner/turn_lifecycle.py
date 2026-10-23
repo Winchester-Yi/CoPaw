@@ -103,6 +103,8 @@ class TurnLifecycleOwner(Protocol):
 
     def _build_stop_incomplete_msg(self, reason: str) -> Msg: ...
 
+    def _stream_stop_appended_messages(self, **kwargs: Any) -> Any: ...
+
 
 async def stream_agent_turns(
     owner: TurnLifecycleOwner,
@@ -556,6 +558,14 @@ async def _stream_goal_finalization(
                 outcome.assistant_response,
             )
             yield finalization_msg, True
+            async for item in _stream_approved_appends(
+                owner,
+                request=request,
+                runtime=runtime,
+                plan=plan,
+                outcome=outcome,
+            ):
+                yield item
         return
 
 
@@ -649,6 +659,7 @@ async def _resolve_goal_finalization_stop_gate(
     outcome: Any,
 ) -> tuple[bool, Msg | None, str | None]:
     """Apply Stop to formal Goal delivery without reopening Goal execution."""
+    outcome.stop_append_approved = False
     stop_result = await owner._emit_stop_hook_if_needed(
         request=request,
         runtime=runtime,
@@ -656,6 +667,7 @@ async def _resolve_goal_finalization_stop_gate(
         outcome=outcome,
     )
     if stop_result is None or stop_result.decision != HookDecision.BLOCK:
+        outcome.stop_append_approved = bool(outcome.stop_hook_active)
         outcome.stop_hook_active = False
         return False, None, None
     reason = (
@@ -688,6 +700,7 @@ async def _resolve_stop_gate(
     plan: Any,
     outcome: Any,
 ) -> tuple[bool, Msg | None]:
+    outcome.stop_append_approved = False
     stop_result = await owner._emit_stop_hook_if_needed(
         request=request,
         runtime=runtime,
@@ -695,6 +708,7 @@ async def _resolve_stop_gate(
         outcome=outcome,
     )
     if stop_result is None or stop_result.decision != HookDecision.BLOCK:
+        outcome.stop_append_approved = bool(outcome.stop_hook_active)
         outcome.stop_hook_active = False
         return False, None
     reason = (
@@ -781,7 +795,35 @@ async def _stream_standard_completion_lifecycle(
                     outcome.assistant_response,
                 )
                 yield final_message, True
+        if incomplete_msg is None:
+            async for item in _stream_approved_appends(
+                owner,
+                request=request,
+                runtime=runtime,
+                plan=plan,
+                outcome=outcome,
+            ):
+                yield item
         return
+
+
+async def _stream_approved_appends(
+    owner: TurnLifecycleOwner,
+    *,
+    request: AgentRequest,
+    runtime: Any,
+    plan: Any,
+    outcome: Any,
+) -> AsyncGenerator[tuple[Msg, bool], None]:
+    append = getattr(owner, "_stream_stop_appended_messages", None)
+    if getattr(outcome, "stop_append_approved", False) and callable(append):
+        async for item in append(
+            request=request,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+        ):
+            yield item
 
 
 def _is_bufferable_assistant_text(msg: Msg) -> bool:

@@ -497,6 +497,7 @@ def test_context_references_endpoint_groups_and_limits_discovery_results(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from swe.agents import skill_runtime_snapshot
     from swe.app.routers import console as console_router
 
     app = FastAPI()
@@ -523,17 +524,23 @@ def test_context_references_endpoint_groups_and_limits_discovery_results(
         get_workspace_and_config,
         raising=False,
     )
-    monkeypatch.setattr(
-        "swe.app.context_references.resolve_effective_skills",
-        lambda _workspace, _channel: [f"skill-{index}" for index in range(5)],
-    )
-    for index in range(5):
-        skill_dir = tmp_path / "skills" / f"skill-{index}"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            f"---\nname: skill-{index}\ndescription: Description {index}\n---\n",
-            encoding="utf-8",
+
+    async def get_snapshot(_workspace_dir: Path):
+        return SimpleNamespace(
+            skills={
+                f"skill-{index}": SimpleNamespace(
+                    channels={"console"},
+                    metadata={"description": f"Description {index}"},
+                )
+                for index in range(5)
+            },
         )
+
+    monkeypatch.setattr(
+        skill_runtime_snapshot,
+        "get_workspace_skill_snapshot_async",
+        get_snapshot,
+    )
     (tmp_path / "media").mkdir()
     (tmp_path / "media" / "report.txt").write_text("ignored")
 

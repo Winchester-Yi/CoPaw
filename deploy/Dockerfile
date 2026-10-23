@@ -87,7 +87,7 @@ COPY src ./src
 COPY scripts/verify_session_nas_lock.py ./scripts/verify_session_nas_lock.py
 # Inject console dist from build stage (repo does not commit dist).
 COPY --from=console-builder /app/console/dist/ ./src/swe/console/
-RUN pip install --no-cache-dir .[ollama]
+RUN pip install --no-cache-dir ".[ollama,mysql]"
 
 # Init working dir with default config.json and HEARTBEAT.md (build time).
 RUN swe init --defaults --accept-security

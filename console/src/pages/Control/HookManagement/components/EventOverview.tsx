@@ -61,7 +61,9 @@ export function EventOverview({
       <section aria-label="Hook 状态" className={styles.statusBanner}>
         <div className={styles.statusCopy}>
           <CheckCircleFilled
-            className={config.enabled ? styles.statusEnabled : styles.statusDisabled}
+            className={
+              config.enabled ? styles.statusEnabled : styles.statusDisabled
+            }
           />
           <div>
             <strong>{config.enabled ? "Hook 已启用" : "Hook 已停用"}</strong>
@@ -87,7 +89,7 @@ export function EventOverview({
         <article className={styles.metricCard}>
           <span>处理器数量</span>
           <strong>{handlerCount}</strong>
-          <small>按配置顺序依次执行</small>
+          <small>按事件及处理阶段执行</small>
         </article>
         <article className={styles.metricCard}>
           <span>待发布修改</span>

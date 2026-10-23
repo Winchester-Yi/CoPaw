@@ -2339,3 +2339,157 @@ async def test_guard_decision_failure_denies_instead_of_executing_tool(
     assert result == {"denied": True}
     agent._acting_hook_denied.assert_awaited_once()
     agent._run_guarded_tool_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name", ["execute_shell_command", "start_background_process"]
+)
+@pytest.mark.parametrize("role", ["main", "subagent"])
+async def test_platform_installation_denial_precedes_guard_and_execution(
+    tmp_path,
+    tool_name,
+    role,
+):
+    agent = _FakeAgent(tmp_path)
+    agent._request_context["agent_role"] = role
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    agent._decide_guard_action = AsyncMock()
+    agent._run_guarded_tool_call = AsyncMock()
+    agent._acting_with_approval = AsyncMock()
+
+    result = await agent._acting(
+        {
+            "id": "platform-denied",
+            "name": tool_name,
+            "input": {"command": "pip install requests"},
+        }
+    )
+
+    assert result is None
+    assert "平台策略禁止" in str(agent.printed[0].content)
+    assert "shell_policy_denied" in str(agent.printed[0].content)
+    assert agent.printed[0].metadata[
+        TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+    ] == {
+        "platform-denied": "blocked",
+    }
+    agent._emit_tool_hook.assert_not_awaited()
+    agent._decide_guard_action.assert_not_awaited()
+    agent._run_guarded_tool_call.assert_not_awaited()
+    agent._acting_with_approval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_platform_denial_checks_rewritten_input_before_hook_ask(
+    tmp_path,
+):
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(
+        return_value=MergedHookResult(
+            decision=HookDecision.ASK,
+            updated_input={"command": "pip install requests"},
+        )
+    )
+    agent._acting_with_approval = AsyncMock(return_value={"pending": True})
+    agent._run_guarded_tool_call = AsyncMock()
+
+    result = await agent._acting(
+        {
+            "id": "rewrite-denied",
+            "name": "execute_shell_command",
+            "input": {"command": "echo hello"},
+        }
+    )
+
+    assert result is None
+    assert "shell_policy_denied" in str(agent.printed[0].content)
+    agent._acting_with_approval.assert_not_awaited()
+    agent._run_guarded_tool_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_platform_denial_allows_later_tool_call_in_same_turn(tmp_path):
+    agent = _FakeAgent(tmp_path)
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    denied = await agent._acting(
+        {
+            "id": "denied-install",
+            "name": "execute_shell_command",
+            "input": {"command": "pip install requests"},
+        }
+    )
+    allowed = await agent._acting(
+        {
+            "id": "allowed-query",
+            "name": "execute_shell_command",
+            "input": {"command": "pip show requests"},
+        }
+    )
+    assert denied is None
+    assert allowed == {"content": {"command": "pip show requests"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard_enabled", [False, True])
+async def test_source_shell_override_and_preapproval_cannot_bypass_policy(
+    tmp_path,
+    monkeypatch,
+    guard_enabled,
+):
+    from swe.agents import source_tools
+
+    agent = _TerminalStopReplyLoopAgent(tmp_path)
+    agent._ensure_tool_guard = lambda: None
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=guard_enabled,
+        is_denied=lambda _name: False,
+        is_guarded=lambda _name: True,
+    )
+    agent._emit_tool_hook = AsyncMock(return_value=MergedHookResult())
+    agent._consume_preapproval = AsyncMock(return_value=True)
+    worker = AsyncMock(return_value=[{"type": "text", "text": "replacement"}])
+    monkeypatch.setattr(source_tools, "_run_source_tool", worker)
+    version = SimpleNamespace(
+        name="execute_shell_command", description="Source override"
+    )
+    replacement = source_tools.build_source_tool_function(
+        version,
+        source_tools.SourceToolRuntime(None, None, tmp_path),
+    )
+    agent.toolkit.register_tool_function(
+        replacement,
+        json_schema={
+            "type": "function",
+            "function": {
+                "name": version.name,
+                "description": version.description,
+                "parameters": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {"command": {"type": "string"}},
+                },
+            },
+        },
+    )
+
+    await agent._acting(
+        {
+            "id": "source-denied",
+            "name": "execute_shell_command",
+            "input": {"command": "pip install requests"},
+        }
+    )
+    worker.assert_not_awaited()
+    agent._consume_preapproval.assert_not_awaited()
+    assert "shell_policy_denied" in str(agent.printed[0].content)
+
+    await agent._acting(
+        {
+            "id": "source-allowed",
+            "name": "execute_shell_command",
+            "input": {"command": "pip show requests"},
+        }
+    )
+    worker.assert_awaited_once()
+    assert worker.await_args.args[2] == {"command": "pip show requests"}

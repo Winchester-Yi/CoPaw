@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Transactional persistence coverage for Chat Checkpoints."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -14,10 +15,134 @@ from swe.agents.memory.chat_checkpoint import (
     PrecompactionCandidate,
 )
 from swe.agents.memory.conversation_archive import ConversationArchiveStore
+from swe.performance_metrics import PerformanceMetrics
 
 
 def _chat_id() -> str:
     return str(uuid4())
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_read_metrics_count_only_read_payloads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    metrics = PerformanceMetrics()
+    monkeypatch.setattr(
+        "swe.performance_metrics.METRICS",
+        metrics,
+    )
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+    assert store._read_checkpoint_epoch(chat_id) == 1
+    assert metrics.snapshot()["counters"]["checkpoint_read_calls"] == 0
+    chat_dir = store.path_for(chat_id)
+    chat_dir.mkdir(parents=True)
+    epoch_payload = json.dumps({"current_epoch": 1, "history": []})
+    record_payload = CheckpointRecord.new(
+        chat_id=chat_id,
+        epoch=1,
+    ).to_json()
+    event_payload = "malformed 中文\n"
+    for filename, payload in (
+        ("epochs.json", epoch_payload),
+        ("checkpoint.json", record_payload),
+        ("events.jsonl", event_payload),
+    ):
+        (chat_dir / filename).write_text(payload, encoding="utf-8")
+
+    assert store._read_checkpoint_epoch(chat_id) == 1
+    counters = metrics.snapshot()["counters"]
+    assert counters["checkpoint_read_calls"] == 1
+    assert counters["checkpoint_read_bytes"] == len(
+        epoch_payload.encode("utf-8"),
+    )
+
+    state = await store.read_checkpoint_state(chat_id)
+    assert state.events == ()
+    counters = metrics.snapshot()["counters"]
+    assert counters["checkpoint_read_calls"] == 4
+    assert counters["checkpoint_read_bytes"] == sum(
+        len(payload.encode("utf-8"))
+        for payload in (
+            epoch_payload,
+            epoch_payload,
+            record_payload,
+            event_payload,
+        )
+    )
+
+
+def test_checkpoint_metrics_include_payload_rejected_as_corrupt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    metrics = PerformanceMetrics()
+    monkeypatch.setattr(
+        "swe.performance_metrics.METRICS",
+        metrics,
+    )
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+    chat_dir = store.path_for(chat_id)
+    chat_dir.mkdir(parents=True)
+    payload = "broken 中文"
+    (chat_dir / "epochs.json").write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Checkpoint epoch state is invalid"):
+        store._read_checkpoint_epoch(chat_id)
+
+    counters = metrics.snapshot()["counters"]
+    assert counters["checkpoint_read_calls"] == 1
+    assert counters["checkpoint_read_bytes"] == len(payload.encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["epochs.json", "checkpoint.json", "events.jsonl"],
+)
+@pytest.mark.parametrize("invalid_utf8", [False, True])
+def test_checkpoint_metrics_count_raw_bytes_including_crlf_and_invalid_utf8(
+    tmp_path: Path,
+    monkeypatch,
+    filename: str,
+    invalid_utf8: bool,
+) -> None:
+    metrics = PerformanceMetrics()
+    monkeypatch.setattr("swe.performance_metrics.METRICS", metrics)
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+    chat_dir = store.path_for(chat_id)
+    chat_dir.mkdir(parents=True)
+    payloads = {
+        "epochs.json": b'{"current_epoch":1,"history":[]}\r\n',
+        "checkpoint.json": CheckpointRecord.new(
+            chat_id=chat_id,
+            epoch=1,
+        )
+        .to_json()
+        .encode("utf-8")
+        + b"\r\n",
+        "events.jsonl": b"malformed\r\n",
+    }
+    payload = payloads[filename] + (b"\xff\r\n" if invalid_utf8 else b"")
+    (chat_dir / filename).write_bytes(payload)
+
+    def read_payload():
+        if filename == "epochs.json":
+            return store._read_current_epoch(chat_dir)
+        if filename == "checkpoint.json":
+            return store._read_checkpoint_locked(chat_id, 1)
+        return store._read_checkpoint_events(chat_dir)
+
+    if invalid_utf8:
+        with pytest.raises(ValueError):
+            read_payload()
+    else:
+        read_payload()
+    counters = metrics.snapshot()["counters"]
+    assert counters["checkpoint_read_calls"] == 1
+    assert counters["checkpoint_read_bytes"] == len(payload)
 
 
 def _message(index: int) -> Msg:

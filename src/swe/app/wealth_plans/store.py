@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """财富工作台规划的三表持久化：主表 + 场景子表 + 分发目标子表。
 
-遵循 swe_cron_broadcast_tasks 的模式：配置数据库时走 aiomysql，
+遵循 swe_cron_broadcast_tasks 的模式：配置数据库时走共享异步数据库接口，
 未配置时退化为进程内存储（进程重启即丢，仅供本地开发）。
 """
 

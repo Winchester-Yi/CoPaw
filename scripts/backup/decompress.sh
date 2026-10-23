@@ -59,6 +59,20 @@ if [[ -n "$TENANTS" ]]; then
     TENANT_ARRAY=($(echo "$TENANTS" | tr ',' ' '))
 fi
 
+# Never merge immutable memory generations through the legacy copy-based path.
+if [[ -d "$WORKING_DIR" ]] && \
+   [[ -n "$(find "$WORKING_DIR" \( -name state-v2.json -o -name .turn-ledger \) -print -quit)" ]]; then
+    echo "Error: Versioned memory storage requires stopped writers and Python restore into a fresh directory." >&2
+    exit 1
+fi
+for memory_archive in "$ZIP_DIR"/*.zip; do
+    [ -f "$memory_archive" ] || continue
+    if unzip -Z1 "$memory_archive" | grep -Eq '(^|/)(state-v2\.json$|\.turn-ledger/)'; then
+        echo "Error: Versioned memory storage requires stopped writers and Python restore into a fresh directory." >&2
+        exit 1
+    fi
+done
+
 # 创建回滚目录
 ROLLBACK_PATH=""
 if [[ -n "$ROLLBACK_DIR" && -n "$TASK_ID" ]]; then

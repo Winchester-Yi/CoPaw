@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Chat checkpoint attachment coverage for ReMe-compatible memory."""
 
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -9,7 +12,10 @@ import pytest
 from agentscope.message import Msg
 
 from swe.agents.memory.chat_checkpoint import CheckpointRecord
-from swe.agents.memory.conversation_archive import attach_conversation_archive
+from swe.agents.memory.conversation_archive import (
+    ConversationArchiveStore,
+    attach_conversation_archive,
+)
 from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
 
 
@@ -200,3 +206,97 @@ async def test_attach_restores_existing_epoch_after_memory_recreation(
     attach_conversation_archive(restarted_memory, tmp_path / "dialog", chat_id)
 
     assert restarted_memory._chat_checkpoint_epoch == 2
+
+
+def test_attachment_reads_epoch_without_checkpoint_or_events(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    chat_id = _chat_id()
+    dialog_root = tmp_path / "dialog"
+    chat_dir = dialog_root / chat_id
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "epochs.json").write_text(
+        json.dumps({"current_epoch": 3, "history": []}),
+        encoding="utf-8",
+    )
+    (chat_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    (chat_dir / "events.jsonl").write_text("x" * 1024 * 1024)
+
+    def reject_full_read(*_args):
+        pytest.fail("request attachment read full checkpoint state")
+
+    monkeypatch.setattr(
+        ConversationArchiveStore,
+        "_read_checkpoint_locked",
+        reject_full_read,
+    )
+    monkeypatch.setattr(
+        ConversationArchiveStore,
+        "_read_checkpoint_events",
+        reject_full_read,
+    )
+    memory = attach_conversation_archive(_memory(), dialog_root, chat_id)
+
+    assert memory._chat_checkpoint_epoch == 3
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        "{}",
+        "[]",
+        '{"current_epoch":true}',
+        '{"current_epoch":0}',
+        '{"current_epoch":"2"}',
+    ],
+)
+def test_epoch_only_read_preserves_corruption_error(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+    chat_dir = store.path_for(chat_id)
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "epochs.json").write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Checkpoint epoch state is invalid"):
+        store._read_checkpoint_epoch(chat_id)
+
+
+def test_epoch_only_read_waits_for_chat_lock(tmp_path: Path) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+    started = threading.Event()
+
+    def read_epoch() -> int:
+        started.set()
+        return store._read_checkpoint_epoch(chat_id)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with store._chat_lock(chat_id):
+            future = executor.submit(read_epoch)
+            assert started.wait(timeout=2)
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.05)
+            chat_dir = store.path_for(chat_id)
+            chat_dir.mkdir(parents=True)
+            store._write_epochs(chat_dir, 2, "new")
+        assert future.result(timeout=2) == 2
+
+
+@pytest.mark.asyncio
+async def test_full_state_read_still_rejects_corrupt_record(
+    tmp_path: Path,
+) -> None:
+    chat_id = _chat_id()
+    dialog_root = tmp_path / "dialog"
+    chat_dir = dialog_root / chat_id
+    chat_dir.mkdir(parents=True)
+    (chat_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    memory = attach_conversation_archive(_memory(), dialog_root, chat_id)
+
+    with pytest.raises(ValueError, match="Checkpoint record is invalid"):
+        await memory.chat_checkpoint_store.read_checkpoint_state(chat_id)

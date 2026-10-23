@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from agentscope.message import Msg
@@ -422,12 +423,12 @@ async def test_goal_finalization_falls_back_when_model_fails(
     goal.state = GoalState.COMPLETE
     await service.persist(goal)
 
-    def fail_to_create_agent(**_kwargs):
+    async def fail_to_create_agent(**_kwargs):
         raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(
         runner,
-        "_create_goal_finalization_agent",
+        "_create_goal_finalization_agent_async",
         fail_to_create_agent,
     )
     events = [
@@ -599,8 +600,8 @@ async def test_goal_finalization_persists_the_final_message(
 
     monkeypatch.setattr(
         runner,
-        "_create_goal_finalization_agent",
-        lambda **_kwargs: FinalizationAgent(),
+        "_create_goal_finalization_agent_async",
+        AsyncMock(return_value=FinalizationAgent()),
     )
     monkeypatch.setattr(
         "swe.app.runner.runner.stream_printing_messages",
@@ -1012,8 +1013,8 @@ async def test_goal_completion_reviewer_parses_hidden_judge_output(
 
     monkeypatch.setattr(
         runner,
-        "_create_goal_completion_judge_agent",
-        lambda **_kwargs: FakeJudge(),
+        "_create_goal_completion_judge_agent_async",
+        AsyncMock(return_value=FakeJudge()),
     )
     monkeypatch.setattr(
         "swe.app.runner.runner.stream_printing_messages",
@@ -1156,8 +1157,10 @@ async def test_approved_review_without_replay_payload_fails_closed(
     )
     monkeypatch.setattr(
         runner,
-        "_create_goal_completion_judge_agent",
-        lambda **_kwargs: pytest.fail("Judge must not start without replay"),
+        "_create_goal_completion_judge_agent_async",
+        AsyncMock(
+            side_effect=AssertionError("Judge must not start without replay"),
+        ),
     )
 
     result = await runner._run_goal_completion_review(

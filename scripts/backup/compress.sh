@@ -91,6 +91,12 @@ for user_path in "$WORKING_DIR"/*; do
         [[ "$skip" == true ]] && continue
     fi
 
+    # Generic recursive copying cannot guarantee a committed memory snapshot.
+    if [[ -n "$(find "$user_path" \( -name state-v2.json -o -name .turn-ledger \) -print -quit)" ]]; then
+        echo "Error: Versioned memory storage requires the Python backup worker with root verification." >&2
+        exit 1
+    fi
+
     echo "Processing tenant: $user"
 
     # 创建临时目录

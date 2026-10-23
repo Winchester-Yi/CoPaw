@@ -6,6 +6,8 @@ interface HistoryLoadStatusProps {
   state: HistoryLoadState;
   retrying?: boolean;
   onRetry: () => void;
+  onLoadMore?: () => void;
+  advancing?: boolean;
 }
 
 const useStyles = createStyles(({ css, token }) => ({
@@ -98,6 +100,8 @@ export default function HistoryLoadStatus({
   state,
   retrying = false,
   onRetry,
+  onLoadMore,
+  advancing = false,
 }: HistoryLoadStatusProps) {
   const { cx, styles } = useStyles();
   const isRetrying = state === "loading" && retrying;
@@ -110,7 +114,18 @@ export default function HistoryLoadStatus({
       data-state={state}
       role={isErrorSurface ? "alert" : "status"}
     >
-      {state === "idle" ? null : (
+      {state === "idle" ? (
+        onLoadMore ? (
+          <button
+            className={styles.retry}
+            disabled={advancing}
+            onClick={onLoadMore}
+            type="button"
+          >
+            加载更早消息
+          </button>
+        ) : null
+      ) : (
         <div
           className={cx(styles.surface, {
             [styles.errorSurface]: isErrorSurface,

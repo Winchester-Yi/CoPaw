@@ -168,7 +168,11 @@ export const providerApi = {
     );
     useProviderModelStore
       .getState()
-      .invalidate({ providers: true, active: false });
+      .invalidate({
+        providers: true,
+        active: false,
+        preserveProviders: true,
+      });
     return result;
   },
 

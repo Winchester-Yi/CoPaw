@@ -11,6 +11,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from .io_worker import run_backup_io
+from .listing import list_restore_tenants
 from .models import BackupTaskStatus
 from .shell_service import ShellBackupService
 
@@ -133,25 +135,14 @@ async def create_shell_restore(
     service = get_shell_backup_service()
 
     # 获取可用备份的租户列表
-    backups = service.list_available_backups(
-        instance_id=request.instance_id,
-        date=request.date,
-        hour=request.hour,
+    target_tenants = await run_backup_io(
+        list_restore_tenants,
+        service.list_available_backups,
+        request.instance_id,
+        request.date or "",
+        request.hour,
+        request.tenant_ids,
     )
-    available_tenants = list(
-        backups["backups"]
-        .get(request.instance_id or "default", {})
-        .get(request.date or "", {})
-        .get(request.hour if request.hour is not None else 0, {})
-        .keys(),
-    )
-
-    if request.tenant_ids:
-        target_tenants = [
-            t for t in request.tenant_ids if t in available_tenants
-        ]
-    else:
-        target_tenants = available_tenants
 
     task = await service.create_restore_task(
         date=request.date,
@@ -234,7 +225,8 @@ async def list_shell_backups(
 ):
     """列出 OSS 上可用的备份。"""
     service = get_shell_backup_service()
-    result = service.list_available_backups(
+    result = await run_backup_io(
+        service.list_available_backups,
         instance_id=instance_id,
         date=date,
         hour=hour,

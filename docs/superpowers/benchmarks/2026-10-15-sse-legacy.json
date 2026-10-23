@@ -1,0 +1,51 @@
+{
+  "mode": "legacy-kernel-simulation",
+  "tenant_count": 4,
+  "events_per_tenant": 5000,
+  "elapsed_seconds": 0.0634670410072431,
+  "rss_start_bytes": 24887296,
+  "rss_finish_bytes": 55885824,
+  "rss_sampled_peak_bytes": 55885824,
+  "event_loop_lag_p95_ms": 2.405208016280085,
+  "event_loop_lag_p99_ms": 2.405208016280085,
+  "lag_sample_count": 10,
+  "slow_subscriber_buffered_payload_bytes": null,
+  "legacy_slow_queue_entries": 20000,
+  "replay_budget": {
+    "reserved_bytes": 0,
+    "active_logs": 0,
+    "active_subscribers": 0,
+    "subscriber_memory_bytes": 0,
+    "quota_rejections": 0,
+    "slow_disconnects": 0,
+    "replay_errors": 0,
+    "reconnects": 0,
+    "written_bytes": 0,
+    "read_bytes": 0
+  },
+  "stream_worker": {
+    "completed_count": 0,
+    "sample_count": 0,
+    "queue_avg_ms": null,
+    "queue_p95_ms": null,
+    "queue_p99_ms": null,
+    "queue_max_ms": null,
+    "execution_avg_ms": null,
+    "execution_p95_ms": null,
+    "execution_p99_ms": null,
+    "execution_max_ms": null
+  },
+  "scope": "local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB",
+  "replay_budget_after_close": {
+    "reserved_bytes": 0,
+    "active_logs": 0,
+    "active_subscribers": 0,
+    "subscriber_memory_bytes": 0,
+    "quota_rejections": 0,
+    "slow_disconnects": 0,
+    "replay_errors": 0,
+    "reconnects": 0,
+    "written_bytes": 0,
+    "read_bytes": 0
+  }
+}

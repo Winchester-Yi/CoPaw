@@ -43,13 +43,13 @@ async def test_ai_optimize_skill_stream_uses_trace_snapshot(
     async def fake_model(_messages):
         return SimpleNamespace(text="optimized")
 
-    def fake_get_model(trace_context=None):
+    async def fake_get_model(trace_context=None):
         observed["trace_context"] = trace_context
         return fake_model
 
     monkeypatch.setattr(
         skills_stream,
-        "get_model",
+        "get_model_async",
         fake_get_model,
     )
     monkeypatch.setattr(

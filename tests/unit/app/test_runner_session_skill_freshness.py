@@ -70,6 +70,7 @@ class _FakeAgent:
     last_instance: "_FakeAgent | None" = None
 
     def __init__(self, **kwargs):
+        self._workspace_skill_snapshot = kwargs.get("workspace_skill_snapshot")
         self.memory = _FakeMemory()
         self._request_context = kwargs.get("request_context", {})
         self._sys_prompt = "base sys prompt"
@@ -346,7 +347,7 @@ async def test_declared_skill_start_persists_snapshot_in_same_turn(
     _write_skill_manifest(tmp_path, skills=["xlsx"])
     skill_dir = _write_skill_dir(tmp_path, "xlsx")
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda path: 55.0 if Path(path) == skill_dir else 0.0,
     )
     original_stream_completion_lifecycle = runner._stream_completion_lifecycle
@@ -394,7 +395,7 @@ async def test_declared_skill_start_persists_snapshot_in_same_turn(
 
 
 @pytest.mark.asyncio
-async def test_declared_skill_start_persists_confirmation_time_token(
+async def test_declared_skill_start_persists_query_snapshot_token(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -408,12 +409,6 @@ async def test_declared_skill_start_persists_confirmation_time_token(
     async def mutate_skill_dir_during_completion(*args, **kwargs):
         del args
         runtime = kwargs["runtime"]
-        await runtime.session_skill_detector.start_skill(
-            "xlsx",
-            trigger_tool="read_file",
-            trigger_reason="skill_md",
-            confidence=1.0,
-        )
         skill_file = skill_dir / "SKILL.md"
         skill_file.write_text(
             (
@@ -426,6 +421,12 @@ async def test_declared_skill_start_persists_confirmation_time_token(
             encoding="utf-8",
         )
         assert get_skill_freshness_token(skill_dir) != initial_token
+        await runtime.session_skill_detector.start_skill(
+            "xlsx",
+            trigger_tool="read_file",
+            trigger_reason="skill_md",
+            confidence=1.0,
+        )
         async for item in original_stream_completion_lifecycle(
             request=kwargs["request"],
             runtime=kwargs["runtime"],
@@ -470,7 +471,7 @@ async def test_blocked_turn_persists_confirmed_skill_snapshot(
     _write_skill_manifest(tmp_path, skills=["xlsx"])
     skill_dir = _write_skill_dir(tmp_path, "xlsx")
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda path: 55.0 if Path(path) == skill_dir else 0.0,
     )
 
@@ -539,7 +540,7 @@ async def test_freshness_notice_is_model_only_system_turn_message(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
 
@@ -604,7 +605,7 @@ async def test_freshness_notice_requires_reloading_current_skill_md(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
 
@@ -644,7 +645,7 @@ async def test_freshness_notice_is_hidden_from_agentscope_runtime_stream_adapter
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
 
@@ -688,7 +689,7 @@ async def test_declared_skill_resume_emits_freshness_notice_before_persisting_sn
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
 
@@ -743,7 +744,7 @@ async def test_turn_start_aggregates_token_change_and_withdrawal_notice(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda path: 11.0 if Path(path) == xlsx_dir else 20.0,
     )
 
@@ -797,7 +798,7 @@ async def test_turn_start_notice_reports_directory_switch_paths(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 44.0,
     )
 
@@ -817,7 +818,7 @@ async def test_turn_start_notice_reports_directory_switch_paths(
 
 
 @pytest.mark.asyncio
-async def test_missing_skill_snapshot_entry_is_removed_without_notice(
+async def test_manifest_confirmed_missing_skill_is_withdrawn(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -837,7 +838,7 @@ async def test_missing_skill_snapshot_entry_is_removed_without_notice(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 0.0,
     )
 
@@ -850,7 +851,7 @@ async def test_missing_skill_snapshot_entry_is_removed_without_notice(
     ]
 
     assert outputs[-1][0].get_text_content() == "agent reply"
-    assert _turn_notice_messages() == []
+    assert "missing: no longer effective" in _turn_notice_text()
     state = await runner.session.get_session_state_dict(
         "session-1",
         user_id="user-1",
@@ -880,7 +881,7 @@ async def test_missing_stored_skill_dir_still_reports_directory_switch(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 44.0,
     )
 
@@ -928,7 +929,7 @@ async def test_unchanged_snapshot_emits_no_notice(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 42.0,
     )
 
@@ -1092,7 +1093,7 @@ async def test_applied_snapshot_prevents_repeat_notice_on_later_turn(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
 
@@ -1140,7 +1141,7 @@ async def test_freshness_notice_is_not_persisted_in_session_memory(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
 
@@ -1193,7 +1194,7 @@ async def test_retryable_plan_failure_defers_snapshot_persistence_until_success(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
     monkeypatch.setattr(
@@ -1302,7 +1303,7 @@ async def test_retryable_completion_failure_defers_snapshot_persistence_until_su
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
     monkeypatch.setattr(
@@ -1416,7 +1417,7 @@ async def test_retryable_completion_failure_keeps_notice_model_only(
         },
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner.get_skill_freshness_token",
+        "swe.agents.skills_manager.get_skill_freshness_token",
         lambda _path: 11.0,
     )
     monkeypatch.setattr(
@@ -1481,3 +1482,61 @@ async def test_retryable_completion_failure_keeps_notice_model_only(
     assert outputs[-1][0].get_text_content() == "agent reply"
     assert plan_notice_counts == [1, 1]
     assert _streamed_notice_messages(outputs) == []
+
+
+@pytest.mark.asyncio
+async def test_query_retry_keeps_starting_snapshot_across_ttl(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents import skill_runtime_snapshot as snapshots
+
+    runner = _patch_runner(monkeypatch, tmp_path)
+    _FakeAgent.effective_skills = ["xlsx"]
+    _write_skill_manifest(tmp_path, skills=["xlsx"])
+    directory = _write_skill_dir(tmp_path, "xlsx")
+    now = [0.0]
+    monkeypatch.setattr(snapshots.time, "monotonic", lambda: now[0])
+    config = _agent_config()
+    config.running.query_retry.enabled = True
+    config.running.query_retry.max_retries = 1
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *a, **k: config,
+    )
+    original = runner._build_turn_plan
+    observed = []
+
+    async def retry_after_expiry(*args, **kwargs):
+        snapshot = kwargs["runtime"].agent._workspace_skill_snapshot
+        observed.append(snapshot)
+        if len(observed) == 1:
+            (directory / "resource.txt").write_text(
+                "changed after Query start",
+            )
+            now[0] = 600
+            raise RuntimeError("request timed out")
+        return await original(
+            runtime=kwargs["runtime"],
+            request=kwargs["request"],
+            msgs=kwargs["msgs"],
+            query=kwargs["query"],
+        )
+
+    monkeypatch.setattr(runner, "_build_turn_plan", retry_after_expiry)
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="continue")],
+            request=_request(),
+        )
+    ]
+    assert outputs[-1][0].get_text_content() == "agent reply"
+    assert len(observed) == 2
+    assert observed[0] is observed[1]
+    following = await snapshots.get_workspace_skill_snapshot_async(tmp_path)
+    assert following is not observed[0]
+    assert (
+        following.skills["xlsx"].freshness_token
+        != observed[0].skills["xlsx"].freshness_token
+    )

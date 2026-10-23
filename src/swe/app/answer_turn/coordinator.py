@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from .models import (
@@ -209,6 +209,25 @@ class AnswerTurnCoordinator:
                 )
                 for chat_id in chat_ids
             }
+
+    async def commit_message(
+        self,
+        identity: TurnIdentity,
+        persist: Callable[[], Awaitable[None]],
+    ) -> bool:
+        """Admit one local message commit atomically against Stop claims."""
+        lock = await self._chat_lock(identity.chat_id)
+        async with lock:
+            state = self._turns.get(identity.chat_id)
+            if (
+                state is None
+                or state.identity != identity
+                or state.status != TurnStatus.RUNNING
+                or state.settlement_started
+            ):
+                return False
+            await persist()
+            return True
 
     async def current_identity(
         self,

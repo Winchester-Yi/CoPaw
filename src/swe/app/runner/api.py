@@ -805,6 +805,19 @@ async def _build_chat_history(
                 chat_spec.user_id,
             )
         )
+    from .turn_ledger import TurnHistorySnapshot
+
+    if state.get("schema_version") == 3 and not (
+        isinstance(state, TurnHistorySnapshot)
+        and state.chat_id == chat_spec.id
+    ):
+        state = await session.materialize_turn_states(
+            chat_spec.session_id,
+            chat_spec.user_id,
+            state,
+            chat_spec.id,
+        )
+    assert isinstance(state, dict)
     if status_override is not None:
         status = status_override
     else:
@@ -1206,6 +1219,12 @@ async def get_answer_turn(
                 candidate.session_id,
                 candidate.user_id,
             )
+            state = await _hydrate_history_turn(
+                session,
+                candidate,
+                state,
+                msgid,
+            )
             stored_chat_id = _turn_state_chat_id(state, msgid)
             if stored_chat_id is not None and stored_chat_id != candidate.id:
                 continue
@@ -1233,6 +1252,12 @@ async def get_answer_turn(
             session,
             chat_spec.session_id,
             chat_spec.user_id,
+        )
+        selected_state = await _hydrate_history_turn(
+            session,
+            chat_spec,
+            selected_state,
+            msgid,
         )
         selected_history = await _build_chat_history(
             chat_spec,
@@ -1266,6 +1291,29 @@ async def get_answer_turn(
         status=history.status,
         turn_status=turn_status,
     )
+
+
+async def _hydrate_history_turn(session, chat, state, msgid):
+    return await _select_history_turns(session, chat, state, (msgid,))
+
+
+async def _select_history_turns(session, chat, state, turn_ids):
+    """Project selected cold turns without expanding the complete ledger."""
+    if state.get("schema_version") != 3:
+        return state
+    from .turn_ledger import TurnHistorySnapshot
+
+    turns = dict(state.get("turn_states", {}))
+    for turn_id in dict.fromkeys(turn_ids):
+        turn = await session.get_turn_state(
+            chat.session_id,
+            chat.user_id,
+            state,
+            turn_id,
+        )
+        if turn is not None:
+            turns[turn_id] = turn
+    return TurnHistorySnapshot({**state, "turn_states": turns}, chat.id)
 
 
 @router.get("/{chat_id}/history", response_model=ChatArchivePage)

@@ -11,7 +11,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ...agents.model_factory import create_model_and_formatter
+from ...agents.model_factory import (
+    create_model_and_formatter,
+    create_model_and_formatter_async,
+)
 from ...tracing import capture_current_trace_context
 
 logger = logging.getLogger(__name__)
@@ -30,6 +33,18 @@ def get_model(trace_context=None):
         return model
     except Exception as e:
         logger.warning("Failed to get model: %s", e)
+        return None
+
+
+async def get_model_async(trace_context=None):
+    """Prepare model configuration and TLS before loop-owned construction."""
+    try:
+        model, _ = await create_model_and_formatter_async(
+            trace_context=trace_context,
+        )
+        return model
+    except Exception as exc:
+        logger.warning("Failed to get model: %s", exc)
         return None
 
 
@@ -182,7 +197,7 @@ async def ai_optimize_skill_stream(
 
     async def generate():
         try:
-            model = get_model(
+            model = await get_model_async(
                 trace_context=capture_current_trace_context(),
             )
             if not model:

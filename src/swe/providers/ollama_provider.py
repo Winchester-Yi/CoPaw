@@ -78,12 +78,16 @@ class OllamaProvider(OpenAIProvider):
         generation_kwargs: dict | None = None,
     ) -> ChatModelBase:
         from .openai_chat_model_compat import OpenAIChatModelCompat
+        from .client_tls import prepared_http_client_kwargs
 
         return OpenAIChatModelCompat(
             model_name=model_id,
             stream=True,
             api_key=self.api_key,
             stream_tool_parsing=False,
-            client_kwargs={"base_url": self._openai_compatible_base_url()},
+            client_kwargs={
+                "base_url": self._openai_compatible_base_url(),
+                **prepared_http_client_kwargs("openai"),
+            },
             generate_kwargs=generation_kwargs or {},
         )

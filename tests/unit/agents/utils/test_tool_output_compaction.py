@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
+import threading
 
 import pytest
 from agentscope.message import Msg
@@ -28,6 +30,117 @@ def _tool_result_message(output: object) -> Msg:
 
 def _tool_result_text(message: Msg) -> str:
     return message.get_content_blocks("tool_result")[0]["output"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_async_compaction_preserves_unchanged_content(tmp_path):
+    from swe.agents.utils.tool_output_compaction import (
+        compact_tool_result_messages_async,
+    )
+
+    messages = [
+        Msg("user", [{"type": "text", "text": "hello"}], "user"),
+        _tool_result_message("small output"),
+    ]
+    originals = [message.content for message in messages]
+    result = await compact_tool_result_messages_async(
+        messages,
+        old_max_bytes=512,
+        recent_max_bytes=512,
+        recent_n=1,
+        artifact_dir=tmp_path / "tool_result",
+        workspace_dir=tmp_path,
+    )
+    assert result is messages
+    assert all(
+        message.content is original
+        for message, original in zip(messages, originals)
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_compaction_does_not_change_online_message(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.agents.utils import tool_output_compaction as compaction
+
+    message = _tool_result_message([{"type": "text", "text": "x" * 4096}])
+    original_content = message.content
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_write = compaction._persist_artifact
+
+    def blocked_write(*args):
+        started.set()
+        assert release.wait(5)
+        try:
+            return original_write(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(compaction, "_persist_artifact", blocked_write)
+    task = asyncio.create_task(
+        compaction.compact_tool_result_messages_async(
+            [message],
+            old_max_bytes=1000,
+            recent_max_bytes=1000,
+            recent_n=1,
+            artifact_dir=tmp_path / "tool_result",
+            workspace_dir=tmp_path,
+        ),
+    )
+    try:
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    while not finished.is_set():
+        await asyncio.sleep(0.001)
+    assert message.content is original_content
+    assert _tool_result_text(message) == "x" * 4096
+
+
+@pytest.mark.asyncio
+async def test_historical_compaction_and_cleanup_run_off_loop(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.agents.utils import tool_output_compaction as compaction
+    from swe.agents.memory.reme_light_memory_manager import (
+        ReMeLightMemoryManager,
+    )
+
+    manager = object.__new__(ReMeLightMemoryManager)
+    manager.working_dir = str(tmp_path)
+    monkeypatch.setattr(manager, "_warn_if_version_mismatch", lambda: None)
+    observed_threads = []
+    original_cleanup = compaction.cleanup_expired_artifacts
+
+    def record_cleanup(*args, **kwargs):
+        observed_threads.append(threading.get_ident())
+        return original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(
+        compaction,
+        "cleanup_expired_artifacts",
+        record_cleanup,
+    )
+    message = _tool_result_message([{"type": "text", "text": "x" * 4096}])
+    await manager.compact_tool_result(
+        messages=[message],
+        old_max_bytes=1000,
+        recent_max_bytes=1000,
+        recent_n=1,
+        retention_days=1,
+    )
+    assert observed_threads
+    assert threading.get_ident() not in observed_threads
+    assert "<<<TRUNCATED>>>" in _tool_result_text(message)
 
 
 def test_returns_original_text_without_artifact_when_within_budget(

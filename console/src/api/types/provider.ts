@@ -145,52 +145,6 @@ export interface AddModelRequest {
 
 /* ---- Local models ---- */
 
-export interface LocalModelInfo {
-  id: string;
-  name: string;
-  size_bytes: number;
-  downloaded: boolean;
-  source: LocalDownloadSource;
-}
-
-export type LocalDownloadSource = "huggingface" | "modelscope" | "auto";
-
-export interface LocalServerStatus {
-  available: boolean;
-  installable: boolean;
-  installed: boolean;
-  port: number | null;
-  model_name: string | null;
-  message: string | null;
-}
-
-export interface LocalDownloadProgress {
-  status:
-    | "idle"
-    | "pending"
-    | "downloading"
-    | "canceling"
-    | "completed"
-    | "failed"
-    | "cancelled";
-  model_name: string | null;
-  downloaded_bytes: number;
-  total_bytes: number | null;
-  speed_bytes_per_sec: number;
-  source: LocalDownloadSource | null;
-  error: string | null;
-  local_path: string | null;
-}
-
-export interface LocalActionResponse {
-  status: string;
-  message: string;
-}
-
-export interface StartLocalServerRequest {
-  model_id: string;
-}
-
 /* ---- Test Connection ---- */
 
 export interface TestConnectionResponse {

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -17,6 +18,7 @@ from fastapi import HTTPException
 
 from swe.config.utils import list_all_tenant_ids
 from .config import BackupConfig, load_backup_config
+from .io_worker import run_backup_io
 from .models import BackupTask, BackupTaskStatus, BackupTaskType
 from .task_store import TaskStore
 from .shell_worker import ShellBackupWorker
@@ -34,6 +36,7 @@ class ShellBackupService:
         self.task_store = TaskStore()
         self._worker: ShellBackupWorker | None = None
         self._lock = asyncio.Lock()
+        self._worker_lock = threading.Lock()
 
     def _get_backup_config(self) -> BackupConfig:
         """获取备份配置。"""
@@ -47,32 +50,33 @@ class ShellBackupService:
 
     def _get_worker(self) -> ShellBackupWorker:
         """获取或创建 Shell 备份 worker 实例。"""
-        if self._worker is None:
-            backup_config = self._get_backup_config()
-            env_config = backup_config.get_active_config()
-            if env_config is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Backup environment not configured",
-                )
+        with self._worker_lock:
+            if self._worker is None:
+                backup_config = self._get_backup_config()
+                env_config = backup_config.get_active_config()
+                if env_config is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Backup environment not configured",
+                    )
 
-            # 检查平台兼容性
-            if sys.platform == "win32":
-                logger.warning(
-                    "Shell backup mode not supported on Windows platform",
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail="Shell backup mode is only supported on Linux/Unix platforms",
-                )
+                # 检查平台兼容性
+                if sys.platform == "win32":
+                    logger.warning(
+                        "Shell backup mode not supported on Windows platform",
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Shell backup mode is only supported on Linux/Unix platforms",
+                    )
 
-            self._worker = ShellBackupWorker(
-                self.task_store,
-                env_config,
-                backup_config.shell_script,
-            )
-            logger.info("ShellBackupWorker initialized")
-        return self._worker
+                self._worker = ShellBackupWorker(
+                    self.task_store,
+                    env_config,
+                    backup_config.shell_script,
+                )
+                logger.info("ShellBackupWorker initialized")
+            return self._worker
 
     async def create_backup_task(
         self,
@@ -95,6 +99,7 @@ class ShellBackupService:
                     status_code=409,
                     detail="Another backup task is already running",
                 )
+            worker = await run_backup_io(self._get_worker)
 
         # 设置备份日期和时间（北京时间），默认当前时间
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -116,7 +121,7 @@ class ShellBackupService:
         self.task_store.save(task)
 
         # 启动异步执行
-        asyncio.create_task(self._get_worker().run_backup_task(task))
+        asyncio.create_task(worker.run_backup_task(task))
 
         return task
 
@@ -141,6 +146,7 @@ class ShellBackupService:
                     status_code=409,
                     detail="Another backup task is already running",
                 )
+            worker = await run_backup_io(self._get_worker)
 
         # 设置日期
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -160,7 +166,7 @@ class ShellBackupService:
         self.task_store.save(task)
 
         # 启动异步执行
-        asyncio.create_task(self._get_worker().run_restore_task(task))
+        asyncio.create_task(worker.run_restore_task(task))
 
         return task
 

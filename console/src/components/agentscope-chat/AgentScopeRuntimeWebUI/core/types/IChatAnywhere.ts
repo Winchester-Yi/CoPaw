@@ -57,6 +57,7 @@ export interface IAgentScopeRuntimeWebUIAPIOptions {
     signal?: AbortSignal;
     logical_session_id?: string;
     chat_id?: string | null;
+    after_event_id?: string;
   }) => Promise<Response>;
 
   /**
@@ -70,7 +71,7 @@ export interface IAgentScopeRuntimeWebUIAPIOptions {
    * @descriptionEn Custom parser for stream chunks (default JSON.parse)
    */
   responseParser?: (
-    response: Response,
+    response: string,
   ) => IAgentScopeRuntimeResponse | IAgentScopeRuntimeMessage | IContent;
 
   /**

@@ -42,7 +42,11 @@ interface ProviderModelState {
     modelId: string,
     config: ModelRuntimeConfig,
   ) => void;
-  invalidate: (options?: { providers?: boolean; active?: boolean }) => void;
+  invalidate: (options?: {
+    providers?: boolean;
+    active?: boolean;
+    preserveProviders?: boolean;
+  }) => void;
   reset: () => void;
 }
 
@@ -311,6 +315,7 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
   invalidate(options) {
     const clearProviders = options?.providers ?? true;
     const clearActive = options?.active ?? true;
+    const preserveProviders = options?.preserveProviders ?? false;
 
     if (clearProviders && clearActive) {
       providerCacheGeneration += 1;
@@ -319,7 +324,10 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
       activeCache.clear();
       providerInflight.clear();
       activeInflight.clear();
-      set(initialState());
+      set((state) => ({
+        ...initialState(),
+        providers: preserveProviders ? state.providers : [],
+      }));
       return;
     }
 
@@ -336,7 +344,7 @@ export const useProviderModelStore = create<ProviderModelState>((set) => ({
     }
 
     set((state) => ({
-      providers: clearProviders ? [] : state.providers,
+      providers: clearProviders && !preserveProviders ? [] : state.providers,
       activeModels: clearActive ? null : state.activeModels,
     }));
   },

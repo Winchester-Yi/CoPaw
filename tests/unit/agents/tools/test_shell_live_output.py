@@ -3,10 +3,88 @@ import asyncio
 import os
 import signal
 import sys
+import threading
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_unix_shell_decodes_complete_output_in_worker(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents.tools import shell
+
+    observed_threads = []
+    original_decode = shell.smart_decode
+
+    def record_decode(data):
+        observed_threads.append(threading.get_ident())
+        return original_decode(data)
+
+    monkeypatch.setattr(shell, "smart_decode", record_decode)
+    returncode, stdout, stderr = await shell._execute_unix_subprocess(
+        "printf hello",
+        tmp_path,
+        5,
+        os.environ.copy(),
+    )
+    assert (returncode, stdout, stderr) == (0, "hello", "")
+    assert observed_threads
+    assert threading.get_ident() not in observed_threads
+
+
+@pytest.mark.asyncio
+async def test_shell_response_formatting_runs_in_worker(monkeypatch, tmp_path):
+    from swe.agents.tools import shell
+
+    observed_threads = []
+    original_format = shell._format_shell_response
+
+    def record_format(*args):
+        observed_threads.append(threading.get_ident())
+        return original_format(*args)
+
+    async def fake_subprocess(*args, **kwargs):
+        return 0, "hello", "warning"
+
+    @asynccontextmanager
+    async def no_execution_slot(_policy):
+        yield
+
+    monkeypatch.setattr(shell, "_format_shell_response", record_format)
+    monkeypatch.setattr(shell, "_execute_platform_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        shell,
+        "_tenant_shell_execution_slot",
+        no_execution_slot,
+    )
+    monkeypatch.setattr(
+        shell,
+        "prepare_shell_command",
+        lambda *a: SimpleNamespace(
+            command="ignored",
+            working_dir=tmp_path,
+            env=os.environ.copy(),
+            python_runtime_guard=nullcontext(),
+        ),
+    )
+    monkeypatch.setattr(
+        shell,
+        "resolve_current_process_limit_policy",
+        lambda *a: SimpleNamespace(build_preexec_fn=lambda: None),
+    )
+    monkeypatch.setattr(
+        shell,
+        "_format_process_limit_diagnostic",
+        lambda text, p: text,
+    )
+    response = await shell.execute_shell_command("ignored")
+    assert response.content[0]["text"] == "hello\n[stderr]\nwarning"
+    assert observed_threads
+    assert threading.get_ident() not in observed_threads
 
 
 @pytest.mark.asyncio

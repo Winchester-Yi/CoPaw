@@ -201,73 +201,66 @@ class FeaturedCaseStore:
         scope_bbk_id = normalize_featured_case_bbk_id(case.bbk_id)
         case.bbk_id = scope_bbk_id
 
-        async with self.db.acquire() as conn:
-            await conn.begin()
-            try:
-                case_ids = await self._lock_queue(
-                    conn,
-                    case.source_id,
-                    scope_bbk_id,
+        async with self.db.transaction() as conn:
+            case_ids = await self._lock_queue(
+                conn,
+                case.source_id,
+                scope_bbk_id,
+            )
+            await self._persist_queue(
+                conn,
+                case.source_id,
+                scope_bbk_id,
+                case_ids,
+            )
+            steps_json = (
+                json.dumps([step.model_dump() for step in case.steps])
+                if case.steps
+                else None
+            )
+            created_id = int(
+                await conn.insert(
+                    """
+                    INSERT INTO swe_featured_case
+                        (source_id, bbk_id, label, value, image_url,
+                         iframe_url, iframe_title, steps, sort_order,
+                         is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    (
+                        case.source_id,
+                        scope_bbk_id,
+                        case.label,
+                        case.value,
+                        case.image_url,
+                        case.iframe_url,
+                        case.iframe_title,
+                        steps_json,
+                        len(case_ids) + 1,
+                        int(case.is_active),
+                    ),
+                ),
+            )
+            timestamps = await conn.fetch_one(
+                """
+                    SELECT created_at, updated_at
+                    FROM swe_featured_case
+                    WHERE id = %s
+                """,
+                (created_id,),
+            )
+            if timestamps is None:
+                raise RuntimeError(
+                    "Created featured case could not be reloaded",
                 )
-                await self._persist_queue(
-                    conn,
-                    case.source_id,
-                    scope_bbk_id,
-                    case_ids,
-                )
-                steps_json = (
-                    json.dumps([step.model_dump() for step in case.steps])
-                    if case.steps
-                    else None
-                )
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                            INSERT INTO swe_featured_case
-                                (source_id, bbk_id, label, value, image_url,
-                                 iframe_url, iframe_title, steps, sort_order,
-                                 is_active)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            case.source_id,
-                            scope_bbk_id,
-                            case.label,
-                            case.value,
-                            case.image_url,
-                            case.iframe_url,
-                            case.iframe_title,
-                            steps_json,
-                            len(case_ids) + 1,
-                            int(case.is_active),
-                        ),
-                    )
-                    created_id = int(cursor.lastrowid)
-                    await cursor.execute(
-                        """
-                            SELECT created_at, updated_at
-                            FROM swe_featured_case
-                            WHERE id = %s
-                        """,
-                        (created_id,),
-                    )
-                    timestamps = await cursor.fetchone()
-                    if timestamps is None:
-                        raise RuntimeError(
-                            "Created featured case could not be reloaded",
-                        )
-                    created = case.model_copy(
-                        update={
-                            "id": created_id,
-                            "sort_order": len(case_ids) + 1,
-                            "created_at": timestamps[0],
-                            "updated_at": timestamps[1],
-                        },
-                    )
-                await conn.commit()
-            except Exception:
-                await conn.rollback()
-                raise
+            created = case.model_copy(
+                update={
+                    "id": created_id,
+                    "sort_order": len(case_ids) + 1,
+                    "created_at": timestamps["created_at"],
+                    "updated_at": timestamps["updated_at"],
+                },
+            )
         return created
 
     async def update_case(
@@ -341,31 +334,24 @@ class FeaturedCaseStore:
             return None
 
         scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
-        async with self.db.acquire() as conn:
-            await conn.begin()
-            try:
-                case_ids = await self._lock_queue(
-                    conn,
-                    source_id,
-                    scope_bbk_id,
-                )
-                if case_id not in case_ids:
-                    await conn.rollback()
-                    return None
+        async with self.db.transaction() as conn:
+            case_ids = await self._lock_queue(
+                conn,
+                source_id,
+                scope_bbk_id,
+            )
+            if case_id not in case_ids:
+                return None
 
-                case_ids.remove(case_id)
-                final_sort_order = min(sort_order, len(case_ids) + 1)
-                case_ids.insert(final_sort_order - 1, case_id)
-                await self._persist_queue(
-                    conn,
-                    source_id,
-                    scope_bbk_id,
-                    case_ids,
-                )
-                await conn.commit()
-            except Exception:
-                await conn.rollback()
-                raise
+            case_ids.remove(case_id)
+            final_sort_order = min(sort_order, len(case_ids) + 1)
+            case_ids.insert(final_sort_order - 1, case_id)
+            await self._persist_queue(
+                conn,
+                source_id,
+                scope_bbk_id,
+                case_ids,
+            )
 
         return FeaturedCaseReorderResult(
             case_id=case_id,
@@ -384,41 +370,32 @@ class FeaturedCaseStore:
             return False
 
         scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
-        async with self.db.acquire() as conn:
-            await conn.begin()
-            try:
-                case_ids = await self._lock_queue(
-                    conn,
-                    source_id,
-                    scope_bbk_id,
-                )
-                if case_id not in case_ids:
-                    await conn.rollback()
-                    return False
+        async with self.db.transaction() as conn:
+            case_ids = await self._lock_queue(
+                conn,
+                source_id,
+                scope_bbk_id,
+            )
+            if case_id not in case_ids:
+                return False
 
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """
-                            DELETE FROM swe_featured_case
-                            WHERE id = %s AND source_id = %s
-                        """,
-                        (case_id, source_id),
-                    )
-                    if cursor.rowcount <= 0:
-                        await conn.rollback()
-                        return False
+            affected_rows = await conn.execute(
+                """
+                    DELETE FROM swe_featured_case
+                    WHERE id = %s AND source_id = %s
+                """,
+                (case_id, source_id),
+            )
+            if affected_rows <= 0:
+                return False
 
-                case_ids.remove(case_id)
-                await self._persist_queue(
-                    conn,
-                    source_id,
-                    scope_bbk_id,
-                    case_ids,
-                )
-                await conn.commit()
-            except Exception:
-                await conn.rollback()
-                raise
+            case_ids.remove(case_id)
+            await self._persist_queue(
+                conn,
+                source_id,
+                scope_bbk_id,
+                case_ids,
+            )
         return True
 
     async def _lock_queue(
@@ -429,19 +406,17 @@ class FeaturedCaseStore:
     ) -> list[int]:
         """Lock and return one queue's case IDs in stable current order."""
         scope_condition, scope_params = _scope_condition(bbk_id)
-        async with conn.cursor() as cursor:
-            await cursor.execute(
-                f"""
-                    SELECT id
-                    FROM swe_featured_case
-                    WHERE source_id = %s AND {scope_condition}
-                    ORDER BY sort_order ASC, id ASC
-                    FOR UPDATE
-                """,
-                tuple([source_id, *scope_params]),
-            )
-            rows = await cursor.fetchall()
-        return [int(row[0]) for row in rows]
+        rows = await conn.fetch_all(
+            f"""
+                SELECT id
+                FROM swe_featured_case
+                WHERE source_id = %s AND {scope_condition}
+                ORDER BY sort_order ASC, id ASC
+                FOR UPDATE
+            """,
+            tuple([source_id, *scope_params]),
+        )
+        return [int(row["id"]) for row in rows]
 
     async def _persist_queue(
         self,
@@ -454,18 +429,17 @@ class FeaturedCaseStore:
         if not case_ids:
             return
         scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
-        async with conn.cursor() as cursor:
-            await cursor.executemany(
-                """
-                    UPDATE swe_featured_case
-                    SET sort_order = %s, bbk_id = %s
-                    WHERE id = %s AND source_id = %s
-                """,
-                [
-                    (position, scope_bbk_id, row_id, source_id)
-                    for position, row_id in enumerate(case_ids, start=1)
-                ],
-            )
+        await conn.execute_many(
+            """
+                UPDATE swe_featured_case
+                SET sort_order = %s, bbk_id = %s
+                WHERE id = %s AND source_id = %s
+            """,
+            [
+                (position, scope_bbk_id, row_id, source_id)
+                for position, row_id in enumerate(case_ids, start=1)
+            ],
+        )
 
     def _row_to_case(self, row: dict) -> FeaturedCase:
         steps = None

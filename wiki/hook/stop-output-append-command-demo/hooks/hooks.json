@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "events": {
+    "Stop": [
+      {
+        "id": "append-reference-links",
+        "hooks": [
+          {
+            "id": "append-reference-links-text",
+            "type": "command",
+            "argv": ["python", "scripts/append_reference_links.py"],
+            "timeout": 10,
+            "outputAppend": true
+          }
+        ]
+      }
+    ]
+  }
+}

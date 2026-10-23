@@ -86,7 +86,7 @@ COPY pyproject.toml setup.py README.md ./
 COPY src ./src
 COPY scripts/verify_session_nas_lock.py ./scripts/verify_session_nas_lock.py
 COPY console/dist src/swe/console/
-RUN pip install --no-cache-dir ".[ollama]" aiomysql pymysql
+RUN pip install --no-cache-dir ".[ollama,mysql]"
 
 RUN swe init --defaults --accept-security
 

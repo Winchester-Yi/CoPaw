@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from .io_worker import run_backup_io
 from .batch_models import (
     BatchTaskItemStatus,
     BatchTaskStatus,
@@ -313,6 +314,10 @@ class BatchBackupService:
 
     async def get_latest_backups(self) -> dict[str, dict]:
         """Get latest backup info for each instance from S3."""
+        return await run_backup_io(self._get_latest_backups_sync)
+
+    def _get_latest_backups_sync(self) -> dict[str, dict]:
+        """Construct the client, enumerate and select results in one worker."""
         from .s3_client import S3BackupClient
         from .config import load_backup_config
 

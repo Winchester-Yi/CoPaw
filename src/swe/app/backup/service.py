@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 
 from swe.config.utils import list_all_tenant_ids
 from .config import BackupConfig, load_backup_config
+from .io_worker import run_backup_io
 from .models import BackupTask, BackupTaskStatus, BackupTaskType
 from .task_store import TaskStore
 from .worker import BackupWorker
@@ -24,6 +26,7 @@ class BackupService:
         self.task_store = TaskStore()
         self._worker: BackupWorker | None = None
         self._lock = asyncio.Lock()
+        self._worker_lock = threading.Lock()
 
     def _get_backup_config(self) -> BackupConfig:
         """Get backup config from file."""
@@ -37,16 +40,17 @@ class BackupService:
 
     def _get_worker(self) -> BackupWorker:
         """Get or create worker instance."""
-        if self._worker is None:
-            backup_config = self._get_backup_config()
-            env_config = backup_config.get_active_config()
-            if env_config is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Backup environment not configured",
-                )
-            self._worker = BackupWorker(self.task_store, env_config)
-        return self._worker
+        with self._worker_lock:
+            if self._worker is None:
+                backup_config = self._get_backup_config()
+                env_config = backup_config.get_active_config()
+                if env_config is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Backup environment not configured",
+                    )
+                self._worker = BackupWorker(self.task_store, env_config)
+            return self._worker
 
     async def create_backup_task(
         self,
@@ -69,6 +73,7 @@ class BackupService:
                     status_code=409,
                     detail="Another backup task is already running",
                 )
+            worker = await run_backup_io(self._get_worker)
 
         # Set backup date and hour (Beijing time)
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -90,7 +95,7 @@ class BackupService:
         self.task_store.save(task)
 
         # Start async execution
-        asyncio.create_task(self._get_worker().run_backup_task(task))
+        asyncio.create_task(worker.run_backup_task(task))
 
         return task
 
@@ -115,6 +120,7 @@ class BackupService:
                     status_code=409,
                     detail="Another backup task is already running",
                 )
+            worker = await run_backup_io(self._get_worker)
 
         # Set date if not provided
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -134,7 +140,7 @@ class BackupService:
         self.task_store.save(task)
 
         # Start async execution
-        asyncio.create_task(self._get_worker().run_restore_task(task))
+        asyncio.create_task(worker.run_restore_task(task))
 
         return task
 

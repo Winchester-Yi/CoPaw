@@ -145,7 +145,7 @@ const BubbleList: React.ForwardRefRenderFunction<
     if (!scrollEl) return true;
 
     if (isDesc) {
-      return scrollEl.scrollTop <= 2;
+      return Math.abs(scrollEl.scrollTop) <= 2;
     }
     return (
       scrollEl.scrollHeight - scrollEl.clientHeight - scrollEl.scrollTop <= 2

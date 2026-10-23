@@ -24,6 +24,7 @@ import RetryStatusMessage from "./RetryStatusMessage";
 import { getCompletedReasoningFallbackText } from "./reasoningFallback";
 import ProcessDisclosure from "./ProcessDisclosure";
 import { resolveToolName } from "./ToolTitle";
+import { readStopAppendMetadata } from "@/pages/Chat/stopAppend";
 // import { Avatar, Flex } from "antd";
 
 type RetryMetadata = {
@@ -384,7 +385,13 @@ export default function AgentScopeRuntimeResponseCard(props: {
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
       {props.beforeActions}
-      <Actions {...props} hideReplace={hasModelCallFailed} />
+      <Actions
+        {...props}
+        hideReplace={
+          hasModelCallFailed ||
+          messages.some((message) => Boolean(readStopAppendMetadata(message)))
+        }
+      />
       {props.data.suggestions?.length > 0 && (
         <Suggestions
           suggestions={props.data.suggestions}

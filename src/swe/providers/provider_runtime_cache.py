@@ -11,6 +11,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
+from ..performance_metrics import timed_work
+
 T = TypeVar("T")
 
 
@@ -62,7 +64,13 @@ class ProviderRuntimeCache:
         *args: Any,
     ) -> concurrent.futures.Future[T]:
         """Run synchronous provider runtime work on the shared executor."""
-        return self._init_executor.submit(callback, *args)
+        return self._init_executor.submit(
+            timed_work,
+            "provider",
+            time.monotonic(),
+            callback,
+            *args,
+        )
 
     def get_or_start_instance(
         self,
@@ -95,7 +103,7 @@ class ProviderRuntimeCache:
                         return created
                     return self._instances.setdefault(scope, created)
 
-            future = self._init_executor.submit(build_and_cache)
+            future = self.submit(build_and_cache)
             self._instance_inflight[scope] = future
             return future
 

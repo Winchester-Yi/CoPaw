@@ -2,6 +2,7 @@
 
 import sys
 import types
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -20,6 +21,11 @@ from swe.app.routers.config import (
     list_channel_types,
     put_channel,
 )
+
+
+@asynccontextmanager
+async def _agent_config_update_scope(agent, agent_config):
+    yield agent, agent_config
 
 
 async def test_list_channels_materializes_console_when_channels_missing():
@@ -121,8 +127,8 @@ async def test_put_channel_ignores_constraints_and_forces_console_enabled():
 
     with (
         patch(
-            "swe.app.agent_context.get_agent_and_config_for_request",
-            return_value=(agent, agent_config),
+            "swe.app.agent_context.agent_config_update_scope",
+            lambda _request: _agent_config_update_scope(agent, agent_config),
         ),
         patch(
             "swe.app.routers.config.get_available_channels",
@@ -162,8 +168,8 @@ async def test_put_channel_keeps_console_accessible_when_env_filter_excludes_it(
 
     with (
         patch(
-            "swe.app.agent_context.get_agent_and_config_for_request",
-            return_value=(agent, agent_config),
+            "swe.app.agent_context.agent_config_update_scope",
+            lambda _request: _agent_config_update_scope(agent, agent_config),
         ),
         patch(
             "swe.app.routers.config.get_available_channels",

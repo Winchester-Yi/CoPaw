@@ -53,12 +53,16 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 ```
 
 检查必须同时证明：第二个 Pod 在持锁期间拿不到 `.verification.json.lock`、持锁进程被 SIGKILL 后可以接管、
-第二个 Pod 并发读取原子 JSON 替换时始终可解析且 revision 连续递增。失败时禁止以无锁写入或 Redis 锁替代；
+第二个 Pod 并发读取原子 JSON 替换时始终可解析且 revision 不倒退，写者逐次核对连续 revision，读者须实际读取中途水位并核对最终 revision。脚本也检查硬链接独占发布及删除暂存名后的内容保留。失败时禁止以无锁写入或 Redis 锁替代；
 先保留旧版本。Job 镜像必须是包含 `scripts/verify_session_nas_lock.py` 的本次 release 镜像；示例默认使用
 `agentscope/swe:latest`，生产环境应改为已验证的不可变 release tag。
 
 通过后暂停 cron dispatch，排空现有 session 请求，将旧 Runner Pod 缩容到零，再部署新版本，确认所有新 Pod
 使用同一绝对 session 路径后恢复 cron。禁止新旧 Runner writer 混跑，否则旧逻辑仍可能覆盖新事务快照。
+
+每次验证使用唯一、全新共享测试子目录，不直接使用用户 session 目录；失败后保留现场，下一次换新目录。两份脚本 JSON 及 Pod 节点、镜像摘要、PVC/StorageClass 都须留档，单机两个进程不算两 Pod NAS 通过。2026-10-16 本地 76 项测试、迁移/旧格式导出及 `ddb683634` 旧源码继续写入已通过，详见[本地验收报告](../../docs/superpowers/specs/2026-10-16-memory-storage-verification-report.md)；真实 NAS 门禁仍未执行。
+
+真实历史副本入口为 `scripts/rehearse_memory_history.py`，源目录只读、输出目录必须全新且在源目录外，原始数据和私有指纹不得入库。2026-10-16 已完成 17 个 session、4 份 events-only 日志的脱敏迁移/导出及旧源码追加，380 个源文件 hash 未变化；[历史副本报告](../../docs/superpowers/specs/2026-10-16-memory-history-rehearsal-report.md)同时记录耗时、Python/RSS 峰值和文件数。样本最多 3 个 turn、77 条事件，不能把该结果当作长会话冷存储收益或真实 NAS 验收。
 
 按问题类型给出优先查看的路径，减少无效搜索。
 
@@ -354,6 +358,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 工作台任务页顶部汇总随客户名单响应读取 `targetCusCount`、`todayTouchCount`、`sevenDayTouchCount`、`unTouchedCount`（外部响应 `data` 下，由前端适配到响应顶层）。今日任务经营视角使用所选当天技能的统计，其余视角/模块使用当天全部技能；搜索、标签和接触状态筛选只过滤表格，不重算后端汇总。各模块独立保存名单及统计并同步更新；首次加载显示 `--`，后台刷新保留旧值，缺失统计显示 `--`，当天无场景时显示 0 且不查询名单。列表分页条数仍按当前筛选结果展示。
 
 今日任务经营视角原始客户名单为空且查询完成时，在当前任务标题旁展示执行时间；使用 `plans.items[].scenes[].cron_expr` 经 `mapSceneItem` 解析的排程，由任务树节点透传 `schedule` 并复用 `scheduleLabel`。日/周排程显示具体时分，小时排程显示“每小时整点”，自定义排程显示原表达式。搜索或接触状态筛选导致的空列表不触发展示；客户视角、待触达、已完成不显示。`plans` 不返回实际执行状态，空名单不能严格证明任务尚未执行。
+
+## Stop 追加消息仅最后一条实时可见
+
+- 入口：`src/swe/app/runner/stop_append.py::stream_stop_appended_messages`。每条追加消息必须使用结构化文本块 `[{"type": "text", "text": ...}]`，不能直接传字符串。
+- AgentScope 实时流适配器会将裸字符串缓存到源生成器结束，新消息覆盖旧缓存；因此多条追加可能只显示最后一条，后续持久化失败时甚至一条也不显示，而历史中仍能恢复已提交消息。
+- 回归入口：`tests/unit/app/test_runner_stop_append.py::test_live_adapter_publishes_each_append_before_next_save`，通过真实适配器验证多条成功追加逐条发送，以及第二条保存失败时第一条已送达。
 
 ## 财富工作台嵌入头部控制
 

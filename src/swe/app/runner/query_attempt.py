@@ -29,6 +29,8 @@ from .query_contracts import (
     _QueryRuntime,
 )
 from .retry_classifier import is_query_retryable
+from .stop_append import StopAppendPersistenceError
+from ...agents.hook_runtime.append import log_append_diagnostic
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +326,10 @@ async def stream_single_query_attempt(
     retry_state: Any,
     attempt_state: Any,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
+    if attempt_input.workspace_skill_snapshot is not None:
+        attempt_input.preflight.workspace_skill_snapshot = (
+            attempt_input.workspace_skill_snapshot
+        )
     runtime_args = {
         "request": attempt_input.request,
         "msgs": attempt_input.msgs,
@@ -345,6 +351,12 @@ async def stream_single_query_attempt(
         return
     runtime = attempt_state.runtime_start.runtime
     attempt_state.runtime = runtime
+    if runtime is not None:
+        attempt_input.workspace_skill_snapshot = getattr(
+            runtime.agent,
+            "_workspace_skill_snapshot",
+            None,
+        )
     if runtime is None:
         attempt_state.should_return = True
         return
@@ -385,7 +397,15 @@ async def stream_single_query_attempt(
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(
             runtime=runtime,
         )
-        runtime.agent.rebuild_sys_prompt()
+        rebuild_prompt = getattr(
+            runtime.agent,
+            "rebuild_sys_prompt_async",
+            None,
+        )
+        if callable(rebuild_prompt):
+            await rebuild_prompt()
+        else:
+            runtime.agent.rebuild_sys_prompt()
         plan = await owner._build_turn_plan(
             runtime=runtime,
             request=attempt_input.request,
@@ -515,6 +535,26 @@ async def _stream_retry_attempt(
         attempt_state.should_return = True
         return
     except Exception as exc:
+        if getattr(outcome, "stop_append_started", False):
+            log_append_diagnostic(
+                "Stop append finalization failed category=%s trace_id=%s",
+                type(exc).__name__,
+                trace_id,
+            )
+            try:
+                await owner._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.ERROR,
+                    error="Stop append finalization failed",
+                )
+            except Exception:
+                log_append_diagnostic(
+                    "Stop append error trace closure failed trace_id=%s",
+                    trace_id,
+                )
+            if isinstance(exc, StopAppendPersistenceError):
+                raise
+            raise RuntimeError("Stop append finalization failed") from None
         if not owner._should_retry(
             retry_attempt,
             max_retry_attempts,

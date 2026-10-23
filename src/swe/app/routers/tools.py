@@ -138,44 +138,41 @@ async def toggle_tool(
     Raises:
         HTTPException: If tool not found
     """
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
     from ...config.config import save_agent_config
-
-    workspace, agent_config = await get_agent_and_config_for_request(request)
 
     source_tool = _get_active_source_tool(request, tool_name)
     is_code_builtin = _is_code_builtin(tool_name)
-    if not agent_config.tools or (
-        tool_name not in agent_config.tools.builtin_tools
-        and source_tool is None
-        and not is_code_builtin
-    ):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Tool '{tool_name}' not found",
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        if not agent_config.tools or (
+            tool_name not in agent_config.tools.builtin_tools
+            and source_tool is None
+            and not is_code_builtin
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tool '{tool_name}' not found",
+            )
+
+        # New source tools are default-enabled and only acquire an Agent record
+        # when the user explicitly changes that default.
+        if tool_name not in agent_config.tools.builtin_tools:
+            from ...config.config import BuiltinToolConfig
+
+            agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
+                name=tool_name,
+                enabled=True,
+                description=(
+                    source_tool.description if source_tool is not None else ""
+                ),
+            )
+        tool_config = agent_config.tools.builtin_tools[tool_name]
+        tool_config.enabled = not tool_config.enabled
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
         )
-
-    # New source tools are default-enabled and only acquire an Agent record
-    # when the user explicitly changes that default.
-    if tool_name not in agent_config.tools.builtin_tools:
-        from ...config.config import BuiltinToolConfig
-
-        agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
-            name=tool_name,
-            enabled=True,
-            description=(
-                source_tool.description if source_tool is not None else ""
-            ),
-        )
-    tool_config = agent_config.tools.builtin_tools[tool_name]
-    tool_config.enabled = not tool_config.enabled
-
-    # Save agent config
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -220,10 +217,8 @@ async def update_tool_async_execution(
     Raises:
         HTTPException: If tool not found
     """
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
     from ...config.config import save_agent_config
-
-    workspace, agent_config = await get_agent_and_config_for_request(request)
 
     source_tool = _get_active_source_tool(request, tool_name)
     if source_tool is not None and tool_name != "execute_shell_command":
@@ -231,25 +226,23 @@ async def update_tool_async_execution(
             status_code=400,
             detail="Only execute_shell_command supports async execution",
         )
-    if (
-        not agent_config.tools
-        or tool_name not in agent_config.tools.builtin_tools
-    ):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Tool '{tool_name}' not found",
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        if (
+            not agent_config.tools
+            or tool_name not in agent_config.tools.builtin_tools
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tool '{tool_name}' not found",
+            )
+
+        tool_config = agent_config.tools.builtin_tools[tool_name]
+        tool_config.async_execution = async_execution
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
         )
-
-    # Update async_execution setting
-    tool_config = agent_config.tools.builtin_tools[tool_name]
-    tool_config.async_execution = async_execution
-
-    # Save agent config
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(

@@ -24,6 +24,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 - `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，但现在所有经 Tool Guard 执行的工具路径（包括预批准和受保护的内置工具）都会进入对应的后置 hook；它们适合审计、诊断，或用终止决策结束当前回合。
 - `continue: false` 或 `decision: "stop"` 是回合级终止，而不只是“阻断当前工具”：在工具事件中命中后会阻止后续推理，并取消仍在等待的并行工具调用。
 - `Stop` 是统一完成门禁：普通 handler 并发执行，合并后的 `allow` / `block` 决定候选回复是否完成。显式 `outputTransform: true` 会先串行改写候选文本，再进入普通校验；显式 `block` 可触发有上限的自动续跑，`failPolicy: block` 的执行失败则直接以未完成结束。
+- `Stop + outputAppend: true` 在最终放行后生成独立 Markdown 消息；仅启用追加时正文继续流式输出。追加失败尽力跳过，不否决正文。
 - Skill 自带 hook 只有在该 Skill 在当前会话里被激活后才会生效。
 - 多个 handler 会并发执行，不要依赖“前一个 handler 的输出给后一个 handler 使用”。
 
@@ -105,6 +106,97 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 [stop-output-transform-command-demo](stop-output-transform-command-demo/SKILL.md)。它演示
 从 `assistant_response` 读取候选文本，并仅在文本实际变化时返回合法的
 `hookSpecificOutput.replacementText`。
+
+### Stop 附加消息
+
+在 Stop handler 上声明 `"outputAppend": true`，可在正文最终放行后追加一条独立 Markdown
+消息。command、HTTP、prompt 共用此协议；prompt 会额外调用模型。普通问答只在最终
+allow 后执行一次追加阶段，Goal 只在正式 Finalization 放行后执行；block 尝试、空正文、
+计划交互边界、工具终止、固定 fallback 或 hooks 关闭时均不追加。
+首期只有 Console 执行追加阶段，其他 Channel 直接跳过 handler，不产生脚本副作用。
+
+```json
+{
+  "enabled": true,
+  "events": {
+    "Stop": [{
+      "id": "completion-supplement",
+      "hooks": [{
+        "id": "reference-links",
+        "type": "command",
+        "argv": ["python", "scripts/append_reference_links.py"],
+        "outputAppend": true,
+        "timeout": 10
+      }]
+    }]
+  }
+}
+```
+
+三阶段顺序为“可选输出转换 → 普通 Stop 校验 → 放行后的追加”。追加 handler 不参与前两阶段。
+仅启用追加不会暂存正文；如同时有潜在输出转换器，仍沿用原有暂存语义。
+先交付最终正文，再发送追加消息，整个追加阶段在原请求结束前完成。
+
+handler 输入沿用 HookContext：事件为 Stop，`assistant_response` 为已放行的最终正文。
+阶段入口刷新激活 Skill 并冻结匹配计划（包括来源、matcher、overlay、`if`），
+所有 handler 并发读取同一正文；请求会话快照时读取同一份追加前快照，仍受各自上限和脱敏约束。
+结果按固定顺序交付：租户 → Agent Profile → Skill（按 `skill_name` 排序），
+各来源内按 matcher group、handler 声明顺序；不同来源同名 ID 保持独立。
+执行完成顺序不决定气泡顺序，也不决定累计预算分配。
+
+command 须退出 0 并在 stdout 返回 JSON；HTTP 须返回 2xx JSON；prompt 返回相同结构：
+
+```json
+{
+  "decision": "allow",
+  "reason": "reference links collected",
+  "hookSpecificOutput": {
+    "appendText": "### 参考链接\n\n[规范](https://example.org/spec)"
+  }
+}
+```
+
+顶层只接受 `decision`、`reason`、`hookSpecificOutput`；reason 为非空诊断说明，最多
+2,000 字符，不显示在聊天中。嵌套只接受 `appendText`；省略它或返回空对象表示成功但不追加。
+如提供，必须是含非空白内容的字符串，原文保留。拒绝 block/deny/stop、replacementText、
+角色、任意 metadata、权限与上下文字段。未声明追加的 handler 不获得此能力。
+`outputAppend` 只允许 Stop，且与同一 handler 的 `outputTransform: true`、`once: true` 互斥；
+保存接口拒绝非法组合。
+
+每个 handler 最多产生一条独立消息，作为真实 assistant 消息进入 Agent memory、
+会话历史、分享和后续模型上下文，属于原 Answer Turn。它遵循普通上下文预算与压缩规则，
+不保证永久保留在模型输入中；不会递归触发 Stop、Goal 评审或模型续跑。
+Console 的实时、刷新和重连使用运行时控制的 `metadata.stop_append.message_id` 识别同一消息，
+避免与正文合并或因回放重复显示。
+
+资源与失败边界：
+
+- 单 handler 默认超时 10 秒；阶段生成/收集总预算默认 30 秒，由 Agent Profile 的
+  `running.hook_runtime.max_stop_append_seconds` 配置，必须为正有限数。租户和 Skill
+  不能提高阶段总预算。截止时回收未完成任务，保留截止前成功结果并有序交付。
+- 单条最多 **16,384 UTF-8 字节**，每轮累计最多 **65,536 UTF-8 字节**。
+  超限跳过、不截断；某条超过剩余额度时，后续较小消息仍可使用余额。
+- 原始 command stdout、HTTP 解码响应和 prompt 响应各最多 **256 KiB**，command stderr
+  最多 **64 KiB**，读取时即限制；仅追加模式使用这些限制。
+- 单项执行失败、超时、非法协议或超限均尽力跳过，其他 handler 继续。有效失败策略固定为
+  **allow**，保存的 `failPolicy: block` 也不改变它；不否决正文、不调用模型重试、不插错误气泡。
+- 每条消息先加入 memory 并通过会话事务持久化，成功提交后才发送。存储失败不是 handler
+  失败：不发送未保存消息、撤销未提交 memory 变更、停止后续追加，进入现有持久化恢复路径；
+  不重新运行模型或脚本。
+- 用户停止会取消剩余任务，保留已成功提交的消息，丢弃未提交结果。脚本受控进程和本地请求
+  尽力清理，不承诺回滚外部副作用、远端请求或已脱离控制的进程。
+- 单纯 SSE 断线后台继续执行；重连恢复已保存消息，不重跑追加阶段。进程崩溃后仅恢复已有
+  消息，不补跑脚本，未提交结果允许丢失；不提供外部副作用的 exactly-once 保证。
+
+Hook 管理页可为三种 handler 开启“追加独立消息”，显示固定有效策略及预算。
+人工测试要求非空示例 `assistant_response`，实际运行一个 handler；只返回脱敏统计：
+`output_append`、`append_applied`、`append_bytes`（UTF-8）、`effective_fail_policy: "allow"`、
+`duration_ms`，以及既有 status/failed/failure_type 等字段。
+它不写真实 Chat、Agent memory 或草稿配置，不回显 appendText、reason、原始 stdout/stderr/HTTP body；
+handler 本身的外部副作用仍然真实发生。单项测试不能证明跨来源顺序、累计预算或恢复行为。
+运行诊断只保留来源、handler、turn/trace、消息 ID、顺序、耗时、字节数、哈希和失败类别。
+
+可运行样例：[stop-output-append-command-demo](stop-output-append-command-demo/SKILL.md)。
 
 ## 配置写在哪里
 
@@ -269,6 +361,7 @@ Skill 级 `hooks/hooks.json` 示例：
 | `conversationSnapshotLimit` | 否 | 快照最多携带多少条最近消息。默认 `50`，最大 `200`；仅在 `includeConversationSnapshot: true` 时生效。 |
 | `failPolicy` | 否 | handler 自身执行失败时的处理策略，支持 `allow` 或 `block`。`command` / `http` 默认 `allow`，`prompt` 默认 `block`。 |
 | `outputTransform` | 否 | 仅 `Stop` 可用，默认 `false`。为 `true` 时 handler 串行改写最终文本，且不能设置 `once: true`。 |
+| `outputAppend` | 否 | 仅 `Stop` 可用，默认 `false`。放行后追加独立消息；与同一 handler 的 `outputTransform: true`、`once: true` 互斥，有效失败策略固定为 allow。 |
 
 ### `once: true` 的实际含义
 
@@ -498,10 +591,12 @@ Skill 级 `hooks/hooks.json` 示例：
 - `block`
 - `stop`
 
-`Stop` 是完成门禁，并且更严格，只允许：
+普通 `Stop` prompt 是完成门禁，并且更严格，只允许：
 
 - `allow`
 - `block`
+
+输出转换和追加模式只允许 `allow`，分别使用可选 `replacementText` 和 `appendText`。
 
 #### 其他限制
 
@@ -853,7 +948,8 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
   会被追加到本轮 Agent 的初始上下文中
 - `PostToolUse` / `PostToolUseFailure`
   会作为系统说明写入内存，供后续推理或下一轮继续使用
-- `Stop` 不支持 `additionalContext`，也不会写入 memory
+- `Stop` 不支持 `additionalContext`；需要真实 assistant 消息进入 memory 时使用
+  `outputAppend: true` 和 `appendText`，见 [Stop 附加消息](#stop-附加消息)
 
 实务上最常见的用法：
 
@@ -946,7 +1042,8 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 continue:false / decision:stop > block/deny > ask > allow > none
 ```
 
-这套合并规则不适用于 `Stop`：它会先让所有命中的 handler 执行完，再把整个合并结果替换为空结果。
+这套通用合并规则不适用于 `Stop`：普通校验合并 allow/block 完成决策；输出转换和追加各自
+使用独立阶段及严格协议，追加失败不参与正文完成判定。
 
 另外还有几条固定规则：
 

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import importlib
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -129,10 +130,48 @@ async def test_manual_draft_test_uses_guarded_agent_path(
     )
     service.create_draft("source-a", _script(), actor="manager-a")
     calls = []
+    from swe.agents import model_factory, prompt, skill_runtime_snapshot
+
+    model_snapshot = object()
+    skill_snapshot = object()
+    (tmp_path / "AGENTS.md").write_text("manual test prompt")
+    read_threads = []
+    original_read = prompt.read_text_file_with_encoding_fallback
+
+    def read_prompt(path):
+        read_threads.append(threading.get_ident())
+        return original_read(path)
+
+    monkeypatch.setattr(
+        prompt,
+        "read_text_file_with_encoding_fallback",
+        read_prompt,
+    )
+
+    async def prepare_model(**kwargs):
+        assert kwargs == {"agent_id": "agent-a", "tenant_id": "tenant-a"}
+        return model_snapshot
+
+    async def prepare_skills(workspace_dir):
+        assert workspace_dir == tmp_path
+        return skill_snapshot
+
+    monkeypatch.setattr(
+        model_factory,
+        "prepare_model_config_async",
+        prepare_model,
+    )
+    monkeypatch.setattr(
+        skill_runtime_snapshot,
+        "get_workspace_skill_snapshot_async",
+        prepare_skills,
+    )
 
     class FakeConfig:
         def __init__(self):
             self.tools = SimpleNamespace(builtin_tools={})
+            self.system_prompt_files = ["AGENTS.md"]
+            self.heartbeat = None
 
         def model_copy(self, *, deep: bool):
             assert deep is True
@@ -140,6 +179,14 @@ async def test_manual_draft_test_uses_guarded_agent_path(
 
     class FakeAgent:
         def __init__(self, **kwargs):
+            assert kwargs["prepared_model_config"] is model_snapshot
+            assert kwargs["workspace_skill_snapshot"] is skill_snapshot
+            assert prompt._prepared_prompt.get().key == (
+                tmp_path,
+                ("AGENTS.md",),
+                "agent-a",
+                False,
+            )
             calls.append(kwargs)
             self.memory = SimpleNamespace(
                 content=[
@@ -172,7 +219,9 @@ async def test_manual_draft_test_uses_guarded_agent_path(
     fake_react_agent = ModuleType("swe.agents.react_agent")
     fake_react_agent.SWEAgent = FakeAgent
     monkeypatch.setitem(
-        sys.modules, "swe.agents.react_agent", fake_react_agent
+        sys.modules,
+        "swe.agents.react_agent",
+        fake_react_agent,
     )
 
     response = await manual_test_draft(
@@ -188,6 +237,8 @@ async def test_manual_draft_test_uses_guarded_agent_path(
     assert calls[0]["source_tool_versions"][0].version == 0
     assert calls[1]["input"] == {"key": "value"}
     assert service.audit("source-a")[-1].event == "manual_test_completed"
+    assert read_threads and threading.get_ident() not in read_threads
+    assert prompt._prepared_prompt.get() is None
 
 
 @pytest.mark.asyncio

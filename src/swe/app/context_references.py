@@ -464,7 +464,7 @@ class ContextReferenceDirectory:
         scope = (getattr(workspace, "tenant_id", None), workspace.agent_id)
 
         async def refresh_skills() -> list[SkillContextReference]:
-            from .agents.skill_runtime_snapshot import (
+            from ..agents.skill_runtime_snapshot import (
                 get_workspace_skill_snapshot_async,
             )
 

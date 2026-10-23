@@ -10,6 +10,9 @@ spec:
   parallelism: 2
   completionMode: Indexed
   template:
+    metadata:
+      labels:
+        app: swe-session-nas-lock-verification
     spec:
       restartPolicy: Never
       affinity:

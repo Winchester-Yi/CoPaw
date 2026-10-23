@@ -44,6 +44,7 @@ class _QueryPreflight:
     tenant_hooks: HookConfig | None = None
     hook_overlay: HookSessionOverlay | None = None
     hook_additional_context: str = ""
+    workspace_skill_snapshot: WorkspaceSkillSnapshot | None = None
 
 
 @dataclass
@@ -64,6 +65,7 @@ class _QueryRuntimeInputs:
     selected_skill_directives: list[Any] = field(default_factory=list)
     workspace_skill_snapshot: WorkspaceSkillSnapshot | None = None
     session_execution: Any | None = None
+    prepared_model_config: Any | None = None
 
 
 @dataclass

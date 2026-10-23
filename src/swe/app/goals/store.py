@@ -1,8 +1,8 @@
+# -*- coding: utf-8 -*-
 """MySQL authority store for durable Goal Runtime snapshots."""
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import json
 from typing import Any
 
@@ -64,7 +64,7 @@ class MySqlGoalStore:
     async def _write(self, snapshot: GoalSnapshot) -> None:
         """Write current snapshot plus denormalized Revision/criterion/control views."""
         payload = _dump(snapshot)
-        async with self._transaction() as db:
+        async with self._db.transaction() as db:
             await self._write_with(db, snapshot, payload)
 
     async def _write_with(
@@ -140,40 +140,6 @@ class MySqlGoalStore:
                 _UPSERT_SUBAGENT_LINK,
                 (snapshot.goal_id, snapshot.revision, run_id),
             )
-
-    @asynccontextmanager
-    async def _transaction(self):
-        """Write a settlement using one all-or-nothing MySQL transaction."""
-        acquire = getattr(self._db, "acquire", None)
-        if acquire is None:
-            # Unit-test doubles expose execute only; the production connection
-            # follows the branch below.
-            yield self._db
-            return
-        async with acquire() as connection:
-            was_autocommit = connection.get_autocommit()
-            await connection.autocommit(False)
-            try:
-                yield _ConnectionExecutor(connection)
-            except Exception:
-                await connection.rollback()
-                raise
-            else:
-                await connection.commit()
-            finally:
-                await connection.autocommit(was_autocommit)
-
-
-class _ConnectionExecutor:
-    """Expose DatabaseConnection's execute shape on one transaction connection."""
-
-    def __init__(self, connection: Any) -> None:
-        self._connection = connection
-
-    async def execute(self, query: str, params: tuple[Any, ...]) -> int:
-        async with self._connection.cursor() as cursor:
-            await cursor.execute(query, params)
-            return cursor.rowcount
 
 
 def _dump(value: Any) -> str:

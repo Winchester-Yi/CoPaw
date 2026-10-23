@@ -18,6 +18,214 @@ from swe.app.hook_management import (
 )
 
 
+def _append_test_context(workspace_dir: Path, response="approved answer"):
+    return HookContext(
+        session_id="manual-only",
+        transcript_path="",
+        cwd=str(workspace_dir),
+        hook_event_name="Stop",
+        tenant_id="tenant-a",
+        effective_tenant_id="tenant-a",
+        user_id="user-a",
+        agent_id="default",
+        channel="test",
+        assistant_response=response,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("specific_output", "failed", "expected_bytes"),
+    [
+        ({"appendText": "附加🙂"}, False, 10),
+        ({}, False, 0),
+        ({"replacementText": "private replacement"}, True, 0),
+    ],
+)
+async def test_manual_append_runs_real_command_with_redacted_utf8_summary(
+    tmp_path,
+    monkeypatch,
+    specific_output,
+    failed,
+    expected_bytes,
+):
+    workspace = tmp_path / "default"
+    _write_default_agent(workspace)
+    scripts = workspace / "hooks" / "scripts"
+    scripts.mkdir(parents=True)
+    output = {
+        "decision": "allow",
+        "reason": "private diagnostic",
+        "hookSpecificOutput": specific_output,
+    }
+    (scripts / "append.py").write_text(
+        "import json, pathlib, sys\n"
+        "assert json.load(sys.stdin)['assistant_response'] == 'approved answer'\n"
+        "p = pathlib.Path('execution-count')\n"
+        "p.write_text(p.read_text() + '1' if p.exists() else '1')\n"
+        "print('private stderr', file=sys.stderr)\n"
+        f"print({json.dumps(output, ensure_ascii=False)!r})\n",
+        encoding="utf-8",
+    )
+    before = (workspace / "agent.json").read_bytes()
+    audit = Mock()
+    monkeypatch.setattr(hook_management.logger, "info", audit)
+    service = HookManagementService(workspace, tenant_id="tenant-a")
+
+    result = await service.manual_test(
+        handler={
+            "id": "append",
+            "type": "command",
+            "argv": ["python", "hooks/scripts/append.py"],
+            "outputAppend": True,
+            "failPolicy": "block",
+        },
+        context=_append_test_context(workspace),
+        actor=_actor(),
+    )
+
+    summary = result.redacted_summary
+    assert summary["output_append"] is True
+    assert summary["append_applied"] is (expected_bytes > 0)
+    assert summary["append_bytes"] == expected_bytes
+    assert summary["effective_fail_policy"] == "allow"
+    assert summary["failed"] is failed
+    assert summary["status"] == ("failed" if failed else "completed")
+    assert bool(summary["failure_type"]) is failed
+    assert isinstance(summary["duration_ms"], int)
+    assert summary["duration_ms"] >= 0
+    assert (workspace / "execution-count").read_text() == "1"
+    assert (workspace / "agent.json").read_bytes() == before
+    assert not (workspace / "sessions").exists()
+    assert not (workspace / "memory").exists()
+    exposed = json.dumps(summary, ensure_ascii=False) + str(
+        audit.call_args_list,
+    )
+    for secret in (
+        "附加🙂",
+        "private diagnostic",
+        "private stderr",
+        "private replacement",
+        "approved answer",
+    ):
+        assert secret not in exposed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [None, "", "  \n\t"])
+async def test_manual_append_requires_nonempty_response_before_execution(
+    tmp_path,
+    monkeypatch,
+    response,
+):
+    workspace = tmp_path / "default"
+    _write_default_agent(workspace)
+    execute = AsyncMock()
+    monkeypatch.setattr(hook_management, "execute_handler", execute)
+    service = HookManagementService(workspace, tenant_id="tenant-a")
+
+    with pytest.raises(
+        HookManagementValidationError,
+        match="assistant_response",
+    ):
+        await service.manual_test(
+            handler={
+                "id": "append",
+                "type": "command",
+                "argv": ["echo"],
+                "outputAppend": True,
+            },
+            context=_append_test_context(workspace, response),
+            actor=_actor(),
+        )
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("event", "extra"),
+    [
+        ("PreToolUse", {}),
+        ("Stop", {"once": True}),
+        ("Stop", {"outputTransform": True}),
+    ],
+)
+def test_save_rejects_invalid_append_combinations(tmp_path, event, extra):
+    workspace = tmp_path / "default"
+    _write_default_agent(workspace)
+    service = HookManagementService(workspace, tenant_id="tenant-a")
+    with pytest.raises(HookManagementValidationError):
+        service.save_configuration(
+            hooks={
+                "enabled": True,
+                "events": {
+                    event: [
+                        {
+                            "id": "append-group",
+                            "hooks": [
+                                {
+                                    "id": "append",
+                                    "type": "command",
+                                    "argv": ["echo"],
+                                    "outputAppend": True,
+                                    **extra,
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+            expected_revision=service.get_configuration().revision,
+            actor=_actor(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_save_and_distribution_preserve_output_append(tmp_path):
+    source_workspace, target_workspace = (
+        tmp_path / "source",
+        tmp_path / "target",
+    )
+    _write_default_agent(source_workspace)
+    _write_default_agent(target_workspace)
+    source = HookManagementService(source_workspace, tenant_id="tenant-a")
+    target = HookManagementService(target_workspace, tenant_id="tenant-b")
+    source.save_configuration(
+        hooks={
+            "enabled": True,
+            "events": {
+                "Stop": [
+                    {
+                        "id": "append-group",
+                        "hooks": [
+                            {
+                                "id": "append",
+                                "type": "command",
+                                "argv": ["echo"],
+                                "outputAppend": True,
+                                "failPolicy": "block",
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        expected_revision=source.get_configuration().revision,
+        actor=_actor(),
+    )
+    await source.distribute_to_target(
+        target=target,
+        matcher_group_ids=["append-group"],
+        actor=_actor(),
+        activate=AsyncMock(),
+    )
+    for service in (source, target):
+        handler = service.get_configuration().hooks["events"]["Stop"][0][
+            "hooks"
+        ][0]
+        assert handler["outputAppend"] is True
+        assert handler["failPolicy"] == "block"
+
+
 def _write_default_agent(workspace_dir: Path) -> None:
     workspace_dir.mkdir(parents=True)
     (workspace_dir / "agent.json").write_text(
@@ -674,7 +882,7 @@ async def test_distribution_merges_selected_groups_and_copies_scripts(
 
     target_hooks = target.get_configuration().hooks
     groups = target_hooks["events"]["PreToolUse"]
-    assert target_hooks["enabled"] is False
+    assert target_hooks["enabled"] is True
     assert [group["id"] for group in groups] == [
         "replace-group",
         "preserved-group",

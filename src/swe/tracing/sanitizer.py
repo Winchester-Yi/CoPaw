@@ -258,3 +258,8 @@ def sanitize_user_message(
 ) -> Optional[str]:
     """清理用户消息后再落入 tracing。"""
     return sanitize_string(message, max_length)
+
+
+def capture_runtime_secret_values() -> tuple[str, ...]:
+    """Capture immutable secret values without retaining trace objects."""
+    return tuple(_runtime_secret_values.get())

@@ -147,6 +147,10 @@ async def _fake_stream_printing_messages(*, agents, coroutine_task):
 
 def _patch_normal_agent_path(monkeypatch):
     monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
         "swe.app.runner.runner._build_lazy_mcp_clients",
         lambda *_args, **_kwargs: [],
     )

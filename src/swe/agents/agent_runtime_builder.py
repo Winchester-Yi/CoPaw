@@ -83,6 +83,11 @@ class AgentRuntimeBuilder:
                 resolved_model_info=agent._resolved_model_slot,
                 on_model_config_resolved=agent._apply_model_input_budget,
                 on_model_provider_resolved=agent._capture_model_provider_snapshot,
+                prepared_model_config=getattr(
+                    agent,
+                    "_prepared_model_config",
+                    None,
+                ),
                 trace_context={
                     "trace_id": request_context.get("trace_id"),
                     "user_id": request_context.get("user_id"),

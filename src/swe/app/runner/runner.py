@@ -75,6 +75,7 @@ from . import (
     query_preflight,
     query_runtime,
     session_lifecycle,
+    stop_append,
     turn_lifecycle,
 )
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
@@ -84,15 +85,18 @@ from .utils import build_env_context
 from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...__version__ import __version__
-from ...agents.react_agent import SWEAgent
+from ...agents.react_agent import SWEAgent, _REQUEST_MEMORY_NOT_PREPARED
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.tool_failure import (
     TOOL_GOVERNANCE_BLOCK_FIELD,
     attach_tool_governance_message_metadata,
 )
+from ...agents.skill_runtime_snapshot import (
+    SkillRuntimeSnapshot,
+    WorkspaceSkillSnapshot,
+)
 from ...agents.skills_manager import (
-    get_skill_freshness_token,
     get_workspace_skills_dir,
     resolve_effective_skill_dir,
 )
@@ -293,6 +297,8 @@ class _QueryTurnOutcome:
     buffered_assistant_messages: list[Msg] = field(default_factory=list)
     assistant_memory_start: int = 0
     goal_finalization_fallback: bool = False
+    stop_append_approved: bool = False
+    stop_append_started: bool = False
 
 
 def _match_command_with_optional_id(
@@ -2068,123 +2074,45 @@ def _supports_session_skill_freshness_refresh(
     )
 
 
-def _refresh_switched_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    stored_dir: Path,
-    current_dir: Path | None,
-    confirmed_at: Any | None = None,
-) -> str | None:
-    if (
-        current_dir is None
-        or not current_dir.exists()
-        or current_dir == stored_dir
-    ):
-        return None
-
-    current_token = get_skill_freshness_token(current_dir)
-    _upsert_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        resolved_skill_dir=current_dir,
-        freshness_token=current_token,
-        confirmed_at=confirmed_at,
-    )
-    return (
-        f"{skill_name}: detected skill-directory switch "
-        f"{stored_dir} -> {current_dir}. Treat current skill "
-        "content as superseding earlier assumptions. You MUST "
-        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
-    )
-
-
-def _refresh_withdrawn_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    current_dir: Path | None,
-) -> str | None:
-    if current_dir is not None and current_dir.exists():
-        return None
-
-    _remove_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-    )
-    return (
-        f"{skill_name}: no longer effective for this turn. "
-        "Stop relying on earlier assumptions from this skill."
-    )
-
-
-def _refresh_changed_session_skill_snapshot_entry(
-    next_snapshot: dict[str, dict[str, Any]],
-    *,
-    skill_name: str,
-    entry: dict[str, Any],
-    current_dir: Path,
-) -> str | None:
-    current_token = get_skill_freshness_token(current_dir)
-    if current_token == entry.get("freshness_token"):
-        return None
-
-    _upsert_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        resolved_skill_dir=current_dir,
-        freshness_token=current_token,
-        confirmed_at=entry.get("confirmed_at"),
-    )
-    return (
-        f"{skill_name}: detected skill-directory change at "
-        f"{current_dir}. Treat current skill content as "
-        "superseding earlier assumptions. You MUST "
-        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
-    )
-
-
 def _refresh_session_skill_snapshot_entry(
     next_snapshot: dict[str, dict[str, Any]],
     *,
     skill_name: str,
     entry: dict[str, Any],
-    effective_skill_dirs: dict[str, Path],
+    current_skill: SkillRuntimeSnapshot | None,
 ) -> str | None:
-    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
-    current_dir = effective_skill_dirs.get(skill_name)
-
-    switch_notice = _refresh_switched_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        stored_dir=stored_dir,
-        current_dir=current_dir,
-        confirmed_at=entry.get("confirmed_at"),
-    )
-    if switch_notice is not None:
-        return switch_notice
-
-    if not stored_dir.exists():
+    if current_skill is None:
         _remove_session_skill_snapshot_entry(
             next_snapshot,
             skill_name=skill_name,
         )
+        return (
+            f"{skill_name}: no longer effective for this turn. "
+            "Stop relying on earlier assumptions from this skill."
+        )
+    stored_dir = Path(str(entry.get("resolved_skill_dir", "")))
+    current_dir = current_skill.directory
+    current_token = current_skill.freshness_token
+    if current_dir == stored_dir and current_token == entry.get(
+        "freshness_token",
+    ):
         return None
-
-    withdrawal_notice = _refresh_withdrawn_session_skill_snapshot_entry(
+    _upsert_session_skill_snapshot_entry(
         next_snapshot,
         skill_name=skill_name,
-        current_dir=current_dir,
+        resolved_skill_dir=current_dir,
+        freshness_token=current_token,
+        confirmed_at=entry.get("confirmed_at"),
     )
-    if withdrawal_notice is not None:
-        return withdrawal_notice
-
-    assert current_dir is not None
-    return _refresh_changed_session_skill_snapshot_entry(
-        next_snapshot,
-        skill_name=skill_name,
-        entry=entry,
-        current_dir=current_dir,
+    change = (
+        f"skill-directory switch {stored_dir} -> {current_dir}"
+        if current_dir != stored_dir
+        else f"skill-directory change at {current_dir}"
+    )
+    return (
+        f"{skill_name}: detected {change}. Treat current skill content as "
+        "superseding earlier assumptions. You MUST "
+        f"re-read {current_dir / 'SKILL.md'} before relying on this skill."
     )
 
 
@@ -2192,15 +2120,32 @@ def _refresh_session_skill_snapshot_entries(
     next_snapshot: dict[str, dict[str, Any]],
     *,
     stored_snapshot: dict[str, dict[str, Any]],
-    effective_skill_dirs: dict[str, Path],
+    workspace_snapshot: WorkspaceSkillSnapshot | None,
+    effective_skills: set[str],
 ) -> list[str]:
+    if workspace_snapshot is None or not workspace_snapshot.manifest_available:
+        return []
     changes: list[str] = []
     for skill_name, entry in stored_snapshot.items():
+        if skill_name in workspace_snapshot.unconfirmed_skills:
+            continue
+        # Effective skills outside the workspace snapshot (e.g. builtin
+        # skills in legacy callers) have no observation to compare here.
+        if (
+            skill_name in effective_skills
+            and skill_name not in workspace_snapshot.skills
+        ):
+            continue
+        current_skill = (
+            workspace_snapshot.skills.get(skill_name)
+            if skill_name in effective_skills
+            else None
+        )
         notice = _refresh_session_skill_snapshot_entry(
             next_snapshot,
             skill_name=skill_name,
             entry=entry,
-            effective_skill_dirs=effective_skill_dirs,
+            current_skill=current_skill,
         )
         if notice is not None:
             changes.append(notice)
@@ -3082,7 +3027,7 @@ class _QueryAttemptState:
     session_title_task_started: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class _QueryAttemptInput:
     """封装单次 query 尝试不随执行过程变化的输入。"""
 
@@ -3092,6 +3037,7 @@ class _QueryAttemptInput:
     preflight: _QueryPreflight
     trace_id: str | None
     session_execution: Any | None = None
+    workspace_skill_snapshot: Any | None = None
 
 
 class AgentRunner(Runner):
@@ -3331,6 +3277,9 @@ class AgentRunner(Runner):
             "is_active",
             True,
         ):
+            hydrate = getattr(session_execution, "hydrate_turn", None)
+            if hydrate is not None:
+                await hydrate(outcome.identity.msgid)
             mark_terminal_turn_state(
                 session_execution.state,
                 outcome.identity.msgid,
@@ -3356,10 +3305,14 @@ class AgentRunner(Runner):
             )
             return state
 
+        mutation_options = {}
+        if isinstance(self.session, SafeJSONSession):
+            mutation_options["hydrate_turn_ids"] = (outcome.identity.msgid,)
         await self.session.mutate_session_state(
             session_id,
             mark_outcome,
             user_id=user_id,
+            **mutation_options,
         )
 
     async def release_outcome(self, identity: TurnIdentity) -> None:
@@ -4081,6 +4034,36 @@ class AgentRunner(Runner):
         )
         return _with_hook_context(env_context, session_start_context), None
 
+    async def _create_agent_for_query_async(self, **kwargs: Any) -> SWEAgent:
+        """Prepare file-derived inputs, then install the Agent on the loop."""
+        from ...agents.prompt import (
+            PromptConfig,
+            bind_prepared_system_prompt,
+            prepare_system_prompt_async,
+        )
+        from ...runtime_workers import run_runtime_state_work
+
+        config = kwargs["agent_config"]
+        files = getattr(config, "system_prompt_files", None)
+        prepared = await prepare_system_prompt_async(
+            Path(self.workspace_dir or WORKING_DIR),
+            list(PromptConfig.DEFAULT_FILES if files is None else files),
+            self.agent_id,
+            bool(
+                getattr(getattr(config, "heartbeat", None), "enabled", False),
+            ),
+        )
+        kwargs["prepared_request_context"] = await run_runtime_state_work(
+            self._prepare_query_agent_context,
+            kwargs,
+        )
+        kwargs["source_tool_versions"] = await run_runtime_state_work(
+            self._source_tool_versions,
+            kwargs["prepared_request_context"],
+        )
+        with bind_prepared_system_prompt(prepared):
+            return self._create_agent_for_query(**kwargs)
+
     def _create_agent_for_query(
         self,
         *,
@@ -4098,8 +4081,62 @@ class AgentRunner(Runner):
         approved_tool_call: dict[str, Any] | None,
         current_user_text: str = "",
         workspace_skill_snapshot: Any | None = None,
+        prepared_request_memory: Any = _REQUEST_MEMORY_NOT_PREPARED,
+        prepared_model_config: Any | None = None,
+        source_tool_versions: Any | None = None,
+        prepared_request_context: dict[str, Any] | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
+        if prepared_request_context is None:
+            prepared_request_context = self._prepare_query_agent_context(
+                {
+                    "request": request,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "channel": channel,
+                    "chat": chat,
+                    "turn_id": turn_id,
+                    "hook_overlay": hook_overlay,
+                    "auth_token": auth_token,
+                    "approved_tool_call": approved_tool_call,
+                    "current_user_text": current_user_text,
+                },
+            )
+        request_context = prepared_request_context
+        if source_tool_versions is None:
+            source_tool_versions = self._source_tool_versions(request_context)
+        return SWEAgent(
+            agent_config=agent_config,
+            env_context=env_context,
+            mcp_clients=mcp_clients,
+            memory_manager=self.memory_manager,
+            prepared_request_memory=prepared_request_memory,
+            prepared_model_config=prepared_model_config,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
+            task_tracker=self._task_tracker,
+            source_tool_versions=source_tool_versions,
+        )
+
+    def _prepare_query_agent_context(
+        self,
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prepare request-owned context, including expert filesystem work."""
+        from ...agents.builtin_tool_schemas import prepare_builtin_tool_schemas
+
+        prepare_builtin_tool_schemas()
+        request = values.get("request")
+        session_id = values.get("session_id")
+        user_id = values.get("user_id")
+        channel = values.get("channel")
+        chat = values.get("chat")
+        turn_id = values.get("turn_id")
+        hook_overlay = values.get("hook_overlay")
+        auth_token = values.get("auth_token")
+        approved_tool_call = values.get("approved_tool_call")
+        current_user_text = values.get("current_user_text", "")
         request_details = {
             "session_id": session_id,
             "user_id": user_id,
@@ -4141,18 +4178,7 @@ class AgentRunner(Runner):
                 approved_tool_call,
                 ensure_ascii=False,
             )
-        source_tool_versions = self._source_tool_versions(request_context)
-        return SWEAgent(
-            agent_config=agent_config,
-            env_context=env_context,
-            mcp_clients=mcp_clients,
-            memory_manager=self.memory_manager,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            workspace_skill_snapshot=workspace_skill_snapshot,
-            task_tracker=self._task_tracker,
-            source_tool_versions=source_tool_versions,
-        )
+        return request_context
 
     def _build_query_request_context(
         self,
@@ -4361,6 +4387,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """Create an isolated, tool-free Agent for one Goal finalization."""
         source_context = getattr(runtime.agent, "_request_context", {}) or {}
@@ -4383,6 +4410,34 @@ class AgentRunner(Runner):
         }
         request_context["agent_role"] = "main"
         request_context["goal_finalization"] = True
+        if prepared_model_config is None:
+            model_slot_override, model_provider_override = (
+                self._resolve_goal_finalization_model(runtime)
+            )
+        else:
+            model_slot_override = prepared_model_config.model_slot
+            model_provider_override = prepared_model_config.provider
+        return SWEAgent(
+            agent_config=runtime.agent_config,
+            prepared_model_config=prepared_model_config,
+            env_context=None,
+            enable_memory_manager=False,
+            mcp_clients=[],
+            memory_manager=None,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            task_tracker=None,
+            enable_workspace_skills=False,
+            model_slot_override=model_slot_override,
+            model_provider_override=model_provider_override,
+            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
+            source_tool_versions=(),
+        )
+
+    def _resolve_goal_finalization_model(
+        self,
+        runtime: _QueryRuntime,
+    ) -> tuple[Any, Any]:
         resolved_slot = (
             getattr(runtime.agent, "_resolved_model_slot", {}) or {}
         )
@@ -4413,20 +4468,59 @@ class AgentRunner(Runner):
             )
             if model_provider_override is None:
                 raise RuntimeError("Goal finalization provider is unavailable")
-        return SWEAgent(
-            agent_config=runtime.agent_config,
-            env_context=None,
-            enable_memory_manager=False,
-            mcp_clients=[],
-            memory_manager=None,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            task_tracker=None,
-            enable_workspace_skills=False,
-            model_slot_override=model_slot_override,
-            model_provider_override=model_provider_override,
-            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
-            source_tool_versions=(),
+        return model_slot_override, model_provider_override
+
+    async def _create_goal_finalization_agent_async(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> SWEAgent:
+        from ...agents.model_factory import prepare_model_config_async
+        from ...runtime_workers import run_runtime_state_work
+
+        slot, provider = await run_runtime_state_work(
+            self._resolve_goal_finalization_model,
+            runtime,
+        )
+        prepared = await prepare_model_config_async(
+            agent_id=runtime.agent_config.id,
+            tenant_id=self.tenant_id,
+            model_slot_override=slot,
+            model_provider_override=provider,
+        )
+        return self._create_goal_finalization_agent(
+            runtime=runtime,
+            goal=goal,
+            prepared_model_config=prepared,
+        )
+
+    async def _create_goal_completion_judge_agent_async(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+        approved_tool_call: dict[str, Any] | None = None,
+    ) -> SWEAgent:
+        from ...agents.model_factory import prepare_model_config_async
+        from ...runtime_workers import run_runtime_state_work
+
+        slot, provider = await run_runtime_state_work(
+            self._resolve_goal_completion_judge_model,
+            runtime,
+            goal,
+        )
+        prepared = await prepare_model_config_async(
+            agent_id=runtime.agent_config.id,
+            tenant_id=self.tenant_id,
+            model_slot_override=slot,
+            model_provider_override=provider,
+        )
+        return self._create_goal_completion_judge_agent(
+            runtime=runtime,
+            goal=goal,
+            approved_tool_call=approved_tool_call,
+            prepared_model_config=prepared,
         )
 
     def _create_goal_completion_judge_agent(
@@ -4435,17 +4529,23 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         goal: Any,
         approved_tool_call: dict[str, Any] | None = None,
+        prepared_model_config: Any | None = None,
     ) -> SWEAgent:
         """Create a restricted, frozen-model Agent for Goal completion review."""
         request_context = _build_goal_judge_request_context(
             runtime,
             approved_tool_call,
         )
-        model_slot_override, model_provider_override = (
-            self._resolve_goal_completion_judge_model(runtime, goal)
-        )
+        if prepared_model_config is None:
+            model_slot_override, model_provider_override = (
+                self._resolve_goal_completion_judge_model(runtime, goal)
+            )
+        else:
+            model_slot_override = prepared_model_config.model_slot
+            model_provider_override = prepared_model_config.provider
         return SWEAgent(
             agent_config=runtime.agent_config,
+            prepared_model_config=prepared_model_config,
             env_context=None,
             enable_memory_manager=False,
             mcp_clients=[],
@@ -4570,7 +4670,7 @@ class AgentRunner(Runner):
                     )
                     for criterion_id in criterion_ids
                 }
-            agent = self._create_goal_completion_judge_agent(
+            agent = await self._create_goal_completion_judge_agent_async(
                 runtime=runtime,
                 goal=review_goal,
                 approved_tool_call=approved_tool_call,
@@ -4692,7 +4792,7 @@ class AgentRunner(Runner):
         state = goal.state.value
         previous_msg: Msg | None = None
         try:
-            agent = self._create_goal_finalization_agent(
+            agent = await self._create_goal_finalization_agent_async(
                 runtime=runtime,
                 goal=goal,
             )
@@ -4783,18 +4883,15 @@ class AgentRunner(Runner):
             ):
                 return
 
-            skill_dir = resolve_effective_skill_dir(
-                Path(self.workspace_dir or WORKING_DIR),
-                skill_name,
-            )
-            if skill_dir is None or not skill_dir.exists():
+            skill = snapshot_skills.get(skill_name)
+            if skill is None:
                 return
 
             runtime.pending_confirmed_skill_snapshots[skill_name] = (
                 _build_session_skill_snapshot_entry(
                     skill_name=skill_name,
-                    resolved_skill_dir=skill_dir,
-                    freshness_token=get_skill_freshness_token(skill_dir),
+                    resolved_skill_dir=skill.directory,
+                    freshness_token=skill.freshness_token,
                     confirmed_at=time.time(),
                 )
             )
@@ -4974,12 +5071,14 @@ class AgentRunner(Runner):
         snapshot: dict[str, dict[str, Any]],
         *,
         stored_snapshot: dict[str, dict[str, Any]],
-        effective_skill_dirs: dict[str, Path],
+        workspace_snapshot: WorkspaceSkillSnapshot | None,
+        effective_skills: set[str],
     ) -> list[Any]:
         return _refresh_session_skill_snapshot_entries(
             snapshot,
             stored_snapshot=stored_snapshot,
-            effective_skill_dirs=effective_skill_dirs,
+            workspace_snapshot=workspace_snapshot,
+            effective_skills=effective_skills,
         )
 
     @staticmethod
@@ -5332,6 +5431,23 @@ class AgentRunner(Runner):
     def _build_stop_incomplete_msg(reason: str) -> Msg:
         return _build_stop_incomplete_msg(reason)
 
+    async def _stream_stop_appended_messages(
+        self,
+        *,
+        request: AgentRequest,
+        runtime: _QueryRuntime,
+        plan: _TurnPlan,
+        outcome: _QueryTurnOutcome,
+    ) -> AsyncGenerator[tuple[Msg, bool], None]:
+        async for item in stop_append.stream_stop_appended_messages(
+            self,
+            request=request,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+        ):
+            yield item
+
     async def _emit_stop_hook_if_needed(
         self,
         *,
@@ -5514,6 +5630,7 @@ class AgentRunner(Runner):
         *,
         trace_id: str | None,
         agent: SWEAgent | None,
+        assistant_response: str | None = None,
     ) -> None:
         """有 trace 时把最终模型输出写入 Monitor。"""
         if not trace_id or agent is None:
@@ -5524,7 +5641,8 @@ class AgentRunner(Runner):
             trace_id,
             type(agent).__name__,
         )
-        assistant_response = _extract_assistant_response(agent)
+        if assistant_response is None:
+            assistant_response = _extract_assistant_response(agent)
         logger.debug(
             "Extracted assistant response: trace_id=%s, response_len=%d",
             trace_id,
@@ -5576,7 +5694,10 @@ class AgentRunner(Runner):
                     error=error,
                 )
         except Exception as trace_err:
-            logger.warning("Failed to end trace: %s", trace_err)
+            logger.warning(
+                "Failed to end trace category=%s",
+                type(trace_err).__name__,
+            )
 
     async def _handle_query_cancelled(
         self,
@@ -5864,7 +5985,11 @@ class AgentRunner(Runner):
         ):
             return
 
-        assistant_response = _extract_assistant_response(runtime.agent)
+        assistant_response = (
+            outcome.assistant_response
+            if outcome.stop_append_started
+            else _extract_assistant_response(runtime.agent)
+        )
         user_message = query
         if not assistant_response or not user_message:
             logger.debug(
@@ -6034,6 +6159,11 @@ class AgentRunner(Runner):
         await self._index_model_output_if_needed(
             trace_id=trace_id,
             agent=runtime.agent,
+            assistant_response=(
+                outcome.assistant_response
+                if outcome.stop_append_started
+                else None
+            ),
         )
         await self._end_trace_if_needed(
             trace_id,

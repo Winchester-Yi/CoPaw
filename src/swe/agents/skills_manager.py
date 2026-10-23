@@ -1658,9 +1658,7 @@ def _reconcile_workspace_manifest_locked(
         _update,
         sanitized_rename_moves,
     )
-    from .skill_runtime_snapshot import invalidate_workspace_skill_snapshot
-
-    invalidate_workspace_skill_snapshot(workspace_dir)
+    # Ordinary reconciliation preserves the fixed freshness observation window.
     return result
 
 

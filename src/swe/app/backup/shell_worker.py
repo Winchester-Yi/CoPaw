@@ -24,6 +24,7 @@ from swe.config.utils import (
 )
 
 from .config import BackupEnvironmentConfig, ShellScriptConfig
+from .io_worker import run_backup_io
 from .models import BackupTask, BackupTaskStatus
 from .s3_client import S3BackupClient
 from .task_store import TaskStore
@@ -442,7 +443,8 @@ class ShellBackupWorker:
             task.progress_percent = int(((i + 1) / len(tenant_ids)) * 40)
             self.task_store.save(task)
 
-            hour_to_restore = self._get_backup_hour(
+            hour_to_restore = await run_backup_io(
+                self._get_backup_hour,
                 instance_id,
                 backup_date,
                 backup_hour,
@@ -542,7 +544,8 @@ class ShellBackupWorker:
             if not backup_date:
                 raise ValueError("backup_date is required for restore task")
 
-            tenant_ids = self._get_restore_tenant_ids(
+            tenant_ids = await run_backup_io(
+                self._get_restore_tenant_ids,
                 task,
                 instance_id,
                 backup_date,

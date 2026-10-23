@@ -48,3 +48,11 @@
 - `complete-console-agent-switching` 负责“前端当前选中的 agent 如何与后端 active-agent 协议协同”
 
 如果后续问题出在 agent 选择交互本身，而不是读源漂移或 tenant 作用域错误，应转去看 `complete-console-agent-switching`。
+
+## 磁盘文件被覆盖的独立问题
+
+上述控制面读取一致性约束并不保证手工编辑与所有写入者之间的事务一致性。
+如果磁盘上的 `agent.json` 确实发生回写或重建，继续阅读
+[agent-config-file-overwrite.md](agent-config-file-overwrite.md)：普通回复会为
+`last_dispatch` 序列化整份配置；默认 Agent 引导校验失败时可能移走原文件并
+从模板重建；当前 API 进程内锁也不能协调手工编辑及多个 Pod。

@@ -7,7 +7,7 @@ Defines configuration classes for database connections.
 import os
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
 
 class DatabaseConfig(BaseModel):
@@ -23,13 +23,35 @@ class DatabaseConfig(BaseModel):
     database: str = Field(default="swe", description="Database name")
     min_connections: int = Field(
         default=2,
+        ge=0,
         description="Minimum connection pool size",
     )
     max_connections: int = Field(
         default=10,
+        gt=0,
         description="Maximum connection pool size",
     )
     charset: str = Field(default="utf8mb4", description="Character set")
+    use_unicode: bool = Field(
+        default=True,
+        description="Decode text as Unicode",
+    )
+    ssl_disabled: bool = Field(
+        default=True,
+        description="Disable database TLS",
+    )
+    time_zone: str = Field(default="+08:00", description="Session time zone")
+    acquire_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    connect_timeout: float = Field(default=10, gt=0, allow_inf_nan=False)
+    read_timeout: float = Field(default=600, gt=0, allow_inf_nan=False)
+    write_timeout: float = Field(default=600, gt=0, allow_inf_nan=False)
+    cleanup_timeout: float = Field(default=1, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_pool_bounds(self):
+        if self.min_connections > self.max_connections:
+            raise ValueError("min_connections must not exceed max_connections")
+        return self
 
 
 def get_database_config(
@@ -90,7 +112,26 @@ def get_database_config(
             pass
         return default
 
+    def _get_timeout(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _get_bool(name: str, default: bool) -> bool:
+        val = os.environ.get(name)
+        return TypeAdapter(bool).validate_python(val) if val else default
+
     return DatabaseConfig(
+        charset=_get_str("SWE_DB_CHARSET", "utf8mb4"),
+        use_unicode=_get_bool("SWE_DB_USE_UNICODE", True),
+        ssl_disabled=_get_bool("SWE_DB_SSL_DISABLED", True),
+        time_zone=_get_str("SWE_DB_TIME_ZONE", "+08:00"),
+        acquire_timeout=_get_timeout("SWE_DB_ACQUIRE_TIMEOUT", 30),
+        connect_timeout=_get_timeout("SWE_DB_CONNECT_TIMEOUT", 10),
+        read_timeout=_get_timeout("SWE_DB_READ_TIMEOUT", 600),
+        write_timeout=_get_timeout("SWE_DB_WRITE_TIMEOUT", 600),
+        cleanup_timeout=_get_timeout("SWE_DB_CLEANUP_TIMEOUT", 1),
         host=(
             host if host is not None else _get_str("SWE_DB_HOST", "localhost")
         ),

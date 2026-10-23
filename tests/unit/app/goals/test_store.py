@@ -1,6 +1,8 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from typing import Any
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -20,12 +22,33 @@ class FakeDb:
         self.is_connected = True
         self.executed: list[tuple[str, tuple[Any, ...] | None]] = []
         self.rows: list[dict[str, Any]] = []
+        self.transactions = 0
+        self.in_transaction = False
 
-    async def execute(self, query: str, params: tuple[Any, ...] | None = None) -> int:
+    @asynccontextmanager
+    async def transaction(self):
+        self.transactions += 1
+        self.in_transaction = True
+        try:
+            yield self
+        finally:
+            self.in_transaction = False
+
+    async def execute(
+        self,
+        query: str,
+        params: tuple[Any, ...] | None = None,
+    ) -> int:
+        if not query.lstrip().startswith("CREATE TABLE"):
+            assert self.in_transaction
         self.executed.append((query, params))
         return 1
 
-    async def fetch_one(self, query: str, params: tuple[Any, ...] | None = None):
+    async def fetch_one(
+        self,
+        query: str,
+        params: tuple[Any, ...] | None = None,
+    ):
         self.executed.append((query, params))
         return self.rows.pop(0) if self.rows else None
 
@@ -48,13 +71,18 @@ def contract() -> GoalContract:
 
 def scope() -> GoalScope:
     return GoalScope(
-        tenant_id="tenant", source_id="source", agent_profile_id="agent",
-        chat_id="chat", effective_model="model",
+        tenant_id="tenant",
+        source_id="source",
+        agent_profile_id="agent",
+        chat_id="chat",
+        effective_model="model",
     )
 
 
 @pytest.mark.asyncio
-async def test_initialize_creates_snapshot_tables_but_no_goal_audit_table() -> None:
+async def test_initialize_creates_snapshot_tables_but_no_goal_audit_table() -> (
+    None
+):
     db = FakeDb()
     store = MySqlGoalStore(db)
 
@@ -62,15 +90,21 @@ async def test_initialize_creates_snapshot_tables_but_no_goal_audit_table() -> N
 
     sql = "\n".join(query for query, _ in db.executed)
     for name in (
-        "swe_goals", "swe_goal_revisions", "swe_goal_criteria",
-        "swe_goal_steering", "swe_goal_subagent_links", "swe_goal_control_commands",
+        "swe_goals",
+        "swe_goal_revisions",
+        "swe_goal_criteria",
+        "swe_goal_steering",
+        "swe_goal_subagent_links",
+        "swe_goal_control_commands",
     ):
         assert f"CREATE TABLE IF NOT EXISTS {name}" in sql
     assert "audit" not in sql.lower()
 
 
 @pytest.mark.asyncio
-async def test_save_writes_goal_revision_criteria_and_control_snapshot() -> None:
+async def test_save_writes_goal_revision_criteria_and_control_snapshot() -> (
+    None
+):
     db = FakeDb()
     store = MySqlGoalStore(db)
     service = GoalService(store)
@@ -86,6 +120,8 @@ async def test_save_writes_goal_revision_criteria_and_control_snapshot() -> None
     assert "INSERT INTO swe_goal_revisions" in sql
     assert "INSERT INTO swe_goal_criteria" in sql
     assert "INSERT INTO swe_goal_control_commands" in sql
+    assert db.transactions == 2
+    assert not db.in_transaction
 
 
 @pytest.mark.asyncio

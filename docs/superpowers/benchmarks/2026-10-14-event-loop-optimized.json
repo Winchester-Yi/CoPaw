@@ -1,0 +1,96 @@
+{
+  "mode": "optimized-kernels",
+  "platform": "darwin",
+  "tenant_count": 4,
+  "stdout_mb_per_tenant": 16,
+  "checkpoint_events": 10000,
+  "shell_results": [
+    {
+      "tenant": "tenant-0",
+      "buffered_at_finish_bytes": 0,
+      "display_bytes": 4096
+    },
+    {
+      "tenant": "tenant-1",
+      "buffered_at_finish_bytes": 0,
+      "display_bytes": 4096
+    },
+    {
+      "tenant": "tenant-2",
+      "buffered_at_finish_bytes": 0,
+      "display_bytes": 4096
+    },
+    {
+      "tenant": "tenant-3",
+      "buffered_at_finish_bytes": 0,
+      "display_bytes": 4096
+    }
+  ],
+  "elapsed_seconds": 1.1791141249996144,
+  "sample_interval_ms": 10,
+  "lag_sample_count": 113,
+  "event_loop_lag_p95_ms": 1.1112499923910946,
+  "event_loop_lag_p99_ms": 1.135500002419576,
+  "rss_start_bytes": 191332352,
+  "rss_finish_bytes": 195526656,
+  "rss_sampled_peak_bytes": 195870720,
+  "default_saturation_runtime_wait_ms": 0.12629199773073196,
+  "performance_metrics": {
+    "workers": {
+      "output": {
+        "completed_count": 16400,
+        "sample_count": 2048,
+        "queue_avg_ms": 0.024516226069692948,
+        "queue_p95_ms": 0.03941600152757019,
+        "queue_p99_ms": 0.06620900239795446,
+        "queue_max_ms": 0.20912500622216612,
+        "execution_avg_ms": 0.10721284124315389,
+        "execution_p95_ms": 0.08529200567863882,
+        "execution_p99_ms": 0.1257499970961362,
+        "execution_max_ms": 34.95062499132473
+      },
+      "runtime_state": {
+        "completed_count": 6,
+        "sample_count": 6,
+        "queue_avg_ms": 0.03609733539633453,
+        "queue_p95_ms": 0.10550000297371298,
+        "queue_p99_ms": 0.10550000297371298,
+        "queue_max_ms": 0.10550000297371298,
+        "execution_avg_ms": 0.1543749992075997,
+        "execution_p95_ms": 0.9239579958375543,
+        "execution_p99_ms": 0.9239579958375543,
+        "execution_max_ms": 0.9239579958375543
+      },
+      "provider": {
+        "completed_count": 12,
+        "sample_count": 12,
+        "queue_avg_ms": 7.519131749480342,
+        "queue_p95_ms": 22.75845799886156,
+        "queue_p99_ms": 22.75845799886156,
+        "queue_max_ms": 22.75845799886156,
+        "execution_avg_ms": 23.14795491474797,
+        "execution_p95_ms": 27.656000005663373,
+        "execution_p99_ms": 27.656000005663373,
+        "execution_max_ms": 27.656000005663373
+      },
+      "backup": {
+        "completed_count": 4,
+        "sample_count": 4,
+        "queue_avg_ms": 0.15548949886579067,
+        "queue_p95_ms": 0.1908330013975501,
+        "queue_p99_ms": 0.1908330013975501,
+        "queue_max_ms": 0.1908330013975501,
+        "execution_avg_ms": 0.05022924960940145,
+        "execution_p95_ms": 0.11733300925698131,
+        "execution_p99_ms": 0.11733300925698131,
+        "execution_max_ms": 0.11733300925698131
+      }
+    },
+    "counters": {
+      "checkpoint_read_bytes": 19,
+      "checkpoint_read_calls": 1,
+      "s3_list_pages": 12
+    }
+  },
+  "scope": "local kernels, simulated tenant contexts, mock S3; no HTTP/model/DB"
+}

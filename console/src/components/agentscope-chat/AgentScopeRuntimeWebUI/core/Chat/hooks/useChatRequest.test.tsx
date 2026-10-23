@@ -5,6 +5,7 @@ import useChatRequest from "./useChatRequest";
 import { isChatStreamAbortReason } from "./abortReasons";
 import type { CurrentQARef } from "./currentQARef";
 import type { ChatRequestOwner } from "./requestOwnership";
+import type { IAgentScopeRuntimeWebUIMessage } from "../../types/IMessages";
 
 const mocks = vi.hoisted(() => {
   const streamGate = {
@@ -124,6 +125,7 @@ function Harness(props: {
   onFinish: (owner: ChatRequestOwner) => void;
   applyRecoverySnapshot?: (history: unknown, owner: ChatRequestOwner) => void;
   recoverAfterNotFound?: (owner: ChatRequestOwner) => void;
+  onConnectionLost?: (owner: ChatRequestOwner, error: Error) => void;
 }) {
   hookApi = useChatRequest({
     currentQARef: props.currentQARef,
@@ -133,6 +135,7 @@ function Harness(props: {
     onFinish: props.onFinish,
     applyRecoverySnapshot: props.applyRecoverySnapshot,
     recoverAfterNotFound: props.recoverAfterNotFound,
+    onConnectionLost: props.onConnectionLost,
   });
 
   return null;
@@ -203,6 +206,360 @@ describe("useChatRequest", () => {
       resolveGate = resolve;
     });
     mocks.streamGate.resolve = resolveGate;
+  });
+
+  it("upserts separate append bubbles while keeping the streamed body in its original response", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers(),
+    } as Response);
+    const body = JSON.parse(mocks.streamChunks[1].data).output[0];
+    const appended = (
+      id: string,
+      logicalId: string,
+      text: string,
+      order: number,
+    ) => ({
+      ...body,
+      id,
+      metadata: {
+        metadata: {
+          stop_append: { message_id: logicalId, turn_id: "turn-1", order },
+        },
+      },
+      content: [
+        {
+          object: "content",
+          type: "text",
+          text,
+          status: "completed",
+          msg_id: id,
+        },
+      ],
+    });
+    const first = appended("runtime-append-1", "append-1", "first", 0);
+    const second = appended("runtime-append-2", "append-2", "second", 1);
+    mocks.streamChunks.splice(
+      1,
+      1,
+      ...[
+        {
+          object: "response",
+          id: "response-1",
+          status: "in_progress",
+          output: [body, first],
+        },
+        {
+          object: "response",
+          id: "response-1",
+          status: "in_progress",
+          output: [body, first, second],
+        },
+        {
+          object: "response",
+          id: "response-1",
+          status: "completed",
+          output: [body, { ...first, id: "replayed-runtime-id" }, second],
+        },
+      ].map((value) => ({ data: JSON.stringify(value) })),
+    );
+    mocks.streamGate.resolve();
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: { id: "response-a", cards: [], msgStatus: "generating" },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const messages = new Map<string, IAgentScopeRuntimeWebUIMessage>();
+    const updateMessage = vi.fn((message: unknown) => {
+      const next = message as IAgentScopeRuntimeWebUIMessage;
+      messages.set(next.id, next);
+    });
+    const onFinish = vi.fn();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={onFinish}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, requestOwner);
+    });
+    expect([...messages.keys()]).toEqual([
+      "response-a",
+      "stop-append-append-1",
+      "stop-append-append-2",
+    ]);
+    expect(currentQARef.current.response.cards[0].data.output).toEqual([body]);
+    expect(messages.get("stop-append-append-1")?.cards).toHaveLength(1);
+    expect(
+      messages.get("stop-append-append-1")?.cards?.[0].data.output[0].id,
+    ).toBe("replayed-runtime-id");
+    expect(
+      messages.get("stop-append-append-2")?.cards?.[0].data.output[0].content[0]
+        .msg_id,
+    ).toBe("runtime-append-2");
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes the body before append bubbles when recovery starts with a complete response", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers(),
+    } as Response);
+    const frame = JSON.parse(mocks.streamChunks[1].data);
+    const appended = {
+      ...frame.output[0],
+      id: "runtime-append",
+      metadata: { stop_append: { message_id: "append-1" } },
+    };
+    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+      data: JSON.stringify({ ...frame, output: [...frame.output, appended] }),
+    });
+    mocks.streamGate.resolve();
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: { id: "response-a", cards: [], msgStatus: "generating" },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const updateMessage = vi.fn();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={vi.fn()}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, requestOwner);
+    });
+    expect(updateMessage.mock.calls.map(([message]) => message.id)).toEqual([
+      "response-a",
+      "stop-append-append-1",
+    ]);
+  });
+
+  it("finishes append delivery when recovery history has replaced the live body", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers(),
+    } as Response);
+    const frame = JSON.parse(mocks.streamChunks[1].data);
+    const appended = {
+      ...frame.output[0],
+      id: "runtime-append",
+      metadata: { stop_append: { message_id: "append-1" } },
+    };
+    mocks.streamChunks.splice(1, 1, {
+      data: JSON.stringify({ ...frame, output: [...frame.output, appended] }),
+    });
+    mocks.streamGate.resolve();
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "replaced-live-body",
+          cards: [],
+          msgStatus: "generating",
+        },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const updateMessage = vi.fn();
+    const onFinish = vi.fn(() => {
+      if (currentQARef.current.response)
+        updateMessage(currentQARef.current.response);
+    });
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        hasMessage={() => false}
+        onFinish={onFinish}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, requestOwner);
+    });
+    expect(updateMessage.mock.calls.map(([message]) => message.id)).toEqual([
+      "stop-append-append-1",
+    ]);
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not publish stale append bubbles after switching request owners", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers(),
+    } as Response);
+    const frame = JSON.parse(mocks.streamChunks[1].data);
+    const appended = {
+      ...frame.output[0],
+      id: "runtime-append",
+      metadata: { stop_append: { message_id: "append-1" } },
+    };
+    mocks.streamChunks.splice(1, 1, {
+      data: JSON.stringify({ ...frame, output: [...frame.output, appended] }),
+    });
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: { id: "response-a", cards: [], msgStatus: "generating" },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const updateMessage = vi.fn();
+    const onFinish = vi.fn();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={onFinish}
+      />,
+    );
+    let requestPromise: Promise<void>;
+    await act(async () => {
+      requestPromise = hookApi.request([], undefined, requestOwner);
+    });
+    await waitFor(() => expect(updateMessage).toHaveBeenCalled());
+    currentQARef.current.activeRequestOwner = createOwner({
+      requestId: "request-2",
+      sessionId: "chat-b",
+    });
+    mocks.streamGate.resolve();
+    await act(async () => {
+      await requestPromise;
+    });
+    expect(
+      updateMessage.mock.calls.some(
+        ([message]) => message.id === "stop-append-append-1",
+      ),
+    ).toBe(false);
+    expect(onFinish).not.toHaveBeenCalled();
+  });
+
+  it("aggregates append content frames by their unchanged runtime msg_id", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers(),
+    } as Response);
+    const body = JSON.parse(mocks.streamChunks[1].data).output[0];
+    const appendHeader = {
+      object: "message",
+      id: "msg_transport",
+      role: "assistant",
+      type: "message",
+      status: "in_progress",
+      metadata: { stop_append: { message_id: "persisted-append" } },
+      content: [],
+    };
+    mocks.streamChunks.splice(
+      0,
+      mocks.streamChunks.length,
+      ...[
+        {
+          object: "response",
+          id: "response-1",
+          status: "in_progress",
+          output: [body],
+        },
+        appendHeader,
+        {
+          object: "content",
+          msg_id: "msg_transport",
+          type: "text",
+          text: "appended text",
+          status: "completed",
+          delta: false,
+        },
+        { ...appendHeader, status: "completed" },
+        {
+          object: "response",
+          id: "response-1",
+          status: "completed",
+          output: [],
+        },
+      ].map((data) => ({ data: JSON.stringify(data) })),
+    );
+    mocks.streamGate.resolve();
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: { id: "response-a", cards: [], msgStatus: "generating" },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const messages = new Map<string, IAgentScopeRuntimeWebUIMessage>();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={(message: unknown) => {
+          const next = message as IAgentScopeRuntimeWebUIMessage;
+          messages.set(next.id, next);
+        }}
+        onFinish={vi.fn()}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, requestOwner);
+    });
+    const bubble = messages.get("stop-append-persisted-append");
+    expect(bubble?.msgStatus).toBe("finished");
+    expect(bubble?.cards?.[0].data.output[0]).toMatchObject({
+      id: "msg_transport",
+      content: [{ msg_id: "msg_transport", text: "appended text" }],
+    });
+    expect(currentQARef.current.response.cards[0].data.output).toEqual([body]);
+  });
+
+  it("reports unavailable replay without completing or stopping the business turn", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers({ "X-Swe-Stream-Protocol": "cursor-v1" }),
+    } as Response);
+    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+      event: "stream.unavailable",
+      data: "{}",
+    });
+    mocks.streamGate.resolve();
+    const requestOwner = createOwner();
+    const currentQARef = {
+      current: {
+        response: { id: "response-a", cards: [], msgStatus: "generating" },
+        activeRequestOwner: requestOwner,
+      },
+    } as unknown as CurrentQARef;
+    const onFinish = vi.fn();
+    const onConnectionLost = vi.fn();
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        hasMessage={() => true}
+        onFinish={onFinish}
+        onConnectionLost={onConnectionLost}
+      />,
+    );
+    await act(async () => {
+      await hookApi.request([], undefined, requestOwner);
+    });
+    expect(onConnectionLost).toHaveBeenCalledWith(
+      requestOwner,
+      expect.any(Error),
+    );
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(currentQARef.current.response?.msgStatus).toBe("generating");
   });
 
   it("finishes a W+ entry proposal as a structured Chat card", async () => {
@@ -911,9 +1268,9 @@ describe("useChatRequest", () => {
       await requestPromise;
     });
 
-    expect(currentQARef.current.response?.cards?.map((card) => card.code)).toEqual(
-      ["AgentScopeRuntimeResponseCard", "ApprovalAction"],
-    );
+    expect(
+      currentQARef.current.response?.cards?.map((card) => card.code),
+    ).toEqual(["AgentScopeRuntimeResponseCard", "ApprovalAction"]);
     expect(currentQARef.current.response?.cards?.[1]?.data).toMatchObject({
       requestId: "approval-1",
       toolName: "execute_shell_command",

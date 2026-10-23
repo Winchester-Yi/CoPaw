@@ -18,6 +18,7 @@ import useSuggestionsPolling from "./useSuggestionsPolling";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import ReactDOM from "react-dom";
+import { message } from "antd";
 import {
   FollowUpSubmitCoordinator,
   FOLLOW_UP_SUBMIT_FAILED_EVENT,
@@ -162,7 +163,10 @@ export default function useChatController() {
     ) => {
       const ownerIsActive =
         !owner ||
-        isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, owner);
+        isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        );
       if (!currentQARef.current.response) {
         if (ownerIsActive && !currentQARef.current.stopPending) {
           setLoading(false);
@@ -211,6 +215,10 @@ export default function useChatController() {
     hasMessage: messageHandler.hasMessage,
     getCurrentSessionId: sessionHandler.getCurrentSessionId,
     onFinish: (owner) => finishResponse("finished", owner),
+    onConnectionLost: (owner, error) => {
+      message.warning(error.message);
+      finishResponse("interrupted", owner);
+    },
     applyRecoverySnapshot,
     recoverAfterNotFound,
   });

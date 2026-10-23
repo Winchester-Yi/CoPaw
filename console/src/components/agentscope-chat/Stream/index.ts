@@ -180,23 +180,28 @@ function Stream<Output = SSEOutput>(
   /** support async iterator */
   stream[Symbol.asyncIterator] = async function* () {
     const reader = this.getReader();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      if (!value) continue;
-
-      // Transformed data through all transform pipes
-      yield config?.openaiCompatible
-        ? {
-            ...value,
-            data:
-              typeof (value as SSEOutput).data === "string"
-                ? (value as SSEOutput).data.slice(1)
-                : (value as SSEOutput).data,
-          }
-        : value;
+    let finished = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          finished = true;
+          break;
+        }
+        if (!value) continue;
+        yield config?.openaiCompatible
+          ? {
+              ...value,
+              data:
+                typeof (value as SSEOutput).data === "string"
+                  ? (value as SSEOutput).data.slice(1)
+                  : (value as SSEOutput).data,
+            }
+          : value;
+      }
+    } finally {
+      if (!finished) await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
   };
 

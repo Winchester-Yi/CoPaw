@@ -25,11 +25,38 @@ class TracingConfig(BaseModel):
     )
     batch_size: int = Field(
         default=100,
+        gt=0,
         description="Batch size for bulk write to database",
     )
     flush_interval: int = Field(
         default=5,
+        gt=0,
         description="Flush interval in seconds for background writer",
+    )
+    max_batch_bytes: int = Field(
+        default=256 * 1024,
+        gt=0,
+        description="Estimated SQL payload budget per batch; oversized rows write alone",
+    )
+    max_queue_spans: int = Field(
+        default=10000,
+        gt=0,
+        description="Maximum outstanding spans, including in-flight writes",
+    )
+    max_queue_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        gt=0,
+        description="Estimated outstanding payload budget; one oversized span may exceed it",
+    )
+    write_timeout: float = Field(
+        default=30,
+        gt=0,
+        description="Seconds to wait for accepted Span versions to be confirmed",
+    )
+    shutdown_timeout: float = Field(
+        default=30,
+        gt=0,
+        description="Seconds to drain outstanding Span writes before reporting failure",
     )
     retention_days: int = Field(
         default=30,

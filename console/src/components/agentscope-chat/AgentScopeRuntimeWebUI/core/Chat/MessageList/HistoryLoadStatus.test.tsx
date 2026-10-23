@@ -5,6 +5,28 @@ import HistoryLoadStatus from "./HistoryLoadStatus";
 describe("HistoryLoadStatus", () => {
   afterEach(cleanup);
 
+  it("offers explicit continuation while idle and prevents clicks during layout recovery", () => {
+    const onLoadMore = vi.fn();
+    const rendered = render(
+      <HistoryLoadStatus
+        state="idle"
+        onRetry={vi.fn()}
+        onLoadMore={onLoadMore}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    rendered.rerender(
+      <HistoryLoadStatus
+        state="idle"
+        onRetry={vi.fn()}
+        onLoadMore={onLoadMore}
+        advancing
+      />,
+    );
+    expect(screen.getByRole("button", { name: "加载更早消息" })).toBeDisabled();
+  });
+
   it("keeps a quiet stable status region while idle", () => {
     render(<HistoryLoadStatus state="idle" onRetry={vi.fn()} />);
 

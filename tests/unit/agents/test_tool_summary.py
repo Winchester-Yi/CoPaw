@@ -252,7 +252,11 @@ async def test_run_summary_model_binds_current_trace_context(
     async def fake_model(_messages):
         return "查看资料内容"
 
-    def fake_create_model_and_formatter(*, trace_context=None):
+    def fake_create_model_and_formatter(
+        *,
+        trace_context=None,
+        prepared_model_config=None,
+    ):
         observed["trace_context"] = trace_context
         return fake_model, object()
 
@@ -288,7 +292,11 @@ async def test_run_summary_model_reuses_cached_model_within_same_trace(
     async def fake_model(_messages):
         return "查看资料内容"
 
-    def fake_create_model_and_formatter(*, trace_context=None):
+    def fake_create_model_and_formatter(
+        *,
+        trace_context=None,
+        prepared_model_config=None,
+    ):
         created.append(trace_context)
         return fake_model, object()
 
@@ -344,7 +352,11 @@ async def test_run_summary_model_reuses_cached_model_without_trace_within_scope(
     async def fake_model(_messages):
         return "查看资料内容"
 
-    def fake_create_model_and_formatter(*, trace_context=None):
+    def fake_create_model_and_formatter(
+        *,
+        trace_context=None,
+        prepared_model_config=None,
+    ):
         created.append(trace_context)
         return fake_model, object()
 
@@ -380,7 +392,11 @@ async def test_run_summary_model_cache_key_includes_runtime_scope(
     async def fake_model(_messages):
         return "查看资料内容"
 
-    def fake_create_model_and_formatter(*, trace_context=None):
+    def fake_create_model_and_formatter(
+        *,
+        trace_context=None,
+        prepared_model_config=None,
+    ):
         created.append(trace_context)
         return fake_model, object()
 
@@ -428,7 +444,11 @@ async def test_run_summary_model_evicts_oldest_cached_trace(
     async def fake_model(_messages):
         return "查看资料内容"
 
-    def fake_create_model_and_formatter(*, trace_context=None):
+    def fake_create_model_and_formatter(
+        *,
+        trace_context=None,
+        prepared_model_config=None,
+    ):
         created.append(trace_context)
         return fake_model, object()
 
@@ -490,7 +510,11 @@ async def test_run_summary_model_eviction_disposes_oldest_cached_model(
         async def aclose(self) -> None:
             closed.append(self.label)
 
-    def fake_create_model_and_formatter(*, trace_context=None):
+    def fake_create_model_and_formatter(
+        *,
+        trace_context=None,
+        prepared_model_config=None,
+    ):
         return FakeModel(trace_context["trace_id"]), object()
 
     monkeypatch.setattr(
@@ -520,3 +544,14 @@ async def test_run_summary_model_eviction_disposes_oldest_cached_model(
     await tool_summary._run_summary_model("读取文件")
 
     assert closed == ["trace-1"]
+
+
+@pytest.fixture(autouse=True)
+def prepared_model_boundary(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        tool_summary,
+        "prepare_model_config_async",
+        AsyncMock(return_value=object()),
+    )

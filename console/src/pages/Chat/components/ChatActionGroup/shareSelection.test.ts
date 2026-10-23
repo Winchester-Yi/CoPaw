@@ -13,6 +13,25 @@ const message = (id: string, role: string) => ({
 });
 
 describe("share selection turn rules", () => {
+  it("shares Stop append messages with their existing user turn", () => {
+    expect(
+      buildShareTurns(
+        [
+          message("q1", "user"),
+          message("body", "assistant"),
+          {
+            ...message("append", "assistant"),
+            metadata: {
+              stop_append: { message_id: "append", turn_id: "turn-1" },
+            },
+          },
+        ],
+        { q1: "completed" },
+      ),
+    ).toEqual([
+      { id: "q1", messageIds: ["q1", "body", "append"], selectable: true },
+    ]);
+  });
   it("derives all, partial, and empty toolbar selection states", () => {
     expect(getShareSelectionState(0, 0)).toBe("empty");
     expect(getShareSelectionState(3, 0)).toBe("none");

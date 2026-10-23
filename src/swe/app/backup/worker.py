@@ -23,7 +23,10 @@ from swe.config.utils import (
 )
 
 from .config import BackupEnvironmentConfig
+from .io_worker import run_backup_io
+from .listing import find_latest_backup_hour, list_restore_tenants
 from .models import BackupTask, BackupTaskStatus
+from .memory_storage import RestoreTargetRejected
 from .s3_client import S3BackupClient
 from .task_store import TaskStore
 
@@ -90,6 +93,10 @@ def _compress_directory(
     if not source_dir.exists():
         return
 
+    from .memory_storage import capture_memory_roots, verify_memory_roots
+
+    memory_roots = capture_memory_roots(source_dir)
+
     for file in source_dir.rglob("*"):
         try:
             arcname = safe_archive_name(file, base_dir)
@@ -106,9 +113,13 @@ def _compress_directory(
             elif file.is_dir() and not any(file.iterdir()):
                 zf.writestr(f"{arcname}/", "")
         except (PermissionError, OSError) as e:
+            if memory_roots:
+                raise
             logger.warning(f"Error accessing {file}: {e}")
             if skipped is not None:
                 skipped.append(str(file))
+
+    verify_memory_roots(source_dir, memory_roots)
 
 
 class BackupWorker:
@@ -302,6 +313,7 @@ class BackupWorker:
         self.task_store.save(task)
 
         rollback_paths = []
+        modified_tenants: set[str] = set()
 
         try:
             instance_id = task.instance_id or "default"
@@ -316,17 +328,12 @@ class BackupWorker:
                 tenant_ids = task.target_tenant_ids
             else:
                 # List all backups for the date/hour/instance
-                backups = self.s3_client.list_backups(
-                    instance_id=instance_id,
-                    date=backup_date,
-                    hour=backup_hour,
-                )
-                tenant_ids = list(
-                    backups["backups"]
-                    .get(instance_id, {})
-                    .get(backup_date, {})
-                    .get(backup_hour if backup_hour is not None else 0, {})
-                    .keys(),
+                tenant_ids = await run_backup_io(
+                    list_restore_tenants,
+                    self.s3_client.list_backups,
+                    instance_id,
+                    backup_date,
+                    backup_hour,
                 )
 
             # Check for empty tenant list to avoid division by zero
@@ -368,19 +375,13 @@ class BackupWorker:
                 hour_to_restore = backup_hour
                 if hour_to_restore is None:
                     # Find the latest hour with backup for this tenant
-                    backups = self.s3_client.list_backups(
-                        instance_id=instance_id,
-                        date=backup_date,
+                    hour_to_restore = await run_backup_io(
+                        find_latest_backup_hour,
+                        self.s3_client.list_backups,
+                        instance_id,
+                        backup_date,
                     )
-                    hours = list(
-                        backups["backups"]
-                        .get(instance_id, {})
-                        .get(backup_date, {})
-                        .keys(),
-                    )
-                    if hours:
-                        hour_to_restore = max(hours)
-                    else:
+                    if hour_to_restore is None:
                         logger.warning(
                             f"No backup found for {instance_id}/{backup_date}/{tenant_id}",
                         )
@@ -403,7 +404,12 @@ class BackupWorker:
                 )
 
                 tenant_dir = get_tenant_working_dir(tenant_id)
-                await self._extract_zip(zip_path, tenant_dir, tenant_id)
+                modified_tenants.add(tenant_id)
+                try:
+                    await self._extract_zip(zip_path, tenant_dir, tenant_id)
+                except RestoreTargetRejected:
+                    modified_tenants.discard(tenant_id)
+                    raise
                 restored_tenants.append(tenant_id)
 
             task.restored_tenants = restored_tenants
@@ -422,14 +428,20 @@ class BackupWorker:
 
         except Exception as e:
             task.error_message = str(e)
-            task.current_step = "rolling_back"
-            task.status = BackupTaskStatus.ROLLING_BACK
-            self.task_store.save(task)
-
-            # Rollback all tenants
-            await self._rollback_all(rollback_paths)
-
-            task.status = BackupTaskStatus.ROLLED_BACK
+            affected_backups = [
+                path
+                for path in rollback_paths
+                if Path(path).stem in modified_tenants
+            ]
+            if affected_backups:
+                task.current_step = "rolling_back"
+                task.status = BackupTaskStatus.ROLLING_BACK
+                self.task_store.save(task)
+                await self._rollback_all(affected_backups)
+                task.status = BackupTaskStatus.ROLLED_BACK
+            else:
+                task.current_step = "failed"
+                task.status = BackupTaskStatus.FAILED
         finally:
             task.completed_at = datetime.now(BJ_TZ)
             self.task_store.save(task)
@@ -604,6 +616,10 @@ class BackupWorker:
         """
 
         def _do_extract():
+            from .memory_storage import validate_restore_target
+
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                validate_restore_target(archive, target_dir)
             target_dir.mkdir(parents=True, exist_ok=True)
             secrets_dir = get_tenant_storage_secrets_dir(tenant_id)
             secrets_dir.mkdir(parents=True, exist_ok=True)

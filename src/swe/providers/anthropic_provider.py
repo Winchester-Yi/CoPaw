@@ -133,6 +133,9 @@ class AnthropicProvider(Provider):
         from agentscope.model import AnthropicChatModel
 
         client_kwargs = {"base_url": self.base_url}
+        from .client_tls import prepared_http_client_kwargs
+
+        client_kwargs.update(prepared_http_client_kwargs("anthropic"))
         if self.base_url == DASHSCOPE_BASE_URL:
             client_kwargs["default_headers"] = {
                 "x-dashscope-agentapp": json.dumps(

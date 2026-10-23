@@ -142,6 +142,17 @@ class HookHandlerResult(BaseModel):
     failure_type: str = ""
     replacement_text: str | None = None
     output_transform: bool = False
+    append_text: str | None = None
+
+
+class StopAppendContribution(BaseModel):
+    """保存独立追加消息及其配置来源。"""
+
+    source: str
+    group_id: str
+    handler_id: str
+    order: int
+    text: str
 
 
 class HookPermissionDecision(BaseModel):
@@ -201,6 +212,7 @@ class BaseHookHandlerConfig(BaseModel):
     status_message: str = Field(default="", alias="statusMessage")
     once: bool = False
     output_transform: bool = Field(default=False, alias="outputTransform")
+    output_append: bool = Field(default=False, alias="outputAppend")
     include_conversation_snapshot: bool = Field(
         default=False,
         alias="includeConversationSnapshot",
@@ -345,6 +357,13 @@ def validate_handler_event(
     handler: HookHandlerConfig,
     event_name: HookEventName,
 ) -> None:
+    if handler.output_append:
+        if event_name != HookEventName.STOP:
+            raise ValueError(
+                "outputAppend handlers must be configured on Stop only",
+            )
+        if handler.output_transform or handler.once:
+            raise ValueError("outputAppend cannot use outputTransform or once")
     if (
         isinstance(handler, PromptHookHandlerConfig)
         and event_name not in PROMPT_HANDLER_BLOCKABLE_EVENTS

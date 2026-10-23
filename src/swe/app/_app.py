@@ -762,6 +762,11 @@ async def _start_lifespan_background_services(
 ) -> None:
     """启动生命周期内常驻的后台服务。"""
     from ..security.tool_guard.watcher import ToolGuardConfigWatcher
+    from .transient_memory_cleanup import TransientMemoryCleanup
+
+    transient_cleanup = TransientMemoryCleanup()
+    app.state.transient_memory_cleanup = transient_cleanup
+    await transient_cleanup.start()
 
     tool_guard_watcher = ToolGuardConfigWatcher()
     await tool_guard_watcher.start()
@@ -794,6 +799,10 @@ async def _shutdown_lifespan_resources(
     db_connection: Any | None,
 ) -> None:
     """按依赖顺序关闭生命周期资源。"""
+    transient_cleanup = getattr(app.state, "transient_memory_cleanup", None)
+    if transient_cleanup is not None:
+        await transient_cleanup.stop()
+
     tool_guard_watcher = getattr(app.state, "tool_guard_config_watcher", None)
     if tool_guard_watcher is not None:
         await tool_guard_watcher.stop()
@@ -857,8 +866,21 @@ async def _shutdown_lifespan_resources(
         await stop_service_heartbeat()
     except Exception as e:
         logger.warning("Error stopping service heartbeat: %s", e)
-    await _stop_multi_agent_manager(app)
-    await _stop_tenant_workspace_pool(app)
+    manager_stopped = await _stop_multi_agent_manager(app)
+    pool_stopped = await _stop_tenant_workspace_pool(app)
+    if transient_cleanup is not None:
+        from ..agents.memory.base_memory_manager import summary_task_stats
+
+        # Existing workspace shutdown can swallow service close failures.
+        # Never reset under summaries that resisted cancellation.
+        if (
+            manager_stopped
+            and pool_stopped
+            and not summary_task_stats()["pending"]
+        ):
+            await transient_cleanup.reset()
+        else:
+            logger.warning("Skipping transient memory reset: producers remain")
 
     history_recorder = getattr(
         app.state,
@@ -900,26 +922,30 @@ async def _shutdown_lifespan_resources(
     shutdown_logger()
 
 
-async def _stop_multi_agent_manager(app: FastAPI) -> None:
+async def _stop_multi_agent_manager(app: FastAPI) -> bool:
     multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
     if multi_agent_mgr is None:
-        return
+        return True
     logger.info("Stopping MultiAgentManager...")
     try:
         await multi_agent_mgr.stop_all()
     except Exception as e:
         logger.error(f"Error stopping MultiAgentManager: {e}")
+        return False
+    return True
 
 
-async def _stop_tenant_workspace_pool(app: FastAPI) -> None:
+async def _stop_tenant_workspace_pool(app: FastAPI) -> bool:
     tenant_pool = getattr(app.state, "tenant_workspace_pool", None)
     if tenant_pool is None:
-        return
+        return True
     logger.info("Stopping all tenant workspaces...")
     try:
         await tenant_pool.stop_all()
     except Exception as e:
         logger.error(f"Error stopping tenant workspaces: {e}")
+        return False
+    return True
 
 
 @asynccontextmanager
@@ -1001,10 +1027,9 @@ async def lifespan(
         f"(minimal initialization - runtimes deferred to first use)",
     )
 
-    # 启动服务心跳任务
-    await _start_lifespan_background_services(app, multi_agent_manager)
-
     try:
+        # Include partial background startup in lifecycle cleanup.
+        await _start_lifespan_background_services(app, multi_agent_manager)
         yield
     finally:
         await _shutdown_lifespan_resources(app, db_connection)
@@ -1036,6 +1061,7 @@ if CORS_ORIGINS:
             "X-Swe-Msgid",
             "X-Swe-Sessionid",
             "X-Swe-Chatid",
+            "X-Swe-Stream-Protocol",
         ],
     )
 

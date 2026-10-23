@@ -16,6 +16,7 @@ from ..runner.api import (
     _slice_answer_turn,
     get_workspace,
     _read_history_state,
+    _select_history_turns,
 )
 from ..runner.models import ChatHistory
 from .models import ChatShareOptions, ChatShareSnapshot
@@ -153,19 +154,35 @@ def _message_payload(message: Any) -> dict[str, Any]:
     raise TypeError("Unsupported chat message")
 
 
-async def _share_context(chat, workspace):
-    history: ChatHistory = await _build_chat_history(
-        chat,
-        session=workspace.runner.session,
-        workspace=workspace,
-        non_blocking=True,
-    )
-    messages = await _load_share_messages(chat, workspace, history)
+async def _share_context(chat, workspace, selected_turn_ids=None):
     state = await _read_history_state(
         workspace.runner.session,
         chat.session_id,
         chat.user_id,
     )
+    if state.get("schema_version") == 3:
+        if selected_turn_ids is None:
+            state = await workspace.runner.session.materialize_turn_states(
+                chat.session_id,
+                chat.user_id,
+                state,
+                chat.id,
+            )
+        else:
+            state = await _select_history_turns(
+                workspace.runner.session,
+                chat,
+                state,
+                selected_turn_ids,
+            )
+    history: ChatHistory = await _build_chat_history(
+        chat,
+        session=workspace.runner.session,
+        workspace=workspace,
+        non_blocking=True,
+        state=state,
+    )
+    messages = await _load_share_messages(chat, workspace, history)
     return history, messages, _turn_statuses(messages, state)
 
 
@@ -257,7 +274,11 @@ async def create_chat_share(
         raise HTTPException(status_code=404, detail="Chat not found")
     _authorize_chat(request, chat, workspace)
     try:
-        _, messages, statuses = await _share_context(chat, workspace)
+        _, messages, statuses = await _share_context(
+            chat,
+            workspace,
+            payload.turn_ids,
+        )
         record = await service.create_snapshot(
             chat_id=chat.id,
             chat_name=chat.name,

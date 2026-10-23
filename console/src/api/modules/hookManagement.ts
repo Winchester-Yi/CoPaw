@@ -14,6 +14,9 @@ export type HookMatcherGroup = {
 export type HookHandler = {
   id: string;
   type: "command" | "http" | "prompt";
+  outputAppend?: boolean;
+  outputTransform?: boolean;
+  once?: boolean;
   [key: string]: unknown;
 };
 
@@ -45,6 +48,11 @@ export type HookManualTestSummary = {
   output_transform: boolean;
   replacement_applied: boolean;
   replacement_length: number;
+  output_append?: boolean;
+  append_applied?: boolean;
+  append_bytes?: number;
+  effective_fail_policy?: string;
+  duration_ms?: number;
 };
 
 export type HookManualTestResponse = {

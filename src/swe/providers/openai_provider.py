@@ -83,11 +83,23 @@ class OpenAIProvider(Provider):
             self.chat_model = str(config["chat_model"])
 
     def _client(self, timeout: float = 5) -> AsyncOpenAI:
+        from .client_tls import prepared_http_client_kwargs
+
         return AsyncOpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=timeout,
+            **prepared_http_client_kwargs("openai"),
         )
+
+    async def _client_async(self, timeout: float = 5) -> AsyncOpenAI:
+        import httpx
+        from ..runtime_workers import run_runtime_state_work
+        from .client_tls import bind_prepared_client_tls
+
+        context = await run_runtime_state_work(httpx.create_ssl_context)
+        with bind_prepared_client_tls(context):
+            return self._client(timeout=timeout)
 
     @staticmethod
     def _normalize_models_payload(payload: Any) -> List[ModelInfo]:
@@ -115,7 +127,7 @@ class OpenAIProvider(Provider):
         """Check if OpenAI provider is reachable with current configuration."""
         if self.base_url == CODING_DASHSCOPE_BASE_URL:
             return True, ""
-        client = self._client()
+        client = await self._client_async()
         try:
             await client.models.list(timeout=timeout)
             return True, ""
@@ -130,7 +142,7 @@ class OpenAIProvider(Provider):
     async def fetch_models(self, timeout: float = 5) -> List[ModelInfo]:
         """Fetch available models."""
         try:
-            client = self._client(timeout=timeout)
+            client = await self._client_async(timeout=timeout)
             payload = await client.models.list(timeout=timeout)
             models = self._normalize_models_payload(payload)
             return models
@@ -150,7 +162,7 @@ class OpenAIProvider(Provider):
             return False, "Empty model ID"
 
         try:
-            client = self._client(timeout=timeout)
+            client = await self._client_async(timeout=timeout)
             res = await client.chat.completions.create(
                 model=model_id,
                 messages=[
@@ -189,6 +201,9 @@ class OpenAIProvider(Provider):
         from .kimi_chat_model import KimiChatModel
 
         client_kwargs = {"base_url": self.base_url}
+        from .client_tls import prepared_http_client_kwargs
+
+        client_kwargs.update(prepared_http_client_kwargs("openai"))
 
         if self.base_url == DASHSCOPE_BASE_URL:
             client_kwargs["default_headers"] = {
@@ -295,7 +310,7 @@ class OpenAIProvider(Provider):
             self.base_url,
         )
         start_time = time.monotonic()
-        client = self._client(timeout=timeout)
+        client = await self._client_async(timeout=timeout)
         try:
             res = await client.chat.completions.create(
                 model=model_id,
@@ -471,7 +486,7 @@ class OpenAIProvider(Provider):
 
         is_http = video_url == _PROBE_VIDEO_URL
         req_timeout = timeout * 3 if is_http else timeout
-        client = self._client(timeout=req_timeout)
+        client = await self._client_async(timeout=req_timeout)
         try:
             res = await client.chat.completions.create(
                 model=model_id,

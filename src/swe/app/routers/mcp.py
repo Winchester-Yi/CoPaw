@@ -573,21 +573,7 @@ async def create_mcp_client(
     client: MCPClientCreateRequest = Body(..., embed=True),
 ) -> MCPClientInfo:
     """Create a new MCP client configuration."""
-    from ..agent_context import get_agent_and_config_for_request
-
-    workspace, agent_config = await get_agent_and_config_for_request(request)
-
-    # Initialize mcp config if not exists
-    if agent_config.mcp is None:
-        agent_config.mcp = MCPConfig(clients={})
-
-    # Check if client already exists
-    if client_key in agent_config.mcp.clients:
-        raise HTTPException(
-            400,
-            detail=f"MCP client '{client_key}' already exists. Use PUT to "
-            f"update.",
-        )
+    from ..agent_context import agent_config_update_scope
 
     # Create new client config
     new_client = MCPClientConfig(
@@ -603,13 +589,21 @@ async def create_mcp_client(
         cwd=client.cwd,
     )
 
-    # Add to agent's config and save
-    agent_config.mcp.clients[client_key] = new_client
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        if agent_config.mcp is None:
+            agent_config.mcp = MCPConfig(clients={})
+        if client_key in agent_config.mcp.clients:
+            raise HTTPException(
+                400,
+                detail=f"MCP client '{client_key}' already exists. Use PUT to "
+                f"update.",
+            )
+        agent_config.mcp.clients[client_key] = new_client
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -632,42 +626,40 @@ async def update_mcp_client(
     updates: MCPClientUpdateRequest = Body(...),
 ) -> MCPClientInfo:
     """Update an existing MCP client configuration."""
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
 
-    workspace, agent_config = await get_agent_and_config_for_request(request)
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        if (
+            agent_config.mcp is None
+            or client_key not in agent_config.mcp.clients
+        ):
+            raise HTTPException(
+                404,
+                detail=f"MCP client '{client_key}' not found",
+            )
 
-    if agent_config.mcp is None or client_key not in agent_config.mcp.clients:
-        raise HTTPException(404, detail=f"MCP client '{client_key}' not found")
+        existing = agent_config.mcp.clients[client_key]
+        update_data = updates.model_dump(exclude_unset=True)
+        if "env" in update_data and update_data["env"] is not None:
+            update_data["env"] = _restore_original_values(
+                update_data["env"],
+                existing.env or {},
+            )
+        if "headers" in update_data and update_data["headers"] is not None:
+            update_data["headers"] = _restore_original_values(
+                update_data["headers"],
+                existing.headers or {},
+            )
 
-    existing = agent_config.mcp.clients[client_key]
-
-    # Update fields if provided
-    update_data = updates.model_dump(exclude_unset=True)
-
-    # Restore masked env/header values to originals before replacing
-    if "env" in update_data and update_data["env"] is not None:
-        update_data["env"] = _restore_original_values(
-            update_data["env"],
-            existing.env or {},
+        merged_data = existing.model_dump(mode="json")
+        merged_data.update(update_data)
+        updated_client = MCPClientConfig.model_validate(merged_data)
+        agent_config.mcp.clients[client_key] = updated_client
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
         )
-
-    if "headers" in update_data and update_data["headers"] is not None:
-        update_data["headers"] = _restore_original_values(
-            update_data["headers"],
-            existing.headers or {},
-        )
-
-    merged_data = existing.model_dump(mode="json")
-    merged_data.update(update_data)
-    updated_client = MCPClientConfig.model_validate(merged_data)
-    agent_config.mcp.clients[client_key] = updated_client
-
-    # Save updated config
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -689,22 +681,24 @@ async def toggle_mcp_client(
     client_key: str = FastAPIPath(...),
 ) -> MCPClientInfo:
     """Toggle the enabled status of an MCP client."""
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
 
-    workspace, agent_config = await get_agent_and_config_for_request(request)
-
-    if agent_config.mcp is None or client_key not in agent_config.mcp.clients:
-        raise HTTPException(404, detail=f"MCP client '{client_key}' not found")
-
-    client = agent_config.mcp.clients[client_key]
-
-    # Toggle enabled status
-    client.enabled = not client.enabled
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        if (
+            agent_config.mcp is None
+            or client_key not in agent_config.mcp.clients
+        ):
+            raise HTTPException(
+                404,
+                detail=f"MCP client '{client_key}' not found",
+            )
+        client = agent_config.mcp.clients[client_key]
+        client.enabled = not client.enabled
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -726,20 +720,23 @@ async def delete_mcp_client(
     client_key: str = FastAPIPath(...),
 ) -> Dict[str, str]:
     """Delete an MCP client configuration."""
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
 
-    workspace, agent_config = await get_agent_and_config_for_request(request)
-
-    if agent_config.mcp is None or client_key not in agent_config.mcp.clients:
-        raise HTTPException(404, detail=f"MCP client '{client_key}' not found")
-
-    # Remove client
-    del agent_config.mcp.clients[client_key]
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        if (
+            agent_config.mcp is None
+            or client_key not in agent_config.mcp.clients
+        ):
+            raise HTTPException(
+                404,
+                detail=f"MCP client '{client_key}' not found",
+            )
+        del agent_config.mcp.clients[client_key]
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(

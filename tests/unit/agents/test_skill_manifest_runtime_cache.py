@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -60,9 +59,14 @@ def test_resolve_effective_skills_reuses_unchanged_workspace_snapshot(
 
 def test_snapshot_reuses_manifest_metadata_and_detects_skill_content_change(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     from swe.agents import skills_manager
     from swe.agents.skill_runtime_snapshot import get_workspace_skill_snapshot
+    from swe.agents import skill_runtime_snapshot as snapshots
+
+    now = [0.0]
+    monkeypatch.setattr(snapshots.time, "monotonic", lambda: now[0])
 
     _write_workspace(tmp_path, description="before")
     first = get_workspace_skill_snapshot(tmp_path)
@@ -73,6 +77,8 @@ def test_snapshot_reuses_manifest_metadata_and_detects_skill_content_change(
         "---\nname: demo\ndescription: after\n---\nbody\n",
         encoding="utf-8",
     )
+    assert get_workspace_skill_snapshot(tmp_path) is first
+    now[0] = 600
     second = get_workspace_skill_snapshot(tmp_path)
     assert second is not first
     assert (
@@ -120,12 +126,15 @@ def test_workspace_skill_coordinator_serializes_local_mutations(
     assert entered == ["first", "first-done", "second"]
 
 
-def test_snapshot_build_failure_keeps_previous_cached_snapshot(
+def test_snapshot_build_failure_replaces_expired_cached_snapshot(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     from swe.agents import skills_manager
     from swe.agents import skill_runtime_snapshot as snapshots
+
+    now = [0.0]
+    monkeypatch.setattr(snapshots.time, "monotonic", lambda: now[0])
 
     _write_workspace(tmp_path)
     first = snapshots.get_workspace_skill_snapshot(tmp_path)
@@ -139,42 +148,14 @@ def test_snapshot_build_failure_keeps_previous_cached_snapshot(
         raise RuntimeError("reconcile unavailable")
 
     monkeypatch.setattr(skills_manager, "read_skill_manifest", fail_read)
+    now[0] = 600
     with pytest.raises(RuntimeError, match="reconcile unavailable"):
         snapshots.get_workspace_skill_snapshot(tmp_path)
 
-    assert snapshots._CACHE[tmp_path.resolve()] is first
-
-
-def test_snapshot_validation_refreshes_stat_token_without_rehashing_forever(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    from swe.agents import skills_manager
-    from swe.agents import skill_runtime_snapshot as snapshots
-
-    _write_workspace(tmp_path)
-    first = snapshots.get_workspace_skill_snapshot(tmp_path)
-    skill_md = tmp_path / "skills" / "demo" / "SKILL.md"
-    stat = skill_md.stat()
-    os.utime(
-        skill_md,
-        ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000),
-    )
-
-    validated = snapshots._filter_changed_skills(first)
-    assert (
-        validated.skills["demo"].freshness_token
-        != first.skills["demo"].freshness_token
-    )
-
-    monkeypatch.setattr(
-        skills_manager,
-        "_build_signature",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("unchanged content should not be rehashed"),
-        ),
-    )
-    assert snapshots._filter_changed_skills(validated) is validated
+    cached = snapshots._CACHE[tmp_path.resolve()].snapshot
+    assert cached is not first
+    assert not cached.manifest_available
+    assert cached.skills == {}
 
 
 def test_snapshot_warn_mode_keeps_skill_when_scan_reports_blocking_finding(

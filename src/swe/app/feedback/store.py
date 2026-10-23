@@ -276,25 +276,23 @@ class FeedbackStore:
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        async with self.db.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    query,
-                    (
-                        source_id,
-                        feedback.feedback_user_name,
-                        feedback.feedback_user_sap,
-                        feedback.feedback_branch,
-                        feedback.feedback_sub_branch,
-                        feedback.feedback_position,
-                        feedback.cron_task_name,
-                        feedback.cron_task_id,
-                        feedback.response_id,
-                        resolved_trace_id,
-                        feedback.chat_id,
-                        feedback.session_id,
-                        feedback_options_json,
-                        feedback.feedback_content,
-                    ),
-                )
-                return cur.lastrowid or None, False, resolved_trace_id
+        inserted_id = await self.db.insert(
+            query,
+            (
+                source_id,
+                feedback.feedback_user_name,
+                feedback.feedback_user_sap,
+                feedback.feedback_branch,
+                feedback.feedback_sub_branch,
+                feedback.feedback_position,
+                feedback.cron_task_name,
+                feedback.cron_task_id,
+                feedback.response_id,
+                resolved_trace_id,
+                feedback.chat_id,
+                feedback.session_id,
+                feedback_options_json,
+                feedback.feedback_content,
+            ),
+        )
+        return inserted_id or None, False, resolved_trace_id

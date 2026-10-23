@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Shared, versioned workflow binding storage for SWE and Scheduler."""
 
 from __future__ import annotations
@@ -137,7 +138,7 @@ class WorkflowConfigStore:
         )
         if not isinstance(config_data, dict):
             raise ValueError(
-                "workflow binding configuration must be an object"
+                "workflow binding configuration must be an object",
             )
         return WorkflowConfig.model_validate(
             {
@@ -159,72 +160,60 @@ class WorkflowConfigStore:
         if not source_id or not skill_id:
             raise ValueError("workflow source and skill are required")
         db = self._require_db()
-        async with db.acquire() as conn:
-            await conn.begin()
-            try:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(
-                        """INSERT IGNORE INTO swe_workflow_bindings
-                           (binding_id, source_id, skill_id, current_version)
-                           VALUES (%s, %s, %s, 0)""",
-                        (str(uuid4()), source_id, skill_id),
-                    )
-                    await cursor.execute(
-                        """SELECT binding_id, current_version
-                           FROM swe_workflow_bindings
-                           WHERE source_id = %s AND skill_id = %s
-                           FOR UPDATE""",
-                        (source_id, skill_id),
-                    )
-                    row = await cursor.fetchone()
-                    if row is None:
-                        raise RuntimeError(
-                            "workflow binding insert was not visible"
-                        )
-                    binding_id = str(row[0])
-                    version = int(row[1]) + 1
-                    config = WorkflowConfig.model_validate(
-                        {
-                            **definition,
-                            "binding_id": binding_id,
-                            "version": version,
-                            "skill_id": skill_id,
-                        },
-                    )
-                    ensure_workflow_host_approved(
-                        config.url,
-                        self._allowed_hosts,
-                    )
-                    if not is_registered_workflow_renderer(
-                        config.renderer_key,
-                    ):
-                        raise ValueError("workflow renderer is not registered")
-                    config_text = config.model_dump_json(
-                        exclude={"binding_id", "version", "skill_id"},
-                    )
-                    if len(config_text.encode("utf-8")) > 60_000:
-                        raise ValueError(
-                            "workflow binding configuration is too large"
-                        )
-                    await cursor.execute(
-                        """INSERT INTO swe_workflow_binding_versions
-                           (binding_id, version, skill_id, config_json)
-                           VALUES (%s, %s, %s, %s)""",
-                        (
-                            binding_id,
-                            version,
-                            skill_id,
-                            config_text,
-                        ),
-                    )
-                    await cursor.execute(
-                        """UPDATE swe_workflow_bindings
-                           SET current_version = %s, enabled = 1
-                           WHERE binding_id = %s""",
-                        (version, binding_id),
-                    )
-                await conn.commit()
-            except BaseException:
-                await conn.rollback()
-                raise
+        async with db.transaction() as conn:
+            await conn.execute(
+                """INSERT IGNORE INTO swe_workflow_bindings
+                   (binding_id, source_id, skill_id, current_version)
+                   VALUES (%s, %s, %s, 0)""",
+                (str(uuid4()), source_id, skill_id),
+            )
+            row = await conn.fetch_one(
+                """SELECT binding_id, current_version
+                   FROM swe_workflow_bindings
+                   WHERE source_id = %s AND skill_id = %s
+                   FOR UPDATE""",
+                (source_id, skill_id),
+            )
+            if row is None:
+                raise RuntimeError("workflow binding insert was not visible")
+            binding_id = str(row["binding_id"])
+            version = int(row["current_version"]) + 1
+            config = WorkflowConfig.model_validate(
+                {
+                    **definition,
+                    "binding_id": binding_id,
+                    "version": version,
+                    "skill_id": skill_id,
+                },
+            )
+            ensure_workflow_host_approved(
+                config.url,
+                self._allowed_hosts,
+            )
+            if not is_registered_workflow_renderer(
+                config.renderer_key,
+            ):
+                raise ValueError("workflow renderer is not registered")
+            config_text = config.model_dump_json(
+                exclude={"binding_id", "version", "skill_id"},
+            )
+            if len(config_text.encode("utf-8")) > 60_000:
+                raise ValueError("workflow binding configuration is too large")
+            await conn.execute(
+                """INSERT INTO swe_workflow_binding_versions
+                   (binding_id, version, skill_id, config_json)
+                   VALUES (%s, %s, %s, %s)""",
+                (
+                    binding_id,
+                    version,
+                    skill_id,
+                    config_text,
+                ),
+            )
+            await conn.execute(
+                """UPDATE swe_workflow_bindings
+                   SET current_version = %s, enabled = 1
+                   WHERE binding_id = %s""",
+                (version, binding_id),
+            )
         return config

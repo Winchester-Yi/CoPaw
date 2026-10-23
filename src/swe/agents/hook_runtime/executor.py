@@ -33,7 +33,7 @@ from swe.runtime_invocation_claims import (
     apply_runtime_claim_env,
     build_runtime_claim_headers,
 )
-from swe.agents.model_factory import create_model_and_formatter
+from swe.agents.model_factory import create_model_and_formatter_async
 from swe.config.context import tenant_context
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,10 @@ async def execute_handler(
     *,
     workspace_dir: Path,
 ) -> HookHandlerResult:
+    if handler.output_append:
+        from .append import execute_append_handler
+
+        return await execute_append_handler(handler, context, workspace_dir)
     logger.debug(
         "Executing hook handler id=%s type=%s context=%s",
         handler.id,
@@ -294,7 +298,7 @@ async def _execute_prompt_handler_once(
         workspace_dir=workspace_dir,
         source_id=context.source_id,
     ):
-        model, _formatter = create_model_and_formatter(
+        model, _formatter = await create_model_and_formatter_async(
             agent_id=context.agent_id or None,
             trace_context={
                 "trace_id": context.trace_id,

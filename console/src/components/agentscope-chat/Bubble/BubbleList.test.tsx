@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 import BubbleList from "./BubbleList";
@@ -30,6 +30,28 @@ vi.mock("./hooks/usePaginationItemsData", () => ({
 }));
 
 describe("BubbleList", () => {
+  it("reports reading history when a reverse list has negative scrollTop", () => {
+    const onBottomStateChange = vi.fn();
+    const ref = createRef<{
+      getScrollElement: () => HTMLDivElement | null;
+      scrollToBottom: () => void;
+    }>();
+    render(
+      <BubbleList
+        ref={ref}
+        order="desc"
+        pagination={false}
+        onBottomStateChange={onBottomStateChange}
+      />,
+    );
+    const element = ref.current!.getScrollElement()!;
+    element.scrollTop = -300;
+    fireEvent.scroll(element);
+    expect(onBottomStateChange).toHaveBeenLastCalledWith(false);
+    element.scrollTop = 0;
+    fireEvent.scroll(element);
+    expect(onBottomStateChange).toHaveBeenLastCalledWith(true);
+  });
   it("places top content at the visual top of a reverse-ordered list", () => {
     render(
       <BubbleList

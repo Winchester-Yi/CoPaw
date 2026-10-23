@@ -2,6 +2,19 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## SSE 客户端断连后订阅未释放
+
+- 症状：协商式 SSE 响应返回后，`TaskTracker._runs[chat_id].queues`
+  仍保留已断连客户端的订阅，且 `subscriber.detached` 为 `False`。
+- 触发条件：ASGI 2.0 客户端在 body send 阻塞时断连，同时 tracker 锁被占用。
+  Starlette 的 AnyIO 取消作用域会中断 close callback 获取锁，继而跳过迭代器关闭。
+- 处理：`ReplayStreamingResponse.stream_response()` 的 callback 和
+  `body_iterator.aclose()` 都应位于 `anyio.CancelScope(shield=True)` 内；
+  用 `try/finally` 保证 callback 抛错时仍执行迭代器关闭。
+- 回归入口：`tests/unit/routers/test_console_stream_replay.py` 的断连测试必须
+  同时覆盖阻塞 body send 和锁竞争，并断言释放订阅后 producer 继续运行；
+  `tests/unit/routers/test_sse_response.py` 覆盖 callback 抛错时关闭 source。
+
 ## 财富规划看板“全部”混入不适用岗位的关注来源
 
 - 可见范围：行长（含 RB0108 理财主管）查看本行“分行关注、行长关注”；中台只查看本行“分行关注”。客户经理仍按本行创建/分发关系查看规划。

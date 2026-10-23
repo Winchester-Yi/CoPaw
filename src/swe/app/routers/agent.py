@@ -26,6 +26,7 @@ from ...agents.memory.agent_md_manager import AgentMdManager
 from ...agents.utils import copy_builtin_qa_md_files, copy_md_files
 from ...constant import BUILTIN_QA_AGENT_ID
 from ..agent_context import (
+    agent_config_update_scope,
     get_agent_for_request,
     get_agent_and_config_for_request,
 )
@@ -416,14 +417,15 @@ async def put_agent_language(
             ),
         )
 
-    # Get current agent's workspace
-    workspace, agent_config = await get_agent_and_config_for_request(request)
-    agent_id = workspace.agent_id
-    old_language = agent_config.language
-
-    # Update agent's language
-    agent_config.language = language
-    save_agent_config(agent_id, agent_config, tenant_id=workspace.tenant_id)
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        agent_id = workspace.agent_id
+        old_language = agent_config.language
+        agent_config.language = language
+        save_agent_config(
+            agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
+        )
 
     copied_files: list[str] = []
     if old_language != language:
@@ -544,13 +546,13 @@ async def put_agents_running_config(
     request: Request = None,
 ) -> AgentsRunningConfig:
     """Update agent running configuration."""
-    workspace, agent_config = await get_agent_and_config_for_request(request)
-    agent_config.running = running_config
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        agent_config.running = running_config
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -590,13 +592,13 @@ async def put_system_prompt_files(
     request: Request = None,
 ) -> list[str]:
     """Update list of enabled system prompt files."""
-    workspace, agent_config = await get_agent_and_config_for_request(request)
-    agent_config.system_prompt_files = files
-    save_agent_config(
-        workspace.agent_id,
-        agent_config,
-        tenant_id=workspace.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (workspace, agent_config):
+        agent_config.system_prompt_files = files
+        save_agent_config(
+            workspace.agent_id,
+            agent_config,
+            tenant_id=workspace.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(

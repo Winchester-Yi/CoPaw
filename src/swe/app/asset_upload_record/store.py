@@ -50,19 +50,17 @@ class AssetUploadRecordStore:
                 source_id = VALUES(source_id),
                 template_flag = VALUES(template_flag)
         """
-        async with self.db.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    query,
-                    (
-                        file_name,
-                        file_size,
-                        asset_path,
-                        source_id,
-                        template_flag,
-                    ),
-                )
-                return cur.lastrowid or None
+        inserted_id = await self.db.insert(
+            query,
+            (
+                file_name,
+                file_size,
+                asset_path,
+                source_id,
+                template_flag,
+            ),
+        )
+        return inserted_id or None
 
     async def list_records(
         self,

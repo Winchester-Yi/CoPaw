@@ -11,11 +11,6 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-try:
-    from ...database.connection import aiomysql as _aiomysql
-except Exception:  # noqa: BLE001
-    _aiomysql = None
-
 from .models import (
     SkillReadinessCheckResult,
     SkillReadinessCheckSummary,
@@ -86,33 +81,7 @@ class SkillReadinessStore:
         params: tuple[Any, ...] | None = None,
     ) -> int:
         """在指定连接上执行 SQL，用于事务或命名锁保护的临界区。"""
-        async with conn.cursor() as cur:
-            await cur.execute(query, params)
-            return int(getattr(cur, "rowcount", 0) or 0)
-
-    async def _fetch_one_on_conn(
-        self,
-        conn: Any,
-        query: str,
-        params: tuple[Any, ...] | None = None,
-    ) -> dict[str, Any] | None:
-        """在指定连接上读取单行，避免事务内切换连接。"""
-        cursor_args = ()
-        if _aiomysql is not None and getattr(_aiomysql, "DictCursor", None):
-            cursor_args = (_aiomysql.DictCursor,)
-        async with conn.cursor(*cursor_args) as cur:
-            await cur.execute(query, params)
-            row = await cur.fetchone()
-            if row is None:
-                return None
-            if isinstance(row, dict):
-                return dict(row)
-            description = getattr(cur, "description", None) or []
-            return {
-                description[index][0]: value
-                for index, value in enumerate(row)
-                if index < len(description)
-            }
+        return await conn.execute(query, params)
 
     async def initialize(self) -> None:
         """幂等初始化技能就绪检查相关表和索引。"""
@@ -225,7 +194,9 @@ class SkillReadinessStore:
                 len(owners),
                 max(failed_users, 0),
                 failure_summary,
-                _dump_json([owner.model_dump(mode="json") for owner in owners]),
+                _dump_json(
+                    [owner.model_dump(mode="json") for owner in owners],
+                ),
             ),
         )
 
@@ -263,7 +234,9 @@ class SkillReadinessStore:
         )
         run = await self._get_run(run_id)
         if run is None:
-            raise ValueError(f"skill readiness run not found after create: {run_id}")
+            raise ValueError(
+                f"skill readiness run not found after create: {run_id}",
+            )
         return run
 
     async def get_running_run(
@@ -301,45 +274,17 @@ class SkillReadinessStore:
         db = self._require_db()
         lock_name = _run_lock_name(source_id, skill_id)
         try:
-            async with db.acquire() as conn:
-                locked = False
-                try:
-                    lock_row = await self._fetch_one_on_conn(
-                        conn,
-                        "SELECT GET_LOCK(%s, %s) AS lock_acquired",
-                        (lock_name, 10),
-                    )
-                    locked = int(
-                        (lock_row or {}).get("lock_acquired") or 0,
-                    ) == 1
-                    if not locked:
-                        raise SkillReadinessStoreUnavailable(
-                            f"{_UNAVAILABLE_PREFIX}: acquire run lock timed out",
-                        )
+            async with db.named_lock(lock_name, timeout=10, exact_name=True):
+                running_run = await self.get_running_run(source_id, skill_id)
+                if running_run is not None:
+                    return running_run, True
 
-                    running_run = await self.get_running_run(source_id, skill_id)
-                    if running_run is not None:
-                        return running_run, True
-
-                    run = await self.create_run(
-                        source_id,
-                        skill_id,
-                        config_snapshot,
-                    )
-                    return run, False
-                finally:
-                    if locked:
-                        try:
-                            await self._execute_on_conn(
-                                conn,
-                                "SELECT RELEASE_LOCK(%s)",
-                                (lock_name,),
-                            )
-                        except Exception:
-                            logger.warning(
-                                "failed to release skill readiness run lock",
-                                exc_info=True,
-                            )
+                run = await self.create_run(
+                    source_id,
+                    skill_id,
+                    config_snapshot,
+                )
+                return run, False
         except SkillReadinessStoreUnavailable:
             raise
         except Exception as exc:
@@ -425,7 +370,9 @@ class SkillReadinessStore:
         )
         run = await self._get_run(run_id)
         if run is None:
-            raise ValueError(f"skill readiness run not found after update: {run_id}")
+            raise ValueError(
+                f"skill readiness run not found after update: {run_id}",
+            )
         return run
 
     async def _update_run_progress_on_conn(
@@ -481,64 +428,56 @@ class SkillReadinessStore:
         """写入用户聚合结果并替换该用户的检查明细。"""
         db = self._require_db()
         try:
-            async with db.acquire() as conn:
-                await conn.begin()
-                try:
-                    await self._execute_on_conn(
-                        conn,
-                        f"""
-                            INSERT INTO {_USER_RESULT_TABLE} (
-                                run_id, user_id, user_name, bbk_id,
-                                aggregate_status, summary, duration_ms
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            ON DUPLICATE KEY UPDATE
-                                user_name = VALUES(user_name),
-                                bbk_id = VALUES(bbk_id),
-                                aggregate_status = VALUES(aggregate_status),
-                                summary = VALUES(summary),
-                                duration_ms = VALUES(duration_ms),
-                                updated_at = CURRENT_TIMESTAMP
-                        """,
-                        (
-                            run_id,
-                            user_result.user_id,
-                            user_result.user_name,
-                            user_result.bbk_id,
-                            user_result.aggregate_status,
-                            user_result.summary,
-                            user_result.duration_ms,
-                        ),
-                    )
-                    await self._execute_on_conn(
-                        conn,
-                        f"""
-                            DELETE FROM {_CHECK_RESULT_TABLE}
-                            WHERE run_id = %s AND user_id = %s
-                        """,
-                        (run_id, user_result.user_id),
-                    )
-                    for check in user_result.checks:
-                        await self._insert_check_result_on_conn(
-                            conn,
-                            run_id,
-                            user_result.user_id,
-                            check,
+            async with db.transaction() as conn:
+                await self._execute_on_conn(
+                    conn,
+                    f"""
+                        INSERT INTO {_USER_RESULT_TABLE} (
+                            run_id, user_id, user_name, bbk_id,
+                            aggregate_status, summary, duration_ms
                         )
-                    await self._update_run_progress_on_conn(
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                            user_name = VALUES(user_name),
+                            bbk_id = VALUES(bbk_id),
+                            aggregate_status = VALUES(aggregate_status),
+                            summary = VALUES(summary),
+                            duration_ms = VALUES(duration_ms),
+                            updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        run_id,
+                        user_result.user_id,
+                        user_result.user_name,
+                        user_result.bbk_id,
+                        user_result.aggregate_status,
+                        user_result.summary,
+                        user_result.duration_ms,
+                    ),
+                )
+                await self._execute_on_conn(
+                    conn,
+                    f"""
+                        DELETE FROM {_CHECK_RESULT_TABLE}
+                        WHERE run_id = %s AND user_id = %s
+                    """,
+                    (run_id, user_result.user_id),
+                )
+                for check in user_result.checks:
+                    await self._insert_check_result_on_conn(
                         conn,
                         run_id,
-                        completed_delta=1,
-                        failed_delta=(
-                            1
-                            if user_result.aggregate_status == "abnormal"
-                            else 0
-                        ),
+                        user_result.user_id,
+                        check,
                     )
-                    await conn.commit()
-                except Exception:
-                    await conn.rollback()
-                    raise
+                await self._update_run_progress_on_conn(
+                    conn,
+                    run_id,
+                    completed_delta=1,
+                    failed_delta=(
+                        1 if user_result.aggregate_status == "abnormal" else 0
+                    ),
+                )
         except SkillReadinessStoreUnavailable:
             raise
         except Exception as exc:
@@ -548,7 +487,9 @@ class SkillReadinessStore:
 
         run = await self._get_run(run_id)
         if run is None:
-            raise ValueError(f"skill readiness run not found after update: {run_id}")
+            raise ValueError(
+                f"skill readiness run not found after update: {run_id}",
+            )
         return run
 
     async def get_check_summaries(
@@ -638,9 +579,16 @@ class SkillReadinessStore:
             return [], total
 
         user_ids = [row["user_id"] for row in user_rows]
-        checks_by_user = await self._fetch_checks_for_users(db, run_id, user_ids)
+        checks_by_user = await self._fetch_checks_for_users(
+            db,
+            run_id,
+            user_ids,
+        )
         return [
-            self._row_to_user_result(row, checks_by_user.get(row["user_id"], []))
+            self._row_to_user_result(
+                row,
+                checks_by_user.get(row["user_id"], []),
+            )
             for row in user_rows
         ], total
 
@@ -741,9 +689,13 @@ class SkillReadinessStore:
             """,
             tuple([run_id] + user_ids),
         )
-        checks_by_user: dict[str, list[SkillReadinessCheckResult]] = defaultdict(list)
+        checks_by_user: dict[str, list[SkillReadinessCheckResult]] = (
+            defaultdict(list)
+        )
         for row in rows:
-            checks_by_user[row["user_id"]].append(self._row_to_check_result(row))
+            checks_by_user[row["user_id"]].append(
+                self._row_to_check_result(row),
+            )
         return checks_by_user
 
     async def _create_index_if_missing(
@@ -933,7 +885,9 @@ def _dump_json(value: Any) -> str:
 
 def _run_lock_name(source_id: str, skill_id: str) -> str:
     """生成不超过 MySQL GET_LOCK 限制的稳定锁名。"""
-    digest = hashlib.sha256(f"{source_id}:{skill_id}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(
+        f"{source_id}:{skill_id}".encode("utf-8"),
+    ).hexdigest()
     return f"swe_skill_ready:{digest[:48]}"
 
 

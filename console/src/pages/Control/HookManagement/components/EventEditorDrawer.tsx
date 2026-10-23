@@ -58,7 +58,8 @@ function handlerSummary(
   handler: HookMatcherGroupDraft["hooks"][number],
 ): string {
   if (handler.type === "http") return String(handler.url || "等待填写请求地址");
-  if (handler.type === "prompt") return String(handler.prompt || "等待填写 Prompt");
+  if (handler.type === "prompt")
+    return String(handler.prompt || "等待填写 Prompt");
   return Array.isArray(handler.argv)
     ? handler.argv.filter(Boolean).join(" ") || "等待填写命令参数"
     : "等待填写命令参数";
@@ -136,14 +137,18 @@ export function EventEditorDrawer({
         <div className={styles.pipelineHeading}>
           <div>
             <h3>执行顺序</h3>
-            <p>同一匹配分组内的处理器依次执行。</p>
+            <p>处理器按阶段执行；追加处理器并发生成，按配置顺序展示。</p>
           </div>
-          <span>{groups.reduce((count, group) => count + group.hooks.length, 0)} 个</span>
+          <span>
+            {groups.reduce((count, group) => count + group.hooks.length, 0)} 个
+          </span>
         </div>
         {groups.length ? (
           groups.map((group) => (
             <div key={group.id} className={styles.pipelineGroup}>
-              <span className={styles.pipelineGroupLabel}>{describeMatcher(group)}</span>
+              <span className={styles.pipelineGroupLabel}>
+                {describeMatcher(group)}
+              </span>
               {group.hooks.map((handler, index) => (
                 <div className={styles.pipelineStep} key={handler.id}>
                   <span className={styles.pipelineStepNumber}>{index + 1}</span>
@@ -156,7 +161,9 @@ export function EventEditorDrawer({
                     <strong>{handler.id}</strong>
                     <span>{handlerSummary(handler)}</span>
                     <Tag>{handler.type}</Tag>
-                    {handler.outputTransform && <Tag color="blue">输出转换</Tag>}
+                    {handler.outputTransform && (
+                      <Tag color="blue">输出转换</Tag>
+                    )}
                   </Button>
                   <Space className={styles.pipelineActions} size={0}>
                     <Button
@@ -189,10 +196,12 @@ export function EventEditorDrawer({
               <Select
                 className={styles.handlerTypeSelect}
                 placeholder="添加处理器"
-                options={(["command", "http", "prompt"] as HookHandlerType[]).map(
-                  (type) => ({ value: type, label: type }),
-                )}
-                onChange={(type: HookHandlerType) => onAddHandler(group.id, type)}
+                options={(
+                  ["command", "http", "prompt"] as HookHandlerType[]
+                ).map((type) => ({ value: type, label: type }))}
+                onChange={(type: HookHandlerType) =>
+                  onAddHandler(group.id, type)
+                }
               />
             </div>
           ))

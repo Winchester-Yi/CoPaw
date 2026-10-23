@@ -16,16 +16,11 @@ router_module = importlib.import_module("swe.app.skill_result.router")
 
 
 def _make_db_with_insert(lastrowid: int) -> tuple[MagicMock, MagicMock]:
-    """构造一个 acquire 上下文可返回指定 lastrowid 的数据库桩。"""
-    cur = MagicMock()
-    cur.lastrowid = lastrowid
-    cur.execute = AsyncMock()
-    conn = MagicMock()
-    conn.cursor.return_value.__aenter__.return_value = cur
-    db = MagicMock()
+    """Return a database facade with no raw cursor interface."""
+    db = MagicMock(spec=["is_connected", "insert"])
     db.is_connected = True
-    db.acquire.return_value.__aenter__.return_value = conn
-    return db, cur
+    db.insert = AsyncMock(return_value=lastrowid)
+    return db, db
 
 
 @pytest.mark.asyncio
@@ -48,7 +43,7 @@ async def test_create_stores_json_fields():
 
     assert record_id == 1
     assert trace_id == "trace-1"
-    query, params = cur.execute.call_args[0]
+    query, params = cur.insert.call_args[0]
     assert "INSERT INTO swe_skill_result" in query
     assert params == (
         "copaw",
@@ -73,7 +68,7 @@ async def test_create_serializes_empty_list_and_none_metadata():
     record_id, _ = await store.create(payload, source_id="copaw")
 
     assert record_id == 2
-    _, params = cur.execute.call_args[0]
+    _, params = cur.insert.call_args[0]
     assert params[5] == "[]"
     assert params[6] is None
 

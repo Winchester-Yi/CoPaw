@@ -601,3 +601,13 @@ MARKET_INTERNAL_TOKEN = EnvVarLoader.get_str(
     "SWE_MARKET_INTERNAL_TOKEN",
     "",
 )
+
+
+def capture_env_var_overrides() -> dict[str, str]:
+    """Return an independent snapshot for detached background work."""
+    return dict(_get_overrides())
+
+
+def install_env_var_overrides(overrides: dict[str, str]) -> None:
+    """Install an owned snapshot in an explicitly isolated context."""
+    _ENV_VAR_OVERRIDES.set(dict(overrides))

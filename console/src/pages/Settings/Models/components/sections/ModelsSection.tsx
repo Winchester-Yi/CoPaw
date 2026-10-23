@@ -1,34 +1,21 @@
-import { useState, useEffect, useMemo } from "react";
-import { SaveOutlined, SendOutlined } from "@ant-design/icons";
-import { Select, Button, Modal } from "@agentscope-ai/design";
-import type { ModelSlotRequest } from "../../../../../api/types";
+import { useEffect, useMemo, useState } from "react";
+import { SendOutlined } from "@ant-design/icons";
+import { Button, Modal, Select } from "@agentscope-ai/design";
 import api from "../../../../../api";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
 import { useIframeStore } from "../../../../../stores/iframeStore";
 import { getUserId } from "../../../../../utils/identity";
 import { TenantSelector } from "../../../../../components/TenantSelector";
+import { getRemoteProviders } from "../../modelManagement";
+import { ModelRuntimeConfigModal } from "../modals/ModelRuntimeConfigModal";
+import type { ActiveModelsInfo, ProviderInfo } from "../../../../../api/types";
 import styles from "../../index.module.less";
 
 interface ModelsSectionProps {
-  providers: Array<{
-    id: string;
-    name: string;
-    models?: Array<{ id: string; name: string }>;
-    extra_models?: Array<{ id: string; name: string }>;
-    base_url?: string;
-    api_key?: string;
-    is_custom: boolean;
-    is_local?: boolean;
-    require_api_key?: boolean;
-  }>;
-  activeModels: {
-    active_llm?: {
-      provider_id?: string;
-      model?: string;
-    };
-  } | null;
-  onSaved: () => void;
+  providers: ProviderInfo[];
+  activeModels: ActiveModelsInfo | null;
+  onSaved?: () => void | Promise<void>;
 }
 
 export function ModelsSection({
@@ -38,102 +25,118 @@ export function ModelsSection({
 }: ModelsSectionProps) {
   const { t } = useTranslation();
   const manager = useIframeStore((state) => state.manager);
-  const [saving, setSaving] = useState(false);
-  const [selectedProviderId, setSelectedProviderId] = useState<
-    string | undefined
-  >(undefined);
-  const [selectedModel, setSelectedModel] = useState<string | undefined>(
-    undefined,
-  );
-  const [dirty, setDirty] = useState(false);
   const [distributionOpen, setDistributionOpen] = useState(false);
   const [distributionSubmitting, setDistributionSubmitting] = useState(false);
   const [selectedDistributionTenantIds, setSelectedDistributionTenantIds] =
     useState<string[]>([]);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [activating, setActivating] = useState(false);
   const currentTenantId = getUserId();
 
   const { message } = useAppMessage();
 
   const currentSlot = activeModels?.active_llm;
-
-  const eligible = useMemo(
+  const [optimisticActiveModel, setOptimisticActiveModel] =
+    useState(currentSlot);
+  useEffect(() => {
+    setOptimisticActiveModel(currentSlot);
+  }, [currentSlot]);
+  const selectedActiveModel = optimisticActiveModel ?? currentSlot;
+  const eligibleProviders = useMemo(
     () =>
-      providers.filter((p) => {
+      getRemoteProviders(providers).filter((provider) => {
         const hasModels =
-          (p.models?.length ?? 0) + (p.extra_models?.length ?? 0) > 0;
+          (provider.models?.length ?? 0) +
+            (provider.extra_models?.length ?? 0) >
+          0;
         if (!hasModels) return false;
-        if (p.require_api_key === false) return !!p.base_url;
-        if (p.is_custom) return !!p.base_url;
-        if (p.require_api_key ?? true) return !!p.api_key;
-        return true;
+        if (provider.require_api_key === false) return !!provider.base_url;
+        if (provider.is_custom) return !!provider.base_url;
+        return !!provider.api_key;
       }),
     [providers],
   );
-
-  useEffect(() => {
-    if (currentSlot) {
-      setSelectedProviderId(currentSlot.provider_id || undefined);
-      setSelectedModel(currentSlot.model || undefined);
-    }
-    setDirty(false);
-  }, [currentSlot?.provider_id, currentSlot?.model]);
-
-  const chosenProvider = providers.find((p) => p.id === selectedProviderId);
-  const currentProvider = providers.find(
-    (p) => p.id === currentSlot?.provider_id,
+  const currentProvider = eligibleProviders.find(
+    (p) =>
+      p.id === selectedActiveModel?.provider_id &&
+      [...(p.models ?? []), ...(p.extra_models ?? [])].some(
+        (model) => model.id === selectedActiveModel?.model,
+      ),
   );
-  const modelOptions = [
-    ...(chosenProvider?.models ?? []),
-    ...(chosenProvider?.extra_models ?? []),
-  ];
-  const hasModels = modelOptions.length > 0;
+  const activeRemoteModel = currentProvider ? selectedActiveModel : undefined;
+  const modelOptions = useMemo(
+    () =>
+      eligibleProviders.map((provider) => ({
+        label: provider.name,
+        options: [
+          ...(provider.models ?? []),
+          ...(provider.extra_models ?? []),
+        ].map((model) => ({
+          value: `${provider.id}:${model.id}`,
+          label: `${model.name} (${model.id})`,
+        })),
+      })),
+    [eligibleProviders],
+  );
+  const selectedModelValue =
+    activeRemoteModel?.provider_id && activeRemoteModel.model
+      ? `${activeRemoteModel.provider_id}:${activeRemoteModel.model}`
+      : undefined;
+  const selectedModelLabel =
+    currentProvider && activeRemoteModel?.model
+      ? `${currentProvider.name} · ${
+          [
+            ...(currentProvider.models ?? []),
+            ...(currentProvider.extra_models ?? []),
+          ].find((model) => model.id === activeRemoteModel.model)?.name ||
+          activeRemoteModel.model
+        }`
+      : undefined;
+  const unavailableModelLabel =
+    !currentProvider &&
+    selectedActiveModel?.provider_id &&
+    selectedActiveModel.model
+      ? `${t("models.currentModelUnavailable", "当前模型不可用")}：${
+          selectedActiveModel.provider_id
+        } · ${selectedActiveModel.model}`
+      : undefined;
 
-  const handleProviderChange = (pid: string) => {
-    setSelectedProviderId(pid);
-    setSelectedModel(undefined);
-    setDirty(true);
-  };
-
-  const handleModelChange = (model: string) => {
-    setSelectedModel(model);
-    setDirty(true);
-  };
-
-  const handleSave = async () => {
-    if (!selectedProviderId || !selectedModel) return;
-
-    const body: ModelSlotRequest = {
-      provider_id: selectedProviderId,
-      model: selectedModel,
-      scope: "global",
-    };
-
-    setSaving(true);
+  const handleModelChange = async (value: string) => {
+    if (activating) return;
+    const separator = value.indexOf(":");
+    if (separator < 1) return;
+    const providerId = value.slice(0, separator);
+    const modelId = value.slice(separator + 1);
+    if (
+      providerId === selectedActiveModel?.provider_id &&
+      modelId === selectedActiveModel?.model
+    ) {
+      return;
+    }
+    setActivating(true);
     try {
-      await api.setActiveLlm(body);
-      message.success(t("models.llmModelUpdated"));
-      setDirty(false);
-      onSaved();
+      await api.setActiveLlm({
+        provider_id: providerId,
+        model: modelId,
+        scope: "global",
+      });
+      setOptimisticActiveModel({ provider_id: providerId, model: modelId });
+      try {
+        await onSaved?.();
+      } catch (error) {
+        console.error("ModelsSection: failed to refresh model data", error);
+      }
     } catch (error) {
-      const errMsg =
-        error instanceof Error ? error.message : t("models.failedToSave");
-      message.error(errMsg);
+      message.error(
+        error instanceof Error ? error.message : t("models.failedToSave"),
+      );
     } finally {
-      setSaving(false);
+      setActivating(false);
     }
   };
 
   const openDistributionModal = () => {
-    if (!currentSlot?.provider_id || !currentSlot?.model) return;
-
-    if (dirty) {
-      Modal.warning({
-        title: t("models.distributeDirtyTitle"),
-        content: t("models.distributeDirtyHint"),
-        okText: t("common.confirm"),
-      });
-      return;
-    }
+    if (!activeRemoteModel?.provider_id || !activeRemoteModel?.model) return;
 
     setDistributionOpen(true);
     setSelectedDistributionTenantIds([]);
@@ -166,80 +169,59 @@ export function ModelsSection({
     }
   };
 
-  const isActive =
-    currentSlot &&
-    currentSlot.provider_id === selectedProviderId &&
-    currentSlot.model === selectedModel;
-  const canSave = dirty && !!selectedProviderId && !!selectedModel;
   const canDistribute =
-    manager && !!currentSlot?.provider_id && !!currentSlot?.model;
+    manager && !!activeRemoteModel?.provider_id && !!activeRemoteModel?.model;
 
   return (
     <div className={styles.slotSection}>
-      <div className={styles.slotForm}>
-        <div className={styles.slotField}>
-          <label className={styles.slotLabel}>{t("models.provider")}</label>
+      <div className={styles.defaultLlmControls}>
+        <div className={styles.defaultLlmSelection}>
+          <label>{t("models.model")}</label>
           <Select
-            style={{ width: "100%" }}
-            popupClassName={styles.managementSelectDropdown}
-            placeholder={t("models.selectProvider")}
-            value={selectedProviderId}
-            onChange={handleProviderChange}
-            options={eligible.map((p) => ({
-              value: p.id,
-              label: p.name,
-            }))}
-          />
-        </div>
-
-        <div className={styles.slotField}>
-          <label className={styles.slotLabel}>{t("models.model")}</label>
-          <Select
-            style={{ width: "100%" }}
-            popupClassName={styles.managementSelectDropdown}
-            placeholder={
-              hasModels ? t("models.selectModel") : t("models.addModelFirst")
-            }
-            disabled={!hasModels}
             showSearch
+            value={selectedModelValue}
+            placeholder={t("models.selectModel")}
+            options={modelOptions}
             optionFilterProp="label"
-            value={selectedModel}
+            loading={activating}
+            disabled={modelOptions.length === 0 || activating}
             onChange={handleModelChange}
-            options={modelOptions.map((m) => ({
-              value: m.id,
-              label: `${m.name} (${m.id})`,
-            }))}
+            optionRender={(option) => option.label}
           />
-        </div>
-
-        <div className={`${styles.slotField} ${styles.slotActions}`}>
-          <label
-            className={`${styles.slotLabel} ${styles.visuallyHiddenLabel}`}
-          >
-            {t("models.actions")}
-          </label>
-          <div className={styles.slotActionButtons}>
-            <Button
-              type="primary"
-              loading={saving}
-              disabled={!canSave}
-              onClick={handleSave}
-              block
-              icon={<SaveOutlined />}
-            >
-              {isActive ? t("models.saved") : t("models.save")}
-            </Button>
-            <Button
-              disabled={!canDistribute}
-              onClick={openDistributionModal}
-              block
-              icon={<SendOutlined />}
-            >
-              {t("models.distribute")}
-            </Button>
+          <div className={styles.defaultLlmCurrentValue}>
+            {selectedModelLabel ||
+              unavailableModelLabel ||
+              t("models.noAvailableRemoteModel")}
           </div>
         </div>
+        <div className={styles.defaultLlmActions}>
+          <Button
+            disabled={
+              !activeRemoteModel?.provider_id || !activeRemoteModel.model
+            }
+            onClick={() => setConfigOpen(true)}
+          >
+            {t("models.configure", "配置")}
+          </Button>
+          <Button
+            disabled={!canDistribute}
+            onClick={openDistributionModal}
+            icon={<SendOutlined />}
+          >
+            {t("models.distribute")}
+          </Button>
+        </div>
       </div>
+
+      {currentProvider && activeRemoteModel?.model && (
+        <ModelRuntimeConfigModal
+          provider={currentProvider}
+          modelId={activeRemoteModel.model}
+          open={configOpen}
+          onClose={() => setConfigOpen(false)}
+          onSaved={onSaved}
+        />
+      )}
 
       <Modal
         rootClassName="console-management-modal"
@@ -256,8 +238,9 @@ export function ModelsSection({
           <div className={styles.modalHint}>{t("models.distributeHint")}</div>
           <div className={styles.modalCurrentValue}>
             {t("models.distributeCurrentSource", {
-              provider: currentProvider?.name || currentSlot?.provider_id || "",
-              model: currentSlot?.model || "",
+              provider:
+                currentProvider?.name || activeRemoteModel?.provider_id || "",
+              model: activeRemoteModel?.model || "",
             })}
           </div>
           <div className={styles.warningNotice}>

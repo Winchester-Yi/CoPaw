@@ -30,6 +30,7 @@ from ...config.utils import (
 from ...config.context import resolve_request_effective_tenant_id
 from ...agents.memory.agent_md_manager import AgentMdManager
 from ...agents.utils import copy_builtin_qa_md_files
+from ..agent_context import agent_config_write_scope
 from ..multi_agent_manager import MultiAgentManager
 
 logger = logging.getLogger(__name__)
@@ -403,26 +404,21 @@ async def update_agent(
             detail=f"Agent '{agentId}' not found",
         )
 
-    # Load existing complete configuration
-    existing_config = _load_agent_config_for_request(agentId, request)
-
-    # Merge updates: only update fields that are explicitly set
-    update_data = agent_config.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        if key != "id":
-            setattr(existing_config, key, value)
-
-    # Ensure ID doesn't change
-    existing_config.id = agentId
-
-    # Save merged configuration
-    _save_agent_config_for_request(agentId, existing_config, request)
+    tenant_id = _request_effective_tenant_id(request)
+    async with agent_config_write_scope(tenant_id, agentId):
+        existing_config = _load_agent_config_for_request(agentId, request)
+        update_data = agent_config.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            if key != "id":
+                setattr(existing_config, key, value)
+        existing_config.id = agentId
+        _save_agent_config_for_request(agentId, existing_config, request)
 
     # Trigger hot reload if agent is running (async, non-blocking)
     schedule_agent_reload(
         request,
         agentId,
-        tenant_id=_request_effective_tenant_id(request),
+        tenant_id=tenant_id,
     )
 
     return agent_config

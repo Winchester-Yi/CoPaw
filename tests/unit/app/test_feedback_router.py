@@ -206,3 +206,26 @@ async def test_list_feedbacks_by_session_matches_chat_or_session(mock_db):
     query, params = mock_db.fetch_all.call_args[0]
     assert "(chat_id = %s OR session_id = %s)" in query
     assert params == ("chat-1", "session-1", "copaw")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("insert_id", [42, 0, None])
+async def test_create_feedback_uses_facade_insert_id(insert_id):
+    db = MagicMock(spec=["is_connected", "insert"])
+    db.is_connected = True
+    db.insert = AsyncMock(return_value=insert_id)
+    payload = FeedbackCreate(
+        feedback_content="反馈内容",
+        feedback_options=["准确"],
+    )
+
+    result = await FeedbackStore(db).upsert_feedback(
+        payload,
+        source_id="source-a",
+    )
+
+    assert result == (insert_id or None, False, None)
+    query, params = db.insert.await_args.args
+    assert "INSERT INTO swe_response_feedback" in query
+    assert params[0] == "source-a"
+    assert params[-2:] == ('["准确"]', "反馈内容")

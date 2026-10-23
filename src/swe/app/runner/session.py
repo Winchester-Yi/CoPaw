@@ -8,13 +8,12 @@ are sanitized before being used as filenames.
 """
 
 import asyncio
-import errno
 import json
 import logging
 import os
 import re
 import threading
-import tempfile
+from pathlib import Path
 
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -29,6 +28,13 @@ from swe.app.runner.session_lock import (
     get_session_lock_path,
 )
 from swe.runtime_workers import run_runtime_state_work
+from swe.performance_metrics import measure_storage_operation
+from .turn_ledger import (
+    TurnLedger,
+    atomic_json,
+    terminal_fingerprints,
+    observe_hot_turns,
+)
 
 logger = logging.getLogger(__name__)
 SESSION_SKILL_SNAPSHOT_STATE_KEY = "session_skill_snapshot"
@@ -137,57 +143,6 @@ async def _session_write_scope(
         lock.release()
 
 
-def _write_json_text(file_path: str, content: str) -> None:
-    temp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=os.path.dirname(file_path) or ".",
-            prefix=f".{os.path.basename(file_path)}.",
-            suffix=".tmp",
-            delete=False,
-        ) as file:
-            temp_path = file.name
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_path, file_path)
-        _sync_parent_directory(file_path)
-    except Exception:
-        if temp_path is not None:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-        raise
-
-
-def _sync_parent_directory(file_path: str) -> None:
-    """Persist a replacement directory entry when the platform supports it."""
-    directory_path = os.path.dirname(file_path) or "."
-    directory_flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        directory_flags |= os.O_DIRECTORY
-
-    directory_fd = os.open(directory_path, directory_flags)
-
-    try:
-        try:
-            os.fsync(directory_fd)
-        except OSError as exc:
-            unsupported_errors = {
-                errno.EINVAL,
-                getattr(errno, "ENOSYS", errno.EINVAL),
-                getattr(errno, "ENOTSUP", errno.EINVAL),
-                getattr(errno, "EOPNOTSUPP", errno.EINVAL),
-            }
-            if exc.errno not in unsupported_errors:
-                raise
-    finally:
-        os.close(directory_fd)
-
-
 def _read_json_state_sync(
     session_save_path: str,
     *,
@@ -219,50 +174,140 @@ def _read_json_state_sync(
             f"Session file {session_save_path} does not contain "
             "a JSON object.",
         )
+    _validate_session_schema(states)
     return True, states
+
+
+def _validate_session_schema(state):
+    schema = state.get("schema_version", 1)
+    if type(schema) is not int or schema not in (1, 2, 3):
+        raise ValueError("Unsupported session schema version")
+
+
+def _preserve_ledger_metadata(state, previous):
+    """Payload replacements cannot downgrade or lose committed ledger roots."""
+    if previous.get("schema_version") != 3:
+        return state
+    result = dict(state)
+    for key in (
+        "schema_version",
+        "session_generation",
+        "turn_ledger_version",
+        "revision",
+        "cold_turn_count",
+        "next_admission_order",
+        "ledger_latest",
+    ):
+        if key in previous:
+            result[key] = previous[key]
+    return result
 
 
 def _read_existing_state_for_save_sync(
     session_save_path: str,
 ) -> dict[str, Any]:
-    """保存前读取已有状态，旧文件异常时沿用覆盖写入策略。"""
-    if not os.path.exists(session_save_path):
-        return {}
-
-    with open(
+    """Never replace unreadable committed state with an empty snapshot."""
+    _, state = _read_json_state_sync(
         session_save_path,
-        "r",
-        encoding="utf-8",
-        errors="surrogatepass",
-    ) as file:
-        content = file.read()
-
-    if not content.strip():
-        return {}
-
-    try:
-        loaded_state = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning(
-            "Failed to parse existing session state at %s; "
-            "overwriting with current state.",
-            session_save_path,
-        )
-        return {}
-
-    if isinstance(loaded_state, dict):
-        return loaded_state
-    return {}
+        allow_not_exist=True,
+        allow_empty=True,
+    )
+    return state
 
 
 def _write_json_state_sync(
     session_save_path: str,
     state: dict[str, Any],
 ) -> None:
-    _write_json_text(
-        session_save_path,
-        json.dumps(state, ensure_ascii=False),
-    )
+    atomic_json(Path(session_save_path), state)
+
+
+@measure_storage_operation("session_commit")
+def _commit_ledger_sync(session_save_path, state, baseline, revision):
+    ledger = TurnLedger(session_save_path)
+    _, durable = _read_json_state_sync(session_save_path, allow_not_exist=True)
+    ledger.recover(durable)
+    if durable.get("revision", 0) != state.get("revision", 0):
+        raise ValueError(
+            "Session revision changed; reload the durable snapshot",
+        )
+    state = _preserve_ledger_metadata(state, durable)
+    deleted = tuple(state.pop("_deleted_turn_ids", ()))
+    committed = ledger.prepare(state, baseline, revision, deleted=deleted)
+    try:
+        _write_json_state_sync(session_save_path, committed)
+    except OSError as exc:
+        _, actual = _read_json_state_sync(
+            session_save_path,
+            allow_not_exist=True,
+        )
+        if actual.get("ledger_nonce") == committed["ledger_nonce"]:
+            observe_hot_turns(committed, baseline)
+            raise PublishedLedgerCommitError(committed) from exc
+        raise
+    observe_hot_turns(committed, baseline)
+    try:
+        ledger.finish(committed)
+    except OSError:
+        logger.warning(
+            "Ledger commit published; cleanup will retry on next write",
+        )
+    return committed
+
+
+class PublishedLedgerCommitError(OSError):
+    """A root was published but durability confirmation did not finish."""
+
+    def __init__(self, state):
+        super().__init__(
+            "Session root published; durability confirmation failed",
+        )
+        self.state = state
+
+
+async def _await_durable_worker(operation):
+    task = asyncio.create_task(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+        raise
+
+
+async def _durable_state_write(session_path, state, previous):
+    """Keep the session lock until every worker write has actually finished."""
+    if previous.get("schema_version") == 3:
+        state = _preserve_ledger_metadata(state, previous)
+        operation = run_runtime_state_work(
+            _commit_ledger_sync,
+            session_path,
+            state,
+            terminal_fingerprints(previous),
+            previous["revision"] + 1,
+        )
+    else:
+        operation = run_runtime_state_work(
+            _write_json_state_sync,
+            session_path,
+            state,
+        )
+    task = asyncio.create_task(operation)
+    try:
+        result = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+        raise
+    return result if isinstance(result, dict) else state
 
 
 class SessionExecution:
@@ -282,6 +327,7 @@ class SessionExecution:
         self._schema_version = 1
         self._state_dirty = False
         self._entered = False
+        self._terminal_baseline: dict[str, str] = {}
         self._active_executions_token: (
             Token[Mapping[str, "SessionExecution"]] | None
         ) = None
@@ -319,6 +365,14 @@ class SessionExecution:
             )
             self._schema_version = self._get_schema_version(self._state)
             self._revision = self._get_revision(self._state)
+            if self._schema_version == 3:
+                await _await_durable_worker(
+                    run_runtime_state_work(
+                        TurnLedger(self._session_save_path).recover,
+                        self._state,
+                    ),
+                )
+                self._terminal_baseline = terminal_fingerprints(self._state)
             active_executions = dict(_ACTIVE_SESSION_EXECUTIONS.get())
             active_executions[
                 _get_normalized_session_path(self._session_save_path)
@@ -330,6 +384,8 @@ class SessionExecution:
             return self
         except BaseException:
             self._reset_active_executions()
+            self._state = {}
+            self._terminal_baseline = {}
             if self._scope is not None:
                 await self._scope.__aexit__(None, None, None)
                 self._scope = None
@@ -343,6 +399,8 @@ class SessionExecution:
             self._entered = False
             self._scope = None
             self._reset_active_executions()
+            self._state = {}
+            self._terminal_baseline = {}
 
     async def close(self) -> None:
         """Release this transaction before unrelated query cleanup begins."""
@@ -363,6 +421,18 @@ class SessionExecution:
         """Return the single state snapshot read while acquiring the lock."""
         return self.state
 
+    async def hydrate_turn(self, turn_id: str) -> dict | None:
+        """Restore exactly one cold identity into this request's mutable state."""
+        self._require_entered()
+        turn = await run_runtime_state_work(
+            TurnLedger(self._session_save_path).get_turn,
+            self._state,
+            turn_id,
+        )
+        if turn is not None:
+            self._state.setdefault("turn_states", {})[turn_id] = turn
+        return turn
+
     @property
     def has_uncommitted_state(self) -> bool:
         """Return whether a transaction-side mutation still needs a commit."""
@@ -380,6 +450,30 @@ class SessionExecution:
             raise ValueError("state must be a dict")
 
         next_revision = self._revision + 1
+        if self._schema_version != 3 and not os.path.exists(
+            self._session_save_path,
+        ):
+            from swe.config.context import get_current_tenant_id
+
+            enabled = {
+                value.strip()
+                for value in os.environ.get(
+                    "SWE_SESSION_V3_TENANTS",
+                    "",
+                ).split(",")
+                if value.strip()
+            }
+            if get_current_tenant_id() in enabled:
+                state = await run_runtime_state_work(
+                    TurnLedger(self._session_save_path).initialize,
+                    state,
+                )
+                self._schema_version = 3
+        if self._schema_version == 3:
+            state = _preserve_ledger_metadata(state, self._state)
+            committed_state = await self._commit_ledger(state, next_revision)
+            self._set_committed_state(committed_state, next_revision)
+            return self._state
         committed_state = {
             **state,
             "schema_version": 2,
@@ -406,14 +500,45 @@ class SessionExecution:
         self._set_committed_state(committed_state, next_revision)
         return self._state
 
+    async def _commit_ledger(self, state, revision):
+        task = asyncio.create_task(
+            run_runtime_state_work(
+                _commit_ledger_sync,
+                self._session_save_path,
+                state,
+                self._terminal_baseline,
+                revision,
+            ),
+        )
+        try:
+            return await asyncio.shield(task)
+        except PublishedLedgerCommitError as exc:
+            self._set_committed_state(exc.state, revision)
+            raise
+        except asyncio.CancelledError:
+            try:
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                result = task.result()
+            except PublishedLedgerCommitError as exc:
+                self._set_committed_state(exc.state, revision)
+                raise
+            self._set_committed_state(result, revision)
+            raise
+
     def _set_committed_state(
         self,
         committed_state: dict[str, Any],
         revision: int,
     ) -> None:
         self._state = committed_state
-        self._schema_version = 2
+        self._schema_version = committed_state.get("schema_version", 2)
         self._revision = revision
+        if self._schema_version == 3:
+            self._terminal_baseline = terminal_fingerprints(committed_state)
         self._state_dirty = False
 
     def _require_entered(self) -> None:
@@ -465,6 +590,117 @@ class SafeJSONSession(SessionBase):
             file_path = f"{safe_sid}.json"
         return os.path.join(self.save_dir, file_path)
 
+    async def get_turn_state(self, session_id, user_id, state, turn_id):
+        return await run_runtime_state_work(
+            TurnLedger(self._get_save_path(session_id, user_id)).get_turn,
+            state,
+            turn_id,
+        )
+
+    async def materialize_turn_states(
+        self,
+        session_id,
+        user_id,
+        state,
+        chat_id=None,
+    ):
+        return await run_runtime_state_work(
+            TurnLedger(self._get_save_path(session_id, user_id)).materialize,
+            state,
+            chat_id,
+        )
+
+    async def get_latest_turn_state(self, session_id, user_id, state, chat_id):
+        return await run_runtime_state_work(
+            TurnLedger(self._get_save_path(session_id, user_id)).latest,
+            state,
+            chat_id,
+        )
+
+    @measure_storage_operation("session_migration", dry_run_default=True)
+    async def migrate_terminal_turns(
+        self,
+        session_id,
+        user_id="",
+        *,
+        dry_run=True,
+    ):
+        if dry_run:
+            path = self._get_save_path(session_id, user_id)
+            async with self.session_write_lock(session_id, user_id):
+                _, state = await run_runtime_state_work(
+                    _read_json_state_sync,
+                    path,
+                    allow_not_exist=False,
+                )
+                ledger = TurnLedger(path)
+                pending = False
+                total = len(state.get("turn_states", {}))
+                if state.get("schema_version") == 3:
+                    pending = (
+                        ledger.directory(state) / "pending.json"
+                    ).exists()
+                    total += await run_runtime_state_work(
+                        lambda: sum(1 for _ in ledger.iter_cold(state)),
+                    )
+                return {
+                    "total": total,
+                    "format": state.get("schema_version", 1),
+                    "pending": pending,
+                }
+        async with self.execution(session_id, user_id) as tx:
+            report = {
+                "total": len(tx.state.get("turn_states", {})),
+                "format": tx.schema_version,
+            }
+            if tx.schema_version != 3:
+                state = await _await_durable_worker(
+                    run_runtime_state_work(
+                        TurnLedger(tx._session_save_path).initialize,
+                        tx.state,
+                    ),
+                )
+                tx._state = state
+                tx._schema_version = 3
+                tx._terminal_baseline = terminal_fingerprints(state)
+            # Every commit is bounded; reruns continue an interrupted migration.
+            while True:
+                before = len(tx.state.get("turn_states", {}))
+                await tx.commit_state(tx.state)
+                if len(tx.state.get("turn_states", {})) == before:
+                    break
+            return report
+
+    async def export_legacy_state(self, session_id, user_id=""):
+        async with self.execution(session_id, user_id) as tx:
+            state = await self.materialize_turn_states(
+                session_id,
+                user_id,
+                tx.state,
+            )
+            for turn in state.get("turn_states", {}).values():
+                turn.pop("admission_order", None)
+            for key in (
+                "session_generation",
+                "turn_ledger_version",
+                "ledger_nonce",
+                "next_admission_order",
+                "cold_turn_count",
+                "ledger_latest",
+            ):
+                state.pop(key, None)
+            state["schema_version"] = 2
+            return state
+
+    async def delete_turn_state(self, session_id, turn_id, user_id=""):
+        """Publish a deletion version; older root snapshots remain readable."""
+        async with self.execution(session_id, user_id) as tx:
+            if tx.schema_version == 3:
+                tx.state["_deleted_turn_ids"] = [turn_id]
+            else:
+                tx.state.get("turn_states", {}).pop(turn_id, None)
+            await tx.commit_state(tx.state)
+
     @asynccontextmanager
     async def session_write_lock(
         self,
@@ -514,7 +750,7 @@ class SafeJSONSession(SessionBase):
         self,
         session_save_path: str,
     ) -> dict[str, Any]:
-        """保存前读取已有状态，旧文件异常时沿用覆盖写入策略。"""
+        """Read committed state without silently replacing unreadable roots."""
         return await run_runtime_state_work(
             _read_existing_state_for_save_sync,
             session_save_path,
@@ -537,10 +773,10 @@ class SafeJSONSession(SessionBase):
                 for name, state_module in state_modules_mapping.items()
             }
             state_dicts = {**existing_state, **state_dicts}
-            await run_runtime_state_work(
-                _write_json_state_sync,
+            await _durable_state_write(
                 session_save_path,
                 state_dicts,
+                existing_state,
             )
 
         logger.info(
@@ -733,11 +969,10 @@ class SafeJSONSession(SessionBase):
             state = {}
         session_save_path = self._get_save_path(session_id, user_id=user_id)
         async with _session_write_scope(session_save_path):
-            await run_runtime_state_work(
-                _write_json_state_sync,
+            previous = await self._read_existing_state_for_save(
                 session_save_path,
-                state,
             )
+            await _durable_state_write(session_save_path, state, previous)
         logger.info(
             "Saved merged session state to %s (keys=%d)",
             session_save_path,
@@ -751,6 +986,7 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
         create_if_not_exist: bool = True,
         timeout_seconds: float | None = None,
+        hydrate_turn_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Atomically read, merge and write session state under one lock."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
@@ -769,20 +1005,66 @@ class SafeJSONSession(SessionBase):
                     f"Session file {session_save_path} does not exist.",
                 )
 
+            if states.get("schema_version") == 3:
+                await _await_durable_worker(
+                    run_runtime_state_work(
+                        TurnLedger(session_save_path).recover,
+                        states,
+                    ),
+                )
+            baseline = terminal_fingerprints(states)
+            for turn_id in hydrate_turn_ids:
+                turn = await run_runtime_state_work(
+                    TurnLedger(session_save_path).get_turn,
+                    states,
+                    turn_id,
+                )
+                if turn is not None:
+                    states.setdefault("turn_states", {})[turn_id] = turn
+
+            previous = dict(states)
             updated_state = mutator(states)
             if updated_state is None:
                 updated_state = states
             if not isinstance(updated_state, dict):
                 raise ValueError("mutator must return a dict or None")
 
-            await run_runtime_state_work(
-                _write_json_state_sync,
-                session_save_path,
-                updated_state,
-            )
+            if previous.get("schema_version") == 3:
+                updated_state = _preserve_ledger_metadata(
+                    updated_state,
+                    previous,
+                )
+                # Mutators may edit in place; preserve the pre-mutation baseline.
+                # The durable worker uses this already captured baseline.
+                task = asyncio.create_task(
+                    run_runtime_state_work(
+                        _commit_ledger_sync,
+                        session_save_path,
+                        updated_state,
+                        baseline,
+                        previous["revision"] + 1,
+                    ),
+                )
+                try:
+                    updated_state = await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    while not task.done():
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            continue
+                    task.result()
+                    raise
+            else:
+                await _durable_state_write(
+                    session_save_path,
+                    updated_state,
+                    states,
+                )
 
         logger.info(
             "Mutated session state in %s successfully.",
             session_save_path,
         )
+        assert isinstance(updated_state, dict)
         return updated_state

@@ -77,7 +77,13 @@ def mock_db():
     db.fetch_one = AsyncMock(return_value=None)
     db.fetch_all = AsyncMock(return_value=[])
     db.execute = AsyncMock(return_value=1)
-    db.execute_many = AsyncMock(return_value=1)
+    db.prepared_rows = []
+
+    async def insert_prepared(_template, rows, **_limits):
+        db.prepared_rows = list(rows)
+        return len(db.prepared_rows)
+
+    db.insert_prepared = AsyncMock(side_effect=insert_prepared)
     db.close = AsyncMock()
     return db
 
@@ -159,8 +165,8 @@ class TestStoreSourceIdIsolation:
         spans = [_make_span("tenant-A", span_id=f"s-{i}") for i in range(3)]
         await store.batch_create_spans(spans)
 
-        call_args = mock_db.execute_many.call_args
-        params_list = call_args[0][1]
+        call_args = mock_db.insert_prepared.call_args
+        params_list = mock_db.prepared_rows
         for params in params_list:
             # source_id is the 3rd positional parameter in batch insert
             assert params[2] == "tenant-A"
@@ -626,8 +632,8 @@ class TestCrossTenantIsolation:
 
         await store.batch_create_spans(spans_a + spans_b)
 
-        call_args = mock_db.execute_many.call_args
-        all_params = call_args[0][1]
+        call_args = mock_db.insert_prepared.call_args
+        all_params = mock_db.prepared_rows
 
         tenant_a_spans = [p for p in all_params if p[2] == "tenant-A"]
         tenant_b_spans = [p for p in all_params if p[2] == "tenant-B"]

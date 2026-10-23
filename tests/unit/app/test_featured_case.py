@@ -219,8 +219,29 @@ class _FakeConnection:
             lock.release()
         self.queue_locks.clear()
 
-    def cursor(self):
-        return _FakeCursor(self)
+    async def execute(self, query, params=None):
+        cursor = _FakeCursor(self)
+        await cursor.execute(query, params)
+        return cursor.rowcount
+
+    async def insert(self, query, params=None):
+        cursor = _FakeCursor(self)
+        await cursor.execute(query, params)
+        return cursor.lastrowid
+
+    async def fetch_all(self, query, params=None):
+        cursor = _FakeCursor(self)
+        await cursor.execute(query, params)
+        return [{"id": row[0]} for row in await cursor.fetchall()]
+
+    async def fetch_one(self, query, params=None):
+        cursor = _FakeCursor(self)
+        await cursor.execute(query, params)
+        row = await cursor.fetchone()
+        return {"created_at": row[0], "updated_at": row[1]} if row else None
+
+    async def execute_many(self, query, params_list):
+        return await _FakeCursor(self).executemany(query, params_list)
 
 
 class _AcquireConnection:
@@ -228,9 +249,14 @@ class _AcquireConnection:
         self.connection = _FakeConnection(database)
 
     async def __aenter__(self):
+        await self.connection.begin()
         return self.connection
 
     async def __aexit__(self, exc_type, exc, traceback):
+        if exc_type is None:
+            await self.connection.commit()
+        else:
+            await self.connection.rollback()
         return False
 
 
@@ -257,7 +283,7 @@ class _TransactionDatabase:
         await lock.acquire()
         connection.queue_locks.append(lock)
 
-    def acquire(self):
+    def transaction(self):
         return _AcquireConnection(self)
 
     async def fetch_one(self, query: str, params: tuple | None = None):

@@ -4,8 +4,8 @@
 Tenant-scoped: messages are isolated by tenant_id. Each tenant has
 separate message storage to prevent cross-tenant data leakage.
 
-Bounded: at most _MAX_MESSAGES kept per tenant; messages older than
-_MAX_AGE_SECONDS are dropped when reading.
+Bounded by entry count and saved UTF-8 data, with write-time monotonic
+expiry. Process-local delivery remains best effort.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 # Per-tenant message storage: tenant_id -> list of messages
@@ -21,6 +22,17 @@ _tenant_messages: Dict[str, List[Dict[str, Any]]] = {}
 _lock = asyncio.Lock()
 _MAX_AGE_SECONDS = 60
 _MAX_MESSAGES = 500
+_MAX_TOTAL_MESSAGES = 10_000
+_MAX_SCOPE_BYTES = 2 * 1024 * 1024
+_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+_MAX_ENTRY_BYTES = 256 * 1024
+_CLEANUP_BATCH = 256
+_write_order: OrderedDict[str, tuple[str, Dict[str, Any]]] = OrderedDict()
+_scope_bytes: Dict[str, int] = {}
+_payload_bytes = 0
+_expired_total = 0
+_evicted_total = 0
+_rejected_total = 0
 
 
 def _resolve_store_key(tenant_id: Optional[str] = None) -> str:
@@ -133,20 +145,57 @@ def _iter_matching_store_keys(tenant_id: Optional[str]) -> List[str]:
 
 
 def _get_tenant_store(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Get or create message store for tenant.
+    """Read a scope without allocating an empty store."""
+    return _tenant_messages.get(_resolve_store_key(tenant_id), [])
 
-    Args:
-        tenant_id: Tenant identifier. If None, uses "default".
 
-    Returns:
-        Message list for the tenant.
-    """
-    tenant_id = _resolve_store_key(tenant_id)
+def _entry_size(strings: List[str], limit: int) -> Optional[int]:
+    # UTF-8 cannot use fewer bytes than characters. Reject giant inputs before
+    # encoding, then encode only bounded strings.
+    if sum(map(len, strings)) > limit:
+        return None
+    size = sum(len(value.encode("utf-8")) for value in strings)
+    return size if size <= limit else None
 
-    if tenant_id not in _tenant_messages:
-        _tenant_messages[tenant_id] = []
 
-    return _tenant_messages[tenant_id]
+def _remove_locked(message_id: str, reason: str = "") -> None:
+    global _payload_bytes, _expired_total, _evicted_total
+    item = _write_order.pop(message_id, None)
+    if item is None:
+        return
+    scope, message = item
+    messages = _tenant_messages[scope]
+    messages.remove(message)
+    size = message["_bytes"]
+    _payload_bytes -= size
+    _scope_bytes[scope] -= size
+    if not messages:
+        del _tenant_messages[scope]
+        del _scope_bytes[scope]
+    if reason == "expired":
+        _expired_total += 1
+    elif reason == "evicted":
+        _evicted_total += 1
+
+
+def _is_expired(message: Dict[str, Any], now: float, age: float) -> bool:
+    return now >= min(message["_expires_at"], message["_written_at"] + age)
+
+
+def _prune_scope_locked(scope: str, age: float = _MAX_AGE_SECONDS) -> None:
+    now = time.monotonic()
+    for message in list(_tenant_messages.get(scope, [])):
+        if _is_expired(message, now, age):
+            _remove_locked(message["id"], "expired")
+
+
+def _prune_all_locked() -> None:
+    now = time.monotonic()
+    while _write_order:
+        message_id, (_, message) = next(iter(_write_order.items()))
+        if not _is_expired(message, now, _MAX_AGE_SECONDS):
+            break
+        _remove_locked(message_id, "expired")
 
 
 async def append(
@@ -156,103 +205,100 @@ async def append(
     sticky: bool = False,
     tenant_id: Optional[str] = None,
     delivery_key: str = "",
-) -> None:
-    """Append a message (bounded: oldest dropped if over _MAX_MESSAGES).
-
-    Args:
-        session_id: Session identifier.
-        text: Message text.
-        sticky: Whether message is sticky.
-        tenant_id: Tenant identifier for isolation. If None, uses "default".
-    """
+) -> bool:
+    """Keep a bounded complete message, or report rejection without truncation."""
+    global _payload_bytes, _rejected_total
     if not session_id or not text:
-        return
-
+        return False
+    limit = min(_MAX_ENTRY_BYTES, _MAX_SCOPE_BYTES, _MAX_TOTAL_BYTES)
+    if (
+        sum(map(len, [tenant_id or "", session_id, text, delivery_key]))
+        > limit
+    ):
+        async with _lock:
+            _rejected_total += 1
+        return False
+    scope = _resolve_store_key(tenant_id)
+    message_id = str(uuid.uuid4())
+    size = _entry_size(
+        [scope, session_id, text, delivery_key, message_id],
+        limit,
+    )
     async with _lock:
-        store_key = _resolve_store_key(tenant_id)
-        msg_list = _get_tenant_store(store_key)
-
+        if size is None:
+            _rejected_total += 1
+            return False
+        _prune_all_locked()
+        messages = _tenant_messages.get(scope, [])
         if delivery_key and any(
-            message.get("session_id") == session_id
-            and message.get("delivery_key") == delivery_key
-            for message in msg_list
+            message["session_id"] == session_id
+            and message["delivery_key"] == delivery_key
+            for message in messages
         ):
-            return
-
-        msg_list.append(
-            {
-                "id": str(uuid.uuid4()),
-                "text": text,
-                "sticky": sticky,
-                "ts": time.time(),
-                "session_id": session_id,
-                "tenant_id": store_key,
-                "delivery_key": delivery_key,
-            },
-        )
-
-        # Enforce max messages limit per tenant
-        if len(msg_list) > _MAX_MESSAGES:
-            msg_list.sort(key=lambda m: m["ts"])
-            del msg_list[: len(msg_list) - _MAX_MESSAGES]
+            return True
+        while _tenant_messages.get(scope) and (
+            len(_tenant_messages[scope]) >= _MAX_MESSAGES
+            or _scope_bytes[scope] + size > _MAX_SCOPE_BYTES
+        ):
+            _remove_locked(_tenant_messages[scope][0]["id"], "evicted")
+        while _write_order and (
+            len(_write_order) >= _MAX_TOTAL_MESSAGES
+            or _payload_bytes + size > _MAX_TOTAL_BYTES
+        ):
+            _remove_locked(next(iter(_write_order)), "evicted")
+        now = time.monotonic()
+        message = {
+            "id": message_id,
+            "text": text,
+            "sticky": sticky,
+            "ts": time.time(),
+            "session_id": session_id,
+            "tenant_id": scope,
+            "delivery_key": delivery_key,
+            "_written_at": now,
+            "_expires_at": now + _MAX_AGE_SECONDS,
+            "_bytes": size,
+        }
+        _tenant_messages.setdefault(scope, []).append(message)
+        _write_order[message_id] = (scope, message)
+        _scope_bytes[scope] = _scope_bytes.get(scope, 0) + size
+        _payload_bytes += size
+        return True
 
 
 async def take(
     session_id: str,
     tenant_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return and remove all messages for the session.
-
-    Args:
-        session_id: Session identifier.
-        tenant_id: Tenant identifier for isolation. If None, uses "default".
-
-    Returns:
-        List of messages for the session.
-    """
+    """Consume only the requested session's unexpired messages."""
     if not session_id:
         return []
-
     async with _lock:
-        store_key = _resolve_store_key(tenant_id)
-        msg_list = _get_tenant_store(store_key)
-        _prune_expired_locked(msg_list, _MAX_AGE_SECONDS)
-
-        out = []
-        remaining = []
-        for msg in msg_list:
-            if msg.get("session_id") == session_id:
-                out.append(msg)
-            else:
-                remaining.append(msg)
-
-        # Update the tenant store with remaining messages
-        _tenant_messages[store_key] = remaining
-
+        scope = _resolve_store_key(tenant_id)
+        _prune_scope_locked(scope)
+        out = [
+            message
+            for message in _tenant_messages.get(scope, [])
+            if message["session_id"] == session_id
+        ]
+        for message in out:
+            _remove_locked(message["id"])
         return _strip_ts(out)
 
 
 async def take_all(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return and remove all non-expired messages from the store.
-
-    Args:
-        tenant_id: Tenant identifier for isolation. If None, uses "default".
-
-    Returns:
-        List of all messages for the tenant.
-    """
+    """Consume all unexpired messages in the resolved scope."""
     async with _lock:
-        msg_list = _get_tenant_store(tenant_id)
-        _prune_expired_locked(msg_list, _MAX_AGE_SECONDS)
-
-        out = list(msg_list)
-        msg_list.clear()
-
+        scope = _resolve_store_key(tenant_id)
+        _prune_scope_locked(scope)
+        out = list(_tenant_messages.get(scope, []))
+        for message in out:
+            _remove_locked(message["id"])
         return _strip_ts(out)
 
 
 def _strip_ts(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Strip internal timestamp from messages."""
+    """Return public message data."""
     return [
         {
             "id": m["id"],
@@ -263,59 +309,68 @@ def _strip_ts(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
-def _prune_expired_locked(
-    msg_list: List[Dict[str, Any]],
-    max_age_seconds: int,
-) -> None:
-    """Drop expired messages in-place. Caller must hold _lock."""
-    cutoff = time.time() - max_age_seconds
-    msg_list[:] = [m for m in msg_list if m["ts"] >= cutoff]
-
-
 async def get_recent(
     max_age_seconds: int = _MAX_AGE_SECONDS,
     tenant_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return recent messages (not consumed) for tenant.
-
-    Args:
-        max_age_seconds: Maximum age of messages to return.
-        tenant_id: Tenant identifier for isolation. If None, uses "default".
-
-    Returns:
-        List of recent messages for the tenant.
-    """
+    """Read without renewing TTL; callers may request a shorter window."""
     if max_age_seconds < 0:
         raise ValueError("max_age_seconds must be non-negative")
-
     async with _lock:
-        msg_list = _get_tenant_store(tenant_id)
-        _prune_expired_locked(msg_list, max_age_seconds)
-        return _strip_ts(msg_list)
+        scope = _resolve_store_key(tenant_id)
+        _prune_scope_locked(scope, max_age_seconds)
+        return _strip_ts(_tenant_messages.get(scope, []))
 
 
 async def clear_tenant(tenant_id: Optional[str] = None) -> None:
-    """Clear all messages for a tenant.
-
-    Args:
-        tenant_id: Tenant identifier. If None, clears "default" tenant.
-    """
+    """Clear the same logical tenant/scope aliases as the original store."""
     async with _lock:
-        for store_key in _iter_matching_store_keys(tenant_id):
-            if store_key in _tenant_messages:
-                del _tenant_messages[store_key]
+        for scope in _iter_matching_store_keys(tenant_id):
+            for message in list(_tenant_messages.get(scope, [])):
+                _remove_locked(message["id"])
+
+
+async def prune_expired() -> None:
+    """Physically reclaim expired data in bounded lock segments."""
+    # Snapshot identities without awaiting; concurrent writes can happen only
+    # at the yields below. Verify identity again inside each lock segment.
+    snapshot = list(_write_order.items())
+    for start in range(0, len(snapshot), _CLEANUP_BATCH):
+        async with _lock:
+            now = time.monotonic()
+            for message_id, item in snapshot[start : start + _CLEANUP_BATCH]:
+                current = _write_order.get(message_id)
+                if current is item and _is_expired(
+                    item[1],
+                    now,
+                    _MAX_AGE_SECONDS,
+                ):
+                    _remove_locked(message_id, "expired")
+        await asyncio.sleep(0)
+
+
+async def reset() -> None:
+    """Reset process-local data and counters after producers have stopped."""
+    global _payload_bytes, _expired_total, _evicted_total, _rejected_total
+    async with _lock:
+        _tenant_messages.clear()
+        _write_order.clear()
+        _scope_bytes.clear()
+        _payload_bytes = _expired_total = _evicted_total = _rejected_total = 0
 
 
 def get_stats() -> Dict[str, Any]:
-    """Get store statistics.
-
-    Returns:
-        Dictionary with tenant count and message counts per tenant.
-    """
+    """Report bounded business-data bytes, not Python heap or RSS."""
     return {
         "tenant_count": len(_tenant_messages),
         "tenants": {
-            tenant_id: len(msgs)
-            for tenant_id, msgs in _tenant_messages.items()
+            scope: len(messages)
+            for scope, messages in _tenant_messages.items()
         },
+        "entries": len(_write_order),
+        "scopes": len(_tenant_messages),
+        "payload_bytes": _payload_bytes,
+        "expired_total": _expired_total,
+        "evicted_total": _evicted_total,
+        "rejected_total": _rejected_total,
     }

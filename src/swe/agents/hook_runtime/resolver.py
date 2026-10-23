@@ -129,6 +129,30 @@ class HookResolver:
             self._deduplicated_handlers(context, matched_handlers),
         )
 
+    def resolve_stop_append_plan(
+        self,
+        context: HookContext,
+    ) -> EffectiveHookPlan:
+        """以固定来源顺序解析追加任务，并保留跨来源同名 handler。"""
+        if context.hook_event_name != HookEventName.STOP:
+            return self._build_plan(context, ())
+        sources = self._enabled_config_sources(sort_skill_sources=True)
+        entries = self._active_overlay_entries(config for _, config in sources)
+        matches = self._matching_handlers(
+            context,
+            sources,
+            entries,
+            output_append=True,
+        )
+        return self._build_plan(
+            context,
+            self._deduplicated_handlers(
+                context,
+                matches,
+                include_source=True,
+            ),
+        )
+
     def _enabled_configs(self) -> tuple[HookConfig, ...]:
         return tuple(config for _, config in self._enabled_config_sources())
 
@@ -180,6 +204,7 @@ class HookResolver:
         *,
         evaluate_if: bool = True,
         output_transform: bool | None = None,
+        output_append: bool = False,
     ) -> list[_MatchedHandler]:
         matched_handlers: list[_MatchedHandler] = []
         event_name = _event_name_value(context.hook_event_name)
@@ -199,6 +224,7 @@ class HookResolver:
                         event_name=event_name,
                         evaluate_if=evaluate_if,
                         output_transform=output_transform,
+                        output_append=output_append,
                     ),
                 )
         return matched_handlers
@@ -228,6 +254,7 @@ class HookResolver:
         event_name: str,
         evaluate_if: bool,
         output_transform: bool | None,
+        output_append: bool = False,
     ) -> list[_MatchedHandler]:
         group_id = group.id or f"group-{group_index}"
         handlers: list[_MatchedHandler] = []
@@ -238,6 +265,8 @@ class HookResolver:
                 context.hook_event_name,
             )
             if handler is None:
+                continue
+            if handler.output_append != output_append:
                 continue
             if (
                 output_transform is not None

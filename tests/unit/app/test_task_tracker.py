@@ -25,6 +25,145 @@ def _identity(
 
 
 @pytest.mark.asyncio
+async def test_tail_drain_keeps_transport_discoverable(monkeypatch):
+    from swe.app.runner.sse_replay import ReplayLog
+
+    entered, release = threading.Event(), threading.Event()
+    original = ReplayLog._append_many
+
+    def delayed(log, texts):
+        entered.set()
+        assert release.wait(5)
+        return original(log, texts)
+
+    monkeypatch.setattr(ReplayLog, "_append_many", delayed)
+    tracker = TaskTracker()
+    identity = _identity("tail-drain")
+
+    async def producer(*_args):
+        yield "data: tail\n\n"
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+    try:
+        async with asyncio.timeout(2):
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+        assert identity.chat_id in tracker._runs
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+        assert await subscriber.get() == "data: tail\n\n"
+        assert await subscriber.get() is None
+    finally:
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setting,batching",
+    [(None, True), ("0", False), ("1", True)],
+)
+async def test_tracker_batching_defaults_on_and_honors_override(
+    monkeypatch,
+    setting,
+    batching,
+):
+    if setting is None:
+        monkeypatch.delenv("SWE_SSE_BATCH_WRITES", raising=False)
+    else:
+        monkeypatch.setenv("SWE_SSE_BATCH_WRITES", setting)
+    tracker = TaskTracker()
+    identity = _identity("burst")
+
+    async def producer(*_args):
+        for index in range(100):
+            yield f"data: {index}\n\n"
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+    budget = subscriber.stream.log.budget
+    before = budget.snapshot()["write_batches"]
+    try:
+        await tracker.wait_all_done(timeout=2)
+        batches = budget.snapshot()["write_batches"] - before
+        assert batches <= 5 if batching else batches == 100
+        assert [await subscriber.get() for _ in range(100)] == [
+            f"data: {i}\n\n" for i in range(100)
+        ]
+        assert await subscriber.get() is None
+    finally:
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_producer_cancel_still_unregisters_after_tail_drain(
+    monkeypatch,
+):
+    from swe.app.runner.sse_replay import ReplayLog
+
+    monkeypatch.setenv("SWE_SSE_BATCH_WRITES", "1")
+    started, release = threading.Event(), threading.Event()
+    original = ReplayLog._append_many
+
+    def delayed(log, texts):
+        started.set()
+        assert release.wait(5)
+        return original(log, texts)
+
+    monkeypatch.setattr(ReplayLog, "_append_many", delayed)
+    tracker = TaskTracker()
+    identity = _identity("cancel-tail")
+    produced = asyncio.Event()
+
+    async def producer(*_args):
+        yield "data: tail\n\n"
+        produced.set()
+        await asyncio.Event().wait()
+
+    subscriber, _ = await tracker.attach_or_start(identity, {}, producer)
+    task = tracker._runs[identity.chat_id].task
+    try:
+        await produced.wait()
+        task.cancel()
+        async with asyncio.timeout(2):
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+        task.cancel()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        assert identity.chat_id not in tracker._runs
+        assert await subscriber.get() == "data: tail\n\n"
+    finally:
+        release.set()
+        await subscriber.stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_attach_uses_shared_replay_without_prefilling_subscriber():
+    tracker = TaskTracker()
+    identity = _identity("bounded-replay")
+    release = asyncio.Event()
+
+    async def producer(*_args):
+        for index in range(300):
+            yield f"data: {index}\n\n"
+        await release.wait()
+
+    original, _ = await tracker.attach_or_start(identity, {}, producer)
+    try:
+        for _ in range(300):
+            await asyncio.wait_for(original.get(), 2)
+        replay = await tracker.attach(identity)
+        assert replay.buffered_bytes == 0
+        assert replay.stream is original.stream
+        assert replay.stream.log.count == 300
+        assert await replay.get() == "data: 0\n\n"
+    finally:
+        release.set()
+        await tracker.wait_all_done(timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_attach_or_start_binds_identity_and_replays_one_producer_stream():
     tracker = TaskTracker()
     release = asyncio.Event()
@@ -87,6 +226,133 @@ async def test_attach_replays_buffer_and_stream_detaches_on_consumer_close():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attach_or_start", [False, True])
+async def test_large_replay_yields_to_event_loop_without_live_interleaving(
+    attach_or_start,
+):
+    tracker = TaskTracker()
+    identity = _identity("chat-replay-batch")
+    release = asyncio.Event()
+    replay_count = 300
+
+    async def producer(_identity, _payload):
+        for index in range(replay_count):
+            yield f'data: {{"index": {index}}}\n\n'
+        await release.wait()
+        yield 'data: {"live": true}\n\n'
+
+    original, _ = await tracker.attach_or_start(identity, {}, producer)
+    for _ in range(replay_count):
+        await original.get()
+
+    heartbeat = 0
+    heartbeat_done = asyncio.Event()
+
+    async def tick():
+        nonlocal heartbeat
+        for _ in range(3):
+            heartbeat += not attach_task.done()
+            await asyncio.sleep(0)
+        heartbeat_done.set()
+
+    attach_task = asyncio.create_task(
+        (
+            tracker.attach_or_start(identity, {}, producer)
+            if attach_or_start
+            else tracker.attach(identity)
+        ),
+    )
+    tick_task = asyncio.create_task(tick())
+    release.set()
+    replay = await attach_task
+    if attach_or_start:
+        replay, is_new = replay
+        assert is_new is False
+    heartbeat_during_replay = heartbeat
+    await heartbeat_done.wait()
+    await tick_task
+    assert heartbeat_during_replay > 0
+    assert replay is not None
+    events = [await replay.get() for _ in range(replay_count)]
+    assert events == [
+        f'data: {{"index": {index}}}\n\n' for index in range(replay_count)
+    ]
+    assert await replay.get() == 'data: {"live": true}\n\n'
+    assert await replay.get() is None
+    assert await original.get() == 'data: {"live": true}\n\n'
+
+    release.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attach_or_start", [False, True])
+async def test_cancelled_replay_does_not_leave_subscriber_registered(
+    attach_or_start,
+):
+    tracker = TaskTracker()
+    identity = _identity("chat-replay-cancel")
+    replay_count = 300
+    release = asyncio.Event()
+
+    async def producer(_identity, _payload):
+        for index in range(replay_count):
+            yield f'data: {{"index": {index}}}\n\n'
+        await release.wait()
+
+    original, _ = await tracker.attach_or_start(identity, {}, producer)
+    for _ in range(replay_count):
+        await original.get()
+
+    attach_task = asyncio.create_task(
+        (
+            tracker.attach_or_start(identity, {}, producer)
+            if attach_or_start
+            else tracker.attach(identity)
+        ),
+    )
+    await asyncio.sleep(0)
+    attach_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await attach_task
+    assert tracker._runs[identity.chat_id].queues == [original]
+
+    release.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_close_during_replay_delivers_history_before_end_marker():
+    tracker = TaskTracker()
+    identity = _identity("chat-replay-close")
+    release = asyncio.Event()
+    history = [f"data: {index}\n\n" for index in range(300)]
+
+    async def producer(_identity, _payload):
+        for event in history:
+            yield event
+        await release.wait()
+
+    original, _ = await tracker.attach_or_start(identity, {}, producer)
+    for _ in history:
+        await original.get()
+
+    attach_task = asyncio.create_task(tracker.attach(identity))
+    await asyncio.sleep(0)
+    close_task = asyncio.create_task(tracker.close(identity))
+    replay = await attach_task
+    await asyncio.wait_for(close_task, timeout=1)
+    assert replay is not None
+    assert [
+        event async for event in tracker.stream(identity, replay)
+    ] == history
+    assert tracker._runs[identity.chat_id].queues == []
+
+    release.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_producer_exception_is_delivered_then_ends_stream():
     tracker = TaskTracker()
     identity = _identity()
@@ -100,6 +366,63 @@ async def test_producer_exception_is_delivered_then_ends_stream():
     events = [event async for event in tracker.stream(identity, queue)]
     assert events == ['data: {"error": "internal server error"}\n\n']
     assert await tracker.has_active_tasks() is False
+
+
+@pytest.mark.asyncio
+async def test_prefilled_stream_yields_during_history_delivery():
+    tracker = TaskTracker()
+    identity = _identity("chat-stream-batch")
+    queue = asyncio.Queue()
+    history = [f"data: {index}\n\n" for index in range(300)]
+    for event in (*history, None):
+        queue.put_nowait(event)
+    received = []
+
+    async def consume():
+        async for event in tracker.stream(identity, queue):
+            received.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    delivered_before_other_task = len(received)
+    await consumer
+    assert 0 < delivered_before_other_task < len(history)
+    assert received == history
+
+
+@pytest.mark.asyncio
+async def test_cancelled_prefilled_stream_detaches_subscriber():
+    tracker = TaskTracker()
+    identity = _identity("chat-stream-cancel")
+    release = asyncio.Event()
+
+    async def producer(_identity, _payload):
+        for index in range(300):
+            yield f"data: {index}\n\n"
+        await release.wait()
+
+    original, _ = await tracker.attach_or_start(identity, {}, producer)
+    for _ in range(300):
+        await original.get()
+    replay = await tracker.attach(identity)
+    assert replay is not None
+    received = []
+    first_delivered = asyncio.Event()
+
+    async def consume():
+        async for event in tracker.stream(identity, replay):
+            received.append(event)
+            first_delivered.set()
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(first_delivered.wait(), 2)
+    consumer.cancel()
+    await consumer
+    assert 0 < len(received) < 300
+    assert replay not in tracker._runs[identity.chat_id].queues
+
+    release.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
 
 
 @pytest.mark.asyncio

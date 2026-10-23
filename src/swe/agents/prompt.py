@@ -8,9 +8,14 @@ markdown configuration files in the working directory.
 
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..config.config import get_default_system_prompt_files
+from ..runtime_workers import run_runtime_state_work
 from .utils.file_handling import read_text_file_with_encoding_fallback
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,86 @@ class PromptConfig:
     # Default files to load when no config is provided
     # All files are optional - if they don't exist, they'll be skipped
     DEFAULT_FILES = get_default_system_prompt_files()
+
+
+@dataclass(frozen=True)
+class PreparedSystemPrompt:
+    """One construction's file-derived prompt and freshness observation."""
+
+    key: tuple[Path, tuple[str, ...], str | None, bool]
+    text: str
+    file_snapshot: tuple[tuple[Any, ...], ...]
+
+
+_prepared_prompt: ContextVar[PreparedSystemPrompt | None] = ContextVar(
+    "prepared_system_prompt",
+    default=None,
+)
+
+
+@contextmanager
+def bind_prepared_system_prompt(prepared: PreparedSystemPrompt):
+    """Bind only while synchronously installing one request's Agent."""
+    token = _prepared_prompt.set(prepared)
+    try:
+        yield
+    finally:
+        _prepared_prompt.reset(token)
+
+
+def system_prompt_file_snapshot(
+    working_dir: Path,
+    enabled_files: tuple[str, ...],
+) -> tuple[tuple[Any, ...], ...]:
+    """Reuse prepared metadata during construction, otherwise observe files."""
+    prepared = _prepared_prompt.get()
+    if prepared is not None and prepared.key[:2] == (
+        working_dir,
+        enabled_files,
+    ):
+        return prepared.file_snapshot
+    snapshots: list[tuple[Any, ...]] = []
+    for filename in enabled_files:
+        try:
+            stat = (working_dir / filename).stat()
+        except FileNotFoundError:
+            snapshots.append((filename, "missing"))
+        except OSError as exc:
+            snapshots.append((filename, "error", type(exc).__name__))
+        else:
+            snapshots.append(
+                (filename, "present", stat.st_mtime_ns, stat.st_size),
+            )
+    return tuple(snapshots)
+
+
+async def prepare_system_prompt_async(
+    working_dir: Path,
+    enabled_files: list[str],
+    agent_id: str | None,
+    heartbeat_enabled: bool,
+) -> PreparedSystemPrompt:
+    """Read and format prompt files without blocking the event loop."""
+    key = (
+        Path(working_dir),
+        tuple(enabled_files),
+        agent_id,
+        heartbeat_enabled,
+    )
+
+    def prepare() -> PreparedSystemPrompt:
+        # Observe before reading so a concurrent file change is checked again
+        # on the next refresh instead of blessing old content with new stats.
+        snapshot = system_prompt_file_snapshot(key[0], key[1])
+        text = build_system_prompt_from_working_dir(
+            key[0],
+            list(key[1]),
+            key[2],
+            key[3],
+        )
+        return PreparedSystemPrompt(key, text, snapshot)
+
+    return await run_runtime_state_work(prepare)
 
 
 class PromptBuilder:
@@ -175,16 +260,12 @@ class PromptBuilder:
         if not self.prompt_parts:
             logger.warning("No content loaded from working directory")
             return (
-                SYSTEM_PROMPT_PROTECTION
-                + "\n\n"
-                + DEFAULT_SYS_PROMPT.strip()
+                SYSTEM_PROMPT_PROTECTION + "\n\n" + DEFAULT_SYS_PROMPT.strip()
             )
 
         # Join all parts with double newlines
         final_prompt = (
-            SYSTEM_PROMPT_PROTECTION
-            + "\n\n"
-            + "\n\n".join(self.prompt_parts)
+            SYSTEM_PROMPT_PROTECTION + "\n\n" + "\n\n".join(self.prompt_parts)
         )
 
         logger.debug(
@@ -244,6 +325,17 @@ def build_system_prompt_from_working_dir(
     # Use provided working_dir or fallback to global WORKING_DIR
     if working_dir is None:
         working_dir = Path(WORKING_DIR)
+
+    prepared = _prepared_prompt.get()
+    if enabled_files is not None and prepared is not None:
+        key = (
+            Path(working_dir),
+            tuple(enabled_files),
+            agent_id,
+            heartbeat_enabled,
+        )
+        if prepared.key == key:
+            return prepared.text
 
     # Load enabled files from parameter or config
     if enabled_files is None:

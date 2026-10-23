@@ -10,11 +10,16 @@ Example:
 """
 
 import base64
+import asyncio
 import copy
+import contextvars
 import json
 import logging
 import os
 import time
+from ssl import SSLContext
+from dataclasses import dataclass
+from functools import partial
 from typing import Callable, List, Sequence, Tuple, Type, Any, Union, Optional
 from urllib.parse import urlparse
 
@@ -42,6 +47,7 @@ from ..constant import (
     DEFAULT_LLM_CRON_MAX_CONCURRENT,
 )
 from ..providers import ProviderManager
+from ..providers.client_tls import PreparedTLSFailure, bind_prepared_client_tls
 from ..providers.retry_chat_model import (
     RetryChatModel,
     RetryConfig,
@@ -63,6 +69,13 @@ def _file_url_to_path(url: str) -> str:
 
 
 logger = logging.getLogger(__name__)
+
+_NO_TENANT_MODEL_CONFIGURATION = (
+    "No tenant model configuration found. "
+    "Please configure a model for this tenant using the admin panel "
+    "or ensure provider configuration is properly set. "
+    "Multi-tenant isolation requires explicit model config."
+)
 
 _SUPPORTED_IMAGE_EXTENSIONS: dict[str, str] = {
     ".png": "image/png",
@@ -1034,12 +1047,7 @@ def _resolve_model_slot_and_provider(
         model_slot = model_slot_override or _get_model_slot(manager)
 
     if not model_slot or not model_slot.provider_id or not model_slot.model:
-        raise ValueError(
-            "No tenant model configuration found. "
-            "Please configure a model for this tenant using the admin panel "
-            "or ensure provider configuration is properly set. "
-            "Multi-tenant isolation requires explicit model config.",
-        )
+        raise ValueError(_NO_TENANT_MODEL_CONFIGURATION)
     if model_provider_override is None and manager is not None:
         provider = manager.get_provider(model_slot.provider_id)
     if provider is None:
@@ -1093,6 +1101,135 @@ def _create_model_with_fallback(
         )
 
 
+@dataclass(frozen=True)
+class PreparedModelConfig:
+    """Request-owned configuration; model clients are constructed on the loop."""
+
+    tenant_id: str | None
+    agent_id: str | None
+    model_slot: Any
+    provider: Any
+    retry_config: RetryConfig | None
+    rate_limit_config: RateLimitConfig | None
+    fallback_model_slot: Any | None = None
+    fallback_model_provider: Any | None = None
+    tls_context: SSLContext | PreparedTLSFailure | None = None
+
+
+def _prepare_model_config_sync(
+    manager: Any,
+    tenant_id: str | None,
+    agent_id: str | None,
+    overrides: tuple[Any, Any, Any, Any],
+) -> PreparedModelConfig:
+    agent_id = _get_agent_id(agent_id, tenant_id)
+    model_slot, provider, fallback_slot, fallback_provider = overrides
+    if model_slot is None:
+        model_slot = _get_model_slot(manager)
+    if not model_slot or not model_slot.provider_id or not model_slot.model:
+        raise ValueError(_NO_TENANT_MODEL_CONFIGURATION)
+    if provider is None and model_slot is not None:
+        provider = manager.get_provider(model_slot.provider_id)
+    if provider is None:
+        raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
+    retry_config, rate_limit_config = _get_model_runtime_configs(
+        agent_id,
+        tenant_id,
+    )
+    from ..providers.openai_provider import OpenAIProvider
+    from ..providers.anthropic_provider import AnthropicProvider
+
+    tls_context: SSLContext | PreparedTLSFailure | None = None
+    if any(
+        isinstance(candidate, (OpenAIProvider, AnthropicProvider))
+        for candidate in (provider, fallback_provider)
+    ):
+        import httpx
+
+        try:
+            tls_context = httpx.create_ssl_context()
+        except (OSError, ValueError) as exc:
+            if any(
+                isinstance(candidate, OpenAIProvider)
+                for candidate in (provider, fallback_provider)
+            ):
+                tls_context = PreparedTLSFailure(copy.copy(exc))
+            # Let the existing model fallback handle an OpenAI failure without
+            # repeating certificate I/O on the event loop.
+            logger.warning("Unable to prepare SDK TLS context: %s", exc)
+    return PreparedModelConfig(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        model_slot=copy.deepcopy(model_slot),
+        provider=copy.deepcopy(provider),
+        retry_config=copy.deepcopy(retry_config),
+        rate_limit_config=copy.deepcopy(rate_limit_config),
+        fallback_model_slot=copy.deepcopy(fallback_slot),
+        fallback_model_provider=copy.deepcopy(fallback_provider),
+        tls_context=tls_context,
+    )
+
+
+async def prepare_model_config_async(
+    agent_id: str | None = None,
+    tenant_id: str | None = None,
+    *,
+    manager: Any | None = None,
+    model_slot_override: Any | None = None,
+    model_provider_override: Any | None = None,
+    fallback_model_slot: Any | None = None,
+    fallback_model_provider: Any | None = None,
+) -> PreparedModelConfig:
+    """Capture model/retry configuration on the existing Provider executor.
+
+    Query callers pass their initialized and refreshed manager. Standalone
+    callers retain async initialization and freshness checks. No HTTP client
+    or Agent construction runs in the worker.
+    """
+    effective_tenant_id = _get_tenant_id() or tenant_id
+    private_provider = (
+        model_slot_override is not None and model_provider_override is not None
+    )
+    if manager is None and not private_provider:
+        manager = await ProviderManager.get_or_create_instance(tenant_id)
+        await manager.refresh_if_due()
+    callback = partial(
+        _prepare_model_config_sync,
+        manager,
+        effective_tenant_id,
+        agent_id,
+        (
+            model_slot_override,
+            model_provider_override,
+            fallback_model_slot,
+            fallback_model_provider,
+        ),
+    )
+    context = contextvars.copy_context()
+    future = ProviderManager._runtime_cache.submit(context.run, callback)
+    wrapped = asyncio.wrap_future(future)
+    # The request may disappear while executor work is still running.
+    wrapped.add_done_callback(
+        lambda completed: (
+            None if completed.cancelled() else completed.exception()
+        ),
+    )
+    return await asyncio.shield(wrapped)
+
+
+async def create_model_and_formatter_async(
+    agent_id: str | None = None,
+    trace_context: dict[str, Any] | None = None,
+) -> Tuple[ChatModelBase, FormatterBase]:
+    """Prepare configuration/TLS in a worker, install SDK clients on the loop."""
+    prepared = await prepare_model_config_async(agent_id=agent_id)
+    return create_model_and_formatter(
+        agent_id=agent_id,
+        trace_context=trace_context,
+        prepared_model_config=prepared,
+    )
+
+
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
     trace_context: Optional[dict[str, Any]] = None,
@@ -1103,6 +1240,7 @@ def create_model_and_formatter(
     resolved_model_info: dict[str, str] | None = None,
     on_model_config_resolved: Callable[[Any], None] | None = None,
     on_model_provider_resolved: Callable[[Any], None] | None = None,
+    prepared_model_config: PreparedModelConfig | None = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -1122,30 +1260,55 @@ def create_model_and_formatter(
     started_at = time.perf_counter()
 
     # Resolve tenant and tenant-local agent identity.
-    tenant_id = _get_tenant_id()
-    resolved_agent_id = _get_agent_id(agent_id, tenant_id)
+    tenant_id = (
+        prepared_model_config.tenant_id
+        if prepared_model_config is not None
+        else _get_tenant_id()
+    )
+    resolved_agent_id = (
+        prepared_model_config.agent_id
+        if prepared_model_config is not None
+        else _get_agent_id(agent_id, tenant_id)
+    )
 
     try:
-        retry_config, rate_limit_config = _get_model_runtime_configs(
-            resolved_agent_id,
-            tenant_id,
-        )
-        model_slot, provider = _resolve_model_slot_and_provider(
-            tenant_id,
-            model_slot_override,
-            model_provider_override,
-        )
-        (
-            model_config,
-            model,
-            resolved_slot,
-            resolved_provider,
-        ) = _create_model_with_fallback(
-            model_slot,
-            provider,
-            fallback_model_slot,
-            fallback_model_provider,
-        )
+        if prepared_model_config is None:
+            retry_config, rate_limit_config = _get_model_runtime_configs(
+                resolved_agent_id,
+                tenant_id,
+            )
+            model_slot, provider = _resolve_model_slot_and_provider(
+                tenant_id,
+                model_slot_override,
+                model_provider_override,
+            )
+        else:
+            retry_config = prepared_model_config.retry_config
+            rate_limit_config = prepared_model_config.rate_limit_config
+            model_slot = prepared_model_config.model_slot
+            provider = prepared_model_config.provider
+            fallback_model_slot = prepared_model_config.fallback_model_slot
+            fallback_model_provider = (
+                prepared_model_config.fallback_model_provider
+            )
+        with bind_prepared_client_tls(
+            (
+                prepared_model_config.tls_context
+                if prepared_model_config is not None
+                else None
+            ),
+        ):
+            (
+                model_config,
+                model,
+                resolved_slot,
+                resolved_provider,
+            ) = _create_model_with_fallback(
+                model_slot,
+                provider,
+                fallback_model_slot,
+                fallback_model_provider,
+            )
         provider_id = resolved_slot.provider_id
 
         if on_model_config_resolved is not None:
@@ -1228,4 +1391,7 @@ def _create_formatter_instance(
 
 __all__ = [
     "create_model_and_formatter",
+    "create_model_and_formatter_async",
+    "prepare_model_config_async",
+    "PreparedModelConfig",
 ]

@@ -103,6 +103,9 @@ def _verify_indexed_holder(root: Path, revisions: int) -> None:
         "released",
         "handoff-acquired",
         "passed",
+        "reader-ready",
+        "read-window",
+        "read-observed",
     ):
         _marker(root, name).unlink(missing_ok=True)
     holder = mp.Process(target=_crash_holder, args=(str(root),))
@@ -136,11 +139,14 @@ def _verify_indexed_holder(root: Path, revisions: int) -> None:
             "revisions-started",
             "revisions-done",
             "reader-done",
+            "reader-ready",
+            "read-window",
+            "read-observed",
         ):
             _marker(root, name).unlink(missing_ok=True)
 
 
-def _verify_indexed_contender(root: Path) -> None:
+def _verify_indexed_contender(root: Path, revisions: int) -> dict[str, int]:
     _wait_for(_marker(root, "ready"))
     try:
         with _acquire(_lock_path(root), non_blocking=True):
@@ -155,13 +161,62 @@ def _verify_indexed_contender(root: Path) -> None:
     _marker(root, "handoff-acquired").touch()
     _marker(root, "passed").touch()
     _wait_for(_marker(root, "revisions-started"))
+    last_revision = -1
+    samples = 0
     while not _marker(root, "revisions-done").exists():
         with (root / ".verification.json").open("r", encoding="utf-8") as file:
             state = json.load(file)
-        if not isinstance(state.get("revision"), int):
+        revision = state.get("revision")
+        if (
+            type(revision) is not int
+            or not last_revision <= revision <= revisions
+        ):
             raise RuntimeError(f"invalid revision state: {state!r}")
+        last_revision = revision
+        samples += 1
+        _marker(root, "reader-ready").touch()
+        if (
+            revision >= max(1, revisions // 2)
+            and _marker(root, "read-window").exists()
+        ):
+            _marker(root, "read-observed").touch()
         time.sleep(0.01)
+    final = json.loads((root / ".verification.json").read_bytes())
+    if samples == 0 or final != {"revision": revisions}:
+        raise RuntimeError("reader missed publication or final revision")
     _marker(root, "reader-done").touch()
+    return {"read_samples": samples, "final_revision": revisions}
+
+
+def _verify_hard_links(root: Path) -> None:
+    """Exercise exclusive publication and survival after staging removal."""
+    with tempfile.TemporaryDirectory(
+        prefix=".verification.links-",
+        dir=root,
+    ) as path:
+        staging = Path(path) / "staging.json"
+        published = Path(path) / "published.json"
+        _atomic_commit(staging, {"revision": 1})
+        os.link(staging, published)
+        try:
+            os.link(staging, published)
+        except FileExistsError:
+            pass
+        else:
+            raise RuntimeError(
+                "hard-link publication replaced an existing target",
+            )
+        staging.unlink()
+        directory_fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if json.loads(published.read_bytes()) != {"revision": 1}:
+            raise RuntimeError("hard-link publication lost staged data")
 
 
 def _atomic_commit(path: Path, state: dict[str, int]) -> None:
@@ -203,7 +258,9 @@ def _verify_revisions(
     lock = _lock_path(root)
     with _acquire(lock, non_blocking=False):
         if reader_barrier:
+            _atomic_commit(path, {"revision": 0})
             _marker(root, "revisions-started").touch()
+            _wait_for(_marker(root, "reader-ready"))
         for revision in range(1, count + 1):
             state = {"revision": revision}
             _atomic_commit(path, state)
@@ -213,6 +270,9 @@ def _verify_revisions(
                 raise RuntimeError(
                     f"unexpected state at revision {revision}: {loaded!r}",
                 )
+            if reader_barrier and revision == max(1, count // 2):
+                _marker(root, "read-window").touch()
+                _wait_for(_marker(root, "read-observed"))
         if reader_barrier:
             _marker(root, "revisions-done").touch()
     if cleanup:
@@ -234,6 +294,14 @@ def main() -> int:
     if args.revisions <= 0:
         parser.error("--revisions must be positive")
     args.session_dir.mkdir(parents=True, exist_ok=True)
+    _verify_hard_links(args.session_dir)
+    report = {
+        "passed": True,
+        "mode": args.mode,
+        "host": os.uname().nodename,
+        "hard_links": True,
+        "revisions": args.revisions,
+    }
     if args.mode in {"all", "contention"}:
         _verify_contention(args.session_dir)
     if args.mode in {"all", "revisions"}:
@@ -245,10 +313,13 @@ def main() -> int:
         if worker_index == 0:
             _verify_indexed_holder(args.session_dir, args.revisions)
         elif worker_index == 1:
-            _verify_indexed_contender(args.session_dir)
+            report.update(
+                _verify_indexed_contender(args.session_dir, args.revisions),
+            )
         else:
             parser.error("indexed mode requires worker index 0 or 1")
-    print(f"NAS session lock verification passed: {args.session_dir}")
+        report["worker_index"] = worker_index
+    print(json.dumps(report, sort_keys=True))
     return 0
 
 

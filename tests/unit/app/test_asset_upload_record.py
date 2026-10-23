@@ -398,3 +398,30 @@ def test_result_route_returns_503_when_not_initialized():
     )
 
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("insert_id", [41, 0, None])
+async def test_insert_record_uses_facade_insert_id(insert_id):
+    db = MagicMock(spec=["is_connected", "insert"])
+    db.is_connected = True
+    db.insert = AsyncMock(return_value=insert_id)
+
+    result = await AssetUploadRecordStore(db).insert_record(
+        file_name="客户资料.xlsx",
+        file_size=123,
+        asset_path="assets/file.xlsx",
+        source_id="source-a",
+        template_flag="template-a",
+    )
+
+    assert result == (insert_id or None)
+    query, params = db.insert.await_args.args
+    assert "ON DUPLICATE KEY UPDATE" in query
+    assert params == (
+        "客户资料.xlsx",
+        123,
+        "assets/file.xlsx",
+        "source-a",
+        "template-a",
+    )

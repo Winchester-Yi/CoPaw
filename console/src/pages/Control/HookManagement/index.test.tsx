@@ -223,7 +223,126 @@ describe("HookManagementPage", () => {
     expect(
       screen.queryByRole("switch", { name: "转换最终回复" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "追加独立消息" }),
+    ).not.toBeInTheDocument();
   });
+
+  it.each(["stop-command", "stop-http", "stop-prompt"])(
+    "makes append and transform mutually exclusive for %s",
+    async (handlerId) => {
+      mocks.getConfiguration.mockResolvedValueOnce({
+        hooks: stopHooks,
+        revision: "rev-1",
+      });
+      render(<HookManagementPage />);
+      await openStopHandler(handlerId);
+      fireEvent.click(screen.getByRole("switch", { name: "转换最终回复" }));
+      fireEvent.click(screen.getByRole("switch", { name: "追加独立消息" }));
+      expect(
+        screen.getByRole("switch", { name: "转换最终回复" }),
+      ).not.toBeChecked();
+      fireEvent.click(screen.getByText("高级设置"));
+      expect(screen.getByLabelText("仅执行一次")).toBeDisabled();
+      expect(screen.getByLabelText("仅执行一次")).not.toBeChecked();
+      expect(screen.getByRole("combobox", { name: "失败策略" })).toBeDisabled();
+      expect(
+        screen.getByText(
+          "有效失败策略固定为 allow：跳过失败处理器，保留正文，不插入错误气泡。",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/16 KiB/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("switch", { name: "转换最终回复" }));
+      expect(
+        screen.getByRole("switch", { name: "追加独立消息" }),
+      ).not.toBeChecked();
+      fireEvent.click(screen.getByRole("switch", { name: "追加独立消息" }));
+      fireEvent.click(screen.getByRole("button", { name: "保存并激活 Stop" }));
+      await waitFor(() =>
+        expect(mocks.saveConfiguration).toHaveBeenCalledWith(
+          expect.objectContaining({
+            events: {
+              Stop: [
+                expect.objectContaining({
+                  hooks: expect.arrayContaining([
+                    expect.objectContaining({
+                      id: handlerId,
+                      outputAppend: true,
+                      outputTransform: false,
+                      once: false,
+                    }),
+                  ]),
+                }),
+              ],
+            },
+          }),
+          "rev-1",
+        ),
+      );
+    },
+    10_000,
+  );
+
+  it("requires a non-empty assistant response for appended Stop manual tests", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      hooks: stopHooks,
+      revision: "rev-1",
+    });
+    render(<HookManagementPage />);
+    await openStopHandler("stop-command");
+    fireEvent.click(screen.getByRole("switch", { name: "追加独立消息" }));
+    fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
+    const context = JSON.parse(
+      (screen.getByLabelText("Hook Context（JSON）") as HTMLTextAreaElement)
+        .value,
+    );
+    fireEvent.change(screen.getByLabelText("Hook Context（JSON）"), {
+      target: {
+        value: JSON.stringify({ ...context, assistant_response: " " }),
+      },
+    });
+    fireEvent.click(screen.getByLabelText(/确认将执行真实/i));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+    expect(
+      await screen.findByText("追加消息测试需要非空的 assistant_response"),
+    ).toBeInTheDocument();
+    expect(mocks.manualTest).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it("shows only safe append diagnostics in the modal and page summary", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      hooks: stopHooks,
+      revision: "rev-1",
+    });
+    mocks.manualTest.mockResolvedValueOnce({
+      redacted_summary: {
+        output_append: true,
+        status: "allowed",
+        append_applied: true,
+        append_bytes: 42,
+        effective_fail_policy: "allow",
+        duration_ms: 8,
+        failed: false,
+        failure_type: "",
+        append_text: "private append content",
+        assistant_response: "private answer",
+      },
+    });
+    render(<HookManagementPage />);
+    await openStopHandler("stop-command");
+    fireEvent.click(screen.getByRole("switch", { name: "追加独立消息" }));
+    fireEvent.click(screen.getByRole("tab", { name: "测试与发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
+    fireEvent.click(screen.getByLabelText(/确认将执行真实/i));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+    expect(await screen.findAllByText("append_bytes: 42")).toHaveLength(2);
+    expect(screen.getAllByText("output_append: true")).toHaveLength(2);
+    expect(screen.getAllByText("append_applied: true")).toHaveLength(2);
+    expect(screen.getAllByText("effective_fail_policy: allow")).toHaveLength(2);
+    expect(screen.getAllByText("duration_ms: 8")).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("private append content");
+    expect(document.body.textContent).not.toContain("private answer");
+  }, 10_000);
 
   it("enabling final reply transformation clears and disables once before saving", async () => {
     mocks.getConfiguration.mockResolvedValueOnce({
@@ -547,7 +666,12 @@ describe("HookManagementPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "分发 Hook" }));
     fireEvent.click(screen.getByLabelText("选择 tool-guards"));
     fireEvent.click(screen.getByRole("button", { name: "选择目标租户" }));
-    fireEvent.click(screen.getByRole("button", { name: "开始分发" }));
+    expect(
+      screen.getByText(
+        "分发后将开启目标 Default Agent 的 Hook 总开关，目标已有分组也会按规则参与执行。",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "分发并启用" }));
 
     await waitFor(() =>
       expect(mocks.distributeToDefaultAgents).toHaveBeenCalledWith({

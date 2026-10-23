@@ -15,12 +15,22 @@ from swe.app.runner.runner import AgentRunner
 
 def _fake_agent_config():
     return SimpleNamespace(
+        id="test-agent",
         mcp=None,
         running=SimpleNamespace(
             suggestions=SimpleNamespace(
                 enabled=False,
             ),
         ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def fake_model_preparation(monkeypatch):
+    """These request metadata tests replace Agent/model construction."""
+    monkeypatch.setattr(
+        "swe.agents.model_factory.prepare_model_config_async",
+        AsyncMock(return_value=None),
     )
 
 

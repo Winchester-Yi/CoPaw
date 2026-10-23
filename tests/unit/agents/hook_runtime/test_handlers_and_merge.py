@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import time
 
 import httpx
+from unittest.mock import AsyncMock
+
 import pytest
 
 from swe.config.context import encode_scope_id
@@ -1065,10 +1067,12 @@ async def test_stop_prompt_handler_invalid_output_uses_fail_policy(
         return '{"decision":"deny","reason":"not a gate decision"}'
 
     monkeypatch.setattr(
-        "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None, trace_context=None: (
-            fake_model,
-            object(),
+        "swe.agents.hook_runtime.executor.create_model_and_formatter_async",
+        AsyncMock(
+            side_effect=lambda agent_id=None, trace_context=None: (
+                fake_model,
+                object(),
+            ),
         ),
     )
 
@@ -1122,7 +1126,10 @@ async def test_prompt_handler_binds_context_and_redacts_model_input(
         observed["messages"] = messages
         return '{"decision":"deny","reason":"secret request"}'
 
-    def fake_create_model_and_formatter(agent_id=None, trace_context=None):
+    async def fake_create_model_and_formatter(
+        agent_id=None,
+        trace_context=None,
+    ):
         observed["agent_id"] = agent_id
         observed["trace_context"] = trace_context
         from swe.config.context import (
@@ -1139,7 +1146,7 @@ async def test_prompt_handler_binds_context_and_redacts_model_input(
         return fake_model, object()
 
     monkeypatch.setattr(
-        "swe.agents.hook_runtime.executor.create_model_and_formatter",
+        "swe.agents.hook_runtime.executor.create_model_and_formatter_async",
         fake_create_model_and_formatter,
     )
     context = _context()
@@ -1204,10 +1211,12 @@ async def test_prompt_handler_extracts_streaming_delta_and_cumulative_chunks(
         return stream()
 
     monkeypatch.setattr(
-        "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None, trace_context=None: (
-            fake_model,
-            object(),
+        "swe.agents.hook_runtime.executor.create_model_and_formatter_async",
+        AsyncMock(
+            side_effect=lambda agent_id=None, trace_context=None: (
+                fake_model,
+                object(),
+            ),
         ),
     )
     handler = PromptHookHandlerConfig(id="policy", prompt="Allow safe work.")
@@ -1251,10 +1260,12 @@ async def test_prompt_handler_timeout_closes_stream(
         return FakeStream()
 
     monkeypatch.setattr(
-        "swe.agents.hook_runtime.executor.create_model_and_formatter",
-        lambda agent_id=None, trace_context=None: (
-            fake_model,
-            object(),
+        "swe.agents.hook_runtime.executor.create_model_and_formatter_async",
+        AsyncMock(
+            side_effect=lambda agent_id=None, trace_context=None: (
+                fake_model,
+                object(),
+            ),
         ),
     )
     handler = PromptHookHandlerConfig(

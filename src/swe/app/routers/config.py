@@ -215,20 +215,20 @@ async def put_channels(
     ),
 ) -> dict[str, Any]:
     """Update all channel configs."""
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
     from ...config.config import save_agent_config
 
-    agent, agent_config = await get_agent_and_config_for_request(request)
     normalized_channels = normalize_channel_config_set(
         channels_config,
         materialize_missing_console=True,
     )
-    agent_config.channels = normalized_channels
-    save_agent_config(
-        agent.agent_id,
-        agent_config,
-        tenant_id=agent.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (agent, agent_config):
+        agent_config.channels = normalized_channels
+        save_agent_config(
+            agent.agent_id,
+            agent_config,
+            tenant_id=agent.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -431,7 +431,7 @@ async def put_channel(
     ),
 ) -> dict[str, Any]:
     """Update a specific channel config by name."""
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
     from ...config.config import save_agent_config
 
     available = include_mandatory_channels(get_available_channels())
@@ -439,14 +439,6 @@ async def put_channel(
         raise HTTPException(
             status_code=404,
             detail=f"Channel '{channel_name}' not found",
-        )
-
-    agent, agent_config = await get_agent_and_config_for_request(request)
-
-    # Initialize channels if not exists
-    if agent_config.channels is None:
-        agent_config.channels = _ensure_manageable_channel_config(
-            agent_config.channels,
         )
 
     single_channel_config = strip_channel_management_meta(
@@ -468,13 +460,17 @@ async def put_channel(
             materialize_missing=(channel_name == "console"),
         )
 
-    # Set channel config in agent's config
-    setattr(agent_config.channels, channel_name, channel_config)
-    save_agent_config(
-        agent.agent_id,
-        agent_config,
-        tenant_id=agent.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (agent, agent_config):
+        if agent_config.channels is None:
+            agent_config.channels = _ensure_manageable_channel_config(
+                agent_config.channels,
+            )
+        setattr(agent_config.channels, channel_name, channel_config)
+        save_agent_config(
+            agent.agent_id,
+            agent_config,
+            tenant_id=agent.tenant_id,
+        )
 
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(
@@ -917,22 +913,22 @@ async def put_heartbeat(
     body: HeartbeatBody = Body(..., description="Heartbeat configuration"),
 ) -> Any:
     """Update heartbeat config and reschedule the heartbeat job."""
-    from ..agent_context import get_agent_and_config_for_request
+    from ..agent_context import agent_config_update_scope
     from ...config.config import save_agent_config
 
-    agent, agent_config = await get_agent_and_config_for_request(request)
     hb = HeartbeatConfig(
         enabled=body.enabled,
         every=body.every,
         target=body.target,
         active_hours=body.active_hours,
     )
-    agent_config.heartbeat = hb
-    save_agent_config(
-        agent.agent_id,
-        agent_config,
-        tenant_id=agent.tenant_id,
-    )
+    async with agent_config_update_scope(request) as (agent, agent_config):
+        agent_config.heartbeat = hb
+        save_agent_config(
+            agent.agent_id,
+            agent_config,
+            tenant_id=agent.tenant_id,
+        )
 
     # 配置变更后重新注册到外部调度平台
     cm = agent.cron_manager

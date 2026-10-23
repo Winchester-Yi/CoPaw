@@ -316,6 +316,18 @@ async def test_summary_memory_uses_tenant_scoped_tool_result_compact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, int] = {}
+    import threading
+
+    timezone_threads = []
+
+    def read_timezone():
+        timezone_threads.append(threading.get_ident())
+        return SimpleNamespace(user_timezone="Asia/Shanghai")
+
+    monkeypatch.setattr(
+        "swe.agents.memory.reme_light_memory_manager.load_config",
+        read_timezone,
+    )
 
     monkeypatch.setattr(
         "swe.agents.memory.reme_light_memory_manager.load_agent_config",
@@ -358,9 +370,11 @@ async def test_summary_memory_uses_tenant_scoped_tool_result_compact(
     manager.tenant_id = "tenant-a"
     manager.working_dir = str(Path("/tmp/ws"))
     manager._warn_if_version_mismatch = lambda: None
-    manager._create_execution_model_formatter = lambda **_kwargs: (
-        object(),
-        object(),
+    manager._create_execution_model_formatter_async = AsyncMock(
+        return_value=(
+            object(),
+            object(),
+        ),
     )
     manager.summary_toolkit = object()
     manager._reme = SimpleNamespace(
@@ -370,6 +384,11 @@ async def test_summary_memory_uses_tenant_scoped_tool_result_compact(
     await manager.summary_memory(messages=[])
 
     assert observed["recent_max_bytes"] == 50000
+    assert timezone_threads and threading.get_ident() not in timezone_threads
+    assert (
+        manager._reme.summary_memory.call_args.kwargs["timezone"]
+        == "Asia/Shanghai"
+    )
 
 
 @pytest.mark.asyncio
@@ -377,8 +396,12 @@ async def test_compact_memory_uses_instance_tenant_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str | None]] = []
+    import threading
+
+    loop_thread = threading.get_ident()
 
     def fake_load_agent_config(agent_id: str, tenant_id: str | None = None):
+        assert threading.get_ident() != loop_thread
         calls.append((agent_id, tenant_id))
         return SimpleNamespace(
             agent_id=agent_id,
@@ -406,9 +429,11 @@ async def test_compact_memory_uses_instance_tenant_id(
     manager.agent_id = "default"
     manager.tenant_id = "tenant-a"
     manager._warn_if_version_mismatch = lambda: None
-    manager._create_execution_model_formatter = lambda **_kwargs: (
-        object(),
-        object(),
+    manager._create_execution_model_formatter_async = AsyncMock(
+        return_value=(
+            object(),
+            object(),
+        ),
     )
     manager._reme = SimpleNamespace(
         compact_memory=AsyncMock(

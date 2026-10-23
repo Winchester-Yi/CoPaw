@@ -8,7 +8,10 @@ import re
 from collections import OrderedDict
 from typing import Any, List, Optional
 
-from swe.agents.model_factory import create_model_and_formatter
+from swe.agents.model_factory import (
+    create_model_and_formatter,
+    prepare_model_config_async,
+)
 from swe.tracing import capture_current_trace_context
 from swe.config.context import get_current_effective_tenant_id
 from swe.app.agent_context import get_current_agent_id
@@ -103,6 +106,7 @@ class SuggestionService:
         OrderedDict()
     )
     _lock = asyncio.Lock()
+    _model_cache_generation = 0
 
     @staticmethod
     def _runtime_scope_key() -> tuple[str, str]:
@@ -130,12 +134,17 @@ class SuggestionService:
             cls._models_by_trace.move_to_end(cache_key)
             return model
 
+        generation = cls._model_cache_generation
+        prepared = await prepare_model_config_async()
         async with cls._lock:
             model = cls._models_by_trace.get(cache_key)
             if model is None:
                 model, _ = create_model_and_formatter(
                     trace_context=trace_context,
+                    prepared_model_config=prepared,
                 )
+                if generation != cls._model_cache_generation:
+                    return model
                 cls._models_by_trace[cache_key] = model
                 while len(cls._models_by_trace) > _MODEL_CACHE_LIMIT:
                     _, evicted_model = cls._models_by_trace.popitem(
@@ -149,6 +158,7 @@ class SuggestionService:
     @classmethod
     def reset_model(cls, scope_id: str | None = None) -> None:
         """清理建议模型缓存，用于配置刷新或测试隔离。"""
+        cls._model_cache_generation += 1
         if scope_id is None:
             keys = list(cls._models_by_trace)
         else:

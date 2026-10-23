@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,6 +15,69 @@ from swe.agents.agent_runtime_builder import (
     AgentRuntimeBuilder,
     McpToolRegistrar,
 )
+
+
+def test_agent_constructor_logs_resolved_model_without_provider_lookup(
+    monkeypatch,
+):
+    from swe.agents import react_agent
+    from swe.providers.provider_manager import ProviderManager
+
+    lookup = MagicMock(side_effect=AssertionError("provider lookup on loop"))
+    monkeypatch.setattr(ProviderManager, "get_instance", lookup)
+    config = SimpleNamespace(
+        id="agent-a",
+        language="zh",
+        running=SimpleNamespace(max_iters=3),
+    )
+    config.model_copy = lambda **_: config
+
+    def build(agent, **_kwargs):
+        agent._resolved_model_slot.update(
+            provider_id="custom",
+            model="model-a",
+        )
+        return AgentRuntimeComponents(
+            object(),
+            "prompt",
+            object(),
+            object(),
+            object(),
+        )
+
+    monkeypatch.setattr(AgentRuntimeBuilder, "build_for_swe_agent", build)
+    monkeypatch.setattr(
+        react_agent.ReActAgent,
+        "__init__",
+        lambda self, **_: None,
+    )
+    monkeypatch.setattr(react_agent, "CommandHandler", lambda **_: object())
+    monkeypatch.setattr(
+        react_agent.SWEAgent,
+        "_init_agent_phase_state",
+        lambda _: None,
+    )
+    monkeypatch.setattr(
+        react_agent.SWEAgent,
+        "_register_hooks",
+        lambda _: None,
+    )
+    monkeypatch.setattr(
+        react_agent.SWEAgent,
+        "_current_system_prompt_freshness_token",
+        lambda _: (),
+    )
+
+    def memory(agent, *_args, **_kwargs):
+        agent.memory_manager = None
+        agent._enable_memory_manager = False
+
+    monkeypatch.setattr(react_agent.SWEAgent, "_setup_memory_manager", memory)
+    agent = object.__new__(react_agent.SWEAgent)
+    agent.name = "Friday"
+    agent.memory = None
+    react_agent.SWEAgent.__init__(agent, config)
+    lookup.assert_not_called()
 
 
 def test_request_context_round_trips_fixed_keys_and_extras() -> None:

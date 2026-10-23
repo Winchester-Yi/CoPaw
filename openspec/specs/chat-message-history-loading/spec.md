@@ -7,7 +7,7 @@ Define progressive rendering and archive loading for a single chat detail so cur
 ## Requirements
 ### Requirement: Current chat messages SHALL render progressively
 
-When a persisted chat detail is restored, the Conversation Workspace SHALL initially render the latest 10 historical message cards. It SHALL reveal at most 10 additional locally available historical cards each time upward scrolling leaves and re-enters the history preload region. Live or newly streamed message cards SHALL remain immediately visible and SHALL NOT count against the historical visibility limit.
+When a persisted chat detail is restored, the Conversation Workspace SHALL initially render the latest 10 historical message cards. It SHALL reveal at most 10 additional locally available historical cards each time upward reading reaches the history preload region or a bounded post-layout check requests the next batch. Live or newly streamed message cards SHALL remain immediately visible and SHALL NOT count against the historical visibility limit.
 
 #### Scenario: Long current snapshot opens with a bounded card count
 - **WHEN** a restored chat contains more than 10 current-memory historical message cards
@@ -20,9 +20,22 @@ When a persisted chat detail is restored, the Conversation Workspace SHALL initi
 
 #### Scenario: Upward scrolling reveals one local batch
 - **WHEN** current-memory historical cards remain hidden
-- **AND** the user leaves and re-enters the history preload region by scrolling upward
+- **AND** the user scrolls upward into the history preload region
 - **THEN** the next 10 locally available historical cards are rendered without a network request
 - **AND** the reveal has no fixed artificial delay or loading spinner
+
+#### Scenario: Content growth does not require a downward gesture
+- **WHEN** a local batch increases the content height
+- **AND** the next upward scroll goes directly to the new top
+- **THEN** the next batch is available without first scrolling downward
+
+#### Scenario: Automatic continuation is bounded
+- **WHEN** one upward-reading action starts history progression
+- **THEN** at most three local batches or archive pages are advanced automatically
+- **AND** each step waits for message layout and anchor restoration before checking the current position
+- **AND** moving downward, leaving the preload region, an error, or exhaustion stops continuation
+- **AND** a later upward scroll or the accessible “加载更早消息” action can continue
+- **AND** mounting a short list alone does not initiate history requests
 
 #### Scenario: Live output remains visible
 - **WHEN** a new user, assistant, tool, or progress card arrives while older historical cards remain hidden
@@ -41,13 +54,13 @@ The Conversation Workspace SHALL request compacted archive history only after ev
 
 #### Scenario: Local exhaustion starts archive paging
 - **WHEN** every current-memory historical card is visible
-- **AND** the user later re-enters the history preload region
+- **AND** the user remains near the top after the local batch commits and its reading anchor is restored, or later scrolls upward into that region
 - **THEN** the Console requests `/chats/{chat_id}/history` with the current cursor and `limit=20`
 
 #### Scenario: Archive page renders in full
 - **WHEN** an archive request returns unseen raw messages and optional compaction boundaries
 - **THEN** all cards converted from that response are inserted and rendered together
-- **AND** the next cursor is retained for a later upward-scroll trigger
+- **AND** the next cursor is retained for a later upward-scroll trigger or bounded post-layout continuation
 
 #### Scenario: Archive page does not duplicate existing cards
 - **WHEN** an archive response contains a message or boundary already present in the chat detail
@@ -64,6 +77,10 @@ Revealing local cards or inserting an archive page SHALL preserve the reader's v
 #### Scenario: Archive insertion preserves the visible message
 - **WHEN** an archive page is inserted above the current viewport
 - **THEN** the previously visible anchor message retains its container-relative position after layout settles
+
+#### Scenario: Remounting rebinds the scroll node
+- **WHEN** loading replaces the list DOM and the list returns with the same message count
+- **THEN** history scrolling listens to the new DOM node and detaches from the old one
 
 #### Scenario: Switching chats resets progressive state
 - **WHEN** the resolved backend chat identity changes
@@ -86,6 +103,15 @@ The Conversation Workspace SHALL show loading feedback only while an archive net
 #### Scenario: Local reveal omits loading feedback
 - **WHEN** the Console reveals a locally available batch
 - **THEN** no loading spinner or artificial loading state is shown
+
+#### Scenario: Invalid cursor does not loop
+- **WHEN** a response reports more history but its next cursor is absent or unchanged
+- **THEN** the response is not applied and automatic progression stops with retry feedback
+- **AND** retry uses the same request cursor
+
+#### Scenario: Empty visible page can advance
+- **WHEN** a page adds no unseen cards but its cursor advances
+- **THEN** another page may be fetched within the same three-step budget after layout settles
 
 #### Scenario: Archive failure offers retry
 - **WHEN** an archive request fails

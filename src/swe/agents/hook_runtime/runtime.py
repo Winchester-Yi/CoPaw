@@ -22,6 +22,7 @@ from .models import (
     HookEventName,
     MergedHookResult,
     StopHookExecutionResult,
+    StopAppendContribution,
     copy_handler_with_overrides,
     skill_hook_handler_definition,
 )
@@ -59,6 +60,99 @@ class HookRuntime:
         if workspace_dir is not None:
             self._refresh_skill_hooks_sync(workspace_dir)
         return self._event_resolver().requires_stop_output_buffer(context)
+
+    async def emit_stop_append(
+        self,
+        context: HookContext,
+        *,
+        workspace_dir: Path,
+        max_append_seconds: float,
+        conversation_snapshot_provider: (
+            Callable[[], Awaitable[dict[str, Any] | None]] | None
+        ) = None,
+        stop_requested: Callable[[], Awaitable[bool]] | None = None,
+    ) -> list[StopAppendContribution]:
+        """并发执行冻结的追加计划，收集阶段期限前完成的有效消息。"""
+        from .append import (
+            wait_append_tasks,
+            collect_append_contributions,
+            log_append_diagnostic,
+        )
+
+        if context.hook_event_name != HookEventName.STOP:
+            raise ValueError("Stop append requires a Stop context")
+        if stop_requested is not None and await stop_requested():
+            return []
+        await self._refresh_skill_hooks(workspace_dir)
+        context = context.model_copy(deep=True)
+        plan = (
+            self._event_resolver()
+            .resolve_stop_append_plan(context)
+            .model_copy(deep=True)
+        )
+        if not plan.handlers:
+            return []
+        deadline = asyncio.get_running_loop().time() + max_append_seconds
+        snapshot = None
+        if conversation_snapshot_provider is not None and any(
+            item.handler.include_conversation_snapshot
+            for item in plan.handlers
+        ):
+
+            async def capture_snapshot():
+                return await conversation_snapshot_provider()
+
+            snapshot_task = asyncio.create_task(
+                capture_snapshot(),
+            )
+            completed = await wait_append_tasks(
+                [snapshot_task],
+                deadline,
+                stop_requested,
+            )
+            if snapshot_task not in completed:
+                return []
+            if snapshot_task.exception() is None:
+                import copy
+
+                snapshot = copy.deepcopy(snapshot_task.result())
+            else:
+                log_append_diagnostic(
+                    "Stop append snapshot failure=capture_error",
+                )
+
+        async def run(item):
+            handler_context = self._context_for_handler(
+                context.model_copy(deep=True),
+                item.handler,
+                snapshot,
+            )
+            result = await execute_handler(
+                item.handler,
+                handler_context,
+                workspace_dir=workspace_dir,
+            )
+            return result, asyncio.get_running_loop().time()
+
+        if stop_requested is not None and await stop_requested():
+            return []
+        tasks = [
+            asyncio.create_task(
+                run(item),
+                name=f"stop_append:{item.source}:{item.group_id}:{item.handler.id}",
+            )
+            for item in plan.handlers
+        ]
+        completed = await wait_append_tasks(tasks, deadline, stop_requested)
+        completed = {
+            task
+            for task in completed
+            if not task.cancelled()
+            and (task.exception() is not None or task.result()[1] <= deadline)
+        }
+        if stop_requested is not None and await stop_requested():
+            return []
+        return collect_append_contributions(plan, tasks, completed)
 
     async def emit(
         self,

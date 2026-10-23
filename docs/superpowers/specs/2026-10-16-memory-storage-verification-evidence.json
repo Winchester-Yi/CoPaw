@@ -1,0 +1,73 @@
+{
+  "scope": "local-two-process-synthetic-only",
+  "passed": true,
+  "run_directory": "~/.swe/.storage-verification/20261016-3x1nwph6",
+  "filesystem_device": 16777233,
+  "workers": [
+    {
+      "hard_links": true,
+      "host": "same-local-host",
+      "mode": "indexed",
+      "passed": true,
+      "revisions": 1000,
+      "worker_index": 0
+    },
+    {
+      "final_revision": 1000,
+      "hard_links": true,
+      "host": "same-local-host",
+      "mode": "indexed",
+      "passed": true,
+      "read_samples": 19,
+      "revisions": 1000,
+      "worker_index": 1
+    }
+  ],
+  "all_mode": {
+    "hard_links": true,
+    "host": "same-local-host",
+    "mode": "all",
+    "passed": true,
+    "revisions": 1000
+  },
+  "rehearsals": {
+    "checkpoint2-to-legacy": {
+      "archive_batches": 2,
+      "archive_messages": 80,
+      "checkpoint_sha256": "cc999e43874d48329935a6f32343652764f8a4cdbb3282cd1dc24929347466ff",
+      "epochs": 3,
+      "epochs_sha256": "92e1656cdff8dab28fe15b5f2ea18f52bb896798a7c0606b2f95597c275595d7",
+      "events_sha256": "c7902e3c6bef02e06cf9013dcf3c631064e31ac711748e52337fc03284256155",
+      "evidence_epochs_sha256": "759ad2dfe4f89b78941cc2ed5fbb4d91afda25af2267a13b4635859b04907446",
+      "exported_events": 88,
+      "format": "checkpoint2-to-legacy",
+      "manifest_sha256": "c4ac54c1350bdc34d689d5aadc76b392da3fa951e2850aa68ae6622dfeb1e398",
+      "messages_sha256": "0aa38fafdc7db75a4d221d3ce4e6c335f998fa65fb9d9e9834bc03e73b01ae3e",
+      "reopened_events": 89,
+      "reopened_events_sha256": "0bf096b0317bc260cd9c071575bc9bdd3e7f7fc95300912719dca34a538106aa"
+    },
+    "session3-to-legacy2": {
+      "export_sha256": "0e8e6e8f6147d53b3d424d1f3569c1fcdef975b604bf3ae93d22fc8fd12372b1",
+      "exported_turns": 86,
+      "format": "session3-to-legacy2",
+      "initial_turns": 86,
+      "reopened_sha256": "7197d924a3b9627d4af848257692f3e2c3647f161c726085035cbd233c10f7ea",
+      "reopened_turns": 87
+    }
+  },
+  "old_version": {
+    "archive_messages": 80,
+    "journal_events_after": 90,
+    "journal_events_before": 89,
+    "journal_module": "<repo>/.worktrees/memory-rollback-reader/src/swe/agents/memory/conversation_archive.py",
+    "journal_sha256": "593a9af4e33ad98c7c859dc671b624555d520975ca45902126e21055329f242e",
+    "legacy_source_revision": "ddb683634",
+    "passed": true,
+    "session_module": "<repo>/.worktrees/memory-rollback-reader/src/swe/app/runner/session.py",
+    "session_sha256": "b8a2e9608e8581c932cb15d79315c35f67a89a349b1d4ca0ca162a0107a3f03e",
+    "session_turns_after": 88,
+    "session_turns_before": 87
+  },
+  "pytest_result": "76 passed in 8.73s",
+  "two_pod_nas_acceptance": "not_run_no_cluster"
+}

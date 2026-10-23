@@ -4,7 +4,12 @@
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
+from copy import copy, deepcopy
 import re
+import stat
+import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +17,8 @@ from typing import Any
 from uuid import uuid4
 
 from agentscope.message import Msg
+
+from swe.output_workers import run_output_work
 
 _CANONICAL_NOTICE_RE = re.compile(
     r"\n<<<TRUNCATED>>> "
@@ -23,6 +30,16 @@ _CANONICAL_NOTICE_RE = re.compile(
 )
 _ARTIFACT_FILENAME_RE = re.compile(r"[0-9a-f]{32}\.txt\Z")
 _MEDIA_BLOCK_TYPES = frozenset({"audio", "file", "image", "video"})
+
+_DISPLAY_CACHE_MAX_ENTRIES = 128
+_DISPLAY_CACHE_MAX_BYTES = 4 * 1024 * 1024
+_DISPLAY_CACHE: OrderedDict[tuple, tuple[str, int]] = OrderedDict()
+_DISPLAY_CACHE_BYTES_USED = 0
+_DISPLAY_CACHE_LOCK = threading.Lock()
+_CLEANUP_INTERVAL_SECONDS = 300
+_CLEANUP_MAX_ENTRIES = 128
+_CLEANUP_NEXT_AT: OrderedDict[tuple[Path, int], float] = OrderedDict()
+_CLEANUP_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -119,6 +136,73 @@ def compact_tool_result_messages(
                         workspace_dir=workspace_dir,
                     )
     return messages
+
+
+async def compact_tool_result_messages_async(
+    messages: list[Msg],
+    *,
+    old_max_bytes: int,
+    recent_max_bytes: int,
+    recent_n: int,
+    artifact_dir: Path,
+    workspace_dir: Path,
+    retention_days: int | None = None,
+) -> list[Msg]:
+    """Compact private content in a worker, then update still-current messages."""
+    snapshots = [(message, message.content) for message in messages]
+
+    def compact() -> list[tuple[Any, bool]]:
+        private_messages = []
+        for message, content in snapshots:
+            private_message = copy(message)
+            private_message.content = deepcopy(content)
+            private_messages.append(private_message)
+        if retention_days is not None:
+            _cleanup_artifacts_if_due(
+                artifact_dir,
+                retention_days=retention_days,
+            )
+        compact_tool_result_messages(
+            private_messages,
+            old_max_bytes=old_max_bytes,
+            recent_max_bytes=recent_max_bytes,
+            recent_n=recent_n,
+            artifact_dir=artifact_dir,
+            workspace_dir=workspace_dir,
+        )
+        return [
+            (message.content, message.content != original)
+            for message, (_, original) in zip(private_messages, snapshots)
+        ]
+
+    contents = await run_output_work(compact)
+    for (message, original), (content, changed) in zip(snapshots, contents):
+        if changed and message.content is original:
+            message.content = content
+    return messages
+
+
+def _cleanup_artifacts_if_due(
+    artifact_dir: Path,
+    *,
+    retention_days: int,
+) -> None:
+    if retention_days < 1:
+        raise ValueError("retention_days must be positive")
+    try:
+        key = (artifact_dir.resolve(), retention_days)
+    except OSError:
+        return
+    now = time.monotonic()
+    with _CLEANUP_LOCK:
+        if now < _CLEANUP_NEXT_AT.get(key, float("-inf")):
+            _CLEANUP_NEXT_AT.move_to_end(key)
+            return
+        _CLEANUP_NEXT_AT[key] = now + _CLEANUP_INTERVAL_SECONDS
+        _CLEANUP_NEXT_AT.move_to_end(key)
+        while len(_CLEANUP_NEXT_AT) > _CLEANUP_MAX_ENTRIES:
+            _CLEANUP_NEXT_AT.popitem(last=False)
+    cleanup_expired_artifacts(artifact_dir, retention_days=retention_days)
 
 
 def cleanup_expired_artifacts(
@@ -301,22 +385,21 @@ def _compact_display_text(
 ) -> str:
     existing = _existing_artifact(text, workspace_dir)
     if existing is not None:
-        artifact_path, content = existing
-        if len(content) <= max_bytes:
+        artifact_path, file_stat = existing
+        if file_stat.st_size <= max_bytes:
             return text
         reference = _artifact_reference(artifact_path, workspace_dir)
         if reference is None:
             return text
         try:
-            notice = _truncation_notice(
-                original_bytes=len(content),
-                retained_bytes=max_bytes,
-                artifact_reference=reference,
-                max_bytes=max_bytes,
-            ).encode("utf-8", errors="replace")
-        except ValueError:
+            return _historical_artifact_display(
+                artifact_path,
+                file_stat,
+                max_bytes,
+                reference,
+            )
+        except (OSError, ValueError):
             return text
-        return _compacted_display(content, notice=notice, max_bytes=max_bytes)
 
     if _CANONICAL_NOTICE_RE.search(text):
         return text
@@ -331,7 +414,7 @@ def _compact_display_text(
 def _existing_artifact(
     text: str,
     workspace_dir: Path,
-) -> tuple[Path, bytes] | None:
+) -> tuple[Path, os.stat_result] | None:
     match = _CANONICAL_NOTICE_RE.search(text)
     if match is None:
         return None
@@ -346,11 +429,90 @@ def _existing_artifact(
             or reference != f"tool_result/{artifact_path.name}"
         ):
             return None
-        if not artifact_path.is_file():
+        file_stat = artifact_path.stat()
+        if not stat.S_ISREG(file_stat.st_mode):
             return None
-        return artifact_path, artifact_path.read_bytes()
+        return artifact_path, file_stat
     except (OSError, ValueError):
         return None
+
+
+def _artifact_signature(file_stat: os.stat_result) -> tuple[int, ...]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _historical_artifact_display(
+    path: Path,
+    file_stat: os.stat_result,
+    max_bytes: int,
+    reference: str,
+) -> str:
+    signature = _artifact_signature(file_stat)
+    key = (path, signature, max_bytes, reference)
+    with _DISPLAY_CACHE_LOCK:
+        cached = _DISPLAY_CACHE.get(key)
+        if cached is not None:
+            _DISPLAY_CACHE.move_to_end(key)
+            return cached[0]
+    notice = _truncation_notice(
+        original_bytes=file_stat.st_size,
+        retained_bytes=max_bytes,
+        artifact_reference=reference,
+        max_bytes=max_bytes,
+    ).encode("utf-8", errors="replace")
+    excerpt = _read_artifact_excerpt(path, signature, max_bytes - len(notice))
+    display = (_sanitize_excerpt(excerpt) + notice).decode(
+        "utf-8",
+        errors="replace",
+    )
+    _cache_artifact_display(key, display)
+    return display
+
+
+def _cache_artifact_display(key: tuple, display: str) -> None:
+    global _DISPLAY_CACHE_BYTES_USED
+    size = sys.getsizeof(display)
+    if size > _DISPLAY_CACHE_MAX_BYTES:
+        return
+    with _DISPLAY_CACHE_LOCK:
+        previous = _DISPLAY_CACHE.pop(key, None)
+        if previous is not None:
+            _DISPLAY_CACHE_BYTES_USED -= previous[1]
+        _DISPLAY_CACHE[key] = (display, size)
+        _DISPLAY_CACHE_BYTES_USED += size
+        while (
+            len(_DISPLAY_CACHE) > _DISPLAY_CACHE_MAX_ENTRIES
+            or _DISPLAY_CACHE_BYTES_USED > _DISPLAY_CACHE_MAX_BYTES
+        ):
+            _, (_, removed_size) = _DISPLAY_CACHE.popitem(last=False)
+            _DISPLAY_CACHE_BYTES_USED -= removed_size
+
+
+def _read_artifact_excerpt(
+    path: Path,
+    signature: tuple[int, ...],
+    max_bytes: int,
+) -> bytes:
+    # Unbuffered reads avoid prefetching bytes outside the display budget.
+    with path.open("rb", buffering=0) as artifact_file:
+        if _artifact_signature(os.fstat(artifact_file.fileno())) != signature:
+            raise OSError("Tool artifact changed before reading")
+        head = _utf8_prefix(artifact_file.read(max_bytes // 2), max_bytes // 2)
+        last_newline = head.rfind(b"\n")
+        if last_newline >= 0:
+            head = head[: last_newline + 1]
+        tail_limit = max_bytes - len(head)
+        artifact_file.seek(-tail_limit, os.SEEK_END)
+        tail = _utf8_suffix(artifact_file.read(tail_limit), tail_limit)
+        if _artifact_signature(os.fstat(artifact_file.fileno())) != signature:
+            raise OSError("Tool artifact changed while reading")
+    return head + b" " * (max_bytes - len(head) - len(tail)) + tail
 
 
 def _line_aware_excerpt(content: bytes, max_bytes: int) -> bytes:

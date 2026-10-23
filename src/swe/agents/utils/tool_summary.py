@@ -13,7 +13,10 @@ from pathlib import PurePath
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from ...agents.model_factory import create_model_and_formatter
+from ...agents.model_factory import (
+    create_model_and_formatter,
+    prepare_model_config_async,
+)
 from ...tracing import capture_current_trace_context
 from ...config.context import get_current_effective_tenant_id
 from ...app.agent_context import get_current_agent_id
@@ -46,6 +49,7 @@ _summary_models_by_trace: "OrderedDict[tuple[str, tuple[str, str]], Any]" = (
     OrderedDict()
 )
 _summary_model_lock = asyncio.Lock()
+_summary_model_generation = 0
 
 
 def _runtime_scope_key() -> tuple[str, str]:
@@ -65,6 +69,8 @@ def _summary_trace_cache_key(
 
 def reset_summary_caches(scope_id: str | None = None) -> None:
     """清理摘要生成相关缓存。"""
+    global _summary_model_generation
+    _summary_model_generation += 1
     if scope_id is None:
         keys = list(_summary_models_by_trace)
     else:
@@ -449,12 +455,17 @@ async def _get_summary_model():
         _summary_models_by_trace.move_to_end(cache_key)
         return model
 
+    generation = _summary_model_generation
+    prepared = await prepare_model_config_async()
     async with _summary_model_lock:
         model = _summary_models_by_trace.get(cache_key)
         if model is None:
             model, _ = create_model_and_formatter(
                 trace_context=trace_context,
+                prepared_model_config=prepared,
             )
+            if generation != _summary_model_generation:
+                return model
             _summary_models_by_trace[cache_key] = model
             while len(_summary_models_by_trace) > _SUMMARY_MODEL_CACHE_LIMIT:
                 _, evicted_model = _summary_models_by_trace.popitem(

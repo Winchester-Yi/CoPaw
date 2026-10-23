@@ -781,6 +781,12 @@ class HookRuntimeRunningConfig(BaseModel):
         gt=0,
         description="Stop 输出变换流水线的总时限（秒）",
     )
+    max_stop_append_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Stop 追加消息阶段的总时限（秒）",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1637,7 +1643,7 @@ class ProcessLimitsConfig(BaseModel):
     enabled: bool = True
     shell: bool = True
     mcp_stdio: bool = False
-    cpu_time_limit_seconds: int | None = Field(default=30, ge=1)
+    cpu_time_limit_seconds: int | None = Field(default=90, ge=1)
     memory_max_mb: int | None = Field(default=34000, ge=1)
     shell_max_concurrent: int | None = Field(default=5, ge=1)
     shell_acquire_timeout_seconds: float = Field(default=5, gt=0)

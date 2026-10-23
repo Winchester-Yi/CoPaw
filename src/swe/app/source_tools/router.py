@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -297,8 +298,18 @@ async def manual_test_draft(
         ) from exc
 
     from swe.agents.react_agent import SWEAgent
+    from swe.agents.model_factory import prepare_model_config_async
+    from swe.agents.prompt import (
+        PromptConfig,
+        bind_prepared_system_prompt,
+        prepare_system_prompt_async,
+    )
+    from swe.agents.skill_runtime_snapshot import (
+        get_workspace_skill_snapshot_async,
+    )
     from swe.app.agent_context import get_agent_and_config_for_request
     from swe.config.config import BuiltinToolConfig
+    from swe.constant import WORKING_DIR
 
     workspace, agent_config = await get_agent_and_config_for_request(request)
     test_config = agent_config.model_copy(deep=True)
@@ -331,20 +342,42 @@ async def manual_test_draft(
         created_by=draft.created_by,
     )
     tool_call_id = "source-draft-test-" + uuid.uuid4().hex
-    agent = SWEAgent(
-        agent_config=test_config,
-        request_context={
-            "session_id": "source-draft-test-" + uuid.uuid4().hex,
-            "user_id": actor,
-            "channel": "console",
-            "agent_id": workspace.agent_id,
-            "tenant_id": workspace.tenant_id or "",
-            "source_id": source_id,
-        },
-        workspace_dir=workspace.workspace_dir,
-        task_tracker=getattr(workspace, "_task_tracker", None),
-        source_tool_versions=(draft_version,),
+    prepared_model = await prepare_model_config_async(
+        agent_id=workspace.agent_id,
+        tenant_id=workspace.tenant_id,
     )
+    workspace_dir = Path(workspace.workspace_dir or WORKING_DIR)
+    skill_snapshot = await get_workspace_skill_snapshot_async(workspace_dir)
+    prompt_files = test_config.system_prompt_files
+    prepared_prompt = await prepare_system_prompt_async(
+        workspace_dir,
+        list(
+            (
+                PromptConfig.DEFAULT_FILES
+                if prompt_files is None
+                else prompt_files
+            ),
+        ),
+        workspace.agent_id,
+        bool(getattr(test_config.heartbeat, "enabled", False)),
+    )
+    with bind_prepared_system_prompt(prepared_prompt):
+        agent = SWEAgent(
+            agent_config=test_config,
+            prepared_model_config=prepared_model,
+            workspace_skill_snapshot=skill_snapshot,
+            request_context={
+                "session_id": "source-draft-test-" + uuid.uuid4().hex,
+                "user_id": actor,
+                "channel": "console",
+                "agent_id": workspace.agent_id,
+                "tenant_id": workspace.tenant_id or "",
+                "source_id": source_id,
+            },
+            workspace_dir=workspace.workspace_dir,
+            task_tracker=getattr(workspace, "_task_tracker", None),
+            source_tool_versions=(draft_version,),
+        )
     try:
         await agent._acting_impl(
             {

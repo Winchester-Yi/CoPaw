@@ -14,9 +14,15 @@ import pytest
 from swe.app.runner import session as session_module
 from swe.app.runner.session import SafeJSONSession, SessionExecution
 from swe.app.runner.session_lock import SessionLockTimeout
+from swe.app.runner.turn_ledger import (
+    atomic_json as write_atomic_json,
+    sync_directory,
+)
 
 
 def _write_json_text(path: str, content: str) -> None:
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
     Path(path).write_text(content, encoding="utf-8")
 
 
@@ -152,7 +158,7 @@ async def test_interrupted_commit_waits_for_write_before_releasing_execution_loc
     release_write = threading.Event()
     holder_finished = asyncio.Event()
     second_entered = asyncio.Event()
-    original_write = session_module._write_json_text
+    original_write = session_module.atomic_json
 
     def blocking_write(path: str, content: str) -> None:
         write_started.set()
@@ -162,7 +168,7 @@ async def test_interrupted_commit_waits_for_write_before_releasing_execution_loc
             )
         original_write(path, content)
 
-    monkeypatch.setattr(session_module, "_write_json_text", blocking_write)
+    monkeypatch.setattr(session_module, "atomic_json", blocking_write)
 
     async def hold_interrupted_commit() -> None:
         async with session.execution("shared") as transaction:
@@ -215,7 +221,7 @@ async def test_cancelled_commit_updates_revision_before_next_commit(
     session = SafeJSONSession(save_dir=str(tmp_path))
     write_started = threading.Event()
     release_write = threading.Event()
-    original_write = session_module._write_json_text
+    original_write = session_module.atomic_json
 
     def blocking_first_write(path: str, content: str) -> None:
         if not write_started.is_set():
@@ -228,7 +234,7 @@ async def test_cancelled_commit_updates_revision_before_next_commit(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         blocking_first_write,
     )
 
@@ -410,7 +416,7 @@ def test_parent_directory_sync_propagates_open_errors(
     monkeypatch.setattr(session_module.os, "open", deny_open)
 
     with pytest.raises(PermissionError, match="permission denied"):
-        session_module._sync_parent_directory(str(tmp_path / "session.json"))
+        sync_directory(tmp_path)
 
 
 def test_parent_directory_sync_propagates_supported_fsync_errors(
@@ -427,7 +433,7 @@ def test_parent_directory_sync_propagates_supported_fsync_errors(
     monkeypatch.setattr(session_module.os, "fsync", fail_fsync)
 
     with pytest.raises(OSError, match="I/O error"):
-        session_module._sync_parent_directory(str(tmp_path / "session.json"))
+        sync_directory(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -549,7 +555,7 @@ async def test_session_save_serializes_inside_runtime_state_worker(
     operations: list[str] = []
     state = {"in_worker": False}
     original_loads = json.loads
-    original_dumps = json.dumps
+    original_iterencode = json.JSONEncoder.iterencode
 
     async def fake_worker(func, /, *args, **kwargs):
         calls.append(func.__name__)
@@ -565,15 +571,15 @@ async def test_session_save_serializes_inside_runtime_state_worker(
         operations.append("parse")
         return original_loads(*args, **kwargs)
 
-    def guarded_dumps(*args, **kwargs):
-        assert state["in_worker"], "json.dumps ran outside worker"
+    def guarded_iterencode(*args, **kwargs):
+        assert state["in_worker"], "JSONEncoder.iterencode ran outside worker"
         operations.append("encode")
-        return original_dumps(*args, **kwargs)
+        return original_iterencode(*args, **kwargs)
 
     def guarded_write(path: str, content: str) -> None:
         assert state["in_worker"], "_write_json_text ran outside worker"
         operations.append("write")
-        _write_json_text(path, content)
+        write_atomic_json(Path(path), content)
 
     monkeypatch.setattr(
         session_module,
@@ -582,8 +588,8 @@ async def test_session_save_serializes_inside_runtime_state_worker(
         raising=False,
     )
     monkeypatch.setattr(session_module.json, "loads", guarded_loads)
-    monkeypatch.setattr(session_module.json, "dumps", guarded_dumps)
-    monkeypatch.setattr(session_module, "_write_json_text", guarded_write)
+    monkeypatch.setattr(json.JSONEncoder, "iterencode", guarded_iterencode)
+    monkeypatch.setattr(session_module, "atomic_json", guarded_write)
 
     session = SafeJSONSession(save_dir=str(tmp_path))
 
@@ -591,11 +597,12 @@ async def test_session_save_serializes_inside_runtime_state_worker(
     await session.save_session_state("session-2", agent=StateModule())
 
     assert calls == [
+        "_read_existing_state_for_save_sync",
         "_write_json_state_sync",
         "_read_existing_state_for_save_sync",
         "_write_json_state_sync",
     ]
-    assert operations == ["encode", "write", "parse", "encode", "write"]
+    assert operations == ["write", "encode", "parse", "write", "encode"]
     assert original_loads((tmp_path / "session-1.json").read_text()) == {
         "message": "你好",
     }
@@ -617,7 +624,7 @@ async def test_mutate_session_state_uses_runtime_state_worker_for_json_io(
     state = {"in_worker": False}
     original_open = builtins.open
     original_loads = json.loads
-    original_dumps = json.dumps
+    original_iterencode = json.JSONEncoder.iterencode
 
     async def fake_worker(func, /, *args, **kwargs):
         calls.append(func.__name__)
@@ -640,15 +647,15 @@ async def test_mutate_session_state_uses_runtime_state_worker_for_json_io(
         operations.append("parse")
         return original_loads(*args, **kwargs)
 
-    def guarded_dumps(*args, **kwargs):
-        assert state["in_worker"], "json.dumps ran outside worker"
+    def guarded_iterencode(*args, **kwargs):
+        assert state["in_worker"], "JSONEncoder.iterencode ran outside worker"
         operations.append("encode")
-        return original_dumps(*args, **kwargs)
+        return original_iterencode(*args, **kwargs)
 
     def guarded_write(write_path: str, content: str) -> None:
         assert state["in_worker"], "_write_json_text ran outside worker"
         operations.append("write")
-        _write_json_text(write_path, content)
+        write_atomic_json(Path(write_path), content)
 
     def mutate(states: dict[str, object]) -> None:
         assert not state["in_worker"], "mutator should stay on event loop"
@@ -662,8 +669,8 @@ async def test_mutate_session_state_uses_runtime_state_worker_for_json_io(
     )
     monkeypatch.setattr(builtins, "open", guarded_open)
     monkeypatch.setattr(session_module.json, "loads", guarded_loads)
-    monkeypatch.setattr(session_module.json, "dumps", guarded_dumps)
-    monkeypatch.setattr(session_module, "_write_json_text", guarded_write)
+    monkeypatch.setattr(json.JSONEncoder, "iterencode", guarded_iterencode)
+    monkeypatch.setattr(session_module, "atomic_json", guarded_write)
 
     session = SafeJSONSession(save_dir=str(tmp_path))
 
@@ -672,7 +679,7 @@ async def test_mutate_session_state_uses_runtime_state_worker_for_json_io(
         "mutated": True,
     }
     assert calls == ["_read_json_state_sync", "_write_json_state_sync"]
-    assert operations == ["read", "parse", "encode", "write"]
+    assert operations == ["read", "parse", "write", "encode"]
 
 
 @pytest.mark.asyncio
@@ -693,7 +700,7 @@ async def test_session_write_runs_off_event_loop_thread(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         slow_write,
         raising=False,
     )
@@ -738,7 +745,7 @@ async def test_same_path_writes_serialize_across_session_objects(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         controlled_write,
         raising=False,
     )
@@ -788,7 +795,7 @@ async def test_different_path_writes_can_overlap(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         controlled_write,
         raising=False,
     )
@@ -833,7 +840,7 @@ async def test_concurrent_key_updates_preserve_both_values(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         controlled_write,
         raising=False,
     )
@@ -982,7 +989,7 @@ async def test_state_module_save_preserves_concurrent_key_update(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         controlled_write,
     )
     session = SafeJSONSession(save_dir=str(tmp_path))
@@ -1028,7 +1035,7 @@ async def test_skill_snapshot_save_preserves_concurrent_state_update(
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         controlled_write,
         raising=False,
     )
@@ -1071,12 +1078,12 @@ async def test_get_session_state_dict_avoids_truncated_json_during_write(
             file.flush()
             write_truncated.set()
             assert allow_write.wait(timeout=2)
-            file.write(content)
+            file.write(json.dumps(content, ensure_ascii=False))
             file.flush()
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         truncating_write,
         raising=False,
     )
@@ -1152,12 +1159,12 @@ async def test_load_session_state_avoids_truncated_json_during_write(
             file.flush()
             write_truncated.set()
             assert allow_write.wait(timeout=2)
-            file.write(content)
+            file.write(json.dumps(content, ensure_ascii=False))
             file.flush()
 
     monkeypatch.setattr(
         session_module,
-        "_write_json_text",
+        "atomic_json",
         truncating_write,
         raising=False,
     )

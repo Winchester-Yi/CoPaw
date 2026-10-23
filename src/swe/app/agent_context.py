@@ -6,9 +6,12 @@ with tenant-first resolution order.
 """
 
 from contextvars import ContextVar
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+import asyncio
+import threading
+from typing import AsyncIterator, Optional, TYPE_CHECKING
 from fastapi import HTTPException, Request
 
 from ..config.utils import (
@@ -28,6 +31,7 @@ from ..config.context import (
     resolve_storage_tenant_id,
 )
 from ..constant import WORKING_DIR
+from ..runtime_workers import run_runtime_state_work
 from .middleware.tenant_workspace import TenantWorkspaceContext
 
 if TYPE_CHECKING:
@@ -39,6 +43,11 @@ _current_agent_id: ContextVar[Optional[str]] = ContextVar(
     "current_agent_id",
     default=None,
 )
+_AGENT_CONFIG_UPDATE_LOCKS: dict[
+    tuple[asyncio.AbstractEventLoop, str, str],
+    asyncio.Lock,
+] = {}
+_AGENT_CONFIG_UPDATE_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -375,13 +384,59 @@ async def get_agent_and_config_for_request(
 ) -> tuple["Workspace", "AgentProfileConfig"]:
     """Resolve the request workspace and authoritative tenant-scoped config."""
     from ..config.config import load_agent_config
+    from ..runtime_workers import run_runtime_state_work
 
     workspace = await get_agent_for_request(request, agent_id=agent_id)
-    agent_config = load_agent_config(
+    agent_config = await run_runtime_state_work(
+        load_agent_config,
         workspace.agent_id,
         tenant_id=getattr(workspace, "tenant_id", None),
     )
     return workspace, agent_config
+
+
+def _agent_config_update_lock(
+    tenant_id: Optional[str],
+    agent_id: str,
+) -> asyncio.Lock:
+    """Return the current loop's lock for one tenant Agent config."""
+    key = (asyncio.get_running_loop(), tenant_id or "", agent_id)
+    with _AGENT_CONFIG_UPDATE_LOCKS_GUARD:
+        lock = _AGENT_CONFIG_UPDATE_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _AGENT_CONFIG_UPDATE_LOCKS[key] = lock
+        return lock
+
+
+@asynccontextmanager
+async def agent_config_write_scope(
+    tenant_id: Optional[str],
+    agent_id: str,
+) -> AsyncIterator[None]:
+    """Serialize one tenant Agent configuration mutation."""
+    lock = _agent_config_update_lock(tenant_id, agent_id)
+    async with lock:
+        yield
+
+
+@asynccontextmanager
+async def agent_config_update_scope(
+    request: Request,
+    agent_id: Optional[str] = None,
+) -> AsyncIterator[tuple["Workspace", "AgentProfileConfig"]]:
+    """Serialize one Agent configuration read-modify-save transaction."""
+    from ..config.config import load_agent_config
+
+    workspace = await get_agent_for_request(request, agent_id=agent_id)
+    tenant_id = getattr(workspace, "tenant_id", None)
+    async with agent_config_write_scope(tenant_id, workspace.agent_id):
+        agent_config = await run_runtime_state_work(
+            load_agent_config,
+            workspace.agent_id,
+            tenant_id=tenant_id,
+        )
+        yield workspace, agent_config
 
 
 def get_active_agent_id(tenant_id: Optional[str] = None) -> str:

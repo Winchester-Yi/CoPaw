@@ -174,7 +174,16 @@ def normalize_hook_output(
     raw_output: dict[str, Any],
     event_name: HookEventName | str | None = None,
     output_transform: bool = False,
+    output_append: bool = False,
 ) -> HookHandlerResult:
+    if output_append:
+        return normalize_stop_append_output(
+            handler_id=handler_id,
+            order=order,
+            raw_output=raw_output,
+            event_name=event_name,
+            output_transform=output_transform,
+        )
     output = HookOutput.model_validate(raw_output)
     is_stop = _event_name_value(event_name) == HookEventName.STOP.value
     replacement_text = _validate_hook_output_contract(
@@ -207,7 +216,16 @@ def normalize_prompt_judgment_output(
     text: str,
     event_name: HookEventName | str | None = None,
     output_transform: bool = False,
+    output_append: bool = False,
 ) -> HookHandlerResult:
+    if output_append:
+        return normalize_stop_append_output(
+            handler_id=handler_id,
+            order=order,
+            raw_output=json.loads(text),
+            event_name=event_name,
+            output_transform=output_transform,
+        )
     raw = _parse_prompt_judgment_json(text)
     if not isinstance(raw, dict):
         raise ValueError("Prompt hook output must be a JSON object")
@@ -252,4 +270,53 @@ def normalize_prompt_judgment_output(
         decision=allowed_decisions[decision_value],
         reason=reason,
         replacement_text=replacement_text,
+    )
+
+
+def normalize_stop_append_output(
+    *,
+    handler_id: str,
+    order: int,
+    raw_output: Any,
+    event_name: HookEventName | str | None,
+    output_transform: bool = False,
+) -> HookHandlerResult:
+    """严格验证追加协议，保留追加文本的原始空白。"""
+    if (
+        _event_name_value(event_name) != HookEventName.STOP.value
+        or output_transform
+    ):
+        raise ValueError(
+            "outputAppend requires Stop and excludes outputTransform",
+        )
+    if not isinstance(raw_output, dict):
+        raise ValueError("Append output must be a JSON object")
+    if not {"decision", "reason"}.issubset(raw_output) or set(raw_output) - {
+        "decision",
+        "reason",
+        "hookSpecificOutput",
+    }:
+        raise ValueError("Append output has unsupported keys")
+    reason = raw_output.get("reason")
+    if raw_output.get("decision") != "allow":
+        raise ValueError("Append output decision must be allow")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+        raise ValueError("Append output reason is invalid")
+    specific = raw_output.get("hookSpecificOutput", {})
+    if not isinstance(specific, dict) or set(specific) - {"appendText"}:
+        raise ValueError("Append hookSpecificOutput is invalid")
+    text = specific.get("appendText")
+    if "appendText" in specific and (
+        not isinstance(text, str)
+        or not text.strip()
+        or len(text.encode("utf-8")) > 16384
+    ):
+        raise ValueError("Append text is invalid")
+    return HookHandlerResult(
+        handler_id=handler_id,
+        order=order,
+        output=HookOutput.model_validate(raw_output),
+        decision=HookDecision.ALLOW,
+        reason=reason,
+        append_text=text,
     )

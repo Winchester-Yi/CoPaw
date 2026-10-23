@@ -22,6 +22,9 @@ from typing import Any
 import anyio
 import psutil
 
+from swe.performance_metrics import METRICS
+from swe.app.runner.sse_replay import _BUDGET as STREAM_REPLAY_BUDGET
+
 from swe.app.pod_resources import (
     collect_pod_disk_io_bytes,
     collect_pod_open_fd_count,
@@ -241,6 +244,7 @@ class RuntimeDiagnosticManager:
         self._event_loop_lag_samples: list[float] = []
         self._event_loop_blocked_count = 0
         self._process_cpu_samples: list[float] = []
+        self._process_rss_sampled_peak_bytes: int | None = None
         self._previous_pod_disk_io_bytes: tuple[int, int] | None = None
         self._previous_pod_disk_io_at: float | None = None
         self._pod_disk_io_collection_failed = False
@@ -288,6 +292,7 @@ class RuntimeDiagnosticManager:
         cpu_percent: float | None,
         pod_disk_io_bytes: tuple[int, int] | None = None,
         sampled_at: float | None = None,
+        rss_bytes: int | None = None,
     ) -> None:
         """Record one event-loop and process CPU sample."""
         self._event_loop_lag_samples.append(max(0.0, lag_ms))
@@ -295,6 +300,11 @@ class RuntimeDiagnosticManager:
             self._event_loop_blocked_count += 1
         if cpu_percent is not None:
             self._process_cpu_samples.append(cpu_percent)
+        if rss_bytes is not None:
+            self._process_rss_sampled_peak_bytes = max(
+                self._process_rss_sampled_peak_bytes or 0,
+                rss_bytes,
+            )
         self._record_pod_disk_io_sample(
             pod_disk_io_bytes=pod_disk_io_bytes,
             sampled_at=sampled_at,
@@ -348,6 +358,7 @@ class RuntimeDiagnosticManager:
         self._event_loop_lag_samples.clear()
         self._event_loop_blocked_count = 0
         self._process_cpu_samples.clear()
+        self._process_rss_sampled_peak_bytes = None
         self._pod_disk_io_valid = True
         self._pod_disk_read_bytes_per_second = None
         self._pod_disk_read_bytes_per_second_peak = None
@@ -366,6 +377,7 @@ class RuntimeDiagnosticManager:
         sampled_at = self._monotonic_time()
         lag_ms = max(0.0, (sampled_at - planned_wakeup) * 1000)
         cpu_percent = None
+        rss_bytes = None
         pod_disk_io_bytes = None
         try:
             cpu_percent = float(self._process.cpu_percent())
@@ -381,11 +393,16 @@ class RuntimeDiagnosticManager:
                 logger.exception(
                     "Failed to collect runtime diagnostic Pod disk I/O",
                 )
+        try:
+            rss_bytes = int(self._process.memory_info().rss)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("Failed to sample runtime diagnostic RSS")
         self.record_sample(
             lag_ms=lag_ms,
             cpu_percent=cpu_percent,
             pod_disk_io_bytes=pod_disk_io_bytes,
             sampled_at=sampled_at,
+            rss_bytes=rss_bytes,
         )
 
     async def run_sampler_loop(self) -> None:
@@ -1200,6 +1217,8 @@ class RuntimeDiagnosticManager:
         lag_samples = self._event_loop_lag_samples
         cpu_samples = self._process_cpu_samples
         payload = self._base_payload("diagnostic_flow")
+        performance_metrics = METRICS.snapshot()
+        performance_metrics["sse_replay"] = STREAM_REPLAY_BUDGET.snapshot()
         payload.update(
             {
                 "sse_active_connections": self._sse_active_connections,
@@ -1210,6 +1229,10 @@ class RuntimeDiagnosticManager:
                     else None
                 ),
                 "event_loop_lag_p95_ms": _percentile(lag_samples, 0.95),
+                "event_loop_lag_p99_ms": _percentile(lag_samples, 0.99),
+                "event_loop_lag_sample_count": len(lag_samples),
+                "process_rss_sampled_peak_bytes": self._process_rss_sampled_peak_bytes,
+                "performance_metrics": performance_metrics,
                 "event_loop_lag_max_ms": (
                     max(lag_samples) if lag_samples else None
                 ),

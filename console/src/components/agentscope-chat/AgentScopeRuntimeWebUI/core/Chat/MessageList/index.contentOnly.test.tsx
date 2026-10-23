@@ -27,7 +27,20 @@ const mocks = vi.hoisted(() => ({
   currentSessionId: "chat-1",
   anchorTop: 100,
   animationFrame: undefined as FrameRequestCallback | undefined,
+  frames: new Map<number, FrameRequestCallback>(),
+  nextFrameId: 0,
 }));
+
+async function flushHistoryFrame() {
+  const callbacks = [...mocks.frames.values()];
+  mocks.frames.clear();
+  await act(async () => callbacks.forEach((callback) => callback(0)));
+}
+
+async function flushHistoryLayout() {
+  await flushHistoryFrame();
+  await flushHistoryFrame();
+}
 
 const apiMocks = vi.hoisted(() => ({
   getChatHistory: vi.fn(),
@@ -210,6 +223,83 @@ vi.mock("antd", () => ({
 }));
 
 describe("MessageList content-only composition", () => {
+  it("binds the replacement scroll node after loading with the same message count", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [],
+      boundaries: [],
+      has_more: false,
+    });
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const oldNode = screen.getByTestId("bubble-list");
+    mocks.isSessionLoading = true;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    mocks.isSessionLoading = false;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    const newNode = screen.getByTestId("bubble-list");
+    expect(newNode).not.toBe(oldNode);
+    oldNode.scrollTop = -600;
+    fireEvent.scroll(oldNode);
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    newNode.scrollTop = -600;
+    fireEvent.scroll(newNode);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("bounds pages with no visible additions and permits explicit continuation", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    let page = 0;
+    apiMocks.getChatHistory.mockImplementation(async () => ({
+      messages: [],
+      boundaries: [],
+      has_more: true,
+      next_cursor: `cursor-${++page}`,
+    }));
+    render(<MessageList onSubmit={vi.fn()} />);
+    const node = screen.getByTestId("bubble-list");
+    node.scrollTop = -600;
+    fireEvent.scroll(node);
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+    );
+    await flushHistoryLayout();
+    await flushHistoryLayout();
+    await flushHistoryLayout();
+    await flushHistoryLayout();
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(3);
+    fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(4),
+    );
+  });
+
+  it("rejects an archive cursor that cannot advance and retries the same page", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [{ id: "older" }],
+      boundaries: [],
+      has_more: true,
+      next_cursor: null,
+    });
+    render(<MessageList onSubmit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("历史消息加载失败"),
+    );
+    expect(mocks.messages).toEqual([{ id: "online-message", history: true }]);
+    fireEvent.click(screen.getByRole("button", { name: "重试加载历史消息" }));
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2),
+    );
+    expect(apiMocks.getChatHistory).toHaveBeenLastCalledWith(
+      "chat-real-1",
+      null,
+      20,
+    );
+  });
+
   beforeEach(() => {
     mocks.messages = [];
     mocks.setMessages.mockReset();
@@ -227,10 +317,16 @@ describe("MessageList content-only composition", () => {
     mocks.currentSessionId = "chat-1";
     mocks.anchorTop = 100;
     mocks.animationFrame = undefined;
+    mocks.frames.clear();
+    mocks.nextFrameId = 0;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       mocks.animationFrame = callback;
-      return 1;
+      mocks.frames.set(++mocks.nextFrameId, callback);
+      return mocks.nextFrameId;
     });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) =>
+      mocks.frames.delete(id),
+    );
   });
 
   afterEach(() => {
@@ -378,16 +474,13 @@ describe("MessageList content-only composition", () => {
     fireEvent.scroll(bubbleList);
     await waitFor(() => expect(bubbleList).toHaveTextContent("20"));
     expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(screen.getByRole("status")).toHaveAttribute("data-state", "idle");
 
-    // Remaining inside the preload zone is latched and must not reveal twice.
+    // Layout recovery holds the lock; afterwards remaining near the top advances.
     fireEvent.scroll(bubbleList);
     expect(bubbleList).toHaveTextContent("20");
 
-    bubbleList.scrollTop = -300;
-    fireEvent.scroll(bubbleList);
-    bubbleList.scrollTop = -380;
-    fireEvent.scroll(bubbleList);
+    await flushHistoryLayout();
     await waitFor(() => expect(bubbleList).toHaveTextContent("25"));
     expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
   });
@@ -414,9 +507,7 @@ describe("MessageList content-only composition", () => {
 
     expect(mocks.animationFrame).toBeTypeOf("function");
     mocks.anchorTop = 140;
-    act(() => {
-      mocks.animationFrame?.(0);
-    });
+    await flushHistoryFrame();
     expect(bubbleList.scrollTop).toBe(-340);
   });
 
@@ -446,10 +537,7 @@ describe("MessageList content-only composition", () => {
     await waitFor(() => expect(bubbleList).toHaveTextContent("11"));
     expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
 
-    bubbleList.scrollTop = -300;
-    fireEvent.scroll(bubbleList);
-    bubbleList.scrollTop = -380;
-    fireEvent.scroll(bubbleList);
+    await flushHistoryLayout();
     await waitFor(() => {
       expect(apiMocks.getChatHistory).toHaveBeenCalledWith(
         "chat-real-1",
@@ -499,10 +587,7 @@ describe("MessageList content-only composition", () => {
       );
     });
 
-    bubbleList.scrollTop = -300;
-    fireEvent.scroll(bubbleList);
-    bubbleList.scrollTop = -380;
-    fireEvent.scroll(bubbleList);
+    await flushHistoryLayout();
     await waitFor(() => {
       expect(apiMocks.getChatHistory).toHaveBeenNthCalledWith(
         2,
@@ -628,9 +713,7 @@ describe("MessageList content-only composition", () => {
 
     expect(mocks.animationFrame).toBeTypeOf("function");
     mocks.anchorTop = 140;
-    act(() => {
-      mocks.animationFrame?.(0);
-    });
+    await flushHistoryFrame();
     expect(bubbleList.scrollTop).toBe(-340);
   });
 
@@ -723,6 +806,129 @@ describe("MessageList content-only composition", () => {
     );
 
     expect(apiMocks.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it("preserves the reading anchor when a live message changes reverse-list geometry", () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const node = screen.getByTestId("bubble-list");
+    node.scrollTop = -380;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    mocks.messages = [...mocks.messages, { id: "live-message" }];
+    mocks.anchorTop = 60;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    expect(node.scrollTop).toBe(-420);
+    expect(apiMocks.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it("restores the anchor when Markdown finishes layout after the first frame", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const node = screen.getByTestId("bubble-list");
+    node.scrollTop = -380;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    mocks.messages = [...mocks.messages, { id: "live-message" }];
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryFrame();
+    mocks.anchorTop = 76;
+    await flushHistoryFrame();
+    expect(node.scrollTop).toBe(-404);
+  });
+
+  it("preserves the anchor for late content resize until the reader moves", async () => {
+    let notifyResize!: () => void;
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          notifyResize = callback;
+        }
+        observe = vi.fn();
+        disconnect = disconnect;
+      },
+    );
+    mocks.messages = [{ id: "online-message", history: true }];
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const node = screen.getByTestId("bubble-list");
+    node.scrollTop = -380;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    mocks.messages = [...mocks.messages, { id: "live-message" }];
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    await flushHistoryLayout();
+    mocks.anchorTop = 76;
+    act(() => notifyResize?.());
+    expect(node.scrollTop).toBe(-404);
+    node.scrollTop = -300;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    mocks.anchorTop = 50;
+    act(() => notifyResize());
+    expect(node.scrollTop).toBe(-300);
+    mocks.isSessionLoading = true;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    expect(disconnect).toHaveBeenCalled();
+    rendered.unmount();
+  });
+
+  it("ignores a delayed programmatic scroll after anchor recovery finishes", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const node = screen.getByTestId("bubble-list");
+    node.scrollTop = -380;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    mocks.messages = [...mocks.messages, { id: "live-message" }];
+    mocks.anchorTop = 60;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    mocks.anchorTop = 100;
+    await flushHistoryLayout();
+    fireEvent.scroll(node);
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+    node.scrollTop = -500;
+    fireEvent.scroll(node);
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore an old anchor after the reader moves between commit and the next frame", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    const rendered = render(<MessageList onSubmit={vi.fn()} />);
+    const node = screen.getByTestId("bubble-list");
+    node.scrollTop = -380;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    mocks.messages = [...mocks.messages, { id: "live-message" }];
+    mocks.anchorTop = 60;
+    rendered.rerender(<MessageList onSubmit={vi.fn()} />);
+    node.scrollTop = -300;
+    mocks.anchorTop = -60;
+    fireEvent.click(screen.getByRole("button", { name: "标记为浏览历史" }));
+    await flushHistoryFrame();
+    expect(node.scrollTop).toBe(-300);
+  });
+
+  it("holds the progression lock through retry layout recovery", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    apiMocks.getChatHistory
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue({
+        messages: [{ id: "older" }],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "next",
+      });
+    render(<MessageList onSubmit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    await flushHistoryLayout();
+    fireEvent.click(screen.getByRole("button", { name: "重试加载历史消息" }));
+    await waitFor(() =>
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "加载更早消息" }),
+      ).toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an existing compaction divider when its archive page is loaded", async () => {

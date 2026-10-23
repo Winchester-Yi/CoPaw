@@ -99,6 +99,53 @@ def _manager(**overrides) -> RuntimeDiagnosticManager:
     )
 
 
+def test_diagnostic_exposes_bounded_stream_stage_metrics(monkeypatch):
+    from swe.performance_metrics import PerformanceMetrics
+
+    metrics = PerformanceMetrics()
+    metrics.record_stream_timing("accepted_to_committed", 0.012)
+    monkeypatch.setattr(runtime_diagnostic, "METRICS", metrics)
+    manager = _manager()
+    stage = manager.build_diagnostic_payload()["performance_metrics"][
+        "stream_stages"
+    ]["accepted_to_committed"]
+    assert stage["observed_count"] == 1
+    assert stage["sample_count"] == 1
+    assert stage["duration_p99_ms"] == 12
+    manager.rotate_window()
+    assert (
+        manager.build_diagnostic_payload()["performance_metrics"][
+            "stream_stages"
+        ]["accepted_to_committed"]
+        == stage
+    )
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_records_p99_rss_peak_and_worker_metrics():
+    manager = _manager(monotonic_time=lambda: 1.0)
+    for value in range(1, 101):
+        manager.record_sample(lag_ms=float(value), cpu_percent=None)
+    await manager.sample_once(planned_wakeup=1.0)
+    payload = manager.build_diagnostic_payload()
+    assert payload["event_loop_lag_p95_ms"] == 95.0
+    assert payload["event_loop_lag_p99_ms"] == 99.0
+    assert payload["event_loop_lag_sample_count"] == 101
+    assert payload["process_rss_sampled_peak_bytes"] == 100
+    assert set(payload["performance_metrics"]["workers"]) == {
+        "output",
+        "runtime_state",
+        "backup",
+        "provider",
+        "stream",
+    }
+    manager.rotate_window()
+    assert (
+        manager.build_diagnostic_payload()["process_rss_sampled_peak_bytes"]
+        is None
+    )
+
+
 def test_lifecycle_events_use_flat_versioned_contract() -> None:
     messages: list[str] = []
     manager = _manager(messages=messages)
@@ -130,6 +177,13 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
 
     payload = manager.build_diagnostic_payload()
 
+    assert set(payload.pop("performance_metrics")["workers"]) == {
+        "output",
+        "runtime_state",
+        "backup",
+        "provider",
+        "stream",
+    }
     assert payload == {
         "schema": "runtime_diagnostic.v1",
         "event_type": "diagnostic_flow",
@@ -139,6 +193,9 @@ def test_diagnostic_payload_contains_confirmed_metrics() -> None:
         "sse_peak_connections": 2,
         "event_loop_lag_avg_ms": 605.0,
         "event_loop_lag_p95_ms": 1200.0,
+        "event_loop_lag_p99_ms": 1200.0,
+        "event_loop_lag_sample_count": 2,
+        "process_rss_sampled_peak_bytes": None,
         "event_loop_lag_max_ms": 1200.0,
         "event_loop_blocked_count": 1,
         "process_cpu_avg_percent": 30.0,

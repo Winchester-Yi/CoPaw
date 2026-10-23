@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
-from functools import wraps
+from contextvars import copy_context
+from dataclasses import dataclass
+from functools import partial, wraps
 import logging
 from pathlib import Path
 from threading import RLock
@@ -42,12 +44,27 @@ class WorkspaceSkillSnapshot:
     generation: int
     manifest_stat: ManifestStat
     skills: Mapping[str, SkillRuntimeSnapshot]
+    manifest_available: bool = True
+    unconfirmed_skills: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _CacheEntry:
+    snapshot: WorkspaceSkillSnapshot
+    expires_at: float
+
+
+SNAPSHOT_TTL_SECONDS = 600
+REFRESH_FAILURE_COOLDOWN_SECONDS = 30
+PARTIAL_REFRESH_RETRY_SECONDS = 180
 
 
 _LOCK = RLock()
-_CACHE: dict[Path, WorkspaceSkillSnapshot] = {}
+_CACHE: dict[Path, _CacheEntry] = {}
 _GENERATION = 0
 _COORDINATORS: dict[Path, RLock] = {}
+_INFLIGHT: dict[Path, Future[WorkspaceSkillSnapshot]] = {}
+_REFRESH_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="skill-freshness")
 
 
 @contextmanager
@@ -87,7 +104,7 @@ def coordinate_workspace_skill_mutation(func):
 def _stat(path: Path) -> ManifestStat:
     try:
         value = path.stat()
-    except OSError:
+    except FileNotFoundError:
         return ManifestStat(0, 0, 0)
     return ManifestStat(value.st_mtime_ns, value.st_size, value.st_ino)
 
@@ -107,10 +124,14 @@ def _fresh(snapshot: WorkspaceSkillSnapshot, manifest_path: Path) -> bool:
         return False
     from .skills_manager import get_skill_freshness_token
 
-    return all(
-        get_skill_freshness_token(skill.directory) == skill.freshness_token
-        for skill in snapshot.skills.values()
-    )
+    try:
+        return all(
+            get_skill_freshness_token(skill.directory) == skill.freshness_token
+            for skill in snapshot.skills.values()
+        )
+    except Exception:  # noqa: BLE001
+        # Rebuild so an unreadable skill does not discard confirmed peers.
+        return False
 
 
 def _read_workspace_skill_manifest(
@@ -136,12 +157,12 @@ def _read_workspace_skill_manifest(
 
 def _cached_workspace_skill_snapshot(
     workspace_dir: Path,
-    manifest_path: Path,
 ) -> WorkspaceSkillSnapshot | None:
     with _LOCK:
-        previous = _CACHE.get(workspace_dir)
-        if previous is None or not _fresh(previous, manifest_path):
+        entry = _CACHE.get(workspace_dir)
+        if entry is None or time.monotonic() >= entry.expires_at:
             return None
+        previous = entry.snapshot
         logger.debug(
             "skill_manifest_cache_hit=true skill_count=%d "
             "runtime_skill_snapshot_generation=%d",
@@ -151,62 +172,10 @@ def _cached_workspace_skill_snapshot(
         return previous
 
 
-def _skill_scan_allows_snapshot(
-    directory: Path,
-    name: str,
-    *,
-    scan_direct: bool,
-) -> bool:
-    from ..security.skill_scanner import (
-        SkillScanError,
-        _get_scan_mode,
-        is_skill_whitelisted,
-        scan_skill_directory,
-    )
-
-    scan_mode = _get_scan_mode()
-    try:
-        scan_result = scan_skill_directory(
-            directory,
-            skill_name=name,
-            # Let the scanner apply the configured block/warn/off policy.
-            block=None,
-            _direct=scan_direct,
-        )
-        if (
-            scan_result is None
-            and scan_mode != "off"
-            and not is_skill_whitelisted(name, directory)
-        ):
-            logger.warning(
-                "Workspace skill '%s' excluded because scan did not complete",
-                name,
-            )
-            return False
-    except SkillScanError:
-        if scan_mode == "block":
-            logger.warning(
-                "Workspace skill '%s' excluded after security scan",
-                name,
-            )
-            return False
-        # A scanner implementation may still raise while the effective policy
-        # is warn (for example during a config transition). Warn mode is
-        # explicitly non-blocking.
-        logger.warning(
-            "Workspace skill '%s' has scanner findings; "
-            "continuing because scan mode is warn",
-            name,
-        )
-    return True
-
-
 def _build_workspace_skill_runtime_snapshot(
     workspace_dir: Path,
     name: str,
     entry: dict[str, Any],
-    *,
-    scan_direct: bool,
 ) -> SkillRuntimeSnapshot | None:
     from .skills_manager import (
         _build_signature,
@@ -222,8 +191,8 @@ def _build_workspace_skill_runtime_snapshot(
     )
     if not directory.is_dir():
         return None
-    signature = _build_signature(directory)
     freshness = get_skill_freshness_token(directory)
+    signature = _build_signature(directory)
     metadata = entry.get("metadata")
     if not isinstance(metadata, dict) or not metadata.get("description"):
         metadata = _build_skill_metadata(
@@ -234,12 +203,6 @@ def _build_workspace_skill_runtime_snapshot(
         )
     from .skill_runtime_profile import build_skill_runtime_profile
 
-    if not _skill_scan_allows_snapshot(
-        directory,
-        name,
-        scan_direct=scan_direct,
-    ):
-        return None
     return SkillRuntimeSnapshot(
         directory=directory.resolve(),
         metadata=_freeze(dict(metadata)),
@@ -258,10 +221,9 @@ def _build_workspace_skill_runtime_snapshot(
 def _build_workspace_skill_runtime_snapshots(
     workspace_dir: Path,
     entries: Any,
-    *,
-    scan_direct: bool,
-) -> dict[str, SkillRuntimeSnapshot]:
+) -> tuple[dict[str, SkillRuntimeSnapshot], set[str]]:
     skills: dict[str, SkillRuntimeSnapshot] = {}
+    unconfirmed: set[str] = set()
     for name, entry in sorted(entries.items()):
         if not isinstance(entry, dict) or not entry.get("enabled", False):
             continue
@@ -270,17 +232,19 @@ def _build_workspace_skill_runtime_snapshots(
                 workspace_dir,
                 name,
                 entry,
-                scan_direct=scan_direct,
             )
             if skill is not None:
                 skills[name] = skill
+            else:
+                unconfirmed.add(name)
         except Exception as exc:  # noqa: BLE001
+            unconfirmed.add(name)
             logger.warning(
                 "Workspace skill '%s' excluded from snapshot: %s",
                 name,
                 exc,
             )
-    return skills
+    return skills, unconfirmed
 
 
 def _publish_workspace_skill_snapshot(
@@ -289,7 +253,7 @@ def _publish_workspace_skill_snapshot(
     skills: dict[str, SkillRuntimeSnapshot],
     *,
     manifest_available: bool,
-    parse_started_at: float,
+    unconfirmed_skills: set[str],
     capture_started_at: float,
 ) -> WorkspaceSkillSnapshot:
     global _GENERATION
@@ -300,14 +264,14 @@ def _publish_workspace_skill_snapshot(
             generation=_GENERATION,
             manifest_stat=manifest_stat,
             skills=MappingProxyType(skills),
+            manifest_available=manifest_available,
+            unconfirmed_skills=frozenset(unconfirmed_skills),
         )
-        if manifest_available:
-            _CACHE[workspace_dir] = snapshot
+        _cache_snapshot(snapshot)
         logger.debug(
-            "skill_md_parse_ms=%.1f skill_count=%d "
+            "skill_count=%d "
             "runtime_skill_snapshot_generation=%d "
             "snapshot_capture_ms=%.1f",
-            (time.monotonic() - parse_started_at) * 1000,
             len(skills),
             snapshot.generation,
             (time.monotonic() - capture_started_at) * 1000,
@@ -315,80 +279,143 @@ def _publish_workspace_skill_snapshot(
         return snapshot
 
 
+def _cache_snapshot(snapshot: WorkspaceSkillSnapshot) -> None:
+    """Publish a result with a fixed window measured from completion."""
+    if not snapshot.manifest_available:
+        seconds = REFRESH_FAILURE_COOLDOWN_SECONDS
+        outcome = "failure"
+    elif snapshot.unconfirmed_skills:
+        seconds = PARTIAL_REFRESH_RETRY_SECONDS
+        outcome = "partial"
+    else:
+        seconds = SNAPSHOT_TTL_SECONDS
+        outcome = "success"
+    with _LOCK:
+        _CACHE[snapshot.workspace_dir] = _CacheEntry(
+            snapshot,
+            time.monotonic() + seconds,
+        )
+    logger.debug(
+        "skill_snapshot_refresh_outcome=%s skill_count=%d "
+        "unconfirmed_skill_count=%d refresh_window_seconds=%d",
+        outcome,
+        len(snapshot.skills),
+        len(snapshot.unconfirmed_skills),
+        seconds,
+    )
+
+
+def _capture_workspace_skill_snapshot(
+    workspace_dir: Path,
+    manifest_path: Path,
+    *,
+    reconcile: bool,
+) -> WorkspaceSkillSnapshot:
+    """Bound capture retries and never publish an unstable skill as confirmed."""
+    from .skills_manager import get_skill_freshness_token
+
+    capture_started_at = time.monotonic()
+    for attempt in range(2):
+        manifest, available = _read_workspace_skill_manifest(
+            workspace_dir,
+            reconcile=reconcile,
+            fail_closed=False,
+        )
+        before = _stat(manifest_path)
+        skills, unconfirmed = _build_workspace_skill_runtime_snapshots(
+            workspace_dir,
+            manifest.get("skills", {}),
+        )
+        after = _stat(manifest_path)
+        if before != after:
+            if attempt == 0:
+                continue
+            raise RuntimeError(
+                "Workspace skill manifest changed during capture",
+            )
+        unstable: set[str] = set()
+        for name, skill in skills.items():
+            try:
+                if (
+                    get_skill_freshness_token(skill.directory)
+                    != skill.freshness_token
+                ):
+                    unstable.add(name)
+            except Exception:  # noqa: BLE001
+                unstable.add(name)
+        if unstable and attempt == 0:
+            continue
+        for name in unstable:
+            skills.pop(name)
+        unconfirmed.update(unstable)
+        return _publish_workspace_skill_snapshot(
+            workspace_dir,
+            after,
+            skills,
+            manifest_available=available,
+            unconfirmed_skills=unconfirmed,
+            capture_started_at=capture_started_at,
+        )
+    raise AssertionError("unreachable capture state")
+
+
 def get_workspace_skill_snapshot(
     workspace_dir: Path,
     *,
     reconcile: bool = True,
     fail_closed: bool = False,
-    _scan_direct: bool = False,
-    _retry: int = 0,
 ) -> WorkspaceSkillSnapshot:
-    """Return a cached workspace snapshot, reconciling only on invalidation."""
+    """Observe workspace skills once per fixed freshness window."""
     capture_started_at = time.monotonic()
     workspace_dir = workspace_dir.expanduser().resolve()
     from .skills_manager import (
         get_workspace_skill_manifest_path,
-        get_skill_freshness_token,
     )
 
+    cached = _cached_workspace_skill_snapshot(workspace_dir)
+    if cached is not None:
+        return cached
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     with workspace_skill_coordinator(workspace_dir):
-        previous = _cached_workspace_skill_snapshot(
-            workspace_dir,
-            manifest_path,
-        )
-        if previous is not None:
-            return previous
-        reconcile_started_at = time.monotonic()
-        manifest, manifest_available = _read_workspace_skill_manifest(
-            workspace_dir,
-            reconcile=reconcile,
-            fail_closed=fail_closed,
-        )
-        logger.debug(
-            "skill_manifest_reconcile_ms=%.1f skill_manifest_cache_hit=false",
-            (time.monotonic() - reconcile_started_at) * 1000,
-        )
-        manifest_stat_before = _stat(manifest_path)
-        entries = manifest.get("skills", {})
-        parse_started_at = time.monotonic()
-        skills = _build_workspace_skill_runtime_snapshots(
-            workspace_dir,
-            entries,
-            scan_direct=_scan_direct,
-        )
-        manifest_stat_after = _stat(manifest_path)
-        skills_still_current = all(
-            get_skill_freshness_token(skill.directory) == skill.freshness_token
-            for skill in skills.values()
-        )
-        if _retry < 1 and (
-            manifest_stat_before != manifest_stat_after
-            or not skills_still_current
-        ):
-            logger.info(
-                "Workspace skill snapshot changed during capture; retrying",
-            )
-            return get_workspace_skill_snapshot(
+        cached = _cached_workspace_skill_snapshot(workspace_dir)
+        if cached is not None:
+            return cached
+        with _LOCK:
+            previous = _CACHE.get(workspace_dir)
+        try:
+            if (
+                previous is not None
+                and previous.snapshot.manifest_available
+                and not previous.snapshot.unconfirmed_skills
+                and _fresh(previous.snapshot, manifest_path)
+            ):
+                _cache_snapshot(previous.snapshot)
+                return previous.snapshot
+            return _capture_workspace_skill_snapshot(
                 workspace_dir,
+                manifest_path,
                 reconcile=reconcile,
-                fail_closed=fail_closed,
-                _scan_direct=_scan_direct,
-                _retry=_retry + 1,
             )
-        return _publish_workspace_skill_snapshot(
-            workspace_dir,
-            manifest_stat_after,
-            skills,
-            manifest_available=manifest_available,
-            parse_started_at=parse_started_at,
-            capture_started_at=capture_started_at,
-        )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Workspace skill refresh failed: %s", exc)
+            failed = _publish_workspace_skill_snapshot(
+                workspace_dir,
+                ManifestStat(0, 0, 0),
+                {},
+                manifest_available=False,
+                unconfirmed_skills=set(),
+                capture_started_at=capture_started_at,
+            )
+            if not fail_closed:
+                raise
+            return failed
 
 
 def invalidate_workspace_skill_snapshot(workspace_dir: Path) -> None:
-    with _LOCK:
-        _CACHE.pop(workspace_dir.expanduser().resolve(), None)
+    workspace_dir = workspace_dir.expanduser().resolve()
+    with workspace_skill_coordinator(workspace_dir):
+        with _LOCK:
+            _CACHE.pop(workspace_dir, None)
 
 
 async def get_workspace_skill_snapshot_async(
@@ -397,51 +424,38 @@ async def get_workspace_skill_snapshot_async(
     reconcile: bool = True,
 ) -> WorkspaceSkillSnapshot:
     """Build or fetch a snapshot without blocking the event loop."""
-    from ..security.skill_scanner import _get_scan_executor
-
-    executor, _slot = _get_scan_executor()
-    future = executor.submit(
-        get_workspace_skill_snapshot,
-        workspace_dir,
-        reconcile=reconcile,
-        fail_closed=True,
-        _scan_direct=True,
-    )
-    return await asyncio.wrap_future(future)
-
-
-def _filter_changed_skills(
-    snapshot: WorkspaceSkillSnapshot,
-) -> WorkspaceSkillSnapshot:
-    """Drop skills whose content changed after the snapshot was captured."""
-    from .skills_manager import _build_signature, get_skill_freshness_token
-
-    valid: dict[str, SkillRuntimeSnapshot] = {}
-    changed = False
-    for name, skill in snapshot.skills.items():
-        # The recursive stat token is the cheap admission check. Hash the
-        # directory only when metadata/size/timestamps changed.
-        current_freshness = get_skill_freshness_token(skill.directory)
-        if current_freshness == skill.freshness_token:
-            valid[name] = skill
-            continue
-        if _build_signature(skill.directory) == skill.content_signature:
-            # A metadata-only touch is still the same content, but update the
-            # token so subsequent query admissions stay on the stat-only path.
-            valid[name] = replace(skill, freshness_token=current_freshness)
-            changed = True
-    if not changed and len(valid) == len(snapshot.skills):
-        return snapshot
-    return WorkspaceSkillSnapshot(
-        workspace_dir=snapshot.workspace_dir,
-        generation=snapshot.generation,
-        manifest_stat=snapshot.manifest_stat,
-        skills=MappingProxyType(valid),
-    )
+    workspace_dir = workspace_dir.expanduser().resolve()
+    cached = _cached_workspace_skill_snapshot(workspace_dir)
+    if cached is not None:
+        return cached
+    with _LOCK:
+        cached = _cached_workspace_skill_snapshot(workspace_dir)
+        if cached is not None:
+            return cached
+        future = _INFLIGHT.get(workspace_dir)
+        if future is None:
+            # Preserve request context, while making queued work independent
+            # of the lifetime of the event loop that requested it.
+            refresh = partial(
+                get_workspace_skill_snapshot,
+                workspace_dir,
+                reconcile=reconcile,
+                fail_closed=True,
+            )
+            future = _REFRESH_EXECUTOR.submit(copy_context().run, refresh)
+            _INFLIGHT[workspace_dir] = future
+            future.add_done_callback(
+                partial(_forget_shared_refresh, workspace_dir),
+            )
+    # A concurrent Future can be awaited from different event loops. Only
+    # its owner occupies a worker; cancellation of a waiter is isolated.
+    return await asyncio.shield(asyncio.wrap_future(future))
 
 
-async def validate_workspace_skill_snapshot(
-    snapshot: WorkspaceSkillSnapshot,
-) -> WorkspaceSkillSnapshot:
-    """Recheck content signatures off-loop immediately before consumption."""
-    return await asyncio.to_thread(_filter_changed_skills, snapshot)
+def _forget_shared_refresh(
+    workspace_dir: Path,
+    future: Future[WorkspaceSkillSnapshot],
+) -> None:
+    with _LOCK:
+        if _INFLIGHT.get(workspace_dir) is future:
+            _INFLIGHT.pop(workspace_dir)

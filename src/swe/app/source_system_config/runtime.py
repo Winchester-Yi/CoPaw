@@ -131,6 +131,17 @@ def get_current_source_system_config() -> EffectiveSourceSystemConfig | None:
     return _current_source_system_config.get()
 
 
+def capture_source_system_config_context_value() -> tuple[
+    ContextVar[EffectiveSourceSystemConfig | None],
+    EffectiveSourceSystemConfig | None,
+]:
+    """Capture an independently owned source config snapshot for a child task."""
+    config = _current_source_system_config.get()
+    return _current_source_system_config, (
+        config.model_copy(deep=True) if config is not None else None
+    )
+
+
 def resolve_tool_result_compact_config(
     base_config: ToolResultCompactConfig,
     source_config: Any | None = None,

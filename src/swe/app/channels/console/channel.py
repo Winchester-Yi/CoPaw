@@ -752,7 +752,7 @@ class ConsoleChannel(BaseChannel):
         )
         sid = (meta or {}).get("session_id")
         if sid and text.strip():
-            await push_store_append(
+            return await push_store_append(
                 sid,
                 text.strip(),
                 delivery_key=str((meta or {}).get("cron_delivery_key") or ""),
@@ -776,7 +776,7 @@ class ConsoleChannel(BaseChannel):
             return False
         sid = (meta or {}).get("session_id")
         if sid:
-            await push_store_append(
+            return await push_store_append(
                 sid,
                 body.strip(),
                 delivery_key=str(

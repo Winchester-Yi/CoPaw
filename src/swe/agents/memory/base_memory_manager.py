@@ -4,7 +4,13 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import OrderedDict
+from contextvars import Context
+from dataclasses import dataclass
+from functools import partial
+import itertools
+import time
+import weakref
 from typing import TYPE_CHECKING, Any, Optional
 
 
@@ -17,7 +23,64 @@ if TYPE_CHECKING:
     from reme.memory.file_based.reme_in_memory_memory import ReMeInMemoryMemory
 
 
+from .summary_task_context import (
+    create_summary_task,
+    capture_summary_trace_context,
+)
+from swe.tracing.sanitizer import sanitize_trace_value
+
 logger = logging.getLogger(__name__)
+SUMMARY_RESULT_TTL_SECONDS = 300
+SUMMARY_RESULT_SCOPE_LIMIT = 10
+SUMMARY_RESULT_LIMIT = 256
+SUMMARY_RESULT_MAX_BYTES = 512 * 1024
+SUMMARY_CLOSE_GRACE_SECONDS = 5
+SUMMARY_CLOSE_CANCEL_SECONDS = 5
+_summary_managers = weakref.WeakSet()
+
+
+@dataclass(frozen=True)
+class _SummaryResult:
+    task_id: int
+    scope: str
+    status: str
+    finished_at: float
+    expires_at: float
+    message: str
+    payload_bytes: int
+
+    def text(self) -> str:
+        if self.status == "cancelled":
+            return "Summary task was cancelled.\n"
+        return f"Summary task {self.status}: {self.message}\n"
+
+
+async def prune_summary_task_results() -> None:
+    """Prune bounded result histories without retaining managers across yields."""
+    for manager_ref in [weakref.ref(m) for m in _summary_managers]:
+        manager = manager_ref()
+        if manager is not None:
+            manager._prune_summary_results()
+        del manager
+        await asyncio.sleep(0)
+
+
+def summary_task_stats() -> dict[str, int]:
+    """Return aggregate counts without exposing scope identifiers."""
+    managers = list(_summary_managers)
+    return {
+        "managers": len(managers),
+        "pending": sum(
+            sum(
+                not t.done()
+                for tasks in m._summary_tasks_by_scope.values()
+                for t in tasks
+            )
+            for m in managers
+        ),
+        "completed": sum(len(m._summary_results) for m in managers),
+        "payload_bytes": sum(m._summary_result_bytes for m in managers),
+    }
 
 
 class BaseMemoryManager(ABC):
@@ -53,9 +116,15 @@ class BaseMemoryManager(ABC):
         self.tenant_id: str | None = tenant_id
 
         # 按会话隔离后台总结任务，避免不同对话互相等待或回收任务。
-        self._summary_tasks_by_scope: dict[str, list[asyncio.Task]] = (
-            defaultdict(list)
-        )
+        self._summary_tasks_by_scope: dict[str, list[asyncio.Task]] = {}
+        self._summary_results: OrderedDict[int, _SummaryResult] = OrderedDict()
+        self._summary_result_bytes = 0
+        self._summary_history_claims: dict[int, object] = {}
+        self._summary_task_ids = itertools.count(1)
+        self._summary_closing = False
+        self._summary_close_lock = asyncio.Lock()
+        self._summary_backend_closed = False
+        _summary_managers.add(self)
 
     @abstractmethod
     async def start(self) -> None:
@@ -192,109 +261,258 @@ class BaseMemoryManager(ABC):
         scope_id: str | None = None,
         **kwargs,
     ):
-        """Add an asynchronous summary task for the given messages."""
-        scope_key = self._normalize_summary_scope(scope_id)
-
-        remaining_tasks = []
-        for task in self._summary_tasks_by_scope[scope_key]:
-            if task.done():
-                if task.cancelled():
-                    logger.warning("Summary task was cancelled.")
-                    continue
-                exc = task.exception()
-                if exc is not None:
-                    logger.error(f"Summary task failed: {exc}")
-                else:
-                    result = task.result()
-                    logger.info(f"Summary task completed: {result}")
-            else:
-                remaining_tasks.append(task)
-        self._summary_tasks_by_scope[scope_key] = remaining_tasks
-
-        task = asyncio.create_task(
-            self.summary_memory(
-                messages=messages,
+        """Start a summary with a detached, explicitly allowed context."""
+        if self._summary_closing:
+            raise RuntimeError("Memory manager is closing")
+        scope = self._normalize_summary_scope(scope_id)
+        task_id = next(self._summary_task_ids)
+        kwargs["_summary_trace_context"] = capture_summary_trace_context()
+        task = create_summary_task(
+            self._run_summary(
+                task_id,
+                scope,
+                messages,
                 _bound_chat_model=chat_model,
                 _bound_formatter=formatter,
                 **kwargs,
             ),
         )
-        self._summary_tasks_by_scope[scope_key].append(task)
+        task._swe_summary_task_id = task_id
+        self._summary_tasks_by_scope.setdefault(scope, []).append(task)
+        Context().run(
+            task.add_done_callback,
+            lambda done: self._settle_summary_task(done, scope, task_id),
+        )
+
+    async def _run_summary(self, task_id, scope, messages, **kwargs):
+        task = asyncio.current_task()
+        status, message = "completed", ""
+        try:
+            message = await self.summary_memory(messages=messages, **kwargs)
+            return message
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except Exception as exc:
+            status, message = "failed", exc
+            raise
+        finally:
+            text = self._summary_status_message(message)
+            now = time.monotonic()
+            task._swe_summary_result = self._make_summary_result(
+                task_id,
+                scope,
+                status,
+                now,
+                text,
+            )
+
+    @staticmethod
+    def _make_summary_result(task_id, scope, status, now, text):
+        expires_at = now + SUMMARY_RESULT_TTL_SECONDS
+        fields = {
+            "task_id": str(task_id),
+            "scope": scope,
+            "status": status,
+            "finished_at": str(now),
+            "expires_at": str(expires_at),
+            "bounded_message": text,
+        }
+        payload_bytes = len(str(task_id).encode("utf-8")) + sum(
+            len(key.encode("utf-8")) + len(value.encode("utf-8"))
+            for key, value in fields.items()
+        )
+        return _SummaryResult(
+            task_id,
+            scope,
+            status,
+            now,
+            expires_at,
+            text,
+            payload_bytes,
+        )
+
+    @staticmethod
+    def _summary_status_message(message) -> str:
+        try:
+            safe = sanitize_trace_value(str(message or ""), max_bytes=1024)
+            text = safe.value
+            if safe.truncated:
+                marker = " [truncated]"
+                text = (
+                    text.encode("utf-8")[: 1024 - len(marker)].decode(
+                        "utf-8",
+                        "ignore",
+                    )
+                    + marker
+                )
+            return text
+        except Exception:
+            return "<summary status unavailable>"
+
+    def _settle_summary_task(self, task, scope, task_id):
+        if getattr(task, "_swe_summary_settled", False):
+            return task._swe_summary_result
+        if not task.done():
+            return None
+        if not task.cancelled():
+            exception = task.exception()
+            if exception is None:
+                task.result()
+        record = getattr(task, "_swe_summary_result", None)
+        if record is None:  # Cancellation before the coroutine's first step.
+            now = time.monotonic()
+            record = self._make_summary_result(
+                task_id,
+                scope,
+                "cancelled",
+                now,
+                "",
+            )
+            task._swe_summary_result = record
+        task._swe_summary_settled = True
+        tasks = self._summary_tasks_by_scope.get(scope, [])
+        tasks[:] = [candidate for candidate in tasks if candidate is not task]
+        if not tasks:
+            self._summary_tasks_by_scope.pop(scope, None)
+        self._prune_summary_results()
+        self._summary_results[task_id] = record
+        self._summary_result_bytes += record.payload_bytes
+        while (
+            sum(r.scope == scope for r in self._summary_results.values())
+            > SUMMARY_RESULT_SCOPE_LIMIT
+        ):
+            oldest = next(
+                key
+                for key, r in self._summary_results.items()
+                if r.scope == scope
+            )
+            self._remove_summary_result(oldest)
+        while self._summary_results and (
+            len(self._summary_results) > SUMMARY_RESULT_LIMIT
+            or self._summary_result_bytes > SUMMARY_RESULT_MAX_BYTES
+        ):
+            self._remove_summary_result(next(iter(self._summary_results)))
+        return record
+
+    def _remove_summary_result(self, task_id):
+        record = self._summary_results.pop(task_id, None)
+        if record is not None:
+            self._summary_result_bytes -= record.payload_bytes
+        self._summary_history_claims.pop(task_id, None)
+
+    def _prune_summary_results(self):
+        now = time.monotonic()
+        for task_id, record in list(self._summary_results.items()):
+            if record.expires_at <= now:
+                self._remove_summary_result(task_id)
 
     def get_summary_task_count(self, scope_id: str | None = None) -> int:
-        """返回指定会话作用域下的 summary 任务数量。"""
-        scope_key = self._normalize_summary_scope(scope_id)
-        return len(self._summary_tasks_by_scope.get(scope_key, []))
+        """Return only running summary tasks in this scope."""
+        scope = self._normalize_summary_scope(scope_id)
+        return sum(
+            not task.done()
+            for task in self._summary_tasks_by_scope.get(scope, ())
+        )
 
-    async def await_summary_tasks(
-        self,
-        scope_id: str | None = None,
-    ) -> str:
-        """
-        Wait for all background summary tasks to complete and collect results.
-
-        Blocks until all pending summary tasks in the task list have completed,
-        canceled, or failed. Collects status information from each task and
-        clears the task list after processing.
-
-        Returns:
-            str: A concatenated string of status messages, including:
-                - Completion confirmations with results
-                - Cancellation notices
-                - Error messages for failed tasks
-
-        Note:
-            - This method will block if any tasks are still running
-            - All tasks are removed from summary_tasks after this call
-            - Task exceptions are logged but do not raise to the caller
-            - Use this before application shutdown
-        """
-        scope_key = self._normalize_summary_scope(scope_id)
-        tasks = list(self._summary_tasks_by_scope.get(scope_key, []))
-        result = ""
-        for task in tasks:
+    def has_summary_task_results(self, scope_id: str | None = None) -> bool:
+        self._prune_summary_results()
+        scope = self._normalize_summary_scope(scope_id)
+        for task in list(self._summary_tasks_by_scope.get(scope, ())):
             if task.done():
-                # Task has already completed, check its status
-                if task.cancelled():
-                    logger.warning("Summary task was cancelled.")
-                    result += "Summary task was cancelled.\n"
-                else:
-                    # Check if the task raised an exception
-                    exc = task.exception()
-                    if exc is not None:
-                        logger.error(f"Summary task failed: {exc}")
-                        result += f"Summary task failed: {exc}\n"
-                    else:
-                        # Task completed successfully, collect result
-                        task_result = task.result()
-                        logger.info(f"Summary task completed: {task_result}")
-                        result += f"Summary task completed: {task_result}\n"
+                self._settle_summary_task(
+                    task,
+                    scope,
+                    task._swe_summary_task_id,
+                )
+        return any(r.scope == scope for r in self._summary_results.values())
 
-            else:
-                # Task is still running, wait for it to complete
-                try:
-                    task_result = await task
-                    logger.info(f"Summary task completed: {task_result}")
-                    result += f"Summary task completed: {task_result}\n"
+    async def await_summary_tasks(self, scope_id: str | None = None) -> str:
+        """Await a fixed snapshot; cancellation leaves background work intact."""
+        scope = self._normalize_summary_scope(scope_id)
+        self._prune_summary_results()
+        tasks = list(self._summary_tasks_by_scope.get(scope, ()))
+        task_ids = {getattr(t, "_swe_summary_task_id", None) for t in tasks}
+        claim = object()
+        history = [
+            r
+            for r in self._summary_results.values()
+            if r.scope == scope
+            and r.task_id not in task_ids
+            and r.task_id not in self._summary_history_claims
+        ]
+        for record in history:
+            self._summary_history_claims[record.task_id] = claim
+        results = list(history)
+        try:
+            for task in tasks:
+                waiter = Context().run(
+                    partial(
+                        asyncio.gather,
+                        task,
+                        return_exceptions=True,
+                    ),
+                )
+                await Context().run(asyncio.shield, waiter)
+                results.append(
+                    self._settle_summary_task(
+                        task,
+                        scope,
+                        task._swe_summary_task_id,
+                    ),
+                )
+        except BaseException:
+            for record in history:
+                if self._summary_history_claims.get(record.task_id) is claim:
+                    self._summary_history_claims.pop(record.task_id, None)
+            raise
+        for record in results:
+            self._remove_summary_result(record.task_id)
+        return "".join(record.text() for record in results)
 
-                except asyncio.CancelledError:
-                    logger.warning("Summary task was cancelled while waiting.")
-                    result += "Summary task was cancelled.\n"
-
-                except Exception as e:
-                    logger.exception(f"Summary task failed: {e}")
-                    result += f"Summary task failed: {e}\n"
-
-        # Clear the task list after processing all tasks
-        self._summary_tasks_by_scope.pop(scope_key, None)
-        return result
+    async def _close_summary_tasks(self) -> bool:
+        """Stop producers, then drain and cancel without abandoning live tasks."""
+        self._summary_closing = True
+        tasks = [
+            t for group in self._summary_tasks_by_scope.values() for t in group
+        ]
+        if tasks:
+            _, pending = await asyncio.wait(
+                tasks,
+                timeout=SUMMARY_CLOSE_GRACE_SECONDS,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                _, pending = await asyncio.wait(
+                    pending,
+                    timeout=SUMMARY_CLOSE_CANCEL_SECONDS,
+                )
+            if pending:
+                logger.error(
+                    "Summary shutdown timed out: %s task(s)",
+                    len(pending),
+                )
+                return False
+        for scope, group in list(self._summary_tasks_by_scope.items()):
+            for task in list(group):
+                self._settle_summary_task(
+                    task,
+                    scope,
+                    task._swe_summary_task_id,
+                )
+        self._summary_results.clear()
+        self._summary_history_claims.clear()
+        self._summary_result_bytes = 0
+        return True
 
     @property
     def summary_tasks(self) -> list[asyncio.Task]:
-        """兼容旧调用方，仅返回默认作用域任务列表。"""
-        return self._summary_tasks_by_scope[
-            self._normalize_summary_scope(None)
-        ]
+        """Compatibility view without creating empty scopes."""
+        return self._summary_tasks_by_scope.get(
+            self._normalize_summary_scope(None),
+            [],
+        )
 
     @staticmethod
     def _normalize_summary_scope(scope_id: str | None) -> str:

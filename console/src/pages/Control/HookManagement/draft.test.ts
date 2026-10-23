@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addHandler,
+  createHandler,
   defaultContext,
   isScriptReference,
   moveHandler,
@@ -52,6 +53,12 @@ const twoHandlerConfig: HookConfigDraft = {
 };
 
 describe("Hook configuration draft helpers", () => {
+  it.each(["command", "http", "prompt"] as const)(
+    "defaults %s append mode to false",
+    (type) => {
+      expect(createHandler(type).outputAppend).toBe(false);
+    },
+  );
   it("adds a command Handler without mutating the source draft", () => {
     const next = addHandler(config, "PreToolUse", "tool-guards", "command");
 

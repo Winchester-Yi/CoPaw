@@ -7,8 +7,10 @@ import asyncio
 import ast
 from contextlib import (
     AbstractContextManager,
+    ExitStack,
     asynccontextmanager,
     contextmanager,
+    nullcontext,
 )
 import locale
 import os
@@ -31,6 +33,8 @@ from ...app.runner.tool_output_frames import (
     emit_tool_output_text,
 )
 from ...envs.runtime import build_runtime_env
+from ...output_workers import run_output_work
+from ...runtime_workers import run_runtime_state_work
 from ...runtime_invocation_claims import apply_runtime_claim_env
 from ...security.tenant_path_boundary import (
     is_path_within_tenant_with_base,
@@ -50,6 +54,13 @@ from .file_io import (
     is_created_workspace_skill_write_target,
 )
 from ..skill_context_manager import get_skill_context_manager
+from .shell_output_spool import (
+    ShellOutputStorageError,
+    create_shell_output_spool,
+    get_active_shell_output_spool,
+    run_shell_spool_work,
+    await_shell_cleanup_task,
+)
 
 _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
     {
@@ -57,6 +68,7 @@ _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
         "SWE_SECRET_DIR",
     },
 )
+_SHELL_SPOOL_BATCH_BYTES = 64 * 1024
 
 # Commands that take string arguments which may look like paths
 # but should NOT be treated as file paths
@@ -1246,6 +1258,12 @@ def prepare_shell_command(
 
     cmd, _was_intercepted = intercept_command(cmd)
 
+    from ...security.shell_installation_policy import shell_installation_denial
+
+    policy_denial = shell_installation_denial(cmd)
+    if policy_denial:
+        _raise_shell_error("shell_policy_denied", policy_denial)
+
     try:
         working_dir = _resolve_cwd(cwd)
     except TenantPathBoundaryError as e:
@@ -1276,6 +1294,33 @@ def prepare_shell_command(
             python_runtime_guard,
         ),
     )
+
+
+@asynccontextmanager
+async def _prepared_shell_execution(
+    command: str,
+    cwd: Path | str | None,
+) -> AsyncIterator[tuple[PreparedShellCommand, CurrentProcessLimitPolicy]]:
+    """Own preparation and guard files through cancellation and execution."""
+    resources = ExitStack()
+
+    def prepare() -> tuple[PreparedShellCommand, CurrentProcessLimitPolicy]:
+        prepared = prepare_shell_command(command, cwd)
+        resources.enter_context(prepared.python_runtime_guard)
+        policy = resolve_current_process_limit_policy("shell")
+        return prepared, policy
+
+    preparation = asyncio.create_task(run_runtime_state_work(prepare))
+    try:
+        yield await asyncio.shield(preparation)
+    finally:
+
+        async def cleanup() -> None:
+            # A cancelled caller still owns guard files created by its worker.
+            await asyncio.gather(preparation, return_exceptions=True)
+            await run_runtime_state_work(resources.close)
+
+        await await_shell_cleanup_task(asyncio.create_task(cleanup()))
 
 
 def _format_shell_response(
@@ -1410,6 +1455,65 @@ async def _handle_unix_subprocess_timeout(
         return -1, "", stderr_suffix
 
 
+async def _wait_for_spooled_process_exit(
+    proc: asyncio.subprocess.Process,
+    timeout: float,
+    readers: tuple[asyncio.Task[None], ...],
+) -> None:
+    """Notice output storage errors even when the command is still running."""
+    waiter = asyncio.create_task(_wait_for_unix_process_exit(proc, timeout))
+    pending = {waiter, *readers}
+    try:
+        while waiter in pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                if task is waiter:
+                    task.result()
+                elif isinstance(task.exception(), ShellOutputStorageError):
+                    task.result()
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def _drain_shell_readers(
+    tasks: list[Awaitable[Any]],
+    timeout: float | None,
+) -> None:
+    results = await asyncio.wait_for(
+        asyncio.gather(*tasks, return_exceptions=True),
+        timeout=timeout,
+    )
+    for result in results:
+        if isinstance(result, ShellOutputStorageError):
+            raise result
+
+
+async def _discard_failed_shell_pipes(
+    proc: asyncio.subprocess.Process,
+    readers: tuple[asyncio.Task[None], ...],
+) -> None:
+    """Release failed readers' pipe buffers without collecting their output."""
+
+    async def discard(stream: asyncio.StreamReader) -> None:
+        while await stream.read(_SHELL_SPOOL_BATCH_BYTES):
+            pass
+
+    for stream, reader in zip((proc.stdout, proc.stderr), readers):
+        if stream is None or reader.cancelled():
+            continue
+        if not isinstance(reader.exception(), ShellOutputStorageError):
+            continue
+        try:
+            await asyncio.wait_for(discard(stream), timeout=1)
+        except (asyncio.TimeoutError, OSError):
+            pass
+
+
 async def _execute_unix_subprocess(
     cmd: str,
     working_dir: Path,
@@ -1420,6 +1524,7 @@ async def _execute_unix_subprocess(
     """Execute a shell command on Unix-like platforms."""
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
+    spool = get_active_shell_output_spool()
 
     def _decode_live_chunk(chunk: bytes) -> str:
         try:
@@ -1435,12 +1540,52 @@ async def _execute_unix_subprocess(
     ) -> None:
         if stream is None:
             return
-        while True:
-            chunk = await stream.read(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            await emit_tool_output_text(source, _decode_live_chunk(chunk))
+        loop = asyncio.get_running_loop()
+        drain_remaining = 1.0
+        pending = bytearray()
+
+        async def flush_pending() -> None:
+            if spool is not None and pending:
+                batch = bytes(pending)
+                pending.clear()
+                await spool.append(source, batch)
+
+        try:
+            while True:
+                if spool is None:
+                    chunk = await stream.read(4096)
+                else:
+                    draining = proc.returncode is not None
+                    read_started = loop.time()
+                    try:
+                        chunk = await asyncio.wait_for(
+                            stream.read(4096),
+                            timeout=max(0, drain_remaining) if draining else 1,
+                        )
+                    except asyncio.TimeoutError:
+                        if proc.returncode is not None:
+                            break
+                        continue
+                    if draining:
+                        # Bound pipe reads, excluding worker and emitter waits.
+                        drain_remaining -= loop.time() - read_started
+                if not chunk:
+                    break
+                if spool is None:
+                    chunks.append(chunk)
+                else:
+                    available = _SHELL_SPOOL_BATCH_BYTES - len(pending)
+                    if len(chunk) >= available:
+                        batch = bytes(pending) + chunk[:available]
+                        pending.clear()
+                        # Retain the remainder before the cancellable write.
+                        pending.extend(chunk[available:])
+                        await spool.append(source, batch)
+                    else:
+                        pending.extend(chunk)
+                await emit_tool_output_text(source, _decode_live_chunk(chunk))
+        finally:
+            await flush_pending()
 
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -1459,7 +1604,12 @@ async def _execute_unix_subprocess(
             timeout=timeout,
         )
         returncode = proc.returncode if proc.returncode is not None else -1
-        return returncode, smart_decode(stdout), smart_decode(stderr)
+        stdout_str, stderr_str = await run_output_work(
+            _decode_shell_streams,
+            [stdout],
+            [stderr],
+        )
+        return returncode, stdout_str, stderr_str
 
     try:
         process_group_id = os.getpgid(proc.pid)
@@ -1475,23 +1625,60 @@ async def _execute_unix_subprocess(
     wait_task: asyncio.Task[int] | None = None
 
     try:
-        await _wait_for_unix_process_exit(proc, timeout=timeout)
+        if spool is not None:
+            await _wait_for_spooled_process_exit(
+                proc,
+                timeout,
+                (stdout_task, stderr_task),
+            )
+        else:
+            await _wait_for_unix_process_exit(proc, timeout=timeout)
         returncode = proc.returncode if proc.returncode is not None else -1
         await _terminate_unix_process_group(proc, process_group_id)
         try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    stdout_task,
-                    stderr_task,
-                    return_exceptions=True,
-                ),
-                timeout=1,
+            await _drain_shell_readers(
+                [stdout_task, stderr_task],
+                # Readers bound pipe waits separately from spool worker waits.
+                timeout=None if spool is not None else 1,
             )
         except asyncio.TimeoutError:
             pass
-        stdout_str = smart_decode(b"".join(stdout_chunks))
-        stderr_str = smart_decode(b"".join(stderr_chunks))
+        if spool:
+            stdout_str, stderr_str = await run_shell_spool_work(
+                spool.decode_streams,
+            )
+        else:
+            stdout_str, stderr_str = await run_output_work(
+                _decode_shell_streams,
+                stdout_chunks,
+                stderr_chunks,
+            )
         return returncode, stdout_str, stderr_str
+    except ShellOutputStorageError as exc:
+        assert spool is not None
+
+        async def cleanup_storage_failure() -> None:
+            try:
+                await _terminate_unix_process_group(proc, process_group_id)
+            finally:
+                await asyncio.gather(
+                    stdout_task,
+                    stderr_task,
+                    return_exceptions=True,
+                )
+                await _discard_failed_shell_pipes(
+                    proc,
+                    (stdout_task, stderr_task),
+                )
+
+        await await_shell_cleanup_task(
+            asyncio.create_task(cleanup_storage_failure()),
+        )
+        raise await run_shell_spool_work(
+            spool.storage_failure,
+            "write",
+            proc.returncode,
+        ) from exc
     except asyncio.TimeoutError:
         stderr_suffix = (
             f"⚠️ TimeoutError: The command execution exceeded "
@@ -1508,23 +1695,64 @@ async def _execute_unix_subprocess(
             except (ProcessLookupError, OSError):
                 pass
         timeout_tasks: list[Awaitable[Any]] = [stdout_task, stderr_task]
-        wait_task = asyncio.create_task(proc.wait())
-        timeout_tasks.append(wait_task)
+        if spool is None:
+            wait_task = asyncio.create_task(proc.wait())
+            timeout_tasks.append(wait_task)
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*timeout_tasks, return_exceptions=True),
-                timeout=1,
+            await _drain_shell_readers(
+                timeout_tasks,
+                timeout=None if spool is not None else 1,
             )
+        except ShellOutputStorageError as exc:
+            assert spool is not None
+            await await_shell_cleanup_task(
+                asyncio.create_task(
+                    _discard_failed_shell_pipes(
+                        proc,
+                        (stdout_task, stderr_task),
+                    ),
+                ),
+            )
+            raise await run_shell_spool_work(
+                spool.storage_failure,
+                "write",
+                proc.returncode,
+            ) from exc
         except asyncio.TimeoutError:
             pass
-        stdout_str = smart_decode(b"".join(stdout_chunks))
-        stderr_str = smart_decode(b"".join(stderr_chunks))
-        if stderr_str:
-            stderr_str += f"\n{stderr_suffix}"
+        if spool:
+            stdout_str, stderr_str = await run_shell_spool_work(
+                spool.decode_streams,
+                stderr_suffix,
+            )
         else:
-            stderr_str = stderr_suffix
+            stdout_str, stderr_str = await run_output_work(
+                _decode_shell_streams,
+                stdout_chunks,
+                stderr_chunks,
+                stderr_suffix,
+            )
         await emit_tool_output_text("stderr", stderr_suffix)
         return -1, stdout_str, stderr_str
+    except asyncio.CancelledError:
+
+        async def cleanup_cancelled_process() -> None:
+            await _terminate_unix_process_group(proc, process_group_id)
+            await asyncio.gather(
+                stdout_task,
+                stderr_task,
+                return_exceptions=True,
+            )
+            if spool is not None:
+                await _discard_failed_shell_pipes(
+                    proc,
+                    (stdout_task, stderr_task),
+                )
+
+        await await_shell_cleanup_task(
+            asyncio.create_task(cleanup_cancelled_process()),
+        )
+        raise
     finally:
         for task in (stdout_task, stderr_task, wait_task):
             if task is not None and not task.done():
@@ -1587,58 +1815,104 @@ async def execute_shell_command(
             return code will be -1 and stderr will contain timeout information.
     """
 
-    prepared = prepare_shell_command(command, cwd)
-    process_limit_policy = resolve_current_process_limit_policy("shell")
-    preexec_fn = process_limit_policy.build_preexec_fn()
-
-    try:
-        async with _tenant_shell_execution_slot(process_limit_policy):
-            with prepared.python_runtime_guard:
-                (
-                    returncode,
-                    stdout_str,
-                    stderr_str,
-                ) = await _execute_platform_subprocess(
-                    prepared.command,
-                    prepared.working_dir,
-                    timeout,
-                    prepared.env,
-                    preexec_fn=preexec_fn,
+    async with _prepared_shell_execution(command, cwd) as (
+        prepared,
+        process_limit_policy,
+    ):
+        preexec_fn = process_limit_policy.build_preexec_fn()
+        spool = None
+        try:
+            spool = (
+                await run_output_work(
+                    create_shell_output_spool,
+                    smart_decode,
+                    _format_shell_response,
                 )
-
-        response_text = _format_shell_response(
-            returncode,
-            stdout_str,
-            stderr_str,
-        )
-        response_text = _format_process_limit_diagnostic(
-            response_text,
-            process_limit_policy,
-        )
-        if returncode != 0:
-            _raise_shell_error(
-                _classify_shell_failure(
-                    returncode,
-                    stderr_str,
-                    process_limits_enforced=(
-                        process_limit_policy.should_enforce
-                    ),
-                    memory_limit_enforced=(
-                        process_limit_policy.should_enforce_memory_limit
-                    ),
-                ),
-                response_text,
+                if sys.platform != "win32"
+                else None
             )
+            async with _tenant_shell_execution_slot(process_limit_policy):
+                with spool.activate() if spool else nullcontext():
+                    (
+                        returncode,
+                        stdout_str,
+                        stderr_str,
+                    ) = await _execute_platform_subprocess(
+                        prepared.command,
+                        prepared.working_dir,
+                        timeout,
+                        prepared.env,
+                        preexec_fn=preexec_fn,
+                    )
 
-        return _tool_text_response(response_text)
+                    response_text = await (
+                        run_shell_spool_work if spool else run_output_work
+                    )(
+                        _prepare_shell_response,
+                        returncode,
+                        stdout_str,
+                        stderr_str,
+                        process_limit_policy,
+                    )
 
-    except Exception as e:
-        if isinstance(e, ToolExecutionError):
-            raise
-        _raise_shell_error(
-            "unexpected_tool_error",
-            f"Error: Shell command execution failed due to \n{e}",
+            return _tool_text_response(response_text)
+
+        except Exception as e:
+            if isinstance(e, ToolExecutionError):
+                raise
+            _raise_shell_error(
+                "unexpected_tool_error",
+                f"Error: Shell command execution failed due to \n{e}",
+            )
+        finally:
+            if spool is not None:
+                await spool.aclose()
+
+
+def _decode_shell_streams(
+    stdout_chunks: list[bytes],
+    stderr_chunks: list[bytes],
+    stderr_suffix: str = "",
+) -> tuple[str, str]:
+    """Join and decode complete output outside the event-loop thread."""
+    stdout = smart_decode(b"".join(stdout_chunks))
+    stderr = smart_decode(b"".join(stderr_chunks))
+    if stderr_suffix:
+        stderr = f"{stderr}\n{stderr_suffix}" if stderr else stderr_suffix
+    return stdout, stderr
+
+
+def _prepare_shell_response(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    policy: CurrentProcessLimitPolicy,
+) -> str:
+    """Format and classify data-size-dependent output in the output worker."""
+    spool = get_active_shell_output_spool()
+    if spool is None:
+        text = _format_process_limit_diagnostic(
+            _format_shell_response(returncode, stdout, stderr),
+            policy,
         )
+    else:
+        text, stderr = spool.prepare_response(
+            returncode,
+            stdout,
+            stderr,
+            _format_process_limit_diagnostic("", policy),
+        )
+    if returncode != 0:
+        _raise_shell_error(
+            _classify_shell_failure(
+                returncode,
+                stderr,
+                process_limits_enforced=policy.should_enforce,
+                memory_limit_enforced=policy.should_enforce_memory_limit,
+            ),
+            text,
+        )
+    return text
 
 
 def smart_decode(data: bytes) -> str:

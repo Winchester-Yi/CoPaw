@@ -43,6 +43,11 @@ from .tool_failure import (
     build_failed_tool_result_block,
 )
 from ..security.tool_guard.models import TOOL_GUARD_DENIED_MARK
+from ..security.shell_installation_policy import (
+    SHELL_TOOL_NAMES,
+    UNCHECKABLE_COMMAND,
+    shell_installation_denial,
+)
 from ..tracing import has_trace_manager, get_trace_manager, get_current_trace
 
 logger = logging.getLogger(__name__)
@@ -1482,6 +1487,48 @@ class ToolGuardMixin:
         finally:
             self._active_tool_guard_acting_tasks.discard(task)
 
+    async def _acting_shell_installation_denial(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """Enforce platform shell policy independently of approvals/config."""
+        if tool_name not in SHELL_TOOL_NAMES:
+            return False
+        # Missing required arguments still go through ordinary tool validation.
+        command = tool_input.get("command", "")
+        reason = (
+            shell_installation_denial(command)
+            if isinstance(command, str)
+            else UNCHECKABLE_COMMAND
+        )
+        if reason is None:
+            return False
+        message = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="shell_policy_denied",
+                        detail=reason,
+                        governance_status="blocked",
+                    ),
+                ),
+            ],
+            "system",
+        )
+        attach_tool_governance_message_metadata(
+            message,
+            tool_call_id=tool_call["id"],
+            governance_status="blocked",
+        )
+        await self.print(message, True)
+        await self.memory.add(message)
+        return True
+
     async def _acting_policy_denial(
         self,
         tool_call: dict[str, Any],
@@ -1609,6 +1656,12 @@ class ToolGuardMixin:
                 tool_name,
                 pre_hook_result.reason or "Hook requested stop",
             )
+        if await self._acting_shell_installation_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+        ):
+            return tool_call, tool_input, True, None
         if pre_hook_result.decision in {
             HookDecision.BLOCK,
             HookDecision.DENY,
@@ -1696,6 +1749,13 @@ class ToolGuardMixin:
         # Resolve mcp_server from toolkit registration since tool_call dict
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
+
+        if await self._acting_shell_installation_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+        ):
+            return None
 
         if await self._acting_policy_denial(
             tool_call,

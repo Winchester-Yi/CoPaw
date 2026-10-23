@@ -64,6 +64,60 @@ const outputTransformContract = `{
   }
 }`;
 
+const outputAppendContract = `{
+  "decision": "allow",
+  "reason": "报告已生成",
+  "hookSpecificOutput": {
+    "appendText": "可选附加文本 / Markdown"
+  }
+}`;
+
+function ManualTestSummary({
+  result,
+}: {
+  result: Record<string, unknown> | null;
+}) {
+  if (!result) return null;
+  const append = result.output_append === true;
+  if (!append && result.output_transform !== true) {
+    return (
+      <pre className={styles.summary}>{JSON.stringify(result, null, 2)}</pre>
+    );
+  }
+  const fields = append
+    ? [
+        "output_append",
+        "status",
+        "append_applied",
+        "append_bytes",
+        "effective_fail_policy",
+        "duration_ms",
+        "failed",
+        "failure_type",
+      ]
+    : [
+        "status",
+        "replacement_applied",
+        "replacement_length",
+        "failed",
+        "failure_type",
+      ];
+  return (
+    <section className={styles.outputTransformSummary}>
+      <p>
+        {append
+          ? "仅执行当前追加处理器，不模拟多处理器排序、累计预算或持久化交付。"
+          : "仅执行当前处理器，不模拟转换链路或总时间预算。"}
+      </p>
+      {fields.map((field) => (
+        <p key={field}>
+          {field}: {String(result[field] ?? "")}
+        </p>
+      ))}
+    </section>
+  );
+}
+
 function findHandler(
   config: HookConfigDraft,
   selected: HookTreeSelection,
@@ -153,7 +207,9 @@ function normalizeCommandShells(config: HookConfigDraft): HookConfigDraft {
         groups?.map((group) => ({
           ...group,
           hooks: group.hooks.map((handler) =>
-            handler.type === "command" ? { ...handler, shell: "bash" } : handler,
+            handler.type === "command"
+              ? { ...handler, shell: "bash" }
+              : handler,
           ),
         })),
       ]),
@@ -446,11 +502,15 @@ function HookManagementPage() {
       return;
     }
     if (
-      handler.outputTransform &&
+      (handler.outputTransform || handler.outputAppend) &&
       (typeof context.assistant_response !== "string" ||
         !context.assistant_response.trim())
     ) {
-      setTestError("输出转换测试需要非空的 assistant_response");
+      setTestError(
+        handler.outputAppend
+          ? "追加消息测试需要非空的 assistant_response"
+          : "输出转换测试需要非空的 assistant_response",
+      );
       return;
     }
     setTestError(null);
@@ -677,12 +737,57 @@ function HookManagementPage() {
                 onChange={(outputTransform) =>
                   onHandlerChange(
                     outputTransform
-                      ? { outputTransform, once: false }
+                      ? { outputTransform, outputAppend: false, once: false }
                       : { outputTransform },
                   )
                 }
               />
             </label>
+            <label className={styles.switchLine}>
+              追加独立消息
+              <Switch
+                aria-label="追加独立消息"
+                checked={Boolean(handler.outputAppend)}
+                onChange={(outputAppend) =>
+                  onHandlerChange(
+                    outputAppend
+                      ? { outputAppend, outputTransform: false, once: false }
+                      : { outputAppend },
+                  )
+                }
+              />
+            </label>
+            {handler.outputAppend && (
+              <div className={styles.outputTransformDetails}>
+                <p>
+                  仅在最终 Stop 校验放行后追加独立文本 / Markdown
+                  消息；首期仅支持 Console，消息进入历史和后续模型上下文。
+                </p>
+                <p>
+                  正文保持流式输出；存在其他输出转换器时，仍遵循其暂存规则。
+                </p>
+                <p>
+                  单条最多 16 KiB UTF-8，每轮累计 64 KiB；单处理器默认 10
+                  秒，阶段总预算默认 30 秒。超限跳过，不截断。
+                </p>
+                <p>
+                  仅接受 decision、非空
+                  reason、hookSpecificOutput.appendText；decision 必须为
+                  allow。appendText
+                  可省略；提供时必须为非空白字符串，不支持其他字段。
+                </p>
+                <pre className={styles.transformContract}>
+                  {outputAppendContract}
+                </pre>
+                <p>
+                  有效失败策略固定为
+                  allow：跳过失败处理器，保留正文，不插入错误气泡。
+                </p>
+                {handler.type === "prompt" && (
+                  <p>Prompt 追加处理器会额外发起一次模型请求。</p>
+                )}
+              </div>
+            )}
             {handler.outputTransform && (
               <div className={styles.outputTransformDetails}>
                 <p>
@@ -740,9 +845,13 @@ function HookManagementPage() {
                   <label>
                     失败策略
                     <Select
+                      aria-label="失败策略"
+                      disabled={Boolean(handler.outputAppend)}
                       value={String(
-                        handler.failPolicy ??
-                          (handler.type === "prompt" ? "block" : "allow"),
+                        handler.outputAppend
+                          ? "allow"
+                          : handler.failPolicy ??
+                              (handler.type === "prompt" ? "block" : "allow"),
                       )}
                       options={[
                         { value: "allow", label: "允许" },
@@ -766,20 +875,34 @@ function HookManagementPage() {
                     仅执行一次
                     <Switch
                       checked={Boolean(handler.once)}
-                      disabled={Boolean(handler.outputTransform)}
+                      disabled={Boolean(
+                        handler.outputTransform || handler.outputAppend,
+                      )}
                       title={
-                        handler.outputTransform
+                        handler.outputAppend
+                          ? "追加独立消息在每个最终放行轮次执行，不支持 once"
+                          : handler.outputTransform
                           ? "转换最终回复开启时必须在每次 Stop 时执行"
                           : undefined
                       }
                       aria-describedby={
-                        handler.outputTransform
+                        handler.outputAppend
+                          ? "once-output-append-reason"
+                          : handler.outputTransform
                           ? "once-output-transform-reason"
                           : undefined
                       }
                       onChange={(once) => onHandlerChange({ once })}
                     />
                   </label>
+                  {handler.outputAppend && (
+                    <p
+                      id="once-output-append-reason"
+                      className={styles.onceTransformReason}
+                    >
+                      追加独立消息在每个最终放行轮次执行，不支持仅执行一次。
+                    </p>
+                  )}
                   {handler.outputTransform && (
                     <p
                       id="once-output-transform-reason"
@@ -828,7 +951,7 @@ function HookManagementPage() {
     return (
       <div className={styles.editor}>
         <h2>Matcher Group</h2>
-        <p>该组内的 Handler 会按顺序执行。</p>
+        <p>Handler 按阶段执行；追加处理器并发生成，按配置顺序展示。</p>
         <label>
           Matcher Group ID
           <Input
@@ -882,28 +1005,7 @@ function HookManagementPage() {
       >
         执行人工测试
       </Button>
-      {testResult && testResult.output_transform === true ? (
-        <section className={styles.outputTransformSummary}>
-          <p>仅执行当前处理器，不模拟转换链路或总时间预算。</p>
-          {[
-            "status",
-            "replacement_applied",
-            "replacement_length",
-            "failed",
-            "failure_type",
-          ].map((field) => (
-            <p key={field}>
-              {field}: {String(testResult[field] ?? "")}
-            </p>
-          ))}
-        </section>
-      ) : (
-        testResult && (
-          <pre className={styles.summary}>
-            {JSON.stringify(testResult, null, 2)}
-          </pre>
-        )
-      )}
+      <ManualTestSummary result={testResult} />
     </section>
   );
 
@@ -1188,7 +1290,7 @@ function HookManagementPage() {
           if (!distributing) setDistributionOpen(false);
         }}
         onOk={() => void distribute()}
-        okText="开始分发"
+        okText="分发并启用"
         okButtonProps={{
           disabled:
             distributionGroupIds.length === 0 ||
@@ -1200,6 +1302,10 @@ function HookManagementPage() {
         width={760}
       >
         <div className={styles.distributionContent}>
+          <p>
+            分发后将开启目标 Default Agent 的 Hook
+            总开关，目标已有分组也会按规则参与执行。
+          </p>
           <section className={styles.distributionSection}>
             <h3>选择 Matcher Group</h3>
             <div className={styles.distributionGroupList}>
@@ -1312,28 +1418,7 @@ function HookManagementPage() {
         >
           我确认将执行真实命令、HTTP 请求或模型调用
         </Checkbox>
-        {testResult && testResult.output_transform === true ? (
-          <section className={styles.outputTransformSummary}>
-            <p>仅执行当前处理器，不模拟转换链路或总时间预算。</p>
-            {[
-              "status",
-              "replacement_applied",
-              "replacement_length",
-              "failed",
-              "failure_type",
-            ].map((field) => (
-              <p key={field}>
-                {field}: {String(testResult[field] ?? "")}
-              </p>
-            ))}
-          </section>
-        ) : (
-          testResult && (
-            <pre className={styles.summary}>
-              {JSON.stringify(testResult, null, 2)}
-            </pre>
-          )
-        )}
+        <ManualTestSummary result={testResult} />
       </Modal>
     </div>
   );

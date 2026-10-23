@@ -1,0 +1,161 @@
+{
+  "created_at": "2026-10-15T15:08:29.466078+00:00",
+  "python": "3.12.12",
+  "platform": "macOS-15.8.1-arm64-arm-64bit",
+  "fixture_kind": "synthetic direct filesystem construction; fixture writes omit per-record fsync",
+  "measurement": "one operation; local warm filesystem; tracemalloc excludes fixture construction and imports; application byte I/O includes payloads only, not metadata syscalls; no RSS or NAS claim",
+  "checkpoint": [
+    {
+      "history_count": 10000,
+      "fixture_journal_bytes": 3298894,
+      "append": {
+        "seconds": 0.019256,
+        "peak_traced_python_bytes": 53144,
+        "application_read_bytes": 90692,
+        "application_write_bytes": 1262,
+        "scandir_entries": 0,
+        "counters": {
+          "checkpoint_read_bytes": 931,
+          "checkpoint_read_calls": 1,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 331,
+          "journal_read_bytes": 89761,
+          "journal_frames_decoded": 272,
+          "ledger_lookup_read_bytes": 0
+        }
+      },
+      "fixture_and_measurement_seconds": 0.195
+    },
+    {
+      "history_count": 100000,
+      "fixture_journal_bytes": 33088895,
+      "append": {
+        "seconds": 0.012783,
+        "peak_traced_python_bytes": 48861,
+        "application_read_bytes": 53896,
+        "application_write_bytes": 1267,
+        "scandir_entries": 0,
+        "counters": {
+          "checkpoint_read_bytes": 935,
+          "checkpoint_read_calls": 1,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 332,
+          "journal_read_bytes": 52961,
+          "journal_frames_decoded": 160,
+          "ledger_lookup_read_bytes": 0
+        }
+      },
+      "fixture_and_measurement_seconds": 1.421
+    }
+  ],
+  "ledger": [
+    {
+      "terminal_turn_count": 10000,
+      "cold_turn_count": 9936,
+      "fixture_payload_bytes": 9349435,
+      "point_lookup_including_root_read": {
+        "seconds": 0.001195,
+        "peak_traced_python_bytes": 97678,
+        "application_read_bytes": 28826,
+        "application_write_bytes": 0,
+        "scandir_entries": 1,
+        "counters": {
+          "checkpoint_read_bytes": 0,
+          "checkpoint_read_calls": 0,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 0,
+          "journal_read_bytes": 0,
+          "journal_frames_decoded": 0,
+          "ledger_lookup_read_bytes": 730
+        }
+      },
+      "latest_cold_chat_including_root_read": {
+        "seconds": 0.011627,
+        "peak_traced_python_bytes": 148884,
+        "application_read_bytes": 46565,
+        "application_write_bytes": 0,
+        "scandir_entries": 16,
+        "counters": {
+          "checkpoint_read_bytes": 0,
+          "checkpoint_read_calls": 0,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 0,
+          "journal_read_bytes": 0,
+          "journal_frames_decoded": 0,
+          "ledger_lookup_read_bytes": 11696
+        }
+      },
+      "commit_65_hot_turns_moving_one_to_cold": {
+        "seconds": 0.012276,
+        "peak_traced_python_bytes": 204512,
+        "application_read_bytes": 27975,
+        "application_write_bytes": 30746,
+        "scandir_entries": 0,
+        "counters": {
+          "checkpoint_read_bytes": 0,
+          "checkpoint_read_calls": 0,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 0,
+          "journal_read_bytes": 0,
+          "journal_frames_decoded": 0,
+          "ledger_lookup_read_bytes": 0
+        }
+      },
+      "fixture_and_measurement_seconds": 2.558
+    },
+    {
+      "terminal_turn_count": 100000,
+      "cold_turn_count": 99936,
+      "fixture_payload_bytes": 94684646,
+      "point_lookup_including_root_read": {
+        "seconds": 0.002013,
+        "peak_traced_python_bytes": 98186,
+        "application_read_bytes": 29093,
+        "application_write_bytes": 0,
+        "scandir_entries": 1,
+        "counters": {
+          "checkpoint_read_bytes": 0,
+          "checkpoint_read_calls": 0,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 0,
+          "journal_read_bytes": 0,
+          "journal_frames_decoded": 0,
+          "ledger_lookup_read_bytes": 735
+        }
+      },
+      "latest_cold_chat_including_root_read": {
+        "seconds": 0.021655,
+        "peak_traced_python_bytes": 162420,
+        "application_read_bytes": 62959,
+        "application_write_bytes": 0,
+        "scandir_entries": 32,
+        "counters": {
+          "checkpoint_read_bytes": 0,
+          "checkpoint_read_calls": 0,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 0,
+          "journal_read_bytes": 0,
+          "journal_frames_decoded": 0,
+          "ledger_lookup_read_bytes": 23552
+        }
+      },
+      "commit_65_hot_turns_moving_one_to_cold": {
+        "seconds": 0.01259,
+        "peak_traced_python_bytes": 203605,
+        "application_read_bytes": 28235,
+        "application_write_bytes": 31023,
+        "scandir_entries": 0,
+        "counters": {
+          "checkpoint_read_bytes": 0,
+          "checkpoint_read_calls": 0,
+          "s3_list_pages": 0,
+          "journal_append_bytes": 0,
+          "journal_read_bytes": 0,
+          "journal_frames_decoded": 0,
+          "ledger_lookup_read_bytes": 0
+        }
+      },
+      "fixture_and_measurement_seconds": 33.15
+    }
+  ]
+}

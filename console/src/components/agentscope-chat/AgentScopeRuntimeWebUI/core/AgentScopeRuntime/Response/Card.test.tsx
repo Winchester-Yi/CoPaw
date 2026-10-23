@@ -103,6 +103,18 @@ afterEach(() => {
   cleanup();
 });
 
+it("keeps copy actions but hides regeneration for appended messages", () => {
+  const appended = {
+    ...textMessage("runtime-id", "supplement"),
+    metadata: { stop_append: { message_id: "append-1" } },
+  };
+  render(<AgentScopeRuntimeResponseCard data={response([appended])} isLast />);
+  expect(screen.getByTestId("actions").getAttribute("data-hide-replace")).toBe(
+    "true",
+  );
+  expect(screen.getByText("supplement")).toBeTruthy();
+});
+
 function textMessage(
   id: string,
   text: string,

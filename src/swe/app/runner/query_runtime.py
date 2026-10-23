@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from types import MappingProxyType
 from typing import Any
@@ -20,6 +21,7 @@ from ...agents.hook_runtime.skill_loader import (
 )
 from ...constant import WORKING_DIR
 from ...providers.provider_manager import ProviderManager
+from ...runtime_workers import run_runtime_state_work
 from ..source_system_config.runtime import get_system_prompt_injections
 from .query_contracts import (
     _QueryPreflight,
@@ -31,67 +33,6 @@ from .query_contracts import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _snapshot_stat_is_current(snapshot: Any) -> bool:
-    """Check snapshot freshness using metadata before content validation."""
-    from ...agents.skill_runtime_snapshot import ManifestStat
-    from ...agents.skills_manager import (
-        get_skill_freshness_token,
-        get_workspace_skill_manifest_path,
-    )
-
-    try:
-        value = get_workspace_skill_manifest_path(
-            snapshot.workspace_dir,
-        ).stat()
-    except OSError:
-        return False
-    if snapshot.manifest_stat != ManifestStat(
-        value.st_mtime_ns,
-        value.st_size,
-        value.st_ino,
-    ):
-        return False
-    return all(
-        get_skill_freshness_token(skill.directory) == skill.freshness_token
-        for skill in snapshot.skills.values()
-    )
-
-
-def _drop_invalid_workspace_skill_hooks(
-    overlay: HookSessionOverlay,
-    removed_skill_names: set[str],
-) -> HookSessionOverlay:
-    """Remove hooks loaded for skills rejected by final snapshot validation.
-
-    Selected skill hooks are loaded before Agent construction.  A skill can
-    change in the small window before the final snapshot check, so retaining
-    its already-loaded hook source would let an invalidated skill continue to
-    affect this query.
-    """
-    if not removed_skill_names:
-        return overlay
-
-    loaded_sources = [
-        source
-        for source in overlay.loaded_skill_sources
-        if source.skill_name not in removed_skill_names
-    ]
-    valid_handler_ids: set[str] = set()
-    for source in loaded_sources:
-        valid_handler_ids.update(source.handler_ids())
-    entries = [
-        entry
-        for entry in overlay.entries
-        if not entry.hook_id.startswith("skill:")
-        or entry.hook_id in valid_handler_ids
-    ]
-    return HookSessionOverlay(
-        loaded_skill_sources=loaded_sources,
-        entries=entries,
-        once_executed=dict(overlay.once_executed),
-    )
 
 
 def build_runtime_mcp_clients(
@@ -239,33 +180,7 @@ async def complete_runtime_activation(
         env_context=env_context,
     )
     if block_response is None:
-        workspace_skill_snapshot = inputs.workspace_skill_snapshot
-        if workspace_skill_snapshot is not None:
-            from ...agents.skill_runtime_snapshot import (
-                validate_workspace_skill_snapshot,
-            )
-
-            validated_snapshot = await validate_workspace_skill_snapshot(
-                workspace_skill_snapshot,
-            )
-            valid_skill_names = set(validated_snapshot.skills)
-            removed_directive_renders = {
-                directive.render()
-                for directive in inputs.selected_skill_directives
-                if getattr(directive, "name", None) not in valid_skill_names
-            }
-            if removed_directive_renders:
-                inputs.selected_skill_directives = [
-                    directive
-                    for directive in inputs.selected_skill_directives
-                    if getattr(directive, "name", None) in valid_skill_names
-                ]
-                inputs.selected_context_directives = [
-                    rendered
-                    for rendered in inputs.selected_context_directives
-                    if rendered not in removed_directive_renders
-                ]
-            inputs.workspace_skill_snapshot = validated_snapshot
+        # Keep the observation acquired at Query startup, even across expiry.
         inputs.hook_overlay = await load_selected_hooks(inputs=inputs)
         return resources, None
     return resources, _RuntimeStartResult(
@@ -373,13 +288,18 @@ async def build_query_runtime_inputs(
     agent_config = (
         preflight.agent_config
         if preflight.agent_config is not None
-        else load_agent_configuration(
+        else await run_runtime_state_work(
+            load_agent_configuration,
             owner.agent_id,
             tenant_id=owner.tenant_id,
         )
     )
-    workspace_skill_snapshot = None
-    if getattr(agent_config, "enable_workspace_skills", True):
+    workspace_skill_snapshot = preflight.workspace_skill_snapshot
+    if workspace_skill_snapshot is None and getattr(
+        agent_config,
+        "enable_workspace_skills",
+        True,
+    ):
         from ...agents.skill_runtime_snapshot import (
             get_workspace_skill_snapshot_async,
         )
@@ -407,7 +327,10 @@ async def build_query_runtime_inputs(
                 generation=0,
                 manifest_stat=ManifestStat(0, 0, 0),
                 skills=MappingProxyType({}),
+                manifest_available=False,
             )
+    # Preflight belongs to the whole Query and survives automatic retries.
+    preflight.workspace_skill_snapshot = workspace_skill_snapshot
     passthrough_headers = dict[str, str](
         current_passthrough_headers() or {},
     )
@@ -424,7 +347,10 @@ async def build_query_runtime_inputs(
         tenant_hooks=(
             preflight.tenant_hooks
             if preflight.tenant_hooks is not None
-            else load_tenant_hooks(owner.tenant_id)
+            else await run_runtime_state_work(
+                load_tenant_hooks,
+                owner.tenant_id,
+            )
         ),
         hook_overlay=(
             preflight.hook_overlay
@@ -462,84 +388,45 @@ async def finalize_query_runtime(
 ) -> _QueryRuntime:
     """Create and initialize the Agent for one assembled query runtime."""
     agent_build_started_at = time.perf_counter()
-    # Close the small admission window between query preparation and Agent
-    # registration. This recheck runs off-loop and keeps registration bound
-    # to content that still matches the launch snapshot.
     workspace_skill_snapshot = inputs.workspace_skill_snapshot
-    if workspace_skill_snapshot is not None:
-        from ...agents.skill_runtime_snapshot import (
-            ManifestStat,
-            WorkspaceSkillSnapshot,
-            validate_workspace_skill_snapshot,
+    prepared_memory_kwargs: dict[str, Any] = {}
+    memory_manager = getattr(owner, "memory_manager", None)
+    prepare_memory = getattr(memory_manager, "prepare_request_memory", None)
+    if (
+        resources.chat is not None
+        and callable(prepare_memory)
+        and os.getenv("ENABLE_MEMORY_MANAGER", "").lower() != "false"
+    ):
+        prepared_memory_kwargs["prepared_request_memory"] = (
+            await prepare_memory(resources.chat.id)
         )
-
-        try:
-            if not await asyncio.to_thread(
-                _snapshot_stat_is_current,
-                workspace_skill_snapshot,
-            ):
-                workspace_skill_snapshot = (
-                    await validate_workspace_skill_snapshot(
-                        workspace_skill_snapshot,
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001
-            # A final freshness check can fail because the workspace is being
-            # replaced or its permissions change.  Keep the ordinary query
-            # alive, but fail closed for every Workspace Skill we cannot
-            # confirm.  This mirrors admission-time snapshot failure policy.
-            logger.warning(
-                "Final Workspace Skill snapshot validation failed; "
-                "continuing without Workspace Skills: %s",
-                exc,
-            )
-            workspace_skill_snapshot = WorkspaceSkillSnapshot(
-                workspace_dir=workspace_skill_snapshot.workspace_dir,
-                generation=0,
-                manifest_stat=ManifestStat(0, 0, 0),
-                skills=MappingProxyType({}),
-            )
-        valid_skill_names = set(workspace_skill_snapshot.skills)
-        removed_skill_names = {
-            getattr(directive, "name", "")
-            for directive in inputs.selected_skill_directives
-            if getattr(directive, "name", None) not in valid_skill_names
-        }
-        removed_directive_renders = {
-            directive.render()
-            for directive in inputs.selected_skill_directives
-            if getattr(directive, "name", None) in removed_skill_names
-        }
-        if removed_directive_renders:
-            inputs.selected_skill_directives = [
-                directive
-                for directive in inputs.selected_skill_directives
-                if getattr(directive, "name", None) in valid_skill_names
-            ]
-            inputs.selected_context_directives = [
-                rendered
-                for rendered in inputs.selected_context_directives
-                if rendered not in removed_directive_renders
-            ]
-            inputs.hook_overlay = _drop_invalid_workspace_skill_hooks(
-                inputs.hook_overlay,
-                removed_skill_names,
-            )
-    agent = owner._create_agent_for_query(
-        agent_config=inputs.agent_config,
-        env_context=resources.env_context,
-        mcp_clients=mcp_clients,
-        request=request,
-        session_id=inputs.session_id,
-        user_id=inputs.user_id,
-        channel=inputs.channel,
-        chat=resources.chat,
-        turn_id=resources.turn_id,
-        hook_overlay=inputs.hook_overlay,
-        auth_token=inputs.auth_token,
-        approved_tool_call=preflight.approved_tool_call,
-        current_user_text=query or get_last_user_text(msgs) or "",
-        workspace_skill_snapshot=workspace_skill_snapshot,
+    agent_kwargs = {
+        "agent_config": inputs.agent_config,
+        "env_context": resources.env_context,
+        "mcp_clients": mcp_clients,
+        "request": request,
+        "session_id": inputs.session_id,
+        "user_id": inputs.user_id,
+        "channel": inputs.channel,
+        "chat": resources.chat,
+        "turn_id": resources.turn_id,
+        "hook_overlay": inputs.hook_overlay,
+        "auth_token": inputs.auth_token,
+        "approved_tool_call": preflight.approved_tool_call,
+        "current_user_text": query or get_last_user_text(msgs) or "",
+        "workspace_skill_snapshot": workspace_skill_snapshot,
+        "prepared_model_config": getattr(
+            inputs,
+            "prepared_model_config",
+            None,
+        ),
+        **prepared_memory_kwargs,
+    }
+    create_async = getattr(owner, "_create_agent_for_query_async", None)
+    agent = (
+        await create_async(**agent_kwargs)
+        if callable(create_async)
+        else owner._create_agent_for_query(**agent_kwargs)
     )
     await agent.register_mcp_clients()
     agent.set_console_output_enabled(enabled=False)
@@ -601,6 +488,13 @@ async def prepare_query_runtime(
         )
         if block_result is not None:
             return block_result
+        from ...agents.model_factory import prepare_model_config_async
+
+        inputs.prepared_model_config = await prepare_model_config_async(
+            agent_id=inputs.agent_config.id,
+            tenant_id=owner.tenant_id,
+            manager=manager,
+        )
         runtime = await owner._finalize_query_runtime(
             request=request,
             query=query,
@@ -611,6 +505,25 @@ async def prepare_query_runtime(
             mcp_clients=mcp_clients,
         )
         return _RuntimeStartResult(runtime=runtime)
+    except asyncio.CancelledError:
+        if mcp_clients:
+            cleanup = asyncio.create_task(
+                owner._cleanup_query_runtime_mcp_clients(mcp_clients),
+            )
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                cleanup.result()
+            except Exception:
+                logger.exception(
+                    "MCP cleanup failed after runtime preparation cancellation",
+                )
+        raise
     except Exception:
         if mcp_clients:
             await owner._cleanup_query_runtime_mcp_clients(mcp_clients)

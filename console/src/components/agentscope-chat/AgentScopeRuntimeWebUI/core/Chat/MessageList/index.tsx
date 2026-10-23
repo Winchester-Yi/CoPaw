@@ -200,6 +200,10 @@ export default function MessageList(props: {
   } | null>(null);
   const [historyScrollElement, setHistoryScrollElement] =
     React.useState<HTMLDivElement | null>(null);
+  const bindListRef = React.useCallback((list: typeof listRef.current) => {
+    listRef.current = list;
+    setHistoryScrollElement(list?.getScrollElement() ?? null);
+  }, []);
   const prevMessagesLengthRef = React.useRef(safeMessages.length);
   const historyCursorRef = React.useRef<string | null>(null);
   const historyLoadingRef = React.useRef(false);
@@ -218,6 +222,8 @@ export default function MessageList(props: {
   const pendingHistoryAnchorRef = React.useRef<HistoryAnchorTransaction | null>(
     null,
   );
+  const readingAnchorRef = React.useRef<HistoryAnchorTransaction | null>(null);
+  const restoredScrollTopRef = React.useRef<number | null>(null);
   const [visibleHistoryCount, setVisibleHistoryCount] = React.useState(
     CURRENT_HISTORY_BATCH_SIZE,
   );
@@ -226,6 +232,7 @@ export default function MessageList(props: {
   const [historyLoadState, setHistoryLoadState] =
     React.useState<HistoryLoadState>("idle");
   const [historyRetrying, setHistoryRetrying] = React.useState(false);
+  const [historyGeneration, setHistoryGeneration] = React.useState(0);
   const backendChatId = sessionApi.getChatIdForSession(currentSessionId || "");
   const historicalMessageCount = React.useMemo(
     () => safeMessages.filter(isHistoricalMessage).length,
@@ -332,19 +339,24 @@ export default function MessageList(props: {
     return clearPendingCompactionRefresh;
   }, [backendChatId, clearPendingCompactionRefresh, currentSessionId]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     historyCursorRef.current = null;
     historyLoadingRef.current = false;
     historyDoneRef.current = false;
     loadedArchiveMessageIdsRef.current = new Set();
     loadedBoundaryIdsRef.current = new Set();
     historyGenerationRef.current += 1;
+    setHistoryGeneration(historyGenerationRef.current);
+    pendingHistoryAnchorRef.current = null;
+    readingAnchorRef.current = null;
+    restoredScrollTopRef.current = null;
+    isPrependingHistoryRef.current = false;
     setVisibleHistoryCount(CURRENT_HISTORY_BATCH_SIZE);
     setArchivePagingStarted(false);
     setHistoryExhausted(false);
     setHistoryLoadState("idle");
     setHistoryRetrying(false);
-  }, [backendChatId]);
+  }, [backendChatId, currentSessionId]);
 
   const loadOlderHistory = React.useCallback(
     async (retrying = false) => {
@@ -353,7 +365,7 @@ export default function MessageList(props: {
         historyLoadingRef.current ||
         historyDoneRef.current
       ) {
-        return;
+        return false;
       }
       historyLoadingRef.current = true;
       setHistoryRetrying(retrying);
@@ -365,7 +377,14 @@ export default function MessageList(props: {
           historyCursorRef.current,
           ARCHIVE_HISTORY_PAGE_LIMIT,
         );
-        if (generation !== historyGenerationRef.current) return;
+        if (generation !== historyGenerationRef.current) return false;
+        if (
+          page.has_more &&
+          (!page.next_cursor || page.next_cursor === historyCursorRef.current)
+        ) {
+          setHistoryLoadState("error");
+          return false;
+        }
         historyDoneRef.current = !page.has_more;
         setHistoryExhausted(!page.has_more);
         historyCursorRef.current = page.next_cursor || null;
@@ -410,10 +429,12 @@ export default function MessageList(props: {
           ];
         });
         setHistoryLoadState(page.has_more ? "idle" : "exhausted");
+        return true;
       } catch {
         if (generation === historyGenerationRef.current) {
           setHistoryLoadState("error");
         }
+        return false;
       } finally {
         if (generation === historyGenerationRef.current) {
           historyLoadingRef.current = false;
@@ -444,11 +465,11 @@ export default function MessageList(props: {
       setVisibleHistoryCount((current) =>
         Math.min(current + CURRENT_HISTORY_BATCH_SIZE, historicalMessageCount),
       );
-      return;
+      return true;
     }
 
     setArchivePagingStarted(true);
-    await loadOlderHistory();
+    return loadOlderHistory();
   }, [
     captureVisibleHistoryAnchor,
     hasHiddenLocalHistory,
@@ -457,14 +478,9 @@ export default function MessageList(props: {
   ]);
 
   React.useLayoutEffect(() => {
-    const nextScrollElement = listRef.current?.getScrollElement() ?? null;
-    setHistoryScrollElement((current) =>
-      current === nextScrollElement ? current : nextScrollElement,
-    );
-  }, [currentSessionId, safeMessages.length]);
-
-  React.useLayoutEffect(() => {
-    const transaction = pendingHistoryAnchorRef.current;
+    const transaction =
+      pendingHistoryAnchorRef.current ||
+      (!isAtLatestRef.current ? readingAnchorRef.current : null);
     const scrollElement = listRef.current?.getScrollElement();
     if (
       !transaction ||
@@ -475,6 +491,7 @@ export default function MessageList(props: {
       pendingHistoryAnchorRef.current = null;
       return;
     }
+    pendingHistoryAnchorRef.current = transaction;
 
     const restoreAnchor = (anchor: HistoryAnchorTransaction) => {
       const anchorElement = getHistoryAnchorElement(
@@ -490,10 +507,13 @@ export default function MessageList(props: {
         previousOffset: anchor.offset,
         nextOffset,
       });
+      restoredScrollTopRef.current = scrollElement.scrollTop;
     };
 
     restoreAnchor(transaction);
-    const frameId = requestAnimationFrame(() => {
+    let framesRemaining = 2;
+    let frameId: number;
+    const restoreAfterLayout = () => {
       const pending = pendingHistoryAnchorRef.current;
       if (
         !pending ||
@@ -504,18 +524,58 @@ export default function MessageList(props: {
         return;
       }
       restoreAnchor(pending);
-      pendingHistoryAnchorRef.current = null;
-    });
-    return () => cancelAnimationFrame(frameId);
-  }, [currentSessionId, visibleMessages]);
+      framesRemaining -= 1;
+      if (framesRemaining > 0) {
+        frameId = requestAnimationFrame(restoreAfterLayout);
+      } else {
+        pendingHistoryAnchorRef.current = null;
+        readingAnchorRef.current = pending;
+      }
+    };
+    frameId = requestAnimationFrame(restoreAfterLayout);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            if (
+              transaction.generation === historyGenerationRef.current &&
+              transaction.sessionId === currentSessionId &&
+              (pendingHistoryAnchorRef.current === transaction ||
+                readingAnchorRef.current === transaction)
+            ) {
+              restoreAnchor(transaction);
+            }
+          });
+    // Observe content boxes: the fixed-height viewport does not resize as cards grow.
+    Array.from(scrollElement.children).forEach(
+      (child) => resizeObserver?.observe(child),
+    );
+    return () => {
+      cancelAnimationFrame(frameId);
+      resizeObserver?.disconnect();
+    };
+  }, [currentSessionId, historyScrollElement, visibleMessages]);
 
-  useHistoryPreload({
+  const historyPreload = useHistoryPreload({
     scrollElement: historyScrollElement,
     onNearStart: advanceHistory,
+    onRetry: () => loadOlderHistory(true),
     disabled:
       historyLoadState !== "idle" ||
       (!hasHiddenLocalHistory && (!backendChatId || historyExhausted)),
-    resetKey: backendChatId,
+    resetKey: `${currentSessionId}:${backendChatId}:${historyGeneration}`,
+    isAnchorRecoveryPending: () => pendingHistoryAnchorRef.current !== null,
+    isRestoringAnchor: () => {
+      const restoredTop = restoredScrollTopRef.current;
+      if (
+        restoredTop !== null &&
+        historyScrollElement &&
+        Math.abs(historyScrollElement.scrollTop - restoredTop) <= 2
+      )
+        return true;
+      restoredScrollTopRef.current = null;
+      return false;
+    },
   });
 
   useChatAnywhereEventEmitter(
@@ -538,6 +598,11 @@ export default function MessageList(props: {
         loadedArchiveMessageIdsRef.current = new Set();
         loadedBoundaryIdsRef.current = new Set();
         historyGenerationRef.current += 1;
+        setHistoryGeneration(historyGenerationRef.current);
+        pendingHistoryAnchorRef.current = null;
+        readingAnchorRef.current = null;
+        restoredScrollTopRef.current = null;
+        isPrependingHistoryRef.current = false;
         setHistoryExhausted(false);
         setHistoryLoadState("idle");
         setHistoryRetrying(false);
@@ -601,7 +666,7 @@ export default function MessageList(props: {
 
   return (
     <Bubble.List
-      ref={listRef}
+      ref={bindListRef}
       pagination={false}
       disableBrowserScrollAnchoring
       order="desc"
@@ -614,12 +679,38 @@ export default function MessageList(props: {
       autoScrollToBottom="initial"
       onBottomStateChange={(isAtBottom) => {
         isAtLatestRef.current = isAtBottom;
+        const scrollElement = listRef.current?.getScrollElement();
+        if (
+          restoredScrollTopRef.current !== null &&
+          scrollElement &&
+          Math.abs(scrollElement.scrollTop - restoredScrollTopRef.current) <= 2
+        )
+          return;
+        restoredScrollTopRef.current = null;
+        pendingHistoryAnchorRef.current = null;
+        const anchor =
+          !isAtBottom && scrollElement
+            ? getVisibleMessageAnchor(scrollElement)
+            : null;
+        readingAnchorRef.current = anchor
+          ? {
+              ...anchor,
+              generation: historyGenerationRef.current,
+              sessionId: currentSessionId,
+            }
+          : null;
       }}
       topContent={
         <HistoryLoadStatus
           state={historyLoadState}
           retrying={historyRetrying}
-          onRetry={() => void loadOlderHistory(true)}
+          onRetry={historyPreload.retry}
+          onLoadMore={
+            hasHiddenLocalHistory || (backendChatId && !historyExhausted)
+              ? historyPreload.loadMore
+              : undefined
+          }
+          advancing={historyPreload.isAdvancing}
         />
       }
     />

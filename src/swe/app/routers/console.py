@@ -24,6 +24,7 @@ from typing import (
 )
 from urllib.parse import quote, unquote, urlparse
 
+import anyio
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from fastapi import (
     APIRouter,
@@ -569,11 +570,13 @@ async def _stream_with_keepalive(
                 # No real event within interval — send keepalive
                 yield ": keep-alive\n\n"
     finally:
-        pending.cancel()
-        try:
-            await pending
-        except (asyncio.CancelledError, StopAsyncIteration):
-            pass
+        with anyio.CancelScope(shield=True):
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            await source.aclose()
 
 
 def _safe_filename(name: str) -> str:
@@ -1129,19 +1132,28 @@ async def _current_recovery_terminal_snapshot(
     from ..runner.api import _build_chat_history, _read_history_state
 
     session = workspace.runner.session
+    state = await _read_history_state(
+        session,
+        chat.session_id,
+        chat.user_id,
+    )
     history = await _build_chat_history(
         chat,
         session=session,
         workspace=workspace,
         status_override="idle",
         non_blocking=True,
-    )
-    state = await _read_history_state(
-        session,
-        chat.session_id,
-        chat.user_id,
+        state=state,
     )
     turn_states = state.get("turn_states")
+    if state.get("schema_version") == 3:
+        latest = await session.get_latest_turn_state(
+            chat.session_id,
+            chat.user_id,
+            state,
+            chat.id,
+        )
+        turn_states = dict([latest]) if latest is not None else {}
     if not isinstance(turn_states, dict):
         return history.model_dump(mode="json"), None, None
     for msgid, turn_state in reversed(tuple(turn_states.items())):
@@ -1493,17 +1505,26 @@ async def post_console_chat(
     else:
         suppression_ctx = None
 
-    return await _dispatch_console_stream(
-        workspace=workspace,
-        console_channel=console_channel,
-        native_payload=native_payload,
-        session_id=session_id,
-        identity=identity,
-        request_mapping=request_mapping,
-        is_reconnect=is_reconnect,
-        is_current_reconnect=is_current_reconnect,
-        suppression_ctx=suppression_ctx,
-    )
+    from ..runner.sse_replay import ReplayUnavailable
+
+    try:
+        return await _dispatch_console_stream(
+            workspace=workspace,
+            console_channel=console_channel,
+            native_payload=native_payload,
+            session_id=session_id,
+            identity=identity,
+            request_mapping=request_mapping,
+            is_reconnect=is_reconnect,
+            is_current_reconnect=is_current_reconnect,
+            suppression_ctx=suppression_ctx,
+        )
+    except ReplayUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+            headers={"Retry-After": "1"},
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2135,36 +2156,83 @@ async def _dispatch_console_stream(
             )
         )
 
+    from ..runner.sse_replay import ReplaySubscription, ReplayUnavailable
+    from ..runner.sse_response import ReplayStreamingResponse
+
+    resumable = (
+        request_mapping.get("stream_protocol") == "cursor-v1"
+        and isinstance(queue, ReplaySubscription)
+        and stream_identity is not None
+    )
+    if resumable:
+        try:
+            queue.resume(
+                stream_identity.turn_id,
+                request_mapping.get("after_event_id"),
+            )
+        except ReplayUnavailable as exc:
+            await tracker.detach_subscriber(stream_identity, queue)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     async def event_generator() -> AsyncGenerator[str, None]:
         if stream_identity is None:
             raise RuntimeError("answer-turn identity is missing")
         stream_it = tracker.stream(stream_identity, queue)
-        yield ": keep-alive\n\n"
         try:
+            yield ": keep-alive\n\n"
             try:
                 async for event_data in stream_it:
+                    if resumable and not event_data.startswith(
+                        "event: stream.",
+                    ):
+                        event_data = (
+                            f"id: {stream_identity.turn_id}:{queue.last_sequence}\n"
+                            + event_data
+                        )
                     yield event_data
+                if resumable:
+                    yield 'event: stream.end\ndata: {"object":"stream_end"}\n\n'
             except Exception as e:
                 logger.exception("Console chat stream error")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
         finally:
-            await stream_it.aclose()
+            # ASGI disconnect uses level cancellation; cleanup may wait for
+            # the tracker lock and must finish before leaving its cancel scope.
+            with anyio.CancelScope(shield=True):
+                await stream_it.aclose()
+                # The initial keepalive may block before stream_it starts.
+                if isinstance(queue, ReplaySubscription):
+                    await tracker.detach_subscriber(stream_identity, queue)
 
-    return StreamingResponse(
+    stream_headers = _console_chat_stream_headers(
+        chat_id=run_key,
+        session_id=(
+            native_payload.get("meta", {}).get("resolved_session_id")
+            or session_id
+        ),
+        msgid=(
+            stream_identity.msgid
+            if is_current_reconnect and stream_identity is not None
+            else msgid
+        ),
+    )
+    if resumable:
+        stream_headers["X-Swe-Stream-Protocol"] = "cursor-v1"
+    response_class = (
+        ReplayStreamingResponse if resumable else StreamingResponse
+    )
+    response_options = {}
+    if resumable:
+
+        async def detach_unstarted_subscription():
+            await tracker.detach_subscriber(stream_identity, queue)
+
+        response_options["on_close"] = detach_unstarted_subscription
+    return response_class(
         _stream_with_keepalive(event_generator()),
         media_type="text/event-stream",
-        headers=_console_chat_stream_headers(
-            chat_id=run_key,
-            session_id=(
-                native_payload.get("meta", {}).get("resolved_session_id")
-                or session_id
-            ),
-            msgid=(
-                stream_identity.msgid
-                if is_current_reconnect and stream_identity is not None
-                else msgid
-            ),
-        ),
+        headers=stream_headers,
+        **response_options,
     )
 
 

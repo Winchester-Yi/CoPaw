@@ -7,7 +7,7 @@ Provides the TraceManager for event collection, batching, and storage.
 import asyncio
 import logging
 import uuid
-from contextvars import ContextVar
+from contextvars import Context, ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -17,6 +17,7 @@ from ..database import DatabaseConnection
 from .models import EventType, Span, Trace, TraceStatus
 from .store import TraceStore
 from .sanitizer import sanitize_dict, sanitize_string
+from .writer import SpanWriter
 
 logger = logging.getLogger(__name__)
 
@@ -162,15 +163,15 @@ class TraceManager:
         self._db = db
         self._owns_db = db is None  # Only owns DB if we create it ourselves
 
-        # Batch queue for spans
-        self._span_queue: list[Span] = []
-        self._span_queue_lock = asyncio.Lock()
-
-        # Pending spans cache (for update before flush)
-        self._pending_spans: dict[str, Span] = {}
+        self._writer = SpanWriter(config)
+        self._span_queue = self._writer.queue
+        self._pending_spans = self._writer.pending
 
         # Background flush task
         self._flush_task: Optional[asyncio.Task] = None
+        self._close_task: Optional[asyncio.Task] = None
+        self._store_close_task: Optional[asyncio.Task] = None
+        self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
 
         # Active traces
@@ -226,13 +227,11 @@ class TraceManager:
         self._store = TraceStore(self.config, self._db, owns_db=self._owns_db)
         await self._store.initialize()
 
-        # Start flush task only if we have a database
         self._running = True
-        if self._db is not None:
-            self._flush_task = asyncio.create_task(self._flush_loop())
+        self._writer.start(self.store)
+        self._flush_task = self._writer.task
 
         # Start cleanup task if retention is configured
-        self._cleanup_task: Optional[asyncio.Task] = None
         if self.config.retention_days > 0:
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -243,16 +242,17 @@ class TraceManager:
         )
 
     async def close(self) -> None:
-        """Close the trace manager."""
-        self._running = False
+        """Drain once; cancellation of a caller does not abandon shared writes."""
+        if self._close_task is None:
+            self._close_task = Context().run(
+                asyncio.create_task,
+                self._close(),
+            )
+        await asyncio.shield(self._close_task)
 
-        if self._flush_task:
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-            self._flush_task = None
+    async def _close(self) -> None:
+        """Close storage only after the writer has exited."""
+        self._running = False
 
         if self._cleanup_task:
             self._cleanup_task.cancel()
@@ -262,14 +262,38 @@ class TraceManager:
                 pass
             self._cleanup_task = None
 
-        # Final flush
-        await self._flush_spans()
-
-        if self._store:
-            await self._store.flush()
-            await self._store.close()
+        try:
+            await self._writer.close()
+        finally:
+            if self._writer.task is not None and not self._writer.task.done():
+                # Pool close can wait for the same stalled connection too.
+                self._store_close_task = Context().run(
+                    asyncio.create_task,
+                    self._close_store_after_writer(),
+                )
+            else:
+                self._flush_task = None
+                if self._store:
+                    await self._store.close()
 
         logger.info("TraceManager closed")
+
+    async def _close_store_after_writer(self) -> None:
+        """Defer resource release without extending the shutdown deadline."""
+        task = self._writer.task
+        assert task is not None
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                return
+        except Exception:
+            logger.exception("Tracing writer failed during deferred shutdown")
+        self._flush_task = None
+        try:
+            await self.store.close()
+        except Exception:
+            logger.exception("Failed to close tracing store after writer exit")
 
     # Trace lifecycle
 
@@ -638,51 +662,16 @@ class TraceManager:
             except Exception as e:
                 logger.warning("Failed to end skill detection: %s", e)
 
-        # Flush pending spans before ending trace with retry mechanism
-        # 确保所有 spans 写入完成，避免 trace 结束后 spans 丢失
-        max_flush_retries = 3
-        for retry in range(max_flush_retries):
-            await self._flush_spans()
-            # 检查是否还有 pending spans（属于当前 trace 的）
-            async with self._span_queue_lock:
-                pending_for_trace = [
-                    s for s in self._span_queue if s.trace_id == trace_id
-                ]
-            if not pending_for_trace:
-                break
-            if retry < max_flush_retries - 1:
-                logger.warning(
-                    "Flush retry %d/%d for trace %s, %d spans pending",
-                    retry + 1,
-                    max_flush_retries,
-                    trace_id[:8],
-                    len(pending_for_trace),
-                )
-                await asyncio.sleep(0.1)  # 短暂等待后重试
+        await self._writer.flush(trace_id)
 
-        # 最终检查：如果仍有 pending spans，记录错误但不阻塞
-        async with self._span_queue_lock:
-            final_pending = [
-                s for s in self._span_queue if s.trace_id == trace_id
-            ]
-        if final_pending:
-            logger.error(
-                "Failed to flush %d spans for trace %s after %d retries. "
-                "Spans may be lost: %s",
-                len(final_pending),
-                trace_id[:8],
-                max_flush_retries,
-                [s.span_id[:8] for s in final_pending[:5]],
-            )
-
-        trace = self._active_traces.pop(
+        trace = self._active_traces.get(
             trace_id,
-            None,
         ) or await self.store.get_trace(trace_id)
         if trace is None:
             logger.warning("Trace not found: %s", trace_id)
             return
 
+        trace = trace.model_copy()
         trace.end_time = datetime.now()
         trace.duration_ms = int(
             (trace.end_time - trace.start_time).total_seconds() * 1000,
@@ -691,6 +680,7 @@ class TraceManager:
         trace.error = error
 
         await self.store.update_trace(trace)
+        self._active_traces.pop(trace_id, None)
 
         # Clear context
         if ctx and ctx.trace_id == trace_id:
@@ -773,22 +763,9 @@ class TraceManager:
             tool_input=tool_input,
             mcp_server=mcp_server,
         )
-        # Update trace statistics (skills_used, tools_used, input_tokens if > 0)
+        await self._writer.submit(span)
+        # Count only accepted events; admission may be cancelled under backpressure.
         self._update_trace_totals(trace_id, span, None, input_tokens)
-
-        # Add to pending cache and queue atomically
-        # 在锁内检查是否需要立即 flush，避免锁外检查导致的竞态条件
-        need_flush = False
-        async with self._span_queue_lock:
-            self._pending_spans[span_id] = span
-            self._span_queue.append(span)
-            if len(self._span_queue) >= self.config.batch_size:
-                need_flush = True
-
-        # 在锁外执行 flush，使用 await 确保写入完成
-        # 防止 end_trace 时数据尚未写入数据库
-        if need_flush:
-            await self._flush_spans()
 
         return span_id
 
@@ -830,6 +807,7 @@ class TraceManager:
             )
             return
 
+        span = span.model_copy()
         self._update_span_fields(
             span,
             output_tokens,
@@ -837,6 +815,7 @@ class TraceManager:
             tool_output,
             error,
         )
+        await self._writer.submit(span, inserted=True)
         self._update_trace_totals(
             span.trace_id,
             span,
@@ -844,10 +823,6 @@ class TraceManager:
             input_tokens,
             is_update=True,
         )
-
-        # Persist if not in pending cache
-        if span_id not in self._pending_spans:
-            await self.store.update_span(span)
 
     async def _find_span(
         self,
@@ -1164,7 +1139,7 @@ class TraceManager:
             return
 
         # Update event_type to TOOL_CALL_END for proper statistics
-        span.event_type = EventType.TOOL_CALL_END
+        span = span.model_copy(update={"event_type": EventType.TOOL_CALL_END})
         # Update other fields, passing the span object to avoid re-fetching
         await self.update_span(
             span_id=span_id,
@@ -1243,123 +1218,9 @@ class TraceManager:
 
     # Background flush
 
-    async def _flush_loop(self) -> None:
-        """Background loop for flushing queued spans."""
-        while self._running:
-            try:
-                await asyncio.sleep(self.config.flush_interval)
-                await self._flush_spans()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Error in flush loop: %s", e)
-
     async def _flush_spans(self) -> None:
-        """Flush queued spans to storage.
-
-        Handles race condition with update_span and ensures data integrity:
-        1. Keep spans in _pending_spans during INSERT
-        2. After successful INSERT, check for spans updated during INSERT
-        3. UPDATE those spans that were modified during the race window
-        4. Only clear _pending_spans after successful write
-        5. On failure, re-queue spans for retry (avoid data loss)
-        """
-        async with self._span_queue_lock:
-            if not self._span_queue:
-                return
-            spans = self._span_queue.copy()
-            self._span_queue.clear()
-            # Record span IDs that were originally in queue (without end_time)
-            # for later detection of updates during INSERT
-            spans_before_insert = {
-                span.span_id: span.end_time for span in spans
-            }
-
-        if not spans:
-            return
-
-        flush_success = False
-        try:
-            if self._db is None:
-                self._flush_spans_log_only(spans)
-                flush_success = True
-            else:
-                rowcount = await self.store.batch_create_spans(spans)
-                # 验证写入是否成功（至少写入了一部分数据）
-                if rowcount > 0:
-                    await self._update_spans_modified_during_flush(
-                        spans,
-                        spans_before_insert,
-                    )
-                    flush_success = True
-                else:
-                    logger.warning(
-                        "batch_create_spans returned 0 rows, treating as failure",
-                    )
-        except Exception as e:
-            logger.error(
-                "Failed to flush spans (will retry later): %s. "
-                "Affected %d spans: %s",
-                e,
-                len(spans),
-                [s.span_id[:8] for s in spans[:5]],  # 只显示前 5 个 span_id
-            )
-
-        # 只有写入成功时才清除 _pending_spans
-        # 写入失败时将 spans 重新放回队列，等待下次 flush 重试
-        async with self._span_queue_lock:
-            if flush_success:
-                for span in spans:
-                    self._pending_spans.pop(span.span_id, None)
-            else:
-                # 将失败的 spans 重新放回队列头部，优先重试
-                # 避免与新 spans 混在一起导致顺序混乱
-                for span in reversed(spans):
-                    self._span_queue.insert(0, span)
-                logger.info(
-                    "Re-queued %d failed spans for retry",
-                    len(spans),
-                )
-
-    def _flush_spans_log_only(self, spans: list["Span"]) -> None:
-        """Log skill-related spans in log-only mode."""
-        for span in spans:
-            if span.skill_name:
-                logger.info(
-                    "[SKILL SPAN] skill='%s', type=%s",
-                    span.skill_name,
-                    (
-                        span.event_type.value
-                        if hasattr(span.event_type, "value")
-                        else span.event_type
-                    ),
-                )
-
-    async def _update_spans_modified_during_flush(
-        self,
-        spans: list["Span"],
-        spans_before_insert: dict[str, Optional["datetime"]],
-    ) -> None:
-        """UPDATE spans that were modified during INSERT race window.
-
-        Args:
-            spans: List of spans that were flushed
-            spans_before_insert: Dict mapping span_id to original end_time
-        """
-        for span in spans:
-            # If span has end_time now but didn't before, it was updated
-            if (
-                span.end_time is not None
-                and spans_before_insert.get(span.span_id) is None
-            ):
-                try:
-                    await self.store.update_span(span)
-                except Exception as update_error:
-                    logger.warning(
-                        "Failed to update span %s after flush: %s",
-                        span.span_id,
-                        update_error,
-                    )
+        """Wait for accepted writes without owning or cancelling the writer."""
+        await self._writer.flush()
 
     async def _cleanup_loop(self) -> None:
         """Background loop for cleaning up old trace data."""

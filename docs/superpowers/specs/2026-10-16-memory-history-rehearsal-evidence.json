@@ -1,0 +1,1105 @@
+{
+  "scope": "anonymized-historical-copies-local-filesystem",
+  "passed": true,
+  "selected_original_files_unchanged": true,
+  "old_revision": "ddb68363426757632f9e8558c53c5b8a0bebddde",
+  "inventory": {
+    "invalid": 0,
+    "unsupported": 0,
+    "changed": 0,
+    "symlinks_skipped": 0,
+    "omitted_derived_indexes": true,
+    "sessions": {
+      "count": 340,
+      "bytes": 8403803,
+      "turns": 16,
+      "max_turns": 3,
+      "min_bytes": 3896,
+      "max_bytes": 441852,
+      "schemas": {
+        "1": 324,
+        "2": 16
+      }
+    },
+    "journals": {
+      "count": 40,
+      "bytes": 181034,
+      "events": 707,
+      "max_events": 77,
+      "min_bytes": 257,
+      "max_bytes": 19728
+    }
+  },
+  "cases": [
+    {
+      "id": "session-01",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001446,
+          "peak_new_python_bytes": 231274,
+          "process_peak_rss_bytes": 123027456
+        },
+        "migration": {
+          "seconds": 0.004731,
+          "peak_new_python_bytes": 292868,
+          "process_peak_rss_bytes": 123273216
+        },
+        "validation": {
+          "seconds": 0.00145,
+          "peak_new_python_bytes": 222685,
+          "process_peak_rss_bytes": 123813888
+        },
+        "export": {
+          "seconds": 0.003575,
+          "peak_new_python_bytes": 222681,
+          "process_peak_rss_bytes": 123879424
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123928576,
+      "initial_total": 3,
+      "exported_total": 4,
+      "hot_turns_after_migration": 3,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 28164
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 28484
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 28297
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 5
+      },
+      "source_bytes": 28098,
+      "fixture_bytes": 28164
+    },
+    {
+      "id": "session-02",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001463,
+          "peak_new_python_bytes": 319558,
+          "process_peak_rss_bytes": 122961920
+        },
+        "migration": {
+          "seconds": 0.004148,
+          "peak_new_python_bytes": 387480,
+          "process_peak_rss_bytes": 123289600
+        },
+        "validation": {
+          "seconds": 0.001403,
+          "peak_new_python_bytes": 310654,
+          "process_peak_rss_bytes": 123813888
+        },
+        "export": {
+          "seconds": 0.003026,
+          "peak_new_python_bytes": 310650,
+          "process_peak_rss_bytes": 123813888
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123879424,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 40776
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 41052
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 40908
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 40898,
+      "fixture_bytes": 40776
+    },
+    {
+      "id": "session-03",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001338,
+          "peak_new_python_bytes": 122445,
+          "process_peak_rss_bytes": 122994688
+        },
+        "migration": {
+          "seconds": 0.003992,
+          "peak_new_python_bytes": 176884,
+          "process_peak_rss_bytes": 123207680
+        },
+        "validation": {
+          "seconds": 0.001352,
+          "peak_new_python_bytes": 113541,
+          "process_peak_rss_bytes": 123224064
+        },
+        "export": {
+          "seconds": 0.002947,
+          "peak_new_python_bytes": 121851,
+          "process_peak_rss_bytes": 123224064
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123224064,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 12617
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 12893
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 12749
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 12547,
+      "fixture_bytes": 12617
+    },
+    {
+      "id": "session-04",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001425,
+          "peak_new_python_bytes": 155107,
+          "process_peak_rss_bytes": 124846080
+        },
+        "migration": {
+          "seconds": 0.004097,
+          "peak_new_python_bytes": 199227,
+          "process_peak_rss_bytes": 125042688
+        },
+        "validation": {
+          "seconds": 0.001379,
+          "peak_new_python_bytes": 146203,
+          "process_peak_rss_bytes": 125124608
+        },
+        "export": {
+          "seconds": 0.003075,
+          "peak_new_python_bytes": 146199,
+          "process_peak_rss_bytes": 125124608
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 125124608,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 17283
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 17559
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 17415
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 17253,
+      "fixture_bytes": 17283
+    },
+    {
+      "id": "session-05",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001641,
+          "peak_new_python_bytes": 248735,
+          "process_peak_rss_bytes": 123191296
+        },
+        "migration": {
+          "seconds": 0.005908,
+          "peak_new_python_bytes": 335275,
+          "process_peak_rss_bytes": 123748352
+        },
+        "validation": {
+          "seconds": 0.001524,
+          "peak_new_python_bytes": 239961,
+          "process_peak_rss_bytes": 124059648
+        },
+        "export": {
+          "seconds": 0.004582,
+          "peak_new_python_bytes": 239957,
+          "process_peak_rss_bytes": 124076032
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 124076032,
+      "initial_total": 2,
+      "exported_total": 3,
+      "hot_turns_after_migration": 2,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 30655
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 30953
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 30787
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 4
+      },
+      "source_bytes": 30093,
+      "fixture_bytes": 30655
+    },
+    {
+      "id": "session-06",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001415,
+          "peak_new_python_bytes": 150081,
+          "process_peak_rss_bytes": 122961920
+        },
+        "migration": {
+          "seconds": 0.004722,
+          "peak_new_python_bytes": 213440,
+          "process_peak_rss_bytes": 123256832
+        },
+        "validation": {
+          "seconds": 0.001391,
+          "peak_new_python_bytes": 141352,
+          "process_peak_rss_bytes": 123666432
+        },
+        "export": {
+          "seconds": 0.003361,
+          "peak_new_python_bytes": 145213,
+          "process_peak_rss_bytes": 123666432
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123666432,
+      "initial_total": 2,
+      "exported_total": 3,
+      "hot_turns_after_migration": 2,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 16565
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 16863
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 16700
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 4
+      },
+      "source_bytes": 16341,
+      "fixture_bytes": 16565
+    },
+    {
+      "id": "session-07",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001597,
+          "peak_new_python_bytes": 140032,
+          "process_peak_rss_bytes": 123453440
+        },
+        "migration": {
+          "seconds": 0.004675,
+          "peak_new_python_bytes": 212210,
+          "process_peak_rss_bytes": 123699200
+        },
+        "validation": {
+          "seconds": 0.001401,
+          "peak_new_python_bytes": 131258,
+          "process_peak_rss_bytes": 123764736
+        },
+        "export": {
+          "seconds": 0.003323,
+          "peak_new_python_bytes": 144056,
+          "process_peak_rss_bytes": 123764736
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123764736,
+      "initial_total": 2,
+      "exported_total": 3,
+      "hot_turns_after_migration": 2,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 15126
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 15424
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 15258
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 4
+      },
+      "source_bytes": 14866,
+      "fixture_bytes": 15126
+    },
+    {
+      "id": "session-08",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001418,
+          "peak_new_python_bytes": 122574,
+          "process_peak_rss_bytes": 123338752
+        },
+        "migration": {
+          "seconds": 0.004028,
+          "peak_new_python_bytes": 176962,
+          "process_peak_rss_bytes": 123568128
+        },
+        "validation": {
+          "seconds": 0.001364,
+          "peak_new_python_bytes": 113646,
+          "process_peak_rss_bytes": 123830272
+        },
+        "export": {
+          "seconds": 0.00293,
+          "peak_new_python_bytes": 121926,
+          "process_peak_rss_bytes": 123830272
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123830272,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 12632
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 12908
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 12764
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 12564,
+      "fixture_bytes": 12632
+    },
+    {
+      "id": "session-09",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001376,
+          "peak_new_python_bytes": 122165,
+          "process_peak_rss_bytes": 122978304
+        },
+        "migration": {
+          "seconds": 0.004048,
+          "peak_new_python_bytes": 176975,
+          "process_peak_rss_bytes": 123224064
+        },
+        "validation": {
+          "seconds": 0.001395,
+          "peak_new_python_bytes": 113261,
+          "process_peak_rss_bytes": 123518976
+        },
+        "export": {
+          "seconds": 0.003425,
+          "peak_new_python_bytes": 121638,
+          "process_peak_rss_bytes": 123650048
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 123699200,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 12577
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 12853
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 12709
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 12509,
+      "fixture_bytes": 12577
+    },
+    {
+      "id": "session-10",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001405,
+          "peak_new_python_bytes": 122704,
+          "process_peak_rss_bytes": 125190144
+        },
+        "migration": {
+          "seconds": 0.003977,
+          "peak_new_python_bytes": 177312,
+          "process_peak_rss_bytes": 125452288
+        },
+        "validation": {
+          "seconds": 0.00159,
+          "peak_new_python_bytes": 113800,
+          "process_peak_rss_bytes": 125534208
+        },
+        "export": {
+          "seconds": 0.003074,
+          "peak_new_python_bytes": 121834,
+          "process_peak_rss_bytes": 125534208
+        }
+      },
+      "baseline_rss_bytes": 22937600,
+      "case_peak_rss_bytes": 125534208,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 12654
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 12930
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 12786
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 12586,
+      "fixture_bytes": 12654
+    },
+    {
+      "id": "session-11",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001374,
+          "peak_new_python_bytes": 123981,
+          "process_peak_rss_bytes": 124747776
+        },
+        "migration": {
+          "seconds": 0.003999,
+          "peak_new_python_bytes": 178236,
+          "process_peak_rss_bytes": 124944384
+        },
+        "validation": {
+          "seconds": 0.001564,
+          "peak_new_python_bytes": 115053,
+          "process_peak_rss_bytes": 124977152
+        },
+        "export": {
+          "seconds": 0.00304,
+          "peak_new_python_bytes": 122393,
+          "process_peak_rss_bytes": 124977152
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 125009920,
+      "initial_total": 1,
+      "exported_total": 2,
+      "hot_turns_after_migration": 1,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 12833
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 13109
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 12965
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 12769,
+      "fixture_bytes": 12833
+    },
+    {
+      "id": "session-12",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.00143,
+          "peak_new_python_bytes": 52352,
+          "process_peak_rss_bytes": 125108224
+        },
+        "migration": {
+          "seconds": 0.003388,
+          "peak_new_python_bytes": 82401,
+          "process_peak_rss_bytes": 125173760
+        },
+        "validation": {
+          "seconds": 0.001393,
+          "peak_new_python_bytes": 41388,
+          "process_peak_rss_bytes": 125255680
+        },
+        "export": {
+          "seconds": 0.002856,
+          "peak_new_python_bytes": 52110,
+          "process_peak_rss_bytes": 125272064
+        }
+      },
+      "baseline_rss_bytes": 22446080,
+      "case_peak_rss_bytes": 125272064,
+      "initial_total": 0,
+      "exported_total": 1,
+      "hot_turns_after_migration": 0,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 3939
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 4248
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 4126
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 2
+      },
+      "source_bytes": 3896,
+      "fixture_bytes": 3939
+    },
+    {
+      "id": "session-13",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001418,
+          "peak_new_python_bytes": 135528,
+          "process_peak_rss_bytes": 124256256
+        },
+        "migration": {
+          "seconds": 0.004105,
+          "peak_new_python_bytes": 174674,
+          "process_peak_rss_bytes": 124616704
+        },
+        "validation": {
+          "seconds": 0.001379,
+          "peak_new_python_bytes": 126703,
+          "process_peak_rss_bytes": 124731392
+        },
+        "export": {
+          "seconds": 0.00311,
+          "peak_new_python_bytes": 126851,
+          "process_peak_rss_bytes": 124764160
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 124764160,
+      "initial_total": 0,
+      "exported_total": 1,
+      "hot_turns_after_migration": 0,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 14486
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 14795
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 14673
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 2
+      },
+      "source_bytes": 14439,
+      "fixture_bytes": 14486
+    },
+    {
+      "id": "session-14",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001797,
+          "peak_new_python_bytes": 353795,
+          "process_peak_rss_bytes": 124747776
+        },
+        "migration": {
+          "seconds": 0.005125,
+          "peak_new_python_bytes": 430184,
+          "process_peak_rss_bytes": 125042688
+        },
+        "validation": {
+          "seconds": 0.001777,
+          "peak_new_python_bytes": 344970,
+          "process_peak_rss_bytes": 125190144
+        },
+        "export": {
+          "seconds": 0.004497,
+          "peak_new_python_bytes": 345118,
+          "process_peak_rss_bytes": 125190144
+        }
+      },
+      "baseline_rss_bytes": 23216128,
+      "case_peak_rss_bytes": 125288448,
+      "initial_total": 0,
+      "exported_total": 1,
+      "hot_turns_after_migration": 0,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 45667
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 45976
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 45854
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 2
+      },
+      "source_bytes": 45214,
+      "fixture_bytes": 45667
+    },
+    {
+      "id": "session-15",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.002326,
+          "peak_new_python_bytes": 1160013,
+          "process_peak_rss_bytes": 126631936
+        },
+        "migration": {
+          "seconds": 0.009267,
+          "peak_new_python_bytes": 1500716,
+          "process_peak_rss_bytes": 127975424
+        },
+        "validation": {
+          "seconds": 0.002337,
+          "peak_new_python_bytes": 1151188,
+          "process_peak_rss_bytes": 128598016
+        },
+        "export": {
+          "seconds": 0.008158,
+          "peak_new_python_bytes": 1151336,
+          "process_peak_rss_bytes": 128598016
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 128876544,
+      "initial_total": 0,
+      "exported_total": 1,
+      "hot_turns_after_migration": 0,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 160841
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 161150
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 161028
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 2
+      },
+      "source_bytes": 157933,
+      "fixture_bytes": 160841
+    },
+    {
+      "id": "session-16",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.002718,
+          "peak_new_python_bytes": 1133168,
+          "process_peak_rss_bytes": 126550016
+        },
+        "migration": {
+          "seconds": 0.012259,
+          "peak_new_python_bytes": 1451691,
+          "process_peak_rss_bytes": 128483328
+        },
+        "validation": {
+          "seconds": 0.002659,
+          "peak_new_python_bytes": 1124288,
+          "process_peak_rss_bytes": 129695744
+        },
+        "export": {
+          "seconds": 0.010529,
+          "peak_new_python_bytes": 1124239,
+          "process_peak_rss_bytes": 129712128
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 129826816,
+      "initial_total": 0,
+      "exported_total": 1,
+      "hot_turns_after_migration": 0,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 157006
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 157279
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 157157
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 2
+      },
+      "source_bytes": 156749,
+      "fixture_bytes": 157006
+    },
+    {
+      "id": "session-17",
+      "kind": "session",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.004218,
+          "peak_new_python_bytes": 3245308,
+          "process_peak_rss_bytes": 132595712
+        },
+        "migration": {
+          "seconds": 0.023072,
+          "peak_new_python_bytes": 4121369,
+          "process_peak_rss_bytes": 138018816
+        },
+        "validation": {
+          "seconds": 0.008135,
+          "peak_new_python_bytes": 3235991,
+          "process_peak_rss_bytes": 146948096
+        },
+        "export": {
+          "seconds": 0.026068,
+          "peak_new_python_bytes": 3236395,
+          "process_peak_rss_bytes": 149880832
+        }
+      },
+      "baseline_rss_bytes": 24117248,
+      "case_peak_rss_bytes": 150142976,
+      "initial_total": 0,
+      "exported_total": 1,
+      "hot_turns_after_migration": 0,
+      "cold_turns_after_migration": 0,
+      "initial_storage": {
+        "files": 1,
+        "bytes": 458706
+      },
+      "migrated_storage": {
+        "files": 3,
+        "bytes": 458979
+      },
+      "rollback_storage": {
+        "files": 1,
+        "bytes": 458857
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 2
+      },
+      "source_bytes": 441852,
+      "fixture_bytes": 458706
+    },
+    {
+      "id": "journal-01",
+      "kind": "journal",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.001103,
+          "peak_new_python_bytes": 22981,
+          "process_peak_rss_bytes": 126124032
+        },
+        "migration": {
+          "seconds": 0.007952,
+          "peak_new_python_bytes": 56975,
+          "process_peak_rss_bytes": 126255104
+        },
+        "validation": {
+          "seconds": 0.001355,
+          "peak_new_python_bytes": 26870,
+          "process_peak_rss_bytes": 126271488
+        },
+        "export": {
+          "seconds": 0.003851,
+          "peak_new_python_bytes": 33700,
+          "process_peak_rss_bytes": 126271488
+        }
+      },
+      "baseline_rss_bytes": 23527424,
+      "case_peak_rss_bytes": 126271488,
+      "initial_total": 1,
+      "exported_total": 2,
+      "initial_storage": {
+        "files": 2,
+        "bytes": 293
+      },
+      "migrated_storage": {
+        "files": 10,
+        "bytes": 2826
+      },
+      "rollback_storage": {
+        "files": 5,
+        "bytes": 1135
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 3
+      },
+      "source_bytes": 257,
+      "fixture_bytes": 293
+    },
+    {
+      "id": "journal-02",
+      "kind": "journal",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.00284,
+          "peak_new_python_bytes": 28494,
+          "process_peak_rss_bytes": 126451712
+        },
+        "migration": {
+          "seconds": 0.026207,
+          "peak_new_python_bytes": 79044,
+          "process_peak_rss_bytes": 126566400
+        },
+        "validation": {
+          "seconds": 0.002126,
+          "peak_new_python_bytes": 29317,
+          "process_peak_rss_bytes": 126582784
+        },
+        "export": {
+          "seconds": 0.004632,
+          "peak_new_python_bytes": 36769,
+          "process_peak_rss_bytes": 126582784
+        }
+      },
+      "baseline_rss_bytes": 23887872,
+      "case_peak_rss_bytes": 126599168,
+      "initial_total": 12,
+      "exported_total": 13,
+      "initial_storage": {
+        "files": 2,
+        "bytes": 3498
+      },
+      "migrated_storage": {
+        "files": 10,
+        "bytes": 10174
+      },
+      "rollback_storage": {
+        "files": 5,
+        "bytes": 4165
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 14
+      },
+      "source_bytes": 3066,
+      "fixture_bytes": 3498
+    },
+    {
+      "id": "journal-03",
+      "kind": "journal",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.007043,
+          "peak_new_python_bytes": 40712,
+          "process_peak_rss_bytes": 125059072
+        },
+        "migration": {
+          "seconds": 0.108189,
+          "peak_new_python_bytes": 122211,
+          "process_peak_rss_bytes": 125452288
+        },
+        "validation": {
+          "seconds": 0.003981,
+          "peak_new_python_bytes": 35384,
+          "process_peak_rss_bytes": 125485056
+        },
+        "export": {
+          "seconds": 0.007469,
+          "peak_new_python_bytes": 44236,
+          "process_peak_rss_bytes": 125485056
+        }
+      },
+      "baseline_rss_bytes": 22822912,
+      "case_peak_rss_bytes": 125517824,
+      "initial_total": 38,
+      "exported_total": 39,
+      "initial_storage": {
+        "files": 2,
+        "bytes": 11091
+      },
+      "migrated_storage": {
+        "files": 10,
+        "bytes": 27571
+      },
+      "rollback_storage": {
+        "files": 5,
+        "bytes": 11342
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 40
+      },
+      "source_bytes": 9723,
+      "fixture_bytes": 11091
+    },
+    {
+      "id": "journal-04",
+      "kind": "journal",
+      "passed": true,
+      "measurements": {
+        "preview": {
+          "seconds": 0.01279,
+          "peak_new_python_bytes": 63425,
+          "process_peak_rss_bytes": 125632512
+        },
+        "migration": {
+          "seconds": 0.314488,
+          "peak_new_python_bytes": 195693,
+          "process_peak_rss_bytes": 125960192
+        },
+        "validation": {
+          "seconds": 0.006909,
+          "peak_new_python_bytes": 44432,
+          "process_peak_rss_bytes": 126042112
+        },
+        "export": {
+          "seconds": 0.012005,
+          "peak_new_python_bytes": 55142,
+          "process_peak_rss_bytes": 126042112
+        }
+      },
+      "baseline_rss_bytes": 24002560,
+      "case_peak_rss_bytes": 126156800,
+      "initial_total": 77,
+      "exported_total": 78,
+      "initial_storage": {
+        "files": 2,
+        "bytes": 22500
+      },
+      "migrated_storage": {
+        "files": 10,
+        "bytes": 53704
+      },
+      "rollback_storage": {
+        "files": 5,
+        "bytes": 22127
+      },
+      "legacy": {
+        "passed": true,
+        "total_after_legacy_write": 79
+      },
+      "source_bytes": 19728,
+      "fixture_bytes": 22500
+    }
+  ],
+  "memory_semantics": "tracemalloc=new allocations per operation; RSS=per-case cumulative OS high-water including imports, not isolated per-operation resident memory",
+  "code_baseline": "cd236c93c",
+  "tool_sha256": {
+    "scripts/memory_history_fixture.py": "95a376f4ee7fdb6acc783ab64a0723a40743dcb6a70ada7733589f49c1774fb1",
+    "scripts/rehearse_memory_history.py": "184a51a8f6790010701e6ed73210197cc849af1cff04be894c44410b555291e3"
+  },
+  "run_directory": "/private/tmp/swe-history-rehearsal-20261016-r2"
+}

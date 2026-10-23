@@ -1,0 +1,1763 @@
+{
+  "description": "All scheduled measurement runs, sequential fresh Python processes; smoke runs excluded.",
+  "started_utc": "2026-10-15T03:57:55.487860+00:00",
+  "git_head": "f832ddf337888cc33a8a9f523ccbeba3ca9992bb",
+  "source_sha256_before": {
+    "src/swe/app/runner/sse_replay.py": "564418fd8b7323fb9be79634d81d407c25959063647705d5be283d623bb8073c",
+    "scripts/benchmark_sse_replay.py": "69f9ce63dc3ec52446e590685153c15b06935cf5ee4ec34e60c690cf33339185",
+    "src/swe/performance_metrics.py": "3931a758bd59c7fd15cad6fe519386837d7ce3fe1106ac3e259a30b656611e6f"
+  },
+  "runs": [
+    {
+      "id": "burst-1-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 1.607290332991397,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:57:55 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 1.5061150410037953,
+        "rss_start_bytes": 25493504,
+        "rss_finish_bytes": 28999680,
+        "rss_sampled_peak_bytes": 28999680,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 298,
+          "p50_ms": 0.07416698383167375,
+          "p95_ms": 0.12420799350365985,
+          "p99_ms": 0.24804199812933792,
+          "max_ms": 0.6738329876679926
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 0.5963750008959323,
+          "p95_ms": 6.082542007789016,
+          "p99_ms": 10.716582997702062,
+          "max_ms": 20.877291972283274
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.21629099501296878,
+          "p95_ms": 0.3443750028964132,
+          "p99_ms": 5.24816699908115,
+          "max_ms": 15.445708995684981
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 21195560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 20000,
+          "written_records": 20000
+        },
+        "replay_counter_deltas": {
+          "written_records": 20000,
+          "write_batches": 20000,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 33915,
+          "sample_count": 2048,
+          "queue_avg_ms": 0.08656163102216397,
+          "queue_p95_ms": 0.10824998025782406,
+          "queue_p99_ms": 0.14787499094381928,
+          "queue_max_ms": 5.182791006518528,
+          "execution_avg_ms": 0.0233091432164656,
+          "execution_p95_ms": 0.07683399599045515,
+          "execution_p99_ms": 0.1287079940084368,
+          "execution_max_ms": 0.27208300889469683
+        },
+        "stream_worker_completed_delta": 33915,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 20000,
+          "written_records": 20000
+        }
+      }
+    },
+    {
+      "id": "burst-1-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000",
+      "exit_code": 0,
+      "wall_seconds": 0.5868426249944605,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:57:57 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 0.4915110000001732,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 30130176,
+        "rss_sampled_peak_bytes": 30130176,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 91,
+          "p50_ms": 0.5411250214092432,
+          "p95_ms": 0.9364170010667293,
+          "p99_ms": 1.0186250193510205,
+          "max_ms": 1.0186250193510205
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 1.8566660000942647,
+          "p95_ms": 12.596000015037134,
+          "p99_ms": 18.871542008128017,
+          "max_ms": 29.877374996431172
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.0007920025382190943,
+          "p95_ms": 0.0010830117389559746,
+          "p99_ms": 5.2414999809116125,
+          "max_ms": 15.776915999595076
+        },
+        "pending_memory_sampled_peak_bytes": 311552,
+        "per_stream_pending_observed_peak_bytes": 77888,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 21195560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 628,
+          "written_records": 20000
+        },
+        "replay_counter_deltas": {
+          "written_records": 20000,
+          "write_batches": 628,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 1214,
+          "sample_count": 1214,
+          "queue_avg_ms": 0.5286643985680748,
+          "queue_p95_ms": 5.116334010381252,
+          "queue_p99_ms": 10.768250009277835,
+          "queue_max_ms": 16.59037498757243,
+          "execution_avg_ms": 0.10099008476957709,
+          "execution_p95_ms": 0.3354579966980964,
+          "execution_p99_ms": 0.5209580122027546,
+          "execution_max_ms": 0.9634159796405584
+        },
+        "stream_worker_completed_delta": 1214,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 628,
+          "written_records": 20000
+        }
+      }
+    },
+    {
+      "id": "burst-2-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000",
+      "exit_code": 0,
+      "wall_seconds": 0.6419116250181105,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:57:57 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 0.5399570419976953,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 30490624,
+        "rss_sampled_peak_bytes": 30490624,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 98,
+          "p50_ms": 0.5570839904248713,
+          "p95_ms": 0.9837920125573872,
+          "p99_ms": 1.0601250152103603,
+          "max_ms": 1.0601250152103603
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 1.9746249890886247,
+          "p95_ms": 12.67629099311307,
+          "p99_ms": 17.99929200205952,
+          "max_ms": 29.117166996002197
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.0007920025382190943,
+          "p95_ms": 0.0011250085663050413,
+          "p99_ms": 5.301541998051107,
+          "max_ms": 17.04166701529175
+        },
+        "pending_memory_sampled_peak_bytes": 311552,
+        "per_stream_pending_observed_peak_bytes": 77888,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 21195560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 628,
+          "written_records": 20000
+        },
+        "replay_counter_deltas": {
+          "written_records": 20000,
+          "write_batches": 628,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 1202,
+          "sample_count": 1202,
+          "queue_avg_ms": 0.6809122101843478,
+          "queue_p95_ms": 5.308833991875872,
+          "queue_p99_ms": 10.961915977532044,
+          "queue_max_ms": 16.239666001638398,
+          "execution_avg_ms": 0.09920825748746988,
+          "execution_p95_ms": 0.32516600913368165,
+          "execution_p99_ms": 0.4881249915342778,
+          "execution_max_ms": 0.7903340156190097
+        },
+        "stream_worker_completed_delta": 1202,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 628,
+          "written_records": 20000
+        }
+      }
+    },
+    {
+      "id": "burst-2-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 1.5983797080116346,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:57:58 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 1.5010582910035737,
+        "rss_start_bytes": 25788416,
+        "rss_finish_bytes": 29622272,
+        "rss_sampled_peak_bytes": 29622272,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 297,
+          "p50_ms": 0.07191702490672458,
+          "p95_ms": 0.11562498286366452,
+          "p99_ms": 0.17358302022330452,
+          "max_ms": 0.6717080005910246
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 0.5996250256430358,
+          "p95_ms": 6.633500015595928,
+          "p99_ms": 10.614958999212831,
+          "max_ms": 15.995708003174514
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.21749999723397195,
+          "p95_ms": 0.34858298022300005,
+          "p99_ms": 5.266791005851701,
+          "max_ms": 15.484375006053597
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 21195560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 20000,
+          "written_records": 20000
+        },
+        "replay_counter_deltas": {
+          "written_records": 20000,
+          "write_batches": 20000,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 33808,
+          "sample_count": 2048,
+          "queue_avg_ms": 0.15549558058580715,
+          "queue_p95_ms": 0.12316700303927064,
+          "queue_p99_ms": 5.1372500020079315,
+          "queue_max_ms": 10.173958988161758,
+          "execution_avg_ms": 0.026033547300130522,
+          "execution_p95_ms": 0.08362499647773802,
+          "execution_p99_ms": 0.14466597349382937,
+          "execution_max_ms": 0.27600000612437725
+        },
+        "stream_worker_completed_delta": 33808,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 20000,
+          "written_records": 20000
+        }
+      }
+    },
+    {
+      "id": "burst-3-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 1.6223702499992214,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:57:59 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 1.5306354580097832,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 28704768,
+        "rss_sampled_peak_bytes": 28688384,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 302,
+          "p50_ms": 0.0762500031851231,
+          "p95_ms": 0.12225000420585264,
+          "p99_ms": 0.18300000112503756,
+          "max_ms": 0.6722079752944409
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 0.6105839856900275,
+          "p95_ms": 5.7088340108748525,
+          "p99_ms": 10.799957992276177,
+          "max_ms": 20.990249991882592
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.22270798217505217,
+          "p95_ms": 0.35141699481755495,
+          "p99_ms": 5.275833013001829,
+          "max_ms": 10.541374998865649
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 21195560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 20000,
+          "written_records": 20000
+        },
+        "replay_counter_deltas": {
+          "written_records": 20000,
+          "write_batches": 20000,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 33893,
+          "sample_count": 2048,
+          "queue_avg_ms": 0.12694249684841452,
+          "queue_p95_ms": 0.11670900858007371,
+          "queue_p99_ms": 5.085375014459714,
+          "queue_max_ms": 15.317708981456235,
+          "execution_avg_ms": 0.021969918932995824,
+          "execution_p95_ms": 0.07654100772924721,
+          "execution_p99_ms": 0.13604099513031542,
+          "execution_max_ms": 0.2307079848833382
+        },
+        "stream_worker_completed_delta": 33893,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 20000,
+          "written_records": 20000
+        }
+      }
+    },
+    {
+      "id": "burst-3-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000",
+      "exit_code": 0,
+      "wall_seconds": 0.5837550419964828,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:01 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 0.4889104589819908,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 30605312,
+        "rss_sampled_peak_bytes": 30605312,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 90,
+          "p50_ms": 0.5739160161465405,
+          "p95_ms": 0.8346669829916208,
+          "p99_ms": 1.2468750111293048,
+          "max_ms": 1.2468750111293048
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 2.1388750174082816,
+          "p95_ms": 12.561084004119039,
+          "p99_ms": 18.027290992904454,
+          "max_ms": 23.443249985575676
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.0008329807315021753,
+          "p95_ms": 0.0010420044418424368,
+          "p99_ms": 5.314958019880578,
+          "max_ms": 11.122833006083965
+        },
+        "pending_memory_sampled_peak_bytes": 311552,
+        "per_stream_pending_observed_peak_bytes": 77888,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 21195560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 628,
+          "written_records": 20000
+        },
+        "replay_counter_deltas": {
+          "written_records": 20000,
+          "write_batches": 628,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 1210,
+          "sample_count": 1210,
+          "queue_avg_ms": 0.661814133545253,
+          "queue_p95_ms": 5.234832991845906,
+          "queue_p99_ms": 10.833417007233948,
+          "queue_max_ms": 16.48466699407436,
+          "execution_avg_ms": 0.10353050859498768,
+          "execution_p95_ms": 0.3462500171735883,
+          "execution_p99_ms": 0.44945802073925734,
+          "execution_max_ms": 0.7730420038569719
+        },
+        "stream_worker_completed_delta": 1210,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 21035560,
+          "read_bytes": 21035560,
+          "write_batches": 628,
+          "written_records": 20000
+        }
+      }
+    },
+    {
+      "id": "burst16-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 16 --events 5000 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 5.3908405840047635,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:02 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 16,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 5.259683916985523,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 38256640,
+        "rss_sampled_peak_bytes": 38256640,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 1029,
+          "p50_ms": 0.09333302034065116,
+          "p95_ms": 0.18683399423025537,
+          "p99_ms": 0.34862501081079234,
+          "max_ms": 5.621082998113707
+        },
+        "publish_start_to_consume": {
+          "sample_count": 80000,
+          "p50_ms": 4.863625013967976,
+          "p95_ms": 24.74916700157337,
+          "p99_ms": 41.88341702683829,
+          "max_ms": 87.47295799548738
+        },
+        "publish_call_duration": {
+          "sample_count": 80000,
+          "p50_ms": 0.2871250035241246,
+          "p95_ms": 5.454416997963563,
+          "p99_ms": 15.67358398460783,
+          "max_ms": 66.62858300842345
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 84812240,
+          "active_logs": 16,
+          "active_subscribers": 32,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 84172240,
+          "read_bytes": 84172240,
+          "write_batches": 80000,
+          "written_records": 80000
+        },
+        "replay_counter_deltas": {
+          "written_records": 80000,
+          "write_batches": 80000,
+          "written_bytes": 84172240,
+          "read_bytes": 84172240,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 113426,
+          "sample_count": 2048,
+          "queue_avg_ms": 0.36079203349004274,
+          "queue_p95_ms": 0.21050000214017928,
+          "queue_p99_ms": 10.17758299713023,
+          "queue_max_ms": 15.559291990939528,
+          "execution_avg_ms": 0.029857483013984165,
+          "execution_p95_ms": 0.0958339951466769,
+          "execution_p99_ms": 0.1652910141274333,
+          "execution_max_ms": 0.37995801540091634
+        },
+        "stream_worker_completed_delta": 113426,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 84172240,
+          "read_bytes": 84172240,
+          "write_batches": 80000,
+          "written_records": 80000
+        }
+      }
+    },
+    {
+      "id": "burst16-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 16 --events 5000",
+      "exit_code": 0,
+      "wall_seconds": 1.1981837920029648,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:07 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 16,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 1.0768581250158604,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 41041920,
+        "rss_sampled_peak_bytes": 41041920,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 197,
+          "p50_ms": 0.508000002009794,
+          "p95_ms": 0.936917004873976,
+          "p99_ms": 1.2073750013951212,
+          "max_ms": 1.279583991272375
+        },
+        "publish_start_to_consume": {
+          "sample_count": 80000,
+          "p50_ms": 13.85154199670069,
+          "p95_ms": 97.06379199633375,
+          "p99_ms": 134.5385409949813,
+          "max_ms": 174.84150000382215
+        },
+        "publish_call_duration": {
+          "sample_count": 80000,
+          "p50_ms": 0.0007910130079835653,
+          "p95_ms": 0.0010829826351255178,
+          "p99_ms": 5.2813750226050615,
+          "max_ms": 110.26924999896437
+        },
+        "pending_memory_sampled_peak_bytes": 1245888,
+        "per_stream_pending_observed_peak_bytes": 77952,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 84812240,
+          "active_logs": 16,
+          "active_subscribers": 32,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 84172240,
+          "read_bytes": 84172240,
+          "write_batches": 2512,
+          "written_records": 80000
+        },
+        "replay_counter_deltas": {
+          "written_records": 80000,
+          "write_batches": 2512,
+          "written_bytes": 84172240,
+          "read_bytes": 84172240,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 4518,
+          "sample_count": 2048,
+          "queue_avg_ms": 2.773265857101137,
+          "queue_p95_ms": 15.89679199969396,
+          "queue_p99_ms": 49.95554199558683,
+          "queue_max_ms": 87.43300000787713,
+          "execution_avg_ms": 0.1852538278654947,
+          "execution_p95_ms": 0.6334999925456941,
+          "execution_p99_ms": 0.9674169996287674,
+          "execution_max_ms": 2.9569159960374236
+        },
+        "stream_worker_completed_delta": 4518,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 84172240,
+          "read_bytes": 84172240,
+          "write_batches": 2512,
+          "written_records": 80000
+        }
+      }
+    },
+    {
+      "id": "sparse-1-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 40 --rate 20",
+      "exit_code": 0,
+      "wall_seconds": 2.0571647079777904,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:08 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 40,
+        "target_events_per_second_per_tenant": 20.0,
+        "elapsed_seconds": 1.9536189580103382,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 26034176,
+        "rss_sampled_peak_bytes": 26001408,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 351,
+          "p50_ms": 0.6725419999565928,
+          "p95_ms": 0.7222090254072099,
+          "p99_ms": 0.7770419807638972,
+          "max_ms": 1.0485840076580644
+        },
+        "publish_start_to_consume": {
+          "sample_count": 160,
+          "p50_ms": 7.625958998687565,
+          "p95_ms": 8.281167014501989,
+          "p99_ms": 8.628875017166138,
+          "max_ms": 8.659499988425523
+        },
+        "publish_call_duration": {
+          "sample_count": 160,
+          "p50_ms": 0.011958007235080004,
+          "p95_ms": 0.04362498293630779,
+          "p99_ms": 0.04895799793303013,
+          "max_ms": 0.05716699524782598
+        },
+        "pending_memory_sampled_peak_bytes": 4860,
+        "per_stream_pending_observed_peak_bytes": 1215,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 169240,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        },
+        "replay_counter_deltas": {
+          "written_records": 160,
+          "write_batches": 160,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 320,
+          "sample_count": 320,
+          "queue_avg_ms": 0.3399782526685158,
+          "queue_p95_ms": 0.7414580031763762,
+          "queue_p99_ms": 0.8839590009301901,
+          "queue_max_ms": 0.9666249970905483,
+          "execution_avg_ms": 0.14540079664584482,
+          "execution_p95_ms": 0.334459007717669,
+          "execution_p99_ms": 0.5473750061355531,
+          "execution_max_ms": 1.039541995851323
+        },
+        "stream_worker_completed_delta": 320,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        }
+      }
+    },
+    {
+      "id": "sparse-1-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 40 --rate 20 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 2.068298500002129,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:10 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 40,
+        "target_events_per_second_per_tenant": 20.0,
+        "elapsed_seconds": 1.9527820829825941,
+        "rss_start_bytes": 24920064,
+        "rss_finish_bytes": 25886720,
+        "rss_sampled_peak_bytes": 25853952,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 348,
+          "p50_ms": 0.6787919893395155,
+          "p95_ms": 0.7285410002805291,
+          "p99_ms": 0.7696250150911509,
+          "max_ms": 1.0485420108307153
+        },
+        "publish_start_to_consume": {
+          "sample_count": 160,
+          "p50_ms": 1.9288329931441694,
+          "p95_ms": 2.6095420180354267,
+          "p99_ms": 3.009708016179502,
+          "max_ms": 3.1686670263297856
+        },
+        "publish_call_duration": {
+          "sample_count": 160,
+          "p50_ms": 1.012708991765976,
+          "p95_ms": 1.4560830022674054,
+          "p99_ms": 1.652417005971074,
+          "max_ms": 2.14641701313667
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 169240,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        },
+        "replay_counter_deltas": {
+          "written_records": 160,
+          "write_batches": 160,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 320,
+          "sample_count": 320,
+          "queue_avg_ms": 0.307282175799628,
+          "queue_p95_ms": 0.6717090145684779,
+          "queue_p99_ms": 0.7732919766567647,
+          "queue_max_ms": 0.9112079860642552,
+          "execution_avg_ms": 0.1291722625865077,
+          "execution_p95_ms": 0.29879200155846775,
+          "execution_p99_ms": 0.39000000106170774,
+          "execution_max_ms": 0.788709003245458
+        },
+        "stream_worker_completed_delta": 320,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        }
+      }
+    },
+    {
+      "id": "sparse-2-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 40 --rate 20 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 2.0715966249990743,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:12 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 40,
+        "target_events_per_second_per_tenant": 20.0,
+        "elapsed_seconds": 1.9530965409940109,
+        "rss_start_bytes": 25165824,
+        "rss_finish_bytes": 26034176,
+        "rss_sampled_peak_bytes": 26001408,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 348,
+          "p50_ms": 0.6800000020302831,
+          "p95_ms": 0.7369169953744857,
+          "p99_ms": 0.7991249777842312,
+          "max_ms": 0.9338750143069773
+        },
+        "publish_start_to_consume": {
+          "sample_count": 160,
+          "p50_ms": 1.8045420001726598,
+          "p95_ms": 2.4194580037146807,
+          "p99_ms": 2.479290997143835,
+          "max_ms": 2.5040409818757325
+        },
+        "publish_call_duration": {
+          "sample_count": 160,
+          "p50_ms": 1.04599999031052,
+          "p95_ms": 1.4419170038308948,
+          "p99_ms": 1.596584013896063,
+          "max_ms": 1.6007079975679517
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 169240,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        },
+        "replay_counter_deltas": {
+          "written_records": 160,
+          "write_batches": 160,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 320,
+          "sample_count": 320,
+          "queue_avg_ms": 0.31010857592264074,
+          "queue_p95_ms": 0.6533340201713145,
+          "queue_p99_ms": 0.7570000016130507,
+          "queue_max_ms": 0.9123329946305603,
+          "execution_avg_ms": 0.12645403412534506,
+          "execution_p95_ms": 0.2730419801082462,
+          "execution_p99_ms": 0.40529199759475887,
+          "execution_max_ms": 0.7927080150693655
+        },
+        "stream_worker_completed_delta": 320,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        }
+      }
+    },
+    {
+      "id": "sparse-2-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 40 --rate 20",
+      "exit_code": 0,
+      "wall_seconds": 2.0699322920117993,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:14 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 40,
+        "target_events_per_second_per_tenant": 20.0,
+        "elapsed_seconds": 1.9542247090139426,
+        "rss_start_bytes": 25100288,
+        "rss_finish_bytes": 26034176,
+        "rss_sampled_peak_bytes": 26001408,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 351,
+          "p50_ms": 0.6759169965516775,
+          "p95_ms": 0.7283340138383209,
+          "p99_ms": 0.8222920051775872,
+          "max_ms": 0.9457080205902456
+        },
+        "publish_start_to_consume": {
+          "sample_count": 160,
+          "p50_ms": 7.435542007442564,
+          "p95_ms": 7.836333010345697,
+          "p99_ms": 8.319207991007715,
+          "max_ms": 8.340041997143999
+        },
+        "publish_call_duration": {
+          "sample_count": 160,
+          "p50_ms": 0.01920902286656201,
+          "p95_ms": 0.05662499461323023,
+          "p99_ms": 0.07279199780896306,
+          "max_ms": 0.07375000859610736
+        },
+        "pending_memory_sampled_peak_bytes": 4860,
+        "per_stream_pending_observed_peak_bytes": 1215,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 169240,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        },
+        "replay_counter_deltas": {
+          "written_records": 160,
+          "write_batches": 160,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 320,
+          "sample_count": 320,
+          "queue_avg_ms": 0.3419636770559009,
+          "queue_p95_ms": 0.7301659788936377,
+          "queue_p99_ms": 0.8588339842390269,
+          "queue_max_ms": 0.9558329766150564,
+          "execution_avg_ms": 0.15328112203860655,
+          "execution_p95_ms": 0.3299590025562793,
+          "execution_p99_ms": 0.41045798570849,
+          "execution_max_ms": 0.8711249975021929
+        },
+        "stream_worker_completed_delta": 320,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        }
+      }
+    },
+    {
+      "id": "sparse-3-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 40 --rate 20",
+      "exit_code": 0,
+      "wall_seconds": 2.0678909159905743,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:17 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 40,
+        "target_events_per_second_per_tenant": 20.0,
+        "elapsed_seconds": 1.9532942080113571,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 26017792,
+        "rss_sampled_peak_bytes": 26017792,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 352,
+          "p50_ms": 0.6706660252530127,
+          "p95_ms": 0.7290839904453604,
+          "p99_ms": 0.7871669996529816,
+          "max_ms": 1.154041999252513
+        },
+        "publish_start_to_consume": {
+          "sample_count": 160,
+          "p50_ms": 7.566082989796996,
+          "p95_ms": 8.38579100673087,
+          "p99_ms": 8.658083010232076,
+          "max_ms": 8.71045800158754
+        },
+        "publish_call_duration": {
+          "sample_count": 160,
+          "p50_ms": 0.01675001112744212,
+          "p95_ms": 0.05004202830605209,
+          "p99_ms": 0.05479200626723468,
+          "max_ms": 0.05658299778588116
+        },
+        "pending_memory_sampled_peak_bytes": 4860,
+        "per_stream_pending_observed_peak_bytes": 1215,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 169240,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        },
+        "replay_counter_deltas": {
+          "written_records": 160,
+          "write_batches": 160,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 320,
+          "sample_count": 320,
+          "queue_avg_ms": 0.31455415783057106,
+          "queue_p95_ms": 0.743083015549928,
+          "queue_p99_ms": 0.9494160185568035,
+          "queue_max_ms": 1.0690419876482338,
+          "execution_avg_ms": 0.1318372123023437,
+          "execution_p95_ms": 0.33904198789969087,
+          "execution_p99_ms": 0.4692499933298677,
+          "execution_max_ms": 0.8562080038245767
+        },
+        "stream_worker_completed_delta": 320,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        }
+      }
+    },
+    {
+      "id": "sparse-3-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 40 --rate 20 --immediate",
+      "exit_code": 0,
+      "wall_seconds": 2.0739456250157673,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:19 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 40,
+        "target_events_per_second_per_tenant": 20.0,
+        "elapsed_seconds": 1.9541385420016013,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 26017792,
+        "rss_sampled_peak_bytes": 26001408,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 349,
+          "p50_ms": 0.6746249902062117,
+          "p95_ms": 0.7302499772049486,
+          "p99_ms": 0.7821250229608266,
+          "max_ms": 2.1130410069599748
+        },
+        "publish_start_to_consume": {
+          "sample_count": 160,
+          "p50_ms": 1.812666014302522,
+          "p95_ms": 2.591166994534433,
+          "p99_ms": 3.1825829937588423,
+          "max_ms": 3.1915830040816218
+        },
+        "publish_call_duration": {
+          "sample_count": 160,
+          "p50_ms": 1.0104590037371963,
+          "p95_ms": 1.4660000160802156,
+          "p99_ms": 1.55683298362419,
+          "max_ms": 1.6631670005153865
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 169240,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        },
+        "replay_counter_deltas": {
+          "written_records": 160,
+          "write_batches": 160,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 320,
+          "sample_count": 320,
+          "queue_avg_ms": 0.30387561910174554,
+          "queue_p95_ms": 0.6773339991923422,
+          "queue_p99_ms": 0.8108750043902546,
+          "queue_max_ms": 0.9313750197179615,
+          "execution_avg_ms": 0.11772122106776806,
+          "execution_p95_ms": 0.27804201818071306,
+          "execution_p99_ms": 0.45674998546019197,
+          "execution_max_ms": 0.8202090102713555
+        },
+        "stream_worker_completed_delta": 320,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 167960,
+          "read_bytes": 167960,
+          "write_batches": 160,
+          "written_records": 160
+        }
+      }
+    },
+    {
+      "id": "serial-immediate",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 500 --serial --immediate",
+      "exit_code": 0,
+      "wall_seconds": 0.3756323750130832,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:21 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "immediate-current-kernel",
+        "consumer_mode": "serial-handshake",
+        "tenant_count": 4,
+        "events_per_tenant": 500,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 0.2599927909905091,
+        "rss_start_bytes": 24903680,
+        "rss_finish_bytes": 26361856,
+        "rss_sampled_peak_bytes": 26296320,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 50,
+          "p50_ms": 0.07962499978020776,
+          "p95_ms": 0.7586659968364983,
+          "p99_ms": 8.291667011799289,
+          "max_ms": 8.291667011799289
+        },
+        "publish_start_to_consume": {
+          "sample_count": 2000,
+          "p50_ms": 0.362666993169114,
+          "p95_ms": 0.971166999079287,
+          "p99_ms": 1.2493750255089253,
+          "max_ms": 16.380790999392048
+        },
+        "publish_call_duration": {
+          "sample_count": 2000,
+          "p50_ms": 0.1862090139184147,
+          "p95_ms": 0.51179199363105,
+          "p99_ms": 0.7164590060710907,
+          "max_ms": 15.78649997827597
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 2117560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 2101560,
+          "read_bytes": 2101560,
+          "write_batches": 2000,
+          "written_records": 2000
+        },
+        "replay_counter_deltas": {
+          "written_records": 2000,
+          "write_batches": 2000,
+          "written_bytes": 2101560,
+          "read_bytes": 2101560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 4000,
+          "sample_count": 2048,
+          "queue_avg_ms": 0.11073651624826653,
+          "queue_p95_ms": 0.19641700782813132,
+          "queue_p99_ms": 0.2841669775079936,
+          "queue_max_ms": 12.335500010522082,
+          "execution_avg_ms": 0.046929967354003566,
+          "execution_p95_ms": 0.1431250129826367,
+          "execution_p99_ms": 0.22324998280964792,
+          "execution_max_ms": 2.33575000311248
+        },
+        "stream_worker_completed_delta": 4000,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 2101560,
+          "read_bytes": 2101560,
+          "write_batches": 2000,
+          "written_records": 2000
+        }
+      }
+    },
+    {
+      "id": "serial-batched",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 500 --serial",
+      "exit_code": 0,
+      "wall_seconds": 0.3387537499947939,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:21 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "batched-cursor-replay",
+        "consumer_mode": "serial-handshake",
+        "tenant_count": 4,
+        "events_per_tenant": 500,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 0.2519378750002943,
+        "rss_start_bytes": 25493504,
+        "rss_finish_bytes": 26361856,
+        "rss_sampled_peak_bytes": 26296320,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 51,
+          "p50_ms": 0.07929199375212181,
+          "p95_ms": 0.11337499483488489,
+          "p99_ms": 0.525332991965115,
+          "max_ms": 0.525332991965115
+        },
+        "publish_start_to_consume": {
+          "sample_count": 2000,
+          "p50_ms": 0.4884999943897128,
+          "p95_ms": 0.5537499964702874,
+          "p99_ms": 0.7167909934651107,
+          "max_ms": 1.6909579862840474
+        },
+        "publish_call_duration": {
+          "sample_count": 2000,
+          "p50_ms": 0.31937501626089215,
+          "p95_ms": 0.3807920147664845,
+          "p99_ms": 0.4640420083887875,
+          "max_ms": 1.4370839926414192
+        },
+        "pending_memory_sampled_peak_bytes": 4864,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": 0,
+        "legacy_slow_queue_entries": 0,
+        "replay_budget": {
+          "reserved_bytes": 2117560,
+          "active_logs": 4,
+          "active_subscribers": 8,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 2101560,
+          "read_bytes": 2101560,
+          "write_batches": 2000,
+          "written_records": 2000
+        },
+        "replay_counter_deltas": {
+          "written_records": 2000,
+          "write_batches": 2000,
+          "written_bytes": 2101560,
+          "read_bytes": 2101560,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 4000,
+          "sample_count": 2048,
+          "queue_avg_ms": 0.05702503332827291,
+          "queue_p95_ms": 0.09575000149197876,
+          "queue_p99_ms": 0.1032919972203672,
+          "queue_max_ms": 0.1240840065293014,
+          "execution_avg_ms": 0.014844007949932347,
+          "execution_p95_ms": 0.04258297849446535,
+          "execution_p99_ms": 0.06500000017695129,
+          "execution_max_ms": 0.12220800272189081
+        },
+        "stream_worker_completed_delta": 4000,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 2101560,
+          "read_bytes": 2101560,
+          "write_batches": 2000,
+          "written_records": 2000
+        }
+      }
+    },
+    {
+      "id": "legacy-burst",
+      "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000 --legacy",
+      "exit_code": 0,
+      "wall_seconds": 0.22759074997156858,
+      "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:58:21 | 0.000s package init\n",
+      "stdout_prefix": "",
+      "result": {
+        "mode": "legacy-kernel-simulation",
+        "consumer_mode": "independent",
+        "tenant_count": 4,
+        "events_per_tenant": 5000,
+        "target_events_per_second_per_tenant": null,
+        "elapsed_seconds": 0.13974541699280962,
+        "rss_start_bytes": 25083904,
+        "rss_finish_bytes": 59031552,
+        "rss_sampled_peak_bytes": 59031552,
+        "rss_sample_interval_seconds": 0.005,
+        "event_loop_lag": {
+          "sample_count": 17,
+          "p50_ms": 3.909915981348604,
+          "p95_ms": 4.937583992723376,
+          "p99_ms": 4.937583992723376,
+          "max_ms": 4.937583992723376
+        },
+        "publish_start_to_consume": {
+          "sample_count": 20000,
+          "p50_ms": 1.5588329988531768,
+          "p95_ms": 1.5944999759085476,
+          "p99_ms": 1.6455829900223762,
+          "max_ms": 1.6673750069458038
+        },
+        "publish_call_duration": {
+          "sample_count": 20000,
+          "p50_ms": 0.000333995558321476,
+          "p95_ms": 0.0004169996827840805,
+          "p99_ms": 1.5485409821849316,
+          "max_ms": 1.6558750066906214
+        },
+        "pending_memory_sampled_peak_bytes": 0,
+        "per_stream_pending_observed_peak_bytes": 0,
+        "slow_subscriber_buffered_payload_bytes": null,
+        "legacy_slow_queue_entries": 20000,
+        "replay_budget": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 0,
+          "read_bytes": 0,
+          "write_batches": 0,
+          "written_records": 0
+        },
+        "replay_counter_deltas": {
+          "written_records": 0,
+          "write_batches": 0,
+          "written_bytes": 0,
+          "read_bytes": 0,
+          "quota_rejections": 0,
+          "replay_errors": 0
+        },
+        "stream_worker": {
+          "completed_count": 0,
+          "sample_count": 0,
+          "queue_avg_ms": null,
+          "queue_p95_ms": null,
+          "queue_p99_ms": null,
+          "queue_max_ms": null,
+          "execution_avg_ms": null,
+          "execution_p95_ms": null,
+          "execution_p99_ms": null,
+          "execution_max_ms": null
+        },
+        "stream_worker_completed_delta": 0,
+        "environment": {
+          "platform": "macOS-15.8.1-arm64-arm-64bit",
+          "python": "3.12.12 (main, Jan 16 2026, 16:20:54) [Clang 17.0.0 (clang-1700.6.3.2)]"
+        },
+        "scope": "Local kernels, one fast and one stalled subscriber per simulated tenant; no HTTP/model/DB. Immediate mode models old per-event publication on the current log/read implementation, not the old binary.",
+        "replay_budget_after_close": {
+          "reserved_bytes": 0,
+          "active_logs": 0,
+          "active_subscribers": 0,
+          "subscriber_memory_bytes": 0,
+          "pending_memory_bytes": 0,
+          "quota_rejections": 0,
+          "slow_disconnects": 0,
+          "replay_errors": 0,
+          "reconnects": 0,
+          "written_bytes": 0,
+          "read_bytes": 0,
+          "write_batches": 0,
+          "written_records": 0
+        }
+      }
+    }
+  ],
+  "failed_preflight_attempts": [
+    {
+      "description": "All scheduled measurement runs, sequential fresh Python processes; smoke runs excluded.",
+      "started_utc": "2026-10-15T03:56:54.112060+00:00",
+      "git_head": "f832ddf337888cc33a8a9f523ccbeba3ca9992bb",
+      "source_sha256_before": {
+        "src/swe/app/runner/sse_replay.py": "564418fd8b7323fb9be79634d81d407c25959063647705d5be283d623bb8073c",
+        "scripts/benchmark_sse_replay.py": "d828c67fd7b4ed20764fd0af88e4ed5797f92fd332c2ee636ce3ea9797ef30fa",
+        "src/swe/performance_metrics.py": "3931a758bd59c7fd15cad6fe519386837d7ce3fe1106ac3e259a30b656611e6f"
+      },
+      "runs": [
+        {
+          "id": "burst-1-immediate",
+          "command": "PYTHONPATH=src venv/bin/python scripts/benchmark_sse_replay.py --tenants 4 --events 5000 --immediate",
+          "exit_code": 1,
+          "wall_seconds": 0.0735555829887744,
+          "stderr": "DEBUG src/swe/__init__.py:47 | 2026-10-15 11:56:54 | 0.000s package init\nTraceback (most recent call last):\n  File \"/Users/shixiangyi/code/Swe/scripts/benchmark_sse_replay.py\", line 239, in <module>\n    asyncio.run(benchmark(options))\n  File \"/Users/shixiangyi/.pyenv/versions/3.12.12/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/Users/shixiangyi/.pyenv/versions/3.12.12/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/shixiangyi/.pyenv/versions/3.12.12/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/Users/shixiangyi/code/Swe/scripts/benchmark_sse_replay.py\", line 144, in benchmark\n    await asyncio.gather(*(run(tenant) for tenant in range(options.tenants)))\n  File \"/Users/shixiangyi/code/Swe/scripts/benchmark_sse_replay.py\", line 139, in run\n    await asyncio.gather(producer(), consumer())\n  File \"/Users/shixiangyi/code/Swe/scripts/benchmark_sse_replay.py\", line 114, in producer\n    await immediate_append(stream, event)\n  File \"/Users/shixiangyi/code/Swe/scripts/benchmark_sse_replay.py\", line 46, in immediate_append\n    async with stream.publish_lock:\n               ^^^^^^^^^^^^^^^^^^^\nAttributeError: 'ReplayStream' object has no attribute 'publish_lock'\n",
+          "stdout": ""
+        }
+      ],
+      "source_sha256_after": {
+        "src/swe/app/runner/sse_replay.py": "564418fd8b7323fb9be79634d81d407c25959063647705d5be283d623bb8073c",
+        "scripts/benchmark_sse_replay.py": "d828c67fd7b4ed20764fd0af88e4ed5797f92fd332c2ee636ce3ea9797ef30fa",
+        "src/swe/performance_metrics.py": "3931a758bd59c7fd15cad6fe519386837d7ce3fe1106ac3e259a30b656611e6f"
+      },
+      "finished_utc": "2026-10-15T03:56:54.191095+00:00"
+    }
+  ],
+  "source_sha256_after": {
+    "src/swe/app/runner/sse_replay.py": "564418fd8b7323fb9be79634d81d407c25959063647705d5be283d623bb8073c",
+    "scripts/benchmark_sse_replay.py": "69f9ce63dc3ec52446e590685153c15b06935cf5ee4ec34e60c690cf33339185",
+    "src/swe/performance_metrics.py": "3931a758bd59c7fd15cad6fe519386837d7ce3fe1106ac3e259a30b656611e6f"
+  },
+  "finished_utc": "2026-10-15T03:58:22.092413+00:00"
+}

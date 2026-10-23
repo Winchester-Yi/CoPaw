@@ -5,6 +5,7 @@ export interface ChatRequestOwner {
   logicalSessionId: string;
   chatId: string | null;
   msgid?: string | null;
+  streamCursor?: string;
 }
 
 export function createChatRequestOwner(

@@ -330,6 +330,13 @@ class HookManagementService:
                 handler,
                 event_name=context.hook_event_name,
             )
+            if (
+                normalized_handler.output_append
+                and not (context.assistant_response or "").strip()
+            ):
+                raise HookManagementValidationError(
+                    "outputAppend requires nonempty context.assistant_response",
+                )
             normalized_context = context.model_copy(
                 update={
                     "tenant_id": self._tenant_id or context.tenant_id,
@@ -359,7 +366,11 @@ class HookManagementService:
 
         result = HookManualTestResult(
             handler_result=handler_result,
-            redacted_summary=self._redacted_summary(handler_result),
+            redacted_summary=self._redacted_summary(
+                handler_result,
+                handler=normalized_handler,
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+            ),
         )
         self._emit_audit(
             event=(
@@ -651,6 +662,7 @@ class HookManagementService:
         payload: HookDistributionPayload,
     ) -> dict[str, Any]:
         merged_hooks = copy.deepcopy(target_hooks)
+        merged_hooks["enabled"] = True
         selected_groups = {
             group["id"]: group
             for groups in payload.groups_by_event.values()
@@ -1175,7 +1187,12 @@ class HookManagementService:
             pass
 
     @staticmethod
-    def _redacted_summary(result: HookHandlerResult) -> dict[str, Any]:
+    def _redacted_summary(
+        result: HookHandlerResult,
+        *,
+        handler: HookHandlerConfig,
+        duration_ms: int,
+    ) -> dict[str, Any]:
         return {
             "handler_id": result.handler_id,
             "decision": str(result.decision.value),
@@ -1189,4 +1206,11 @@ class HookManagementService:
                 if result.replacement_text is not None
                 else 0
             ),
+            "output_append": handler.output_append,
+            "append_applied": result.append_text is not None,
+            "append_bytes": len((result.append_text or "").encode("utf-8")),
+            "effective_fail_policy": (
+                "allow" if handler.output_append else handler.fail_policy
+            ),
+            "duration_ms": duration_ms,
         }

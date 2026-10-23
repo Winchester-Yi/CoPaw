@@ -9,6 +9,8 @@ dependencies = [
     "agentscope-runtime==1.1.3",
     "httpx>=0.27.0",
     "packaging>=24.0",
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-bash>=0.25,<0.26",
     "uvicorn>=0.40.0",
     "uvloop>=0.22.0; sys_platform != 'win32'",
     "croniter>=2.0.0,<7",
@@ -78,6 +80,9 @@ build-backend = "setuptools.build_meta"
 swe = "swe.cli.main:cli"
 
 [project.optional-dependencies]
+mysql = [
+    "mysql-connector-python==26.7.0",
+]
 dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=0.23.0",

@@ -51,19 +51,17 @@ class SkillResultStore:
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
-        async with self.db.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    query,
-                    (
-                        source_id,
-                        payload.trace_id,
-                        payload.skill_id,
-                        payload.user_id,
-                        payload.bbk,
-                        self._dumps_json(payload.cust_list),
-                        self._dumps_json(payload.metadata),
-                        payload.result_id,
-                    ),
-                )
-                return cur.lastrowid or None, payload.trace_id
+        inserted_id = await self.db.insert(
+            query,
+            (
+                source_id,
+                payload.trace_id,
+                payload.skill_id,
+                payload.user_id,
+                payload.bbk,
+                self._dumps_json(payload.cust_list),
+                self._dumps_json(payload.metadata),
+                payload.result_id,
+            ),
+        )
+        return inserted_id or None, payload.trace_id
