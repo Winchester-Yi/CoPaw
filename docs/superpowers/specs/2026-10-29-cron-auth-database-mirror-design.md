@@ -1,6 +1,6 @@
 # 定时执行凭据数据库镜像设计
 
-状态：已确认需求，实施中。业务取舍见 [ADR 0043](../../adr/0043-cron-auth-file-authoritative-database-mirror.md)。用户在确认 `user_info` 沿用序列化方案后要求继续，现按本文推进实现；本阶段不切换业务读取。
+状态：已实现并通过规格与代码审查。业务取舍见 [ADR 0043](../../adr/0043-cron-auth-file-authoritative-database-mirror.md)，操作步骤见[运维文档](../../deploy/cron-auth-database-mirror.md)。最终受影响回归 539 项通过；尚未进行真实 MySQL 验收或部署。本阶段不切换业务读取。
 
 ## 已确认边界
 
