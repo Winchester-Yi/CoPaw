@@ -485,3 +485,26 @@ async def test_comparison_preserves_json_numeric_equivalence(tmp_path):
         )
     )
     assert page.items[0].status == "unchanged"
+
+
+@pytest.mark.asyncio
+async def test_unserializable_deep_source_is_local_issue_and_later_record_continues(
+    tmp_path,
+):
+    m = modules()
+    nested = {}
+    for _ in range(300):
+        nested = {"child": nested}
+    write(tmp_path, "A", {"user_info": nested})
+    write(tmp_path, "B", {"auth_token": "valid"})
+    repo = CronAuthRepository(FakeDatabase())
+    service = m["service"].AuthMigrationService(tmp_path, repo)
+    cls = m["models"].AuthMigrationRequest
+    for operation in ["preview", "import"]:
+        pages = await collect(service, cls(operation=operation))
+        item = next(
+            i for p in pages for i in p.items if i.storage_scope_id == "A"
+        )
+        assert item.status == "invalid_source"
+    assert await repo.get("A") is None
+    assert (await repo.get("B"))["auth_token"] == "valid"

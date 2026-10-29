@@ -125,6 +125,9 @@ def read_record(root: Path, scope: str) -> SourceRecord:
         if not isinstance(data, dict):
             raise ValueError("object required")
         state = CronAuthState.model_validate(data)
+        # Use the actual persistence serializer before this record can reach
+        # async database work; deeply nested JSON may exceed its depth limit.
+        json.dumps(state.model_dump(mode="json"), allow_nan=False)
         return SourceRecord(scope, "valid", state=state)
     except OSError as exc:
         if exc.errno == errno.ENOENT:
