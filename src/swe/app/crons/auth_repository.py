@@ -106,7 +106,10 @@ class CronAuthRepository:
     ) -> None:
         tenant_id, source_id = _scope_metadata(storage_scope_id)
         values = state.model_dump()
-        values["user_info"] = json.dumps(state.user_info, ensure_ascii=False)
+        values["user_info"] = json.dumps(
+            state.model_dump(mode="json")["user_info"],
+            ensure_ascii=False,
+        )
         for name in TIME_FIELDS:
             value = ensure_utc(values[name])
             values[name] = value.replace(tzinfo=None) if value else None

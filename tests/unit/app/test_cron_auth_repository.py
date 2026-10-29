@@ -8,6 +8,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -119,6 +120,32 @@ async def test_complete_snapshot_round_trips_without_losing_user_info(
     assert stored["updated_at"] == stored["created_at"]
     assert "secret-token" not in db.calls[0][0]
     assert "secret-cookie" not in db.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_user_info_uses_the_same_json_normalization_as_file_storage(
+    repository,
+):
+    state = CronAuthState(
+        user_info={
+            "nested": {
+                "observed_at": datetime(
+                    2026,
+                    10,
+                    29,
+                    10,
+                    30,
+                    tzinfo=timezone.utc,
+                ),
+                "identifier": UUID("aee4f7bb-c2a5-4fe3-b5aa-f1b7b3ab4753"),
+            },
+        },
+    )
+    expected = CronAuthState.model_validate(state.model_dump(mode="json"))
+    await repository.upsert("scope", state)
+    row = await repository.get("scope")
+    assert json.loads(row["user_info"]) == expected.user_info
+    assert repository.state_from_row(row) == expected
 
 
 @pytest.mark.asyncio
