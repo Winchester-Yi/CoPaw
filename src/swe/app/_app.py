@@ -798,6 +798,18 @@ async def _shutdown_lifespan_resources(
     app: FastAPI,
     db_connection: Any | None,
 ) -> None:
+    from .crons.auth_mirror import set_cron_auth_repository
+
+    try:
+        await _shutdown_lifespan_resources_impl(app, db_connection)
+    finally:
+        set_cron_auth_repository(None)
+
+
+async def _shutdown_lifespan_resources_impl(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
     """按依赖顺序关闭生命周期资源。"""
     transient_cleanup = getattr(app.state, "transient_memory_cleanup", None)
     if transient_cleanup is not None:
@@ -910,6 +922,9 @@ async def _shutdown_lifespan_resources(
     except Exception as e:
         logger.warning("Error detaching skill scan history recorder: %s", e)
 
+    from .crons.auth_mirror import set_cron_auth_repository
+
+    set_cron_auth_repository(None)
     if db_connection:
         try:
             await db_connection.close()
@@ -978,6 +993,9 @@ async def lifespan(
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
     app.state.db_connection = db_connection
+    from .crons.auth_mirror import configure_cron_auth_mirror
+
+    configure_cron_auth_mirror(db_connection)
 
     await _initialize_tracing_manager(db_connection)
     logger.info("Instance module initialized")
