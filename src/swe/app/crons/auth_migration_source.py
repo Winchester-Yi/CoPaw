@@ -6,6 +6,7 @@ from __future__ import annotations
 import errno
 import heapq
 import json
+import math
 import os
 import stat
 from contextlib import ExitStack
@@ -71,6 +72,13 @@ def _open_directory(path, *, dir_fd=None):
     )
 
 
+def _finite_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite_json_number")
+    return number
+
+
 def read_record(root: Path, scope: str) -> SourceRecord:
     """A bounded no-follow open protects every path component from symlinks."""
     check_root(root)
@@ -109,7 +117,11 @@ def read_record(root: Path, scope: str) -> SourceRecord:
                 "invalid",
                 reason="source_file_too_large",
             )
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(
+            raw.decode("utf-8"),
+            parse_float=_finite_number,
+            parse_constant=_finite_number,
+        )
         if not isinstance(data, dict):
             raise ValueError("object required")
         state = CronAuthState.model_validate(data)

@@ -418,3 +418,70 @@ def test_safe_exact_scope_preserves_compatible_colon_name():
         operation="preview",
         storage_scope_ids=["Alice:Legacy"],
     ).storage_scope_ids == ["Alice:Legacy"]
+
+
+@pytest.mark.asyncio
+async def test_comparison_distinguishes_nested_json_booleans_from_numbers(
+    tmp_path,
+):
+    m = modules()
+    repo = CronAuthRepository(FakeDatabase())
+    await repo.upsert(
+        "A",
+        CronAuthState(user_info={"nested": [{"flag": True}]}),
+    )
+    write(tmp_path, "A", {"user_info": {"nested": [{"flag": 1}]}})
+    page = (
+        await m["service"]
+        .AuthMigrationService(tmp_path, repo)
+        .page(
+            m["models"].AuthMigrationRequest(operation="verify"),
+            phase="files",
+            after=None,
+        )
+    )
+    assert page.items[0].status == "different"
+    assert page.items[0].differences == ["user_info"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999"])
+async def test_nonfinite_json_is_invalid_and_never_imported_or_pruned(
+    tmp_path,
+    number,
+):
+    m = modules()
+    repo = CronAuthRepository(FakeDatabase())
+    await repo.upsert("A", CronAuthState(auth_token="KEEP"))
+    write(tmp_path, "A", {}).write_text(
+        '{"user_info":{"nested":[' + number + "]}}",
+    )
+    service = m["service"].AuthMigrationService(tmp_path, repo)
+    cls = m["models"].AuthMigrationRequest
+    for operation in ["import", "prune"]:
+        pages = await collect(
+            service,
+            cls(operation=operation, storage_scope_ids=["A"]),
+        )
+        assert any(
+            i.status == "invalid_source" for p in pages for i in p.items
+        )
+    assert (await repo.get("A"))["auth_token"] == "KEEP"
+
+
+@pytest.mark.asyncio
+async def test_comparison_preserves_json_numeric_equivalence(tmp_path):
+    m = modules()
+    repo = CronAuthRepository(FakeDatabase())
+    await repo.upsert("A", CronAuthState(user_info={"nested": [1, 0]}))
+    write(tmp_path, "A", {"user_info": {"nested": [1.0, -0.0]}})
+    page = (
+        await m["service"]
+        .AuthMigrationService(tmp_path, repo)
+        .page(
+            m["models"].AuthMigrationRequest(operation="verify"),
+            phase="files",
+            after=None,
+        )
+    )
+    assert page.items[0].status == "unchanged"

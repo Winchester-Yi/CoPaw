@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from collections import Counter
 from pathlib import Path
@@ -31,10 +32,26 @@ from .auth_state import CronAuthState, ensure_utc
 
 def _normalized(state: CronAuthState) -> dict:
     result = state.model_dump(mode="json")
+    json.dumps(result["user_info"], allow_nan=False)
     for name in TIME_FIELDS:
         value = ensure_utc(getattr(state, name))
         result[name] = value.isoformat() if value else None
     return result
+
+
+def _json_equal(left, right) -> bool:
+    """JSON booleans differ from numbers; numeric representations may agree."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _json_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _json_equal(a, b) for a, b in zip(left, right)
+        )
+    return left == right
 
 
 def _item(scope: str, status: str, **kwargs) -> AuthMigrationItem:
@@ -129,7 +146,9 @@ class AuthMigrationService:
         current = _normalized(self.repository.state_from_row(row))
         expected = _normalized(state)
         return [
-            name for name in STATE_FIELDS if current[name] != expected[name]
+            name
+            for name in STATE_FIELDS
+            if not _json_equal(current[name], expected[name])
         ]
 
     async def _database_page(self, request, after):
