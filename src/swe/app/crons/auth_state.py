@@ -277,15 +277,7 @@ async def cleanup_cron_auth_except_source(
     }
 
     base_dir = Path(working_dir) if working_dir is not None else WORKING_DIR
-    if not base_dir.exists():
-        return CronAuthCleanupResult(
-            deleted_tenant_ids=[],
-            deleted_dirs=[],
-            forced_deleted_tenant_ids=[],
-            kept_tenant_ids=[],
-            missing_tenant_ids=[],
-            dry_run=dry_run,
-        )
+    candidates = await asyncio.to_thread(_scan_cron_auth_cleanup, base_dir)
 
     deleted_tenant_ids: list[str] = []
     deleted_dirs: list[str] = []
@@ -293,12 +285,8 @@ async def cleanup_cron_auth_except_source(
     kept_tenant_ids: list[str] = []
     missing_tenant_ids: list[str] = []
 
-    for tenant_dir in sorted(base_dir.iterdir(), key=lambda item: item.name):
-        if not tenant_dir.is_dir() or tenant_dir.name.startswith("."):
-            continue
-
-        auth_path = tenant_dir / ".secret" / CRON_AUTH_FILE_NAME
-        if not auth_path.is_file():
+    for tenant_dir, auth_path, has_auth_file in candidates:
+        if not has_auth_file:
             missing_tenant_ids.append(tenant_dir.name)
             continue
 
@@ -328,6 +316,20 @@ async def cleanup_cron_auth_except_source(
         missing_tenant_ids=missing_tenant_ids,
         dry_run=dry_run,
     )
+
+
+def _scan_cron_auth_cleanup(
+    base_dir: Path,
+) -> list[tuple[Path, Path, bool]]:
+    if not base_dir.exists():
+        return []
+    candidates = []
+    for tenant_dir in sorted(base_dir.iterdir(), key=lambda item: item.name):
+        if not tenant_dir.is_dir() or tenant_dir.name.startswith("."):
+            continue
+        auth_path = tenant_dir / ".secret" / CRON_AUTH_FILE_NAME
+        candidates.append((tenant_dir, auth_path, auth_path.is_file()))
+    return candidates
 
 
 def load_cron_auth_state(

@@ -997,55 +997,55 @@ async def lifespan(
 
     configure_cron_auth_mirror(db_connection)
 
-    await _initialize_tracing_manager(db_connection)
-    logger.info("Instance module initialized")
-
-    # --- 初始化 source 系统配置模块 ---
-    _initialize_source_system_config(
-        app,
-        db_connection,
-        tenant_workspace_pool,
-        multi_agent_manager,
-    )
-    await _initialize_workflow_config_store(
-        app,
-        db_connection,
-        tenant_workspace_pool,
-        multi_agent_manager,
-    )
-    _initialize_source_tools(app)
-
-    # --- 初始化定时任务分发用户反查快照 ---
-    await _initialize_approval_audit_store(app, db_connection)
-    await _initialize_skill_scan_history(app, db_connection)
-    await _initialize_cron_broadcast_children_store(app, db_connection)
-    await _initialize_cron_broadcast_task_store(app, db_connection)
-    await _register_wealth_plan_store(app, db_connection)
-
-    # --- 初始化技能就绪检查存储 ---
-    await _initialize_skill_readiness(
-        app,
-        db_connection,
-        multi_agent_manager,
-    )
-
-    # --- 初始化持续治理管理侧数据库读模型 ---
-    _initialize_continuous_governance(
-        app,
-        db_connection,
-        tenant_workspace_pool,
-        multi_agent_manager,
-    )
-
-    await _initialize_database_backed_modules(db_connection)
-
-    startup_elapsed = time.time() - startup_start_time
-    logger.info(
-        f"Application startup completed in {startup_elapsed:.3f} seconds "
-        f"(minimal initialization - runtimes deferred to first use)",
-    )
-
     try:
+        await _initialize_tracing_manager(db_connection)
+        logger.info("Instance module initialized")
+
+        # --- 初始化 source 系统配置模块 ---
+        _initialize_source_system_config(
+            app,
+            db_connection,
+            tenant_workspace_pool,
+            multi_agent_manager,
+        )
+        await _initialize_workflow_config_store(
+            app,
+            db_connection,
+            tenant_workspace_pool,
+            multi_agent_manager,
+        )
+        _initialize_source_tools(app)
+
+        # --- 初始化定时任务分发用户反查快照 ---
+        await _initialize_approval_audit_store(app, db_connection)
+        await _initialize_skill_scan_history(app, db_connection)
+        await _initialize_cron_broadcast_children_store(app, db_connection)
+        await _initialize_cron_broadcast_task_store(app, db_connection)
+        await _register_wealth_plan_store(app, db_connection)
+
+        # --- 初始化技能就绪检查存储 ---
+        await _initialize_skill_readiness(
+            app,
+            db_connection,
+            multi_agent_manager,
+        )
+
+        # --- 初始化持续治理管理侧数据库读模型 ---
+        _initialize_continuous_governance(
+            app,
+            db_connection,
+            tenant_workspace_pool,
+            multi_agent_manager,
+        )
+
+        await _initialize_database_backed_modules(db_connection)
+
+        startup_elapsed = time.time() - startup_start_time
+        logger.info(
+            f"Application startup completed in {startup_elapsed:.3f} seconds "
+            f"(minimal initialization - runtimes deferred to first use)",
+        )
+
         # Include partial background startup in lifecycle cleanup.
         await _start_lifespan_background_services(app, multi_agent_manager)
         yield

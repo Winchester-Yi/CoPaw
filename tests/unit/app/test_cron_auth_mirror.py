@@ -272,3 +272,70 @@ async def test_service_teardown_clears_registration_when_cleanup_raises():
         assert auth_mirror._repository is None
     finally:
         auth_mirror.set_cron_auth_repository(None)
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_before_yield_clears_mirror(monkeypatch):
+    from swe.app import _app
+    from swe.app import auth
+    from swe.app.crons import auth_mirror
+
+    monkeypatch.setattr(_app, "_configure_async_thread_pools", Mock())
+    monkeypatch.setattr(auth, "auto_register_from_env", Mock())
+    monkeypatch.setattr(_app, "ensure_default_agent_exists", Mock())
+    monkeypatch.setattr(
+        _app,
+        "_reset_scope_sensitive_runtime_state",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        _app,
+        "_initialize_runtime_managers",
+        AsyncMock(return_value=(object(), object())),
+    )
+    connection = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(
+        _app,
+        "_initialize_database_connection",
+        AsyncMock(return_value=connection),
+    )
+    monkeypatch.setattr(
+        _app,
+        "_initialize_tracing_manager",
+        AsyncMock(side_effect=ValueError("startup failed")),
+    )
+    cleanup = AsyncMock()
+    monkeypatch.setattr(_app, "_shutdown_lifespan_resources_impl", cleanup)
+    app = SimpleNamespace(state=SimpleNamespace())
+    try:
+        with pytest.raises(ValueError, match="startup failed"):
+            async with _app.lifespan(app):
+                pytest.fail("Startup must fail before yielding")
+        assert auth_mirror._repository is None
+        cleanup.assert_awaited_once_with(app, connection)
+    finally:
+        auth_mirror.set_cron_auth_repository(None)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_directory_scan_runs_in_worker(mirror, monkeypatch):
+    import threading
+
+    _, _, path = mirror
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    loop_thread = threading.get_ident()
+    original = type(path).iterdir
+    scanned = []
+
+    def scan(directory):
+        scanned.append(threading.get_ident())
+        return original(directory)
+
+    monkeypatch.setattr(type(path), "iterdir", scan)
+    await auth_state.cleanup_cron_auth_except_source(
+        working_dir=path.parents[2],
+        dry_run=True,
+    )
+    assert scanned
+    assert loop_thread not in scanned
