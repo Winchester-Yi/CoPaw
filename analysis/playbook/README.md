@@ -10,6 +10,7 @@
 | [agent-config-read-consistency.md](agent-config-read-consistency.md) | agent 控制面读写一致性边界、排查入口和与 console agent switching 的职责分界 |
 | [agent-config-file-overwrite.md](agent-config-file-overwrite.md) | agent.json 手改后覆盖：回复整文件写回、模型规范化、引导自愈重建与并发丢失更新 |
 | [chat-history-preload-stall.md](chat-history-preload-stall.md) | 聊天历史触顶不继续加载：240px 区域锁、本地与归档分页衔接、复现证据与验收标准 |
+| [cron-auth-database-mirror.md](cron-auth-database-mirror.md) | 凭据镜像、四种运维任务、安全诊断和中断重跑 |
 | [common-errors.md](common-errors.md) | 常见报错模式、典型触发点和第一落点 |
 | [wealth-scene-monitoring.md](wealth-scene-monitoring.md) | 财富规划场景监控配置的本地存储、规划关联和回显验证 |
 | [control-path-complexity.md](control-path-complexity.md) | 策略、审批、专家准入及 Stop append 的复杂度拆分边界、计数口径和回归入口 |

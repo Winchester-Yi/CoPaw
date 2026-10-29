@@ -801,6 +801,16 @@ async def _shutdown_lifespan_resources(
     from .crons.auth_mirror import set_cron_auth_repository
 
     try:
+        auth_migration_tasks = getattr(
+            app.state,
+            "cron_auth_migration_tasks",
+            None,
+        )
+        if auth_migration_tasks is not None:
+            try:
+                await auth_migration_tasks.close()
+            except Exception:
+                logger.warning("Cron auth migration shutdown failed")
         await _shutdown_lifespan_resources_impl(app, db_connection)
     finally:
         set_cron_auth_repository(None)

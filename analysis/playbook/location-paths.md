@@ -1,5 +1,10 @@
 # 定位路径
 
+## 定时执行凭据数据库镜像
+
+- src/swe/app/crons/auth_migration*.py：POST /api/internal/cron/auth-migration/tasks，GET 按 task_id 与 after_page 查询。
+- 在线镜像 auth_mirror.py、严格仓库 auth_repository.py；[排查说明](cron-auth-database-mirror.md)、[运维操作](../../docs/deploy/cron-auth-database-mirror.md)。
+
 ## 定时任务第一阶段全量快照迁移
 
 - 一次提交：`POST /api/internal/cron/migration/tasks`，operation 为 preview/import/verify；后台自动翻页，不必人工传递游标。只写新定义/状态业务表，旧 CRUD、文件、内存及执行入口不切换，独立系统任务不迁移。
