@@ -401,6 +401,7 @@ class MySQLChatRepository(BaseChatRepository):
         if expert_id is not None:
             identity_bytes(expert_id, 256)
         async with self.db.transaction():
+            await self.retentions.assert_writes_allowed()
             session, row = await self._locked_chat(chat_id)
             if session["active_turn_id"] is not None:
                 raise ConflictError("Session is busy")
@@ -453,6 +454,7 @@ class MySQLChatRepository(BaseChatRepository):
 
     async def update_title(self, chat_id, title, *, expected_revision):
         async with self.db.transaction():
+            await self.retentions.assert_writes_allowed()
             try:
                 _, row = await self._locked_chat(chat_id)
             except KeyError:
@@ -474,6 +476,7 @@ class MySQLChatRepository(BaseChatRepository):
             return False
         placeholders = ",".join(["%s"] * len(keys))
         async with self.db.transaction():
+            await self.retentions.assert_writes_allowed()
             rows = await self.db.fetch_all(
                 f"SELECT id,session_id FROM {TABLE} c WHERE {SCOPE_WHERE} "
                 f"AND external_chat_key IN ({placeholders}) AND deleted_at "
@@ -520,6 +523,7 @@ class MySQLChatRepository(BaseChatRepository):
             spec.session_id,
         )
         async with self.db.transaction():
+            await self.retentions.assert_writes_allowed()
             await self.db.insert(
                 "INSERT INTO swe_conversation_sessions "
                 "(tenant_key,source_key,agent_key,user_key,channel_key,"
@@ -708,6 +712,7 @@ class MySQLChatRepository(BaseChatRepository):
 
     async def _freeze_draft_choice(self, session_id):
         async with self.db.transaction():
+            await self.retentions.assert_writes_allowed()
             session = await self.db.fetch_one(
                 "SELECT * FROM swe_conversation_sessions "
                 "WHERE id=%s FOR UPDATE",

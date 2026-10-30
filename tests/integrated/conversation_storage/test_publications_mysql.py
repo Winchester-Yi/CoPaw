@@ -37,12 +37,17 @@ class LostCommitDatabase(DatabaseProxy):
     """Lose a transport response only after the real adapter committed."""
 
     lose_next_commit = False
+    transaction_depth = 0
 
     @asynccontextmanager
     async def transaction(self):
-        async with self.database.transaction() as session:
-            yield session
-        if self.lose_next_commit:
+        self.transaction_depth += 1
+        try:
+            async with self.database.transaction() as session:
+                yield session
+        finally:
+            self.transaction_depth -= 1
+        if self.lose_next_commit and self.transaction_depth == 0:
             self.lose_next_commit = False
             raise ConnectionError(
                 "injected response loss after confirmed server commit",
@@ -208,7 +213,7 @@ async def test_mysql_missing_reservation_waits_for_original_insert_arbitration(
     operation = PublicationRequest(
         new_operation_key(),
         WorkspaceScope("tenant", "source", "agent"),
-        "share",
+        "state",
         "stopped-owner",
         0,
     )

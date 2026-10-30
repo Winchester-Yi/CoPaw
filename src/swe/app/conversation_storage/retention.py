@@ -113,7 +113,15 @@ class RetentionStore:
         if values != self.scope_values:
             raise IntegrityError("retention publication scope mismatch")
 
-    async def _insert(self, key, publication_id, kind, *, guard=False):
+    async def _insert(
+        self,
+        key,
+        publication_id,
+        kind,
+        *,
+        guard=False,
+        snapshot_ref=None,
+    ):
         fields = {
             "retention_key": key,
             "member_key": publication_id or 0,
@@ -125,6 +133,8 @@ class RetentionStore:
             "publication_id": publication_id,
             "guard_marker": 1 if guard else None,
         }
+        if snapshot_ref is not None:
+            fields["snapshot_ref"] = snapshot_ref
         columns = ",".join(fields)
         placeholders = ",".join(["%s"] * len(fields))
         await self.db.insert(
@@ -170,6 +180,90 @@ class RetentionStore:
             f"SELECT * FROM {TABLE} WHERE {SCOPE_WHERE} AND guard_marker=1 FOR UPDATE",
             self.scope_values,
         )
+
+    async def assert_writes_allowed(self):
+        """Call inside a short write transaction before Session/publication locks."""
+        await self.lock_guard()
+        fences = await self.db.fetch_all(
+            f"SELECT * FROM {TABLE} WHERE {SCOPE_WHERE} AND kind='backup_fence' AND state='active' ORDER BY id FOR UPDATE",
+            self.scope_values,
+        )
+        if fences:
+            raise ConflictError(
+                "conversation scope has an active backup fence",
+            )
+
+    @staticmethod
+    def _backup_identity(retention_key, snapshot_ref):
+        key = identity_bytes(retention_key, 128)
+        snapshot = identity_bytes(snapshot_ref, 1024)
+        if not key or not snapshot:
+            raise ValueError(
+                "backup identity and snapshot reference must be nonempty",
+            )
+        return key, snapshot
+
+    async def _backup_fence(self, key, snapshot):
+        row = await self.db.fetch_one(
+            f"SELECT * FROM {TABLE} WHERE retention_key=%s "
+            "AND member_key=0 FOR UPDATE",
+            (key,),
+        )
+        if row is None:
+            raise ConflictError("backup fence identity is missing")
+        self._validate_scope(row)
+        if (
+            row["kind"],
+            row["publication_id"],
+            row["guard_marker"],
+            row["snapshot_ref"],
+        ) != ("backup_fence", None, None, snapshot):
+            raise ConflictError("backup fence identity or snapshot changed")
+        return row
+
+    async def install_backup_fence(self, retention_key, snapshot_ref):
+        """Persist an explicit job fence; failures never remove protection."""
+        key, snapshot = self._backup_identity(retention_key, snapshot_ref)
+        async with self.db.transaction():
+            await self.lock_guard()
+            active = await self.db.fetch_all(
+                f"SELECT * FROM {TABLE} WHERE {SCOPE_WHERE} "
+                "AND kind='backup_fence' AND state='active' "
+                "ORDER BY id FOR UPDATE",
+                self.scope_values,
+            )
+            if any(row["retention_key"] != key for row in active):
+                raise ConflictError("another backup fence is active")
+            await self._insert(
+                key,
+                None,
+                "backup_fence",
+                snapshot_ref=snapshot,
+            )
+            row = await self._backup_fence(key, snapshot)
+            if row["state"] != "active":
+                raise ConflictError("backup fence identity is released")
+            return row
+
+    async def release_backup_fence(self, retention_key, snapshot_ref):
+        """Release only this captured job after its complete pin set exists."""
+        key, snapshot = self._backup_identity(retention_key, snapshot_ref)
+        async with self.db.transaction():
+            await self.lock_guard()
+            row = await self._backup_fence(key, snapshot)
+            if row["state"] == "released":
+                return
+            if row["state"] != "active":
+                raise ConflictError("backup fence has invalid state")
+            changed = await self.db.execute(
+                f"UPDATE {TABLE} SET state='released',"
+                "released_at=UTC_TIMESTAMP(6) WHERE retention_key=%s "
+                f"AND {SCOPE_WHERE} AND kind='backup_fence' "
+                "AND state='active' AND snapshot_ref=%s",
+                (key, *self.scope_values, snapshot),
+            )
+            if changed != 1:
+                raise ConflictError("backup fence release was not confirmed")
 
     async def _lock_publications(self, values):
         ids = _ids(values)

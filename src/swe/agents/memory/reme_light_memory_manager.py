@@ -81,6 +81,16 @@ def _clone_unbound_chat_memory(memory: Any) -> Any:
         "_checkpoint_original_get_memory",
         "_checkpoint_original_clear_content",
         "_checkpoint_original_clear_compressed_summary",
+        "_indexed_archive_store",
+        "_conversation_archive_binding",
+        "_checkpoint_candidate_id",
+        "archive_compacted_messages",
+        "archive_checkpoint_messages",
+        "commit_ready_precompaction",
+        "install_checkpoint_projection",
+        "install_degraded_checkpoint",
+        "reset_context_epoch",
+        "recover_evidence",
     ):
         try:
             delattr(clone, name)
@@ -645,6 +655,12 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         chat_id: str,
     ) -> "ReMeInMemoryMemory | None":
         """Prepare isolated memory and its checkpoint lease off the loop."""
+        store = getattr(self, "_conversation_archive", None)
+        if store is not None:
+            memory = await run_runtime_state_work(self._new_request_memory)
+            if memory is None:
+                return None
+            return await store.prepare_memory(memory, chat_id)
         return await run_runtime_state_work(
             self.create_request_memory,
             chat_id,
@@ -655,6 +671,26 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         chat_id: str,
     ) -> "ReMeInMemoryMemory | None":
         """Create one isolated online memory owned by the current request."""
+        memory = self._new_request_memory()
+        if memory is None:
+            return None
+        store = getattr(self, "_conversation_archive", None)
+        if store is not None:
+            store.attach_memory(memory, chat_id)
+            return memory
+        from .conversation_archive import attach_conversation_archive
+
+        return attach_conversation_archive(
+            memory,
+            Path(self.working_dir) / "dialog",
+            chat_id,
+        )
+
+    def bind_conversation_archive(self, store):
+        """Install the trusted workspace archive without creating storage."""
+        self._conversation_archive = store
+
+    def _new_request_memory(self):
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
@@ -664,13 +700,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         )
         memory = _clone_unbound_chat_memory(memory)
 
-        from .conversation_archive import attach_conversation_archive
-
-        return attach_conversation_archive(
-            memory,
-            Path(self.working_dir) / "dialog",
-            chat_id,
-        )
+        return memory
 
     def get_in_memory_memory(
         self,
@@ -778,6 +808,8 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             chat_id,
             candidate,
         )
+        if getattr(memory, "_indexed_archive_store", None) is not None:
+            memory._checkpoint_candidate_id = candidate.id
         return True
 
     async def install_ready_precompaction(
@@ -813,6 +845,13 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         **kwargs,
     ) -> Any:
         """Recover durable Chat evidence without acquiring online memory."""
+        store = getattr(self, "_conversation_archive", None)
+        if store is not None:
+            return await store.recover_evidence(
+                chat_id=chat_id,
+                epoch=epoch,
+                **kwargs,
+            )
         from .conversation_archive import ConversationArchiveStore
 
         archive_store = ConversationArchiveStore(

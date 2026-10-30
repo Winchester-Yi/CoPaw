@@ -156,6 +156,7 @@ async def test_create_update_full_meta_nas_and_typed_binding(
         and "unknown" not in row["metadata_text"]
     )
     assert row["content_meta_publication_id"] is not None
+    assert row["epoch"] == 1
     loaded.name = "changed"
     loaded.meta["unknown"] = {"retained": True}
     loaded.meta["expert_main_binding"] = {

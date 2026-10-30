@@ -22,9 +22,16 @@ from .models import ChatShareRecord, ChatShareSnapshot
 class ChatSharingService:
     """Create and read immutable Chat share snapshots."""
 
-    def __init__(self, store: Any, snapshot_root: Path):
+    def __init__(
+        self,
+        store: Any,
+        snapshot_root: Path,
+        *,
+        conversation_shares=None,
+    ):
         self.store = store
         self.snapshot_root = Path(snapshot_root).resolve()
+        self.conversation_shares = conversation_shares
 
     @staticmethod
     def _safe_component(value: str, field: str) -> str:
@@ -70,8 +77,6 @@ class ChatSharingService:
         if not selected_turn_ids:
             raise ValueError("Select at least one answer turn")
 
-        tenant_component = self._safe_component(tenant_id, "tenant")
-
         normalised = self._normalise_messages(messages)
         selected: list[tuple[int, list[ChatMessage]]] = []
         for turn_id in dict.fromkeys(selected_turn_ids):
@@ -90,14 +95,23 @@ class ChatSharingService:
         selected.sort(key=lambda item: item[0])
         turn_messages = [message for _, turn in selected for message in turn]
         redacted = _redact_hidden_context_messages(turn_messages)
-        token = secrets.token_urlsafe(32)
-        relative_key = f"{tenant_component}/chat_shares/{token}.json"
-        target = self.snapshot_root / relative_key
-        target.parent.mkdir(parents=True, exist_ok=True)
         payload = ChatShareSnapshot(
             chat_name=(chat_name or "分享的会话").strip() or "分享的会话",
             messages=[message.model_dump(mode="json") for message in redacted],
         ).model_dump(mode="json")
+        if self.conversation_shares is not None:
+            return await self.conversation_shares.create_snapshot(
+                chat_id=chat_id,
+                creator_id=creator_id,
+                tenant_id=tenant_id,
+                payload=payload,
+                selected_question_keys=tuple(dict.fromkeys(selected_turn_ids)),
+            )
+        tenant_component = self._safe_component(tenant_id, "tenant")
+        token = secrets.token_urlsafe(32)
+        relative_key = f"{tenant_component}/chat_shares/{token}.json"
+        target = self.snapshot_root / relative_key
+        target.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._atomic_write_json, target, payload)
 
         record = ChatShareRecord(
@@ -108,17 +122,12 @@ class ChatSharingService:
             tenant_id=tenant_component,
             created_at=datetime.now(timezone.utc),
         )
-        try:
-            await self.store.create(record)
-        except Exception:
-            try:
-                target.unlink()
-            except OSError:
-                pass
-            raise
+        await self.store.create(record)
         return record
 
     async def get_snapshot(self, token: str) -> dict[str, Any]:
+        if self.conversation_shares is not None:
+            return await self.conversation_shares.get_snapshot(token)
         record = await self.store.get(token)
         if record is None:
             raise KeyError("Share not found")

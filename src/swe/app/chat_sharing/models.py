@@ -16,6 +16,9 @@ class ChatShareRecord(BaseModel):
     created_at: datetime
     access_count: int = 0
     last_access_at: datetime | None = None
+    publication_id: int | None = Field(default=None, gt=0)
+    byte_offset: int | None = Field(default=None, ge=0)
+    byte_length: int | None = Field(default=None, ge=0)
 
 
 class ChatShareSnapshot(BaseModel):

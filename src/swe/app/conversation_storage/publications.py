@@ -8,21 +8,40 @@ operation unknown; they never imply rollback and never unlink final bundles.
 
 import asyncio
 from dataclasses import dataclass
-import json
 
 from .bundle import BundleBlock, BundleStore
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
-from .identity import WorkspaceScope, identity_bytes
-from .chat_mutations import (
-    ChatMetadataInstall,
-    install_chat_metadata,
-    load_metadata_json,
-)
+from .identity import WorkspaceScope, identity_bytes, chat_key_bytes
+from .chat_mutations import install_chat_metadata, load_metadata_json
 from .retention import RetentionStore
+from .message_installs import install_messages, install_turn
+from .archive import install_archive
+from .archive_payloads import (
+    validate_archive_plan,
+    validate_archive_payloads,
+    validate_request_plan,
+)
+from .commit_plan import CommitPlan
+from .source_messages import SourceMessages, snapshot_sources
+from .publication_associations import PublicationAssociations
+from .projection_publication import (
+    prepare_recovery_blocks,
+    effective_recovery_plan,
+)
+from .projection_references import (
+    ProjectionReferences,
+    snapshot_projection,
+    refresh_projection_cache,
+)
+from .shares import (
+    install_share,
+    lock_share_selection,
+    validate_share_payload,
+    validate_share_request,
+)
 
 TABLE = "swe_conversation_publications"
 FORMAT_KEY = b"swe-bundle-v1"
-MAX_PLAN_BYTES = 1024 * 1024
 
 
 def _text(value):
@@ -126,64 +145,6 @@ class PublicationRequest:
         }
 
 
-@dataclass(frozen=True)
-class CommitPlan:
-    """Body-free installation plan persisted before any NAS write."""
-
-    recovery_block: str | None = None
-    result_ids: tuple[int, ...] = ()
-    chat_metadata: ChatMetadataInstall | None = None
-
-    def serialize(self):
-        if self.recovery_block is not None:
-            identity_bytes(self.recovery_block, 256)
-            if not self.recovery_block:
-                raise ValueError("recovery block must be nonempty")
-        if len(self.result_ids) > 4096 or any(
-            type(value) is not int or value <= 0 for value in self.result_ids
-        ):
-            raise ValueError(
-                "publication result IDs must be bounded positive integers",
-            )
-        value = {
-            "version": 1,
-            "recovery_block": self.recovery_block,
-            "result_ids": self.result_ids,
-        }
-        if self.chat_metadata is not None:
-            if self.recovery_block is not None:
-                raise ValueError(
-                    "Chat metadata cannot replace a recovery root",
-                )
-            value["chat_metadata"] = self.chat_metadata.to_dict()
-        return json.dumps(value, separators=(",", ":"))
-
-    @classmethod
-    def parse(cls, text):
-        try:
-            if len(text.encode("utf-8")) > MAX_PLAN_BYTES:
-                raise ValueError("oversized commit plan")
-            value = load_metadata_json(text)
-            expected = {"version", "recovery_block", "result_ids"}
-            if (
-                set(value) not in (expected, expected | {"chat_metadata"})
-                or value.pop("version") != 1
-            ):
-                raise ValueError("unknown commit plan version")
-            value["result_ids"] = tuple(value["result_ids"])
-            if "chat_metadata" in value:
-                value["chat_metadata"] = ChatMetadataInstall.from_dict(
-                    value["chat_metadata"],
-                )
-            plan = cls(**value)
-            plan.serialize()
-            return plan
-        except (ValueError, TypeError, AttributeError, KeyError) as error:
-            raise IntegrityError(
-                "publication commit plan is invalid",
-            ) from error
-
-
 def _request(row):
     return PublicationRequest(
         operation_key=_text(row["operation_key"]),
@@ -206,12 +167,19 @@ def _request(row):
     )
 
 
-class PublicationStore:
+class PublicationStore(PublicationAssociations):
     """Short SQL state transitions; immutable IO is outside transactions."""
 
     def __init__(self, database, bundles: BundleStore):
         self.db = database
         self.bundles = bundles
+
+    async def _assert_writes_allowed(self, request):
+        await RetentionStore(
+            self.db,
+            request.scope,
+            scope_kind=request.scope_kind,
+        ).assert_writes_allowed()
 
     @staticmethod
     async def _nas_io(operation_key, function, *args, **kwargs):
@@ -281,9 +249,12 @@ class PublicationStore:
             raise ConflictError("operation commit plan changed")
 
     async def reserve(self, request: PublicationRequest, plan: CommitPlan):
+        validate_share_request(request, plan.share)
+        validate_request_plan(request, plan)
         plan_text = plan.serialize()
         try:
             async with self.db.transaction():
+                await self._assert_writes_allowed(request)
                 await self._insert(request, plan_text, "prepared")
                 row = await self.get(request.operation_key, lock=True)
                 self._matches(row, request)
@@ -309,6 +280,12 @@ class PublicationStore:
             raise ConflictError(
                 "publication must be prepared before writing NAS",
             )
+        blocks = await prepare_recovery_blocks(
+            self,
+            row,
+            CommitPlan.parse(row["result_metadata_text"]),
+            blocks,
+        )
         index = await self._nas_io(
             operation_key,
             self.bundles.publish,
@@ -365,10 +342,16 @@ class PublicationStore:
 
     async def _mark_durable(self, operation_key, index):
         try:
+            initial = await self.get(operation_key)
+            if initial is None:
+                raise UnknownCommit(operation_key)
+            request = _request(initial)
             async with self.db.transaction():
+                await self._assert_writes_allowed(request)
                 current = await self.get(operation_key, lock=True)
                 if current is None or current["state"] != "prepared":
                     raise ConflictError("publication ended during NAS write")
+                self._matches(current, request)
                 await self.db.execute(
                     f"UPDATE {TABLE} SET byte_length=%s,durable_at=UTC_TIMESTAMP(6) WHERE id=%s",
                     (index.byte_length, current["id"]),
@@ -377,29 +360,6 @@ class PublicationStore:
             raise
         except (Exception, asyncio.CancelledError) as error:
             raise UnknownCommit(operation_key) from error
-
-    async def _lock_associations(self, request, *, session_rows=None):
-        session = chat = turn = None
-        if request.session_id is not None:
-            if session_rows is None:
-                session = await self.db.fetch_one(
-                    "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
-                    "FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
-                    (request.session_id,),
-                )
-            else:
-                session = session_rows.get(request.session_id)
-        if request.chat_id is not None:
-            chat = await self.db.fetch_one(
-                "SELECT * FROM swe_conversation_chats WHERE id=%s FOR UPDATE",
-                (request.chat_id,),
-            )
-        if request.turn_id is not None:
-            turn = await self.db.fetch_one(
-                "SELECT * FROM swe_conversation_turns WHERE id=%s FOR UPDATE",
-                (request.turn_id,),
-            )
-        return session, chat, turn
 
     async def _lock_metadata_associations(self, request, plan):
         if (
@@ -517,6 +477,19 @@ class PublicationStore:
             raise ConflictError("Session state revision changed")
 
     @staticmethod
+    def _validate_share_authority(request, plan, associations):
+        PublicationStore._validate_associations(request, *associations)
+        if request.scope_kind == "legacy_share":
+            return
+        chat = associations[1]
+        if chat["deleted_at"] is not None:
+            raise ConflictError("share Chat was deleted")
+        if chat["external_chat_key"] != chat_key_bytes(plan.chat_id) or chat[
+            "user_key"
+        ] != identity_bytes(plan.creator_id, 256):
+            raise ConflictError("share Chat or creator identity changed")
+
+    @staticmethod
     def _validate_authority(request, session, chat, turn):
         PublicationStore._validate_associations(request, session, chat, turn)
         PublicationStore._validate_revisions(request, session, chat)
@@ -570,7 +543,20 @@ class PublicationStore:
         *,
         associations=None,
         target_session=None,
+        sources=None,
     ):
+        try:
+            validate_archive_plan(plan)
+        except ValueError as error:
+            raise IntegrityError(str(error)) from error
+        if plan.share is not None:
+            await install_share(self.db, _request(row), plan.share, row, index)
+        if (
+            plan.turn_install is not None
+            and plan.turn_install.phase == "admission"
+        ):
+            self._validate_admission_anchor(_request(row), plan, associations)
+        await self._install_archive_plan(row, plan, index, associations)
         if plan.chat_metadata is not None:
             request = _request(row)
             if associations is None:
@@ -589,6 +575,18 @@ class PublicationStore:
             await self.db.execute(
                 f"UPDATE {TABLE} SET chat_id=%s WHERE id=%s",
                 (chat_id, row["id"]),
+            )
+        if plan.messages:
+            if associations is None:
+                raise IntegrityError("Message association locks are missing")
+            await install_messages(
+                self.db,
+                _request(row),
+                plan.messages,
+                row,
+                index,
+                associations,
+                sources=sources.rows if sources is not None else None,
             )
         if plan.recovery_block is not None:
             if row["base_state_revision"] is None:
@@ -610,8 +608,102 @@ class PublicationStore:
                 "updated_at=UTC_TIMESTAMP(6) WHERE id=%s",
                 (row["id"], extent.offset, extent.length, row["session_id"]),
             )
+        if plan.turn_install is not None:
+            if associations is None:
+                raise IntegrityError("Turn association locks are missing")
+            await install_turn(
+                self.db,
+                _request(row),
+                plan.turn_install,
+                row,
+                associations,
+            )
+
+    async def _install_archive_plan(self, row, plan, index, associations):
+        if any(
+            (
+                plan.archive,
+                plan.checkpoint,
+                plan.events,
+                plan.reset,
+                plan.prune_ids,
+            ),
+        ):
+            if associations is None:
+                raise IntegrityError("archive association locks are missing")
+            await install_archive(
+                self.db,
+                _request(row),
+                row,
+                index,
+                associations,
+                archive=plan.archive,
+                checkpoint=plan.checkpoint,
+                events=plan.events,
+                reset=plan.reset,
+                prune_ids=plan.prune_ids,
+            )
+
+    @staticmethod
+    def _validate_admission_anchor(request, plan, associations):
+        if associations is None or associations[2] is None:
+            raise IntegrityError("admission Turn association is missing")
+        turn = associations[2]
+        anchors = [
+            message
+            for message in plan.messages
+            if message.layer == "anchor" and message.role == "user"
+        ]
+        if len(anchors) != 1:
+            raise IntegrityError("admission requires exactly one user anchor")
+        anchor = anchors[0]
+        if (
+            anchor.source_msg_key is None
+            or identity_bytes(anchor.source_msg_key, 256)
+            != turn["question_msg_key"]
+        ):
+            raise IntegrityError("admission anchor question identity mismatch")
+        if (
+            anchor.turn_id != request.turn_id
+            or anchor.origin_chat_id != request.chat_id
+        ):
+            raise IntegrityError(
+                "admission anchor Turn or Chat identity mismatch",
+            )
+
+    async def _lock_commit_associations(self, request, plan, archive_turns):
+        target_session = None
+        if plan.chat_metadata is not None:
+            associations, target_session = (
+                await self._lock_metadata_associations(
+                    request,
+                    plan.chat_metadata,
+                )
+            )
+        else:
+            associations = await self._lock_associations(
+                request,
+                archive_turns=archive_turns,
+                archive_chat_ids={
+                    item.origin_chat_id
+                    for item in plan.messages
+                    if item.layer == "archive"
+                    and item.origin_chat_id is not None
+                },
+            )
+        if plan.share is not None:
+            self._validate_share_authority(
+                request,
+                plan.share,
+                associations,
+            )
+            await lock_share_selection(self.db, request, plan.share)
+        return associations, target_session
 
     async def commit(self, operation_key: str):
+        sources = SourceMessages()
+        projected_refs = ProjectionReferences()
+        request = None
         try:
             initial = await self.get(operation_key)
             if initial is None:
@@ -626,6 +718,8 @@ class PublicationStore:
                 )
             request = _request(initial)
             plan = CommitPlan.parse(initial["result_metadata_text"])
+            validate_share_request(request, plan.share)
+            validate_request_plan(request, plan)
             index = await self._nas_io(
                 operation_key,
                 self.bundles.inspect,
@@ -634,49 +728,142 @@ class PublicationStore:
             )
             if index.metadata.get("operation_key") != operation_key:
                 raise IntegrityError("bundle operation identity mismatch")
+            plan, projection = await effective_recovery_plan(
+                self,
+                request,
+                initial,
+                plan,
+                index,
+            )
+            await self._validate_admission_body(request, plan, index)
+            await validate_share_payload(self, request, plan.share, index)
+            sources = await snapshot_sources(self, request, plan)
+            projected_refs = await snapshot_projection(
+                self,
+                request,
+                projection,
+                index,
+                current_id=initial["id"],
+            )
+            sources.include_projection(projected_refs)
+            archive_payloads = await validate_archive_payloads(
+                self,
+                request,
+                plan,
+                index,
+                sources=sources,
+            )
+            archive_turns = sources.include_turns(
+                await self._archive_turns(request, plan),
+            )
             async with self.db.transaction():
-                target_session = None
-                if plan.chat_metadata is not None:
-                    associations, target_session = (
-                        await self._lock_metadata_associations(
-                            request,
-                            plan.chat_metadata,
-                        )
+                await self._assert_writes_allowed(request)
+                associations, target_session = (
+                    await self._lock_commit_associations(
+                        request,
+                        plan,
+                        archive_turns,
                     )
-                else:
-                    associations = await self._lock_associations(request)
-                row = await self.get(operation_key, lock=True)
+                )
+                row = await sources.lock_current(self, initial, operation_key)
                 self._matches(row, request, initial["result_metadata_text"])
                 if row["state"] == "committed":
                     return row
                 if row["state"] != "prepared":
                     raise ConflictError("publication operation is aborted")
-                if plan.chat_metadata is not None:
-                    self._validate_associations(request, *associations)
-                    if (
-                        associations[1] is not None
-                        and associations[1]["deleted_at"] is not None
-                    ):
-                        raise ConflictError("Chat was deleted")
-                else:
-                    self._validate_authority(request, *associations)
+                self._validate_commit_authority(request, plan, associations)
+                archive_payloads.validate_chat(associations[1])
+                await sources.install_dependencies(self, request, row)
                 await self._install(
                     row,
                     plan,
                     index,
                     associations=associations,
                     target_session=target_session,
+                    sources=sources,
                 )
                 await self.db.execute(
-                    f"UPDATE {TABLE} SET state='committed',committed_at=UTC_TIMESTAMP(6) "
+                    f"UPDATE {TABLE} SET state='committed',committed_at=COALESCE(committed_at,UTC_TIMESTAMP(6)) "
                     "WHERE state='prepared' AND id=%s",
                     (row["id"],),
                 )
-            return await self.get(operation_key)
+            return await self._committed_projection(
+                operation_key,
+                projection,
+                projected_refs,
+            )
         except StorageError:
             raise
         except (Exception, asyncio.CancelledError) as error:
             raise UnknownCommit(operation_key) from error
+        finally:
+            if request is not None:
+                await sources.finish(self, request.scope)
+                await projected_refs.finish(
+                    RetentionStore(self.db, request.scope),
+                )
+
+    async def _committed_projection(
+        self,
+        operation_key,
+        projection,
+        projected_refs,
+    ):
+        committed = await self.get(operation_key)
+        await refresh_projection_cache(
+            self,
+            committed,
+            projection,
+            projected_refs,
+        )
+        return committed
+
+    def _validate_commit_authority(self, request, plan, associations):
+        if plan.share is not None:
+            self._validate_share_authority(
+                request,
+                plan.share,
+                associations,
+            )
+        elif plan.chat_metadata is not None:
+            self._validate_associations(request, *associations)
+            if (
+                associations[1] is not None
+                and associations[1]["deleted_at"] is not None
+            ):
+                raise ConflictError("Chat was deleted")
+        else:
+            self._validate_authority(request, *associations)
+
+    async def _validate_admission_body(self, request, plan, index):
+        if plan.turn_install is None or plan.turn_install.phase != "admission":
+            return
+        anchors = [
+            message
+            for message in plan.messages
+            if message.layer == "anchor" and message.role == "user"
+        ]
+        if len(anchors) != 1:
+            raise IntegrityError("admission requires a user anchor")
+        anchor = anchors[0]
+        extent = index.blocks.get(anchor.block_name)
+        if extent is None:
+            raise IntegrityError("admission question block is missing")
+        payload = await self._nas_io(
+            request.operation_key,
+            self.bundles.read_extent,
+            index.relative_path,
+            extent.offset,
+            extent.length,
+            expected_length=index.byte_length,
+        )
+        value = load_metadata_json(payload)
+        if (
+            not isinstance(value, dict)
+            or value.get("role") != "user"
+            or value.get("id") != anchor.source_msg_key
+        ):
+            raise IntegrityError("admission question body identity mismatch")
 
     async def abort(self, request: PublicationRequest, *, owner_stopped: bool):
         """Fence a positively stopped writer; retain the unique tombstone forever."""
@@ -691,6 +878,7 @@ class PublicationStore:
                     initial["result_metadata_text"],
                 ).chat_metadata
             async with self.db.transaction():
+                await self._assert_writes_allowed(request)
                 if metadata_plan is not None:
                     associations, _ = await self._lock_metadata_associations(
                         request,
@@ -714,7 +902,12 @@ class PublicationStore:
                 if (
                     session is not None
                     and session["generation"] == request.generation
-                    and request.kind != "chat_metadata"
+                    and request.kind
+                    not in (
+                        "chat_metadata",
+                        "share",
+                        "share_import",
+                    )
                 ):
                     await self.db.execute(
                         "UPDATE swe_conversation_sessions SET generation=generation+1,"
@@ -806,6 +999,7 @@ class PublicationStore:
             if index.metadata.get("operation_key") != operation_key:
                 raise IntegrityError("bundle operation identity mismatch")
             async with self.db.transaction():
+                await self._assert_writes_allowed(request)
                 associations = await self._lock_associations(request)
                 row = await self.get(operation_key, lock=True)
                 self._matches(row, request, initial["result_metadata_text"])
@@ -830,6 +1024,7 @@ class PublicationStore:
                     row,
                     CommitPlan.parse(row["result_metadata_text"]),
                     index,
+                    associations=associations,
                 )
                 await self.db.execute(
                     f"UPDATE {TABLE} SET state='committed',committed_at=UTC_TIMESTAMP(6) WHERE state='prepared' AND id=%s",

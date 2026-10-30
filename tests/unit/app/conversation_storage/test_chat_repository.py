@@ -85,6 +85,44 @@ class ReadDatabase:
         return self.rows[0] if self.rows else None
 
 
+@pytest.mark.parametrize(
+    "method,args,kwargs",
+    [
+        ("compare_and_set_expert_binding", ("chat", 0, "expert"), {}),
+        ("release_current_expert_binding", ("chat",), {}),
+        ("update_title", ("chat", "new"), {"expected_revision": 0}),
+        ("delete_chats", (["chat"],), {}),
+        ("_freeze_draft_choice", (1,), {}),
+        (
+            "_session_for",
+            (
+                ChatSpec(
+                    id="chat",
+                    session_id="session",
+                    user_id="",
+                    channel="console",
+                ),
+            ),
+            {},
+        ),
+    ],
+)
+async def test_direct_chat_writes_check_backup_fence_before_session_locks(
+    tmp_path,
+    method,
+    args,
+    kwargs,
+):
+    db = ReadDatabase([chat_row()])
+    repo = repository(db, tmp_path)
+    repo.retentions.assert_writes_allowed = AsyncMock(
+        side_effect=ConflictError("backup fence"),
+    )
+    with pytest.raises(ConflictError, match="backup fence"):
+        await getattr(repo, method)(*args, **kwargs)
+    assert not db.queries
+
+
 def repository(db, tmp_path):
     return MySQLChatRepository(
         db,

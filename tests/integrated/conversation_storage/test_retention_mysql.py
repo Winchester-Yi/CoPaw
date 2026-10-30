@@ -130,3 +130,58 @@ async def test_dependency_release_requires_physical_source_reclamation(
     )
     assert row["publication_id"] == first
     assert row["state"] == "released"
+
+
+async def test_backup_fence_blocks_direct_chat_and_execution_writes(
+    conversation_test_database,
+    tmp_path,
+):
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.chat_repository import (
+        MySQLChatRepository,
+    )
+    from swe.app.conversation_storage.execution import ExecutionStore
+    from swe.app.conversation_storage.identity import SessionIdentity
+    from swe.app.conversation_storage.session_adapter import (
+        MySQLSessionAdapter,
+    )
+    from tests.integrated.conversation_storage.test_schema import (
+        insert_chat,
+        insert_session,
+    )
+
+    db = conversation_test_database
+    session = await insert_session(db)
+    await insert_chat(db, session)
+    service = retention(db)
+    await service.install_backup_fence(
+        "backup-job",
+        "snapshot-1",
+    )
+    bundles = BundleStore(tmp_path)
+    repo = MySQLChatRepository(db, service.scope, bundles)
+    with pytest.raises(ConflictError, match="backup fence"):
+        await repo.update_title("chat", "new title", expected_revision=0)
+    with pytest.raises(ConflictError, match="backup fence"):
+        await repo.delete_chats(["chat"])
+    execution = ExecutionStore(db)
+    identity = SessionIdentity(service.scope, "alice", "console", "session")
+    with pytest.raises(ConflictError, match="backup fence"):
+        await execution.request_stop(identity, "question")
+    adapter = MySQLSessionAdapter(
+        db,
+        service.scope,
+        bundles,
+        channel="console",
+    )
+    with pytest.raises(ConflictError, match="backup fence"):
+        await adapter._save_state(identity, {"revision": 0})
+    await service.release(b"backup-job")
+    with pytest.raises(ConflictError, match="backup fence"):
+        async with db.transaction():
+            await service.assert_writes_allowed()
+    await service.release_backup_fence(
+        "backup-job",
+        "snapshot-1",
+    )
+    assert await repo.update_title("chat", "new title", expected_revision=0)

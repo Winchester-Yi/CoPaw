@@ -2490,8 +2490,13 @@ def attach_conversation_archive(
     memory: Any,
     dialog_root: str | Path,
     chat_id: str,
+    *,
+    archive_store=None,
 ) -> Any:
     """Make a ReMe in-memory object archive compactions by chat record ID."""
+    if archive_store is not None:
+        archive_store.attach_memory(memory, chat_id)
+        return memory
     archive_store = ConversationArchiveStore(dialog_root)
     canonical_chat_id = archive_store._validate_chat_id(chat_id)
     if getattr(memory, "_chat_checkpoint_chat_id", None) == canonical_chat_id:

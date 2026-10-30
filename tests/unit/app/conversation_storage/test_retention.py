@@ -69,6 +69,15 @@ class RetentionDatabase:
                 (row for row in self.pins if row.get("guard_marker") == 1),
                 None,
             )
+        if "retention_key=%s" in query:
+            return next(
+                (
+                    deepcopy(row)
+                    for row in self.pins
+                    if row["retention_key"] == params[0]
+                ),
+                None,
+            )
         return None
 
     async def fetch_all(self, query, params):
@@ -85,12 +94,23 @@ class RetentionDatabase:
                 for row in self.pins
                 if row["retention_key"] == params[0]
             ]
+        if "kind='backup_fence'" in query:
+            return [
+                deepcopy(row)
+                for row in self.pins
+                if row["kind"] == "backup_fence" and row["state"] == "active"
+            ]
         return [deepcopy(row) for row in self.pins if row["state"] == "active"]
 
     async def execute(self, query, params):
         self.queries.append(query)
         count = 0
         for row in self.pins:
+            if "kind IN ('reader','backup')" in query and row["kind"] not in (
+                "reader",
+                "backup",
+            ):
+                continue
             if row["retention_key"] == params[0] and row["kind"] != "gc_guard":
                 row["state"] = "released"
                 count += 1
@@ -255,3 +275,85 @@ async def test_released_reader_batch_cannot_start_new_nas_io():
         assert await batch.read(lambda: b"valid") == b"valid"
     with pytest.raises(ConflictError, match="closed"):
         await batch.read(lambda: b"unprotected")
+
+
+async def test_write_gate_ignores_reader_pins_and_checks_fence_under_guard():
+    db = RetentionDatabase()
+    service = store(db)
+    await service.pin([1], kind="reader")
+    async with db.transaction():
+        await service.assert_writes_allowed()
+    guard_lock = next(
+        index
+        for index, query in enumerate(db.queries)
+        if "guard_marker=1 FOR UPDATE" in query
+    )
+    fence_lock = next(
+        index
+        for index, query in enumerate(db.queries)
+        if "kind='backup_fence'" in query
+    )
+    assert guard_lock < fence_lock
+
+
+async def test_backup_fence_is_idempotent_and_only_explicit_release_allows_writes():
+    db = RetentionDatabase()
+    service = store(db)
+    first = await service.install_backup_fence(
+        "backup-job",
+        "snapshot-1",
+    )
+    second = await service.install_backup_fence(
+        "backup-job",
+        "snapshot-1",
+    )
+    assert first["id"] == second["id"]
+    assert first["publication_id"] is None
+    assert first["guard_marker"] is None
+    assert first["member_key"] == 0
+    with pytest.raises(ConflictError, match="backup fence"):
+        async with db.transaction():
+            await service.assert_writes_allowed()
+    await service.release(b"backup-job")
+    with pytest.raises(ConflictError, match="backup fence"):
+        async with db.transaction():
+            await service.assert_writes_allowed()
+    await service.release_backup_fence(
+        "backup-job",
+        "snapshot-1",
+    )
+    async with db.transaction():
+        await service.assert_writes_allowed()
+    with pytest.raises(ConflictError):
+        await service.install_backup_fence(
+            "backup-job",
+            "snapshot-1",
+        )
+
+
+async def test_backup_fence_rejects_other_job_and_changed_snapshot():
+    db = RetentionDatabase()
+    service = store(db)
+    await service.install_backup_fence(
+        "backup-job",
+        "snapshot-1",
+    )
+    with pytest.raises(ConflictError):
+        await service.install_backup_fence(
+            "other-job",
+            "snapshot-2",
+        )
+    with pytest.raises(ConflictError):
+        await service.install_backup_fence(
+            "backup-job",
+            "snapshot-2",
+        )
+    with pytest.raises(ConflictError):
+        await service.release_backup_fence(
+            "backup-job",
+            "snapshot-2",
+        )
+    assert (
+        next(row for row in db.pins if row["kind"] == "backup_fence")["state"]
+        == "active"
+    )

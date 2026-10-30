@@ -21,11 +21,16 @@ from swe.app.conversation_storage.errors import (
 )
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.chat_mutations import ChatMetadataInstall
+from swe.app.conversation_storage.message_installs import (
+    MessageInstall,
+    TurnInstall,
+)
 from swe.app.conversation_storage.publications import (
     PublicationRequest,
     PublicationStore,
     CommitPlan,
 )
+from swe.app.conversation_storage.retention import RetentionStore
 
 
 class PublicationDatabase:
@@ -37,6 +42,8 @@ class PublicationDatabase:
         self.lose_commit = False
         self.fail_read = False
         self.fail_commit_install = False
+        self.guard = None
+        self.transaction_depth = 0
         self.session = {
             "id": 1,
             "tenant_key": b"t",
@@ -47,6 +54,8 @@ class PublicationDatabase:
             "lease_valid": 1,
             "active_turn_id": 3,
             "state_revision": 0,
+            "history_high": 0,
+            "context_epoch": 0,
         }
         self.chat = {
             "id": 2,
@@ -56,6 +65,7 @@ class PublicationDatabase:
             "agent_key": b"a",
             "history_revision": 0,
             "epoch": 0,
+            "history_high": 0,
             "deleted_at": None,
         }
         self.turn = {
@@ -69,6 +79,7 @@ class PublicationDatabase:
 
     @asynccontextmanager
     async def transaction(self):
+        self.transaction_depth += 1
         before = deepcopy(
             (self.rows, self.session, self.chat, self.turn, self.messages),
         )
@@ -79,7 +90,9 @@ class PublicationDatabase:
                 before
             )
             raise
-        if self.lose_commit:
+        finally:
+            self.transaction_depth -= 1
+        if self.lose_commit and self.transaction_depth == 0:
             self.lose_commit = False
             raise ConnectionError("commit response lost")
 
@@ -87,6 +100,8 @@ class PublicationDatabase:
         self.queries.append(query)
         if self.fail_read:
             raise ConnectionError("primary unavailable")
+        if "swe_conversation_retentions" in query:
+            return deepcopy(self.guard)
         if "swe_conversation_sessions" in query:
             return deepcopy(self.session)
         if "swe_conversation_chats" in query:
@@ -106,6 +121,13 @@ class PublicationDatabase:
 
     async def insert(self, query, params=None):
         self.queries.append(query)
+        if "swe_conversation_retentions" in query:
+            columns = query.split("(", 1)[1].split(")", 1)[0].split(",")
+            self.guard = dict(
+                zip((column.strip() for column in columns), params),
+            )
+            self.guard.update(id=1, state="active")
+            return 1
         if "swe_conversation_publications" in query:
             columns = query.split("(", 1)[1].split(")", 1)[0].split(",")
             row = dict(zip((column.strip() for column in columns), params))
@@ -120,6 +142,11 @@ class PublicationDatabase:
             return self.rows[key]["id"]
         self.messages.append(params)
         return len(self.messages)
+
+    async def fetch_all(self, query, params=None):
+        self.queries.append(query)
+        assert "backup_fence" in query
+        return []
 
     async def execute(self, query, params=None):
         self.queries.append(query)
@@ -222,6 +249,67 @@ async def test_durable_nas_precedes_visibility_and_lost_final_commit_is_idempote
     assert db.session["state_revision"] == 1
 
 
+@pytest.mark.parametrize("reconcile", [False, True])
+async def test_backup_fence_blocks_before_session_locks(
+    tmp_path,
+    monkeypatch,
+    reconcile,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = request()
+    await service.reserve(operation, CommitPlan())
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("body", "message", b"{}")],
+    )
+    db.queries.clear()
+
+    async def fenced(_):
+        assert not any(
+            "swe_conversation_sessions" in query for query in db.queries
+        )
+        raise ConflictError("backup fence")
+
+    monkeypatch.setattr(RetentionStore, "assert_writes_allowed", fenced)
+    with pytest.raises(ConflictError, match="backup fence"):
+        if reconcile:
+            await service.reconcile(
+                operation.operation_key,
+                owner_stopped=True,
+                expected_generation=1,
+            )
+        else:
+            await service.commit(operation.operation_key)
+    assert (await service.get(operation.operation_key))["state"] == "prepared"
+
+
+@pytest.mark.parametrize("phase", ["reserve", "durable"])
+async def test_backup_fence_blocks_prepared_and_durable_metadata(
+    tmp_path,
+    monkeypatch,
+    phase,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = request()
+    if phase == "durable":
+        await service.reserve(operation, CommitPlan())
+
+    async def fenced(_):
+        raise ConflictError("backup fence")
+
+    monkeypatch.setattr(RetentionStore, "assert_writes_allowed", fenced)
+    with pytest.raises(ConflictError, match="backup fence"):
+        if phase == "reserve":
+            await service.reserve(operation, CommitPlan())
+        else:
+            await service.write_bundle(
+                operation.operation_key,
+                [BundleBlock("body", "message", b"{}")],
+            )
+
+
 async def test_same_operation_cannot_change_plan_or_payload_identity(tmp_path):
     db = PublicationDatabase()
     service = PublicationStore(db, BundleStore(tmp_path))
@@ -275,7 +363,9 @@ async def test_abort_requires_observed_owner_stop_and_primary_availability(
     assert not db.rows
 
 
-async def test_commit_locks_session_chat_turn_publication_in_order(tmp_path):
+async def test_commit_locks_guard_session_chat_turn_publication_in_order(
+    tmp_path,
+):
     db = PublicationDatabase()
     service = PublicationStore(db, BundleStore(tmp_path))
     operation = request()
@@ -288,6 +378,9 @@ async def test_commit_locks_session_chat_turn_publication_in_order(tmp_path):
     await service.commit(operation.operation_key)
     locks = [query for query in db.queries if "FOR UPDATE" in query]
     assert [query.split("FROM ")[1].split()[0] for query in locks] == [
+        "swe_conversation_retentions",
+        "swe_conversation_retentions",
+        "swe_conversation_retentions",
         "swe_conversation_sessions",
         "swe_conversation_chats",
         "swe_conversation_turns",
@@ -621,3 +714,61 @@ async def test_metadata_reconciliation_missing_body_keeps_original_prepared(
         )
     assert len(db.rows) == 1
     assert (await service.get(operation.operation_key))["state"] == "prepared"
+
+
+async def test_fenced_terminal_reconciliation_installs_original_message_and_root(
+    tmp_path,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = request()
+    plan = CommitPlan(
+        recovery_block="root",
+        messages=(
+            MessageInstall(
+                "answer",
+                "memory",
+                "assistant",
+                source_msg_key="answer",
+                turn_id=3,
+            ),
+        ),
+        turn_install=TurnInstall("terminal", history_status="completed"),
+    )
+    await service.reserve(operation, plan)
+    await service.write_bundle(
+        operation.operation_key,
+        [
+            BundleBlock("root", "recovery", b"{}"),
+            BundleBlock(
+                "answer",
+                "message",
+                b'{"id":"answer","role":"assistant","content":"done"}',
+            ),
+        ],
+    )
+    result = await service.reconcile(
+        operation.operation_key,
+        owner_stopped=True,
+        expected_generation=1,
+    )
+    assert result["state"] == "committed"
+    assert len(db.messages) == 1
+    assert db.session["recovery_publication_id"] == result["id"]
+    assert db.session["state_revision"] == 1
+
+
+async def test_commit_preserves_imported_committed_at(tmp_path):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = request()
+    await service.reserve(operation, CommitPlan(recovery_block="root"))
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("root", "recovery", b"{}")],
+    )
+    db.rows[operation.operation_key.encode()]["committed_at"] = "imported"
+    await service.commit(operation.operation_key)
+    assert (
+        db.rows[operation.operation_key.encode()]["committed_at"] == "imported"
+    )

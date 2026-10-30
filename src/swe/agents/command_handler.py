@@ -188,7 +188,16 @@ class CommandHandler(ConversationCommandHandlerMixin):
             None,
         )
         if archive_messages is not None:
-            boundary = await archive_messages(messages)
+            if (
+                getattr(self.memory, "_indexed_archive_store", None)
+                is not None
+            ):
+                boundary = await archive_messages(
+                    messages,
+                    summary=compact_content,
+                )
+            else:
+                boundary = await archive_messages(messages)
             await self.memory.update_compressed_summary(compact_content)
             return await self._make_system_msg(
                 "",

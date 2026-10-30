@@ -472,7 +472,13 @@ class MemoryCompactionHook:
     ) -> Any | None:
         archive_messages = getattr(memory, "archive_compacted_messages", None)
         if archive_messages is not None:
-            boundary = await archive_messages(messages_to_compact)
+            if getattr(memory, "_indexed_archive_store", None) is not None:
+                boundary = await archive_messages(
+                    messages_to_compact,
+                    summary=compact_content,
+                )
+            else:
+                boundary = await archive_messages(messages_to_compact)
             updated_count = len(messages_to_compact)
         else:
             boundary = None
