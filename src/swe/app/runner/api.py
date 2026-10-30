@@ -865,6 +865,9 @@ async def _build_chat_history(
     non_blocking: bool = False,
     state: dict | None = None,
 ) -> ChatHistory:
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        return await _indexed_history_call(indexed.current, chat_spec.id)
     if state is None:
         state = (
             await _read_history_state(
@@ -945,6 +948,29 @@ async def _build_chat_history(
     )
 
 
+def _indexed_history(workspace):
+    storage = getattr(workspace, "conversation_storage", None)
+    return getattr(storage, "history", None)
+
+
+async def _indexed_history_call(operation, *args, **kwargs):
+    from ..conversation_storage.errors import StorageError
+    from mysql.connector.errors import Error as MySQLError
+
+    try:
+        return await operation(*args, **kwargs)
+    except KeyError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="Chat history not found",
+        ) from error
+    except (StorageError, OSError, RuntimeError, MySQLError) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Conversation storage unavailable",
+        ) from error
+
+
 def _archive_store(workspace) -> ConversationArchiveStore | None:
     workspace_dir = getattr(workspace, "workspace_dir", None)
     if workspace_dir is None:
@@ -965,6 +991,17 @@ def _boundary_model(boundary) -> ChatCompactionBoundary:
 
 
 async def _archive_metadata(workspace, chat_id: str) -> ChatArchiveMetadata:
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        page = await _indexed_history_call(
+            indexed.archive_page,
+            chat_id,
+            limit=1,
+        )
+        return ChatArchiveMetadata(
+            has_more=bool(page.messages),
+            boundaries=page.boundaries,
+        )
     store = _archive_store(workspace)
     if store is None:
         return ChatArchiveMetadata()
@@ -981,6 +1018,14 @@ async def _archive_page(
     before: str | None,
     limit: int,
 ) -> ChatArchivePage:
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        return await _indexed_history_call(
+            indexed.archive_page,
+            chat_id,
+            before=before,
+            limit=limit,
+        )
     store = _archive_store(workspace)
     if store is None:
         return ChatArchivePage()
@@ -1355,6 +1400,25 @@ async def batch_delete_chats(
     return {"deleted": deleted}
 
 
+async def _indexed_answer_turn(
+    indexed,
+    request,
+    workspace,
+    msgid,
+    chat_id,
+    session_id,
+    user_id,
+):
+    return await _indexed_history_call(
+        indexed.answer_turn,
+        msgid,
+        chat_id=chat_id,
+        session_id=session_id,
+        user_id=user_id,
+        authorize=lambda chat: _authorize_chat(request, chat, workspace),
+    )
+
+
 @router.get("/answer-turn", response_model=ChatHistory)
 async def get_answer_turn(
     request: Request,
@@ -1371,6 +1435,17 @@ async def get_answer_turn(
         raise HTTPException(
             status_code=400,
             detail="Request user identity is required",
+        )
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        return await _indexed_answer_turn(
+            indexed,
+            request,
+            workspace,
+            msgid,
+            chat_id,
+            sessionid,
+            user_id,
         )
     chat_spec = None
     candidate_chats: list[ChatSpec] = []
@@ -1519,6 +1594,19 @@ async def get_chat_history_page(
         )
     _authorize_chat(request, chat_spec, workspace)
     try:
+        indexed = _indexed_history(workspace)
+        if indexed is not None:
+            return await _indexed_history_call(
+                indexed.archive_page,
+                chat_spec.id,
+                before=before,
+                limit=limit,
+                authorize=lambda chat: _authorize_chat(
+                    request,
+                    chat,
+                    workspace,
+                ),
+            )
         return await _archive_page(workspace, chat_spec.id, before, limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1544,6 +1632,13 @@ async def get_chat_context_usage(
         )
     _authorize_chat(request, chat_spec, workspace)
 
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        return await _indexed_history_call(
+            indexed.context_usage,
+            chat_id,
+            authorize=lambda chat: _authorize_chat(request, chat, workspace),
+        )
     state = await _read_history_state(
         session,
         chat_spec.session_id,
@@ -1617,6 +1712,13 @@ async def get_chat(
 
     _authorize_chat(request, chat_spec, workspace)
 
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        return await _indexed_history_call(
+            indexed.current,
+            chat_id,
+            authorize=lambda chat: _authorize_chat(request, chat, workspace),
+        )
     return await _build_chat_history(
         chat_spec,
         session=session,

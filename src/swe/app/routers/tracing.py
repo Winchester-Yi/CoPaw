@@ -19,6 +19,7 @@ from ..runner.api import (
     _annotate_task_run_messages,
     _message_sort_key,
     _messages_from_memory_state,
+    _indexed_history_call,
     _task_session_messages_from_state,
 )
 from ..runner.models import ChatHistory, ChatMessage, ChatSpec
@@ -141,6 +142,19 @@ async def get_user_chat(
         raise HTTPException(
             status_code=404,
             detail=f"Chat not found: {chat_id}",
+        )
+    storage = getattr(workspace, "conversation_storage", None)
+    indexed = getattr(storage, "history", None)
+    if indexed is not None:
+
+        def authorize(chat):
+            if chat.user_id != user_id:
+                raise HTTPException(status_code=404, detail="Chat not found")
+
+        return await _indexed_history_call(
+            indexed.tracing_view,
+            chat_id,
+            authorize=authorize,
         )
 
     state = await workspace.runner.session.get_session_state_dict(
