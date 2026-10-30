@@ -2035,6 +2035,30 @@ _Avoid_: logical chat session, UI session, conversation identity
 The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
 _Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
 
+**Conversation Metadata**:
+The authoritative identity, ownership, relationships, lifecycle state, ordering, and content references of Chats, Logical Chat Sessions, Answer Turns, messages, compaction archives, checkpoints, and shares. It includes Chat titles and content locations and extents, but excludes conversation bodies and semantic summaries; related SubAgent and Goal state remains owned by those domains.
+_Avoid_: Chat-list fields only, arbitrary JSON payload, duplicated conversation body
+
+**Conversation Content**:
+The retained user and assistant messages, tool arguments and results, semantic summaries and checkpoint facts, and Agent recovery snapshot payloads belonging to a conversation. Its identity, ownership, ordering, lifecycle, and extent are described by Conversation Metadata.
+_Avoid_: plain text only, current model context only, conversation metadata
+
+**Conversation Message Occurrence**:
+One distinct retained occurrence of a canonical conversation message, including its position and context membership. Different occurrences may share the same original message ID, and one occurrence may produce multiple display blocks without becoming multiple canonical messages.
+_Avoid_: globally unique Msg.id, rendered message card, text block
+
+**Committed Conversation History**:
+The conversation content and associated metadata that have completed durable publication and are available for subsequent history reads and restart recovery. Live output that has only been displayed is not part of this history until it is committed.
+_Avoid_: every displayed token, local stream replay, uncommitted Agent output
+
+**Concurrent Session Submission**:
+A second independent user question submitted while the same identity-scoped Logical Chat Session already has an executing Answer Turn. It receives a busy result rather than being implicitly queued; approvals, Stop commands, and reconnect requests for the current turn are not independent submissions.
+_Avoid_: parallel mutation of shared context, implicit request queue, approval response
+
+**Session Execution Authority**:
+The current owner's exclusive permission to advance an Answer Turn and publish changes to its identity-scoped Logical Chat Session. Superseded execution authority cannot publish late results, and obtaining new authority does not itself resume an interrupted Agent execution.
+_Avoid_: request routing affinity, automatic failover execution, permission to replay tools
+
 **Conversation Compaction Boundary**:
 The durable, user-visible separator within one **Chat Record** marking the point where automatic context compaction or an explicit `/compact` archived earlier messages. It appears immediately through a non-message stream event and is restored from the archive on reload; its archived-message count is the number of display-safe history messages, not rendered cards; it never represents `/new` or `/clear`.
 _Avoid_: history-clear marker, new-conversation marker, summary message
