@@ -1,0 +1,306 @@
+# -*- coding: utf-8 -*-
+"""Explicit reference protection for readers, backups and older dependencies.
+
+Reader batches pin committed/live publication rows in integer ID order. A
+reader must select its locators and authorize them in the same outer database
+transaction as pin(); NAS IO follows only after that transaction commits.
+Released rows remain evidence; no TTL guesses that a reader or writer died.
+"""
+
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+import asyncio
+import secrets
+
+from .errors import ConflictError, IntegrityError
+from .identity import WorkspaceScope, identity_bytes
+
+TABLE = "swe_conversation_retentions"
+SCOPE_WHERE = (
+    "scope_kind=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
+)
+MAX_PIN_BATCH = 4096
+
+
+def _ids(values):
+    result = sorted(set(values))
+    if len(result) > MAX_PIN_BATCH or any(
+        type(value) is not int or value <= 0 for value in result
+    ):
+        raise ValueError(
+            "publication pins require bounded positive integer IDs",
+        )
+    return result
+
+
+@dataclass
+class PinBatch:
+    retention_key: bytes
+    publications: tuple[dict, ...]
+    _workers: set = field(default_factory=set, repr=False)
+    _closed: bool = field(default=False, repr=False)
+
+    async def read(self, function, *args, **kwargs):
+        """Offload bounded NAS IO without releasing its pins on cancellation."""
+        if self._closed:
+            raise ConflictError("reader pin batch is closed")
+        worker = asyncio.create_task(
+            asyncio.to_thread(function, *args, **kwargs),
+        )
+        self._workers.add(worker)
+        cancelled = False
+        try:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                if not worker.cancelled():
+                    worker.exception()
+                raise asyncio.CancelledError
+            return worker.result()
+        finally:
+            self._workers.discard(worker)
+
+    async def drain(self):
+        self._closed = True
+        cancelled = False
+        while self._workers:
+            pending = asyncio.gather(*self._workers, return_exceptions=True)
+            while not pending.done():
+                try:
+                    await asyncio.shield(pending)
+                except asyncio.CancelledError:
+                    cancelled = True
+            self._workers.difference_update(
+                {worker for worker in self._workers if worker.done()},
+            )
+        return cancelled
+
+
+class RetentionStore:
+    """One trusted namespace; legacy shares have an explicit separate kind."""
+
+    def __init__(
+        self,
+        database,
+        scope: WorkspaceScope,
+        *,
+        scope_kind="workspace",
+    ):
+        if scope_kind not in ("workspace", "legacy_share"):
+            raise ValueError("invalid retention scope kind")
+        if scope_kind == "legacy_share" and (
+            scope.source_id or scope.agent_id
+        ):
+            raise ValueError(
+                "legacy share scope cannot invent source or agent identity",
+            )
+        self.db = database
+        self.scope = scope
+        self.scope_kind = scope_kind
+
+    @property
+    def scope_values(self):
+        return (self.scope_kind, *self.scope.sql_values)
+
+    def _validate_scope(self, row):
+        values = tuple(
+            row[key]
+            for key in ("scope_kind", "tenant_key", "source_key", "agent_key")
+        )
+        if values != self.scope_values:
+            raise IntegrityError("retention publication scope mismatch")
+
+    async def _insert(self, key, publication_id, kind, *, guard=False):
+        fields = {
+            "retention_key": key,
+            "member_key": publication_id or 0,
+            "kind": kind,
+            "scope_kind": self.scope_kind,
+            "tenant_key": self.scope.sql_values[0],
+            "source_key": self.scope.sql_values[1],
+            "agent_key": self.scope.sql_values[2],
+            "publication_id": publication_id,
+            "guard_marker": 1 if guard else None,
+        }
+        columns = ",".join(fields)
+        placeholders = ",".join(["%s"] * len(fields))
+        await self.db.insert(
+            f"INSERT INTO {TABLE} ({columns},state,created_at) "
+            f"VALUES ({placeholders},'active',UTC_TIMESTAMP(6)) "
+            "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
+            tuple(fields.values()),
+        )
+
+    async def ensure_guard(self):
+        """The unique scope marker arbitrates first-use races without a Session."""
+        async with self.db.transaction():
+            await self._insert(
+                secrets.token_hex(32).encode("ascii"),
+                None,
+                "gc_guard",
+                guard=True,
+            )
+            row = await self.db.fetch_one(
+                f"SELECT * FROM {TABLE} WHERE {SCOPE_WHERE} AND guard_marker=1 FOR UPDATE",
+                self.scope_values,
+            )
+            if row is None:
+                raise IntegrityError("scope GC guard is missing")
+            self._validate_scope(row)
+            shape = (
+                row["kind"],
+                row["state"],
+                row["member_key"],
+                row["publication_id"],
+                row["guard_marker"],
+            )
+            if shape != ("gc_guard", "active", 0, None, 1):
+                raise IntegrityError(
+                    "scope GC guard has invalid fixed metadata",
+                )
+            return row
+
+    async def lock_guard(self):
+        """Use inside the caller transaction before publication row locks."""
+        await self.ensure_guard()
+        return await self.db.fetch_one(
+            f"SELECT * FROM {TABLE} WHERE {SCOPE_WHERE} AND guard_marker=1 FOR UPDATE",
+            self.scope_values,
+        )
+
+    async def _lock_publications(self, values):
+        ids = _ids(values)
+        if not ids:
+            return []
+        placeholders = ",".join(["%s"] * len(ids))
+        rows = await self.db.fetch_all(
+            f"SELECT * FROM swe_conversation_publications WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE",
+            tuple(ids),
+        )
+        if [row["id"] for row in rows] != ids:
+            raise IntegrityError("retention target publication is missing")
+        for row in rows:
+            self._validate_scope(row)
+        return rows
+
+    async def pin(self, publication_ids, *, kind, retention_key=None):
+        if kind not in ("reader", "backup"):
+            raise ValueError("ordinary pin kind must be reader or backup")
+        key = (
+            identity_bytes(retention_key, 128)
+            if retention_key is not None
+            else secrets.token_hex(32).encode("ascii")
+        )
+        async with self.db.transaction():
+            rows = await self._lock_publications(publication_ids)
+            for row in rows:
+                if row["state"] != "committed" or row["gc_state"] != "live":
+                    raise ConflictError(
+                        "publication is not committed/live for pinning",
+                    )
+            for row in rows:
+                await self._insert(key, row["id"], kind)
+            await self._validate_members(
+                key,
+                [row["id"] for row in rows],
+                kind,
+            )
+        return PinBatch(key, tuple(rows))
+
+    async def _validate_members(self, key, publication_ids, kind):
+        members = await self.db.fetch_all(
+            f"SELECT * FROM {TABLE} WHERE retention_key=%s ORDER BY member_key FOR UPDATE",
+            (key,),
+        )
+        if len(members) != len(publication_ids):
+            raise ConflictError(
+                "retention identity already has a different member set",
+            )
+        for row, publication_id in zip(members, publication_ids):
+            self._validate_scope(row)
+            expected = (publication_id, publication_id, kind, "active")
+            current = (
+                row["publication_id"],
+                row["member_key"],
+                row["kind"],
+                row["state"],
+            )
+            if current != expected or row["guard_marker"] is not None:
+                raise ConflictError(
+                    "retention identity is released or differs from this pin",
+                )
+
+    async def release(self, retention_key: bytes):
+        await self.db.execute(
+            f"UPDATE {TABLE} SET state='released',released_at=UTC_TIMESTAMP(6) "
+            f"WHERE retention_key=%s AND {SCOPE_WHERE} AND kind IN ('reader','backup') AND state='active'",
+            (retention_key, *self.scope_values),
+        )
+
+    @asynccontextmanager
+    async def reader(self, publication_ids):
+        batch = await self.pin(publication_ids, kind="reader")
+        try:
+            yield batch
+        finally:
+            await self.finish_reader(batch)
+
+    async def finish_reader(self, batch: PinBatch):
+        """Drain and release outside the locator snapshot SQL transaction."""
+        cancelled = await batch.drain()
+        release = asyncio.create_task(self.release(batch.retention_key))
+        while not release.done():
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                cancelled = True
+        release.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def add_dependencies(self, source_id: int, target_ids):
+        targets = _ids(target_ids)
+        if any(value >= source_id for value in targets):
+            raise IntegrityError(
+                "dependencies must point to older publications",
+            )
+        async with self.db.transaction():
+            rows = await self._lock_publications([*targets, source_id])
+            source = rows[-1]
+            if source["gc_state"] != "live" or source["state"] not in (
+                "prepared",
+                "committed",
+            ):
+                raise ConflictError("dependency source is not publishable")
+            for row in rows[:-1]:
+                if row["state"] != "committed" or row["gc_state"] != "live":
+                    raise ConflictError(
+                        "dependency target is not committed/live",
+                    )
+            for row in rows[:-1]:
+                await self._insert(
+                    f"dep:{source_id}".encode("ascii"),
+                    row["id"],
+                    "dependency",
+                )
+            await self._validate_members(
+                f"dep:{source_id}".encode("ascii"),
+                targets,
+                "dependency",
+            )
+
+    async def release_dependencies(self, source_id: int):
+        async with self.db.transaction():
+            rows = await self._lock_publications([source_id])
+            if rows[0]["gc_state"] != "reclaimed":
+                raise ConflictError(
+                    "dependency source must be physically reclaimed",
+                )
+            await self.db.execute(
+                f"UPDATE {TABLE} SET state='released',released_at=UTC_TIMESTAMP(6) "
+                f"WHERE retention_key=%s AND {SCOPE_WHERE} AND kind='dependency' AND state='active'",
+                (f"dep:{source_id}".encode("ascii"), *self.scope_values),
+            )

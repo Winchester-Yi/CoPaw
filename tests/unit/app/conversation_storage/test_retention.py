@@ -1,0 +1,257 @@
+# -*- coding: utf-8 -*-
+from contextlib import asynccontextmanager
+from copy import deepcopy
+import asyncio
+import threading
+
+import pytest
+
+from swe.app.conversation_storage.errors import ConflictError, IntegrityError
+from swe.app.conversation_storage.identity import WorkspaceScope
+from swe.app.conversation_storage.retention import RetentionStore
+
+
+class RetentionDatabase:
+    def __init__(self):
+        self.pins = []
+        self.objects = {
+            value: {
+                "id": value,
+                "tenant_key": b"t",
+                "source_key": b"s",
+                "agent_key": b"a",
+                "scope_kind": "workspace",
+                "state": "committed",
+                "gc_state": "live",
+            }
+            for value in range(1, 5)
+        }
+        self.queries = []
+
+    @asynccontextmanager
+    async def transaction(self):
+        before = deepcopy(self.pins)
+        try:
+            yield self
+        except BaseException:
+            self.pins = before
+            raise
+
+    async def insert(self, query, params):
+        self.queries.append(query)
+        fields = query.split("(", 1)[1].split(")", 1)[0].split(",")
+        row = dict(zip((field.strip() for field in fields), params))
+        if row.get("guard_marker") == 1:
+            existing = next(
+                (item for item in self.pins if item.get("guard_marker") == 1),
+                None,
+            )
+        else:
+            existing = next(
+                (
+                    item
+                    for item in self.pins
+                    if (item["retention_key"], item["member_key"])
+                    == (row["retention_key"], row["member_key"])
+                ),
+                None,
+            )
+        if existing:
+            return existing["id"]
+        row.update(id=len(self.pins) + 1, state="active")
+        self.pins.append(row)
+        return row["id"]
+
+    async def fetch_one(self, query, params):
+        self.queries.append(query)
+        if "guard_marker=1" in query:
+            return next(
+                (row for row in self.pins if row.get("guard_marker") == 1),
+                None,
+            )
+        return None
+
+    async def fetch_all(self, query, params):
+        self.queries.append(query)
+        if "swe_conversation_publications" in query:
+            return [
+                deepcopy(self.objects[value])
+                for value in sorted(set(params))
+                if value in self.objects
+            ]
+        if "retention_key=%s" in query:
+            return [
+                deepcopy(row)
+                for row in self.pins
+                if row["retention_key"] == params[0]
+            ]
+        return [deepcopy(row) for row in self.pins if row["state"] == "active"]
+
+    async def execute(self, query, params):
+        self.queries.append(query)
+        count = 0
+        for row in self.pins:
+            if row["retention_key"] == params[0] and row["kind"] != "gc_guard":
+                row["state"] = "released"
+                count += 1
+        return count
+
+
+def store(database):
+    return RetentionStore(database, WorkspaceScope("t", "s", "a"))
+
+
+async def test_guard_initialization_is_unique_and_has_no_publication():
+    db = RetentionDatabase()
+    service = store(db)
+    first = await service.ensure_guard()
+    second = await service.ensure_guard()
+    assert first["id"] == second["id"]
+    assert len(db.pins) == 1
+    assert first["publication_id"] is None
+    assert first["guard_marker"] == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("kind", "reader"),
+        ("state", "released"),
+        ("member_key", 1),
+        ("publication_id", 1),
+    ],
+)
+async def test_malformed_scope_guard_blocks_gc_and_backup(field, value):
+    db = RetentionDatabase()
+    service = store(db)
+    await service.ensure_guard()
+    db.pins[0][field] = value
+    with pytest.raises(IntegrityError, match="guard"):
+        await service.ensure_guard()
+
+
+async def test_reader_batch_is_deduplicated_sorted_and_explicitly_released():
+    db = RetentionDatabase()
+    service = store(db)
+    async with service.reader([3, 1, 3]) as batch:
+        assert [row["publication_id"] for row in db.pins] == [1, 3]
+        assert [row["id"] for row in batch.publications] == [1, 3]
+        assert all(row["state"] == "active" for row in db.pins)
+        assert all(row["guard_marker"] is None for row in db.pins)
+    assert all(row["state"] == "released" for row in db.pins)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("state", "prepared"),
+        ("state", "aborted"),
+        ("gc_state", "deleting"),
+        ("gc_state", "reclaimed"),
+    ],
+)
+async def test_cannot_pin_uncommitted_or_deleting_publications(field, value):
+    db = RetentionDatabase()
+    db.objects[2][field] = value
+    with pytest.raises(ConflictError):
+        await store(db).pin([1, 2], kind="reader")
+    assert not db.pins
+
+
+async def test_scope_mismatch_and_missing_object_fail_without_partial_pins():
+    db = RetentionDatabase()
+    db.objects[2]["source_key"] = b"other"
+    with pytest.raises(IntegrityError):
+        await store(db).pin([1, 2], kind="reader")
+    with pytest.raises(IntegrityError):
+        await store(db).pin([99], kind="reader")
+    assert not db.pins
+
+
+async def test_reader_releases_pin_after_content_read_exception():
+    db = RetentionDatabase()
+    with pytest.raises(OSError):
+        async with store(db).reader([1]):
+            raise OSError("NAS unavailable")
+    assert db.pins[0]["state"] == "released"
+
+
+async def test_dependency_must_point_to_older_committed_publication():
+    db = RetentionDatabase()
+    db.objects[3]["state"] = "prepared"
+    service = store(db)
+    await service.add_dependencies(3, [2, 1, 2])
+    assert [row["publication_id"] for row in db.pins] == [1, 2]
+    assert {row["retention_key"] for row in db.pins} == {b"dep:3"}
+    with pytest.raises(IntegrityError, match="older"):
+        await service.add_dependencies(3, [3])
+    with pytest.raises(ConflictError):
+        await service.release_dependencies(3)
+    db.objects[3]["gc_state"] = "reclaimed"
+    await service.release_dependencies(3)
+    assert all(row["state"] == "released" for row in db.pins)
+
+
+def test_legacy_share_scope_is_distinct_and_cannot_guess_workspace():
+    db = RetentionDatabase()
+    RetentionStore(db, WorkspaceScope("t", "", ""), scope_kind="workspace")
+    RetentionStore(db, WorkspaceScope("t", "", ""), scope_kind="legacy_share")
+    with pytest.raises(ValueError):
+        RetentionStore(
+            db,
+            WorkspaceScope("t", "s", ""),
+            scope_kind="legacy_share",
+        )
+
+
+async def test_released_pin_key_cannot_be_reused_or_silently_claim_protection():
+    db = RetentionDatabase()
+    service = store(db)
+    batch = await service.pin(
+        [1],
+        kind="reader",
+        retention_key="original-reader",
+    )
+    await service.release(batch.retention_key)
+    with pytest.raises(ConflictError, match="retention"):
+        await service.pin([1], kind="reader", retention_key="original-reader")
+    assert db.pins[0]["state"] == "released"
+
+
+async def test_reader_cancellation_waits_for_nas_worker_before_releasing_pin():
+    db = RetentionDatabase()
+    started = threading.Event()
+    finish = threading.Event()
+
+    def slow_read():
+        started.set()
+        finish.wait(5)
+        return b"content"
+
+    async def read():
+        async with store(db).reader([1]) as batch:
+            await batch.read(slow_read)
+
+    task = asyncio.create_task(read())
+    try:
+        for _ in range(100):
+            if started.is_set() or task.done():
+                break
+            await asyncio.sleep(0.001)
+        assert started.is_set()
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        assert db.pins[0]["state"] == "active"
+    finally:
+        finish.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert db.pins[0]["state"] == "released"
+
+
+async def test_released_reader_batch_cannot_start_new_nas_io():
+    db = RetentionDatabase()
+    async with store(db).reader([1]) as batch:
+        assert await batch.read(lambda: b"valid") == b"valid"
+    with pytest.raises(ConflictError, match="closed"):
+        await batch.read(lambda: b"unprotected")
