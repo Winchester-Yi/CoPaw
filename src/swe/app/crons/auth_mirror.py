@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -61,8 +62,18 @@ async def cli_cron_auth_mirror():
     connection = None
     try:
         try:
-            config = get_database_config()
-            if config.host:
+            # The default localhost host does not imply database configuration.
+            if any(
+                os.environ.get(name)
+                for name in (
+                    "SWE_DB_HOST",
+                    "SWE_DB_PORT",
+                    "SWE_DB_USER",
+                    "SWE_DB_ACCESS",
+                    "SWE_DB_NAME",
+                )
+            ):
+                config = get_database_config()
                 connection = DatabaseConnection(config)
                 await asyncio.wait_for(
                     connection.connect(),

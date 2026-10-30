@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -160,6 +161,7 @@ async def test_cli_lifecycle_opens_once_and_closes_on_error(monkeypatch):
     from swe.app.crons import auth_mirror
     from swe import database
 
+    monkeypatch.setenv("SWE_DB_HOST", "mysql")
     connection = SimpleNamespace(connect=AsyncMock(), close=AsyncMock())
     factory = Mock(return_value=connection)
     monkeypatch.setattr(database, "DatabaseConnection", factory)
@@ -187,6 +189,8 @@ async def test_cli_local_connection_failure_keeps_file_success(
 ):
     from swe import database
     from swe.app.crons import auth_mirror
+
+    monkeypatch.setenv("SWE_DB_HOST", "localhost")
 
     async def connect():
         if failure == "refused":
@@ -283,6 +287,40 @@ async def test_cancelled_file_mutation_finishes_its_mirror_attempt(
     with pytest.raises(asyncio.CancelledError):
         await task
     expected.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("SWE_DB_PORT", "3306"),
+        ("SWE_DB_USER", "root"),
+        ("SWE_DB_ACCESS", "BEE_local-secret"),
+        ("SWE_DB_NAME", "swe"),
+    ],
+)
+async def test_cli_local_database_can_be_configured_without_host(
+    monkeypatch,
+    name,
+    value,
+):
+    from swe import database
+    from swe.app.crons import auth_mirror
+
+    for key in os.environ:
+        if key.startswith("SWE_DB_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv(name, value)
+    connection = SimpleNamespace(connect=AsyncMock(), close=AsyncMock())
+    factory = Mock(return_value=connection)
+    monkeypatch.setattr(database, "DatabaseConnection", factory)
+
+    async with auth_mirror.cli_cron_auth_mirror():
+        assert auth_mirror._repository.db is connection
+    assert factory.call_args.args[0].host == "localhost"
+    connection.connect.assert_awaited_once()
+    connection.close.assert_awaited_once()
+    assert auth_mirror._repository is None
 
 
 @pytest.mark.asyncio
