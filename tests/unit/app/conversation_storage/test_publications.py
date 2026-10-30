@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime
 import asyncio
 import threading
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +20,7 @@ from swe.app.conversation_storage.errors import (
     UnknownCommit,
 )
 from swe.app.conversation_storage.identity import WorkspaceScope
+from swe.app.conversation_storage.chat_mutations import ChatMetadataInstall
 from swe.app.conversation_storage.publications import (
     PublicationRequest,
     PublicationStore,
@@ -150,6 +153,13 @@ class PublicationDatabase:
         elif "state='settling'" in query:
             self.turn["state"] = "settling"
         return 1
+
+
+def test_commit_plan_rejects_duplicate_version_field():
+    with pytest.raises(IntegrityError, match="plan"):
+        CommitPlan.parse(
+            '{"version":99,"version":1,"recovery_block":null,"result_ids":[]}',
+        )
 
 
 def request(**values):
@@ -522,3 +532,92 @@ async def test_reconciliation_never_fences_another_owner(tmp_path, generation):
             expected_generation=generation,
         )
     assert db.session["owner_key"] == b"different-owner"
+
+
+def metadata_plan():
+    return CommitPlan(
+        chat_metadata=ChatMetadataInstall(
+            external_chat_key="chat",
+            user_id="alice",
+            channel="console",
+            title="title",
+            metadata_text="{}",
+            created_at="2026-10-30T00:00:00Z",
+            updated_at="2026-10-30T00:00:00Z",
+            expected_metadata_revision=0,
+        ),
+    )
+
+
+async def test_metadata_reconciliation_confirms_original_operation_and_is_idempotent(
+    tmp_path,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = replace(request(), kind="chat_metadata", turn_id=None)
+    await service.reserve(operation, metadata_plan())
+    committed = {
+        **await service.get(operation.operation_key),
+        "state": "committed",
+    }
+    service.confirm_bundle = AsyncMock()
+    service.commit = AsyncMock(return_value=committed)
+    result = await service.reconcile_metadata(
+        operation.operation_key,
+        owner_stopped=True,
+    )
+    assert result is committed
+    service.confirm_bundle.assert_awaited_once_with(operation.operation_key)
+    service.commit.assert_awaited_once_with(operation.operation_key)
+    with pytest.raises(ConflictError, match="owner"):
+        await service.reconcile_metadata(
+            operation.operation_key,
+            owner_stopped=False,
+        )
+    db.rows[operation.operation_key.encode()]["state"] = "committed"
+    assert (
+        await service.reconcile_metadata(
+            operation.operation_key,
+            owner_stopped=True,
+        )
+    )["state"] == "committed"
+    assert service.confirm_bundle.await_count == 1
+
+
+async def test_metadata_reconciliation_conflict_aborts_only_original_operation(
+    tmp_path,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = replace(request(), kind="chat_metadata", turn_id=None)
+    await service.reserve(operation, metadata_plan())
+    service.confirm_bundle = AsyncMock()
+    service.commit = AsyncMock(side_effect=ConflictError("metadata conflict"))
+    service.abort = AsyncMock(return_value={"state": "aborted"})
+    with pytest.raises(ConflictError):
+        await service.reconcile_metadata(
+            operation.operation_key,
+            owner_stopped=True,
+        )
+    service.abort.assert_awaited_once()
+    assert (
+        service.abort.await_args.args[0].operation_key
+        == operation.operation_key
+    )
+    assert db.session["generation"] == 1 and db.session["active_turn_id"] == 3
+
+
+async def test_metadata_reconciliation_missing_body_keeps_original_prepared(
+    tmp_path,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(db, BundleStore(tmp_path))
+    operation = replace(request(), kind="chat_metadata", turn_id=None)
+    await service.reserve(operation, metadata_plan())
+    with pytest.raises(FileNotFoundError):
+        await service.reconcile_metadata(
+            operation.operation_key,
+            owner_stopped=True,
+        )
+    assert len(db.rows) == 1
+    assert (await service.get(operation.operation_key))["state"] == "prepared"

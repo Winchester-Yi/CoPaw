@@ -197,6 +197,9 @@ class ChatManager:
         The normal product invariant is unique by session, user, and channel.
         If legacy data has duplicates, return the most recently updated match.
         """
+        latest = getattr(self._repo, "latest_chat_by_session", None)
+        if latest is not None:
+            return await latest(session_id, channel, user_id)
         chats = await self._repo.filter_chats(
             user_id=user_id,
             channel=channel,
@@ -326,9 +329,25 @@ class ChatManager:
                     )
                 )
             except BaseException:
-                self._delete_session_resources([spec.id])
+                if (
+                    getattr(
+                        self._repo,
+                        "deferred_resource_cleanup",
+                        False,
+                    )
+                    is not True
+                ):
+                    self._delete_session_resources([spec.id])
                 raise
-            if not created:
+            if (
+                not created
+                and getattr(
+                    self._repo,
+                    "deferred_resource_cleanup",
+                    False,
+                )
+                is not True
+            ):
                 self._delete_session_resources([spec.id])
             return chat, created
 
@@ -411,8 +430,7 @@ class ChatManager:
                     **meta,
                 }
             spec.updated_at = datetime.now(timezone.utc)
-            await self._repo.upsert_chat(spec)
-            return True
+            return await self._repo.update_chat_if_exists(spec) is not None
 
     async def delete_chats(self, chat_ids: list[str]) -> bool:
         """Delete a chat spec.
@@ -426,6 +444,8 @@ class ChatManager:
             True if deleted, False if not found
         """
         async with self._lock:
+            if getattr(self._repo, "deferred_resource_cleanup", False) is True:
+                return await self._repo.delete_chats(chat_ids)
             existing_ids = {
                 chat.id
                 for chat in await self._repo.list_chats()

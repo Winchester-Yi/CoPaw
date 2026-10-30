@@ -7,12 +7,18 @@ operation unknown; they never imply rollback and never unlink final bundles.
 """
 
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import json
 
 from .bundle import BundleBlock, BundleStore
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
 from .identity import WorkspaceScope, identity_bytes
+from .chat_mutations import (
+    ChatMetadataInstall,
+    install_chat_metadata,
+    load_metadata_json,
+)
+from .retention import RetentionStore
 
 TABLE = "swe_conversation_publications"
 FORMAT_KEY = b"swe-bundle-v1"
@@ -126,6 +132,7 @@ class CommitPlan:
 
     recovery_block: str | None = None
     result_ids: tuple[int, ...] = ()
+    chat_metadata: ChatMetadataInstall | None = None
 
     def serialize(self):
         if self.recovery_block is not None:
@@ -138,23 +145,36 @@ class CommitPlan:
             raise ValueError(
                 "publication result IDs must be bounded positive integers",
             )
-        return json.dumps(
-            {"version": 1, **asdict(self)},
-            separators=(",", ":"),
-        )
+        value = {
+            "version": 1,
+            "recovery_block": self.recovery_block,
+            "result_ids": self.result_ids,
+        }
+        if self.chat_metadata is not None:
+            if self.recovery_block is not None:
+                raise ValueError(
+                    "Chat metadata cannot replace a recovery root",
+                )
+            value["chat_metadata"] = self.chat_metadata.to_dict()
+        return json.dumps(value, separators=(",", ":"))
 
     @classmethod
     def parse(cls, text):
         try:
             if len(text.encode("utf-8")) > MAX_PLAN_BYTES:
                 raise ValueError("oversized commit plan")
-            value = json.loads(text)
+            value = load_metadata_json(text)
+            expected = {"version", "recovery_block", "result_ids"}
             if (
-                set(value) != {"version", "recovery_block", "result_ids"}
+                set(value) not in (expected, expected | {"chat_metadata"})
                 or value.pop("version") != 1
             ):
                 raise ValueError("unknown commit plan version")
             value["result_ids"] = tuple(value["result_ids"])
+            if "chat_metadata" in value:
+                value["chat_metadata"] = ChatMetadataInstall.from_dict(
+                    value["chat_metadata"],
+                )
             plan = cls(**value)
             plan.serialize()
             return plan
@@ -243,8 +263,16 @@ class PublicationStore:
 
     @staticmethod
     def _matches(row, request, plan_text=None):
+        expected = request.fields()
+        if (
+            row is not None
+            and row["state"] == "committed"
+            and request.kind == "chat_metadata"
+            and request.chat_id is None
+        ):
+            expected.pop("chat_id")
         if row is None or any(
-            row[key] != value for key, value in request.fields().items()
+            row[key] != value for key, value in expected.items()
         ):
             raise ConflictError(
                 "operation identity or publication association changed",
@@ -308,6 +336,33 @@ class PublicationStore:
         await self._mark_durable(operation_key, index)
         return index
 
+    async def reconcile_metadata(
+        self,
+        operation_key: str,
+        *,
+        owner_stopped: bool,
+    ):
+        """Resolve only the original structural mutation after its writer stops."""
+        if not owner_stopped:
+            raise ConflictError("original owner must be confirmed stopped")
+        row = await self.get(operation_key)
+        if row is None:
+            raise UnknownCommit(operation_key)
+        if row["kind"] != "chat_metadata":
+            raise ConflictError(
+                "metadata reconciliation requires a metadata operation",
+            )
+        if row["state"] == "committed":
+            return row
+        if row["state"] != "prepared":
+            raise ConflictError("publication operation is aborted")
+        await self.confirm_bundle(operation_key)
+        try:
+            return await self.commit(operation_key)
+        except ConflictError:
+            await self.abort(_request(row), owner_stopped=True)
+            raise
+
     async def _mark_durable(self, operation_key, index):
         try:
             async with self.db.transaction():
@@ -323,14 +378,17 @@ class PublicationStore:
         except (Exception, asyncio.CancelledError) as error:
             raise UnknownCommit(operation_key) from error
 
-    async def _lock_associations(self, request):
+    async def _lock_associations(self, request, *, session_rows=None):
         session = chat = turn = None
         if request.session_id is not None:
-            session = await self.db.fetch_one(
-                "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
-                "FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
-                (request.session_id,),
-            )
+            if session_rows is None:
+                session = await self.db.fetch_one(
+                    "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
+                    "FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
+                    (request.session_id,),
+                )
+            else:
+                session = session_rows.get(request.session_id)
         if request.chat_id is not None:
             chat = await self.db.fetch_one(
                 "SELECT * FROM swe_conversation_chats WHERE id=%s FOR UPDATE",
@@ -342,6 +400,70 @@ class PublicationStore:
                 (request.turn_id,),
             )
         return session, chat, turn
+
+    async def _lock_metadata_associations(self, request, plan):
+        if (
+            request.kind != "chat_metadata"
+            or request.session_id is None
+            or request.turn_id is not None
+        ):
+            raise IntegrityError(
+                "invalid Chat metadata publication association",
+            )
+        if request.chat_id is None:
+            await RetentionStore(self.db, request.scope).lock_guard()
+        ids = sorted(
+            {
+                value
+                for value in (request.session_id, plan.target_session_id)
+                if value is not None
+            },
+        )
+        session_rows = {}
+        for identity in ids:
+            session_rows[identity] = await self.db.fetch_one(
+                "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
+                "FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
+                (identity,),
+            )
+        target = (
+            session_rows.get(plan.target_session_id)
+            if plan.target_session_id is not None
+            else None
+        )
+        if plan.target_session_id is not None:
+            if (
+                target is None
+                or tuple(
+                    target[key]
+                    for key in ("tenant_key", "source_key", "agent_key")
+                )
+                != request.scope.sql_values
+            ):
+                raise IntegrityError(
+                    "Chat metadata target Session scope mismatch",
+                )
+        associations = await self._lock_associations(
+            request,
+            session_rows=session_rows,
+        )
+        if request.chat_id is None and plan.create_if_absent:
+            winner = await self.db.fetch_one(
+                "SELECT * FROM swe_conversation_chats WHERE session_id=%s "
+                "AND deleted_at IS NULL ORDER BY registry_order,id LIMIT 1 FOR UPDATE",
+                (request.session_id,),
+            )
+            if (
+                winner is not None
+                and tuple(
+                    winner[key]
+                    for key in ("tenant_key", "source_key", "agent_key")
+                )
+                != request.scope.sql_values
+            ):
+                raise IntegrityError("draft Chat scope association mismatch")
+            associations = (associations[0], winner, associations[2])
+        return associations, target
 
     @staticmethod
     def _validate_associations(request, session, chat, turn):
@@ -440,7 +562,34 @@ class PublicationStore:
         ):
             raise ConflictError("publication Turn authority changed")
 
-    async def _install(self, row, plan, index):
+    async def _install(
+        self,
+        row,
+        plan,
+        index,
+        *,
+        associations=None,
+        target_session=None,
+    ):
+        if plan.chat_metadata is not None:
+            request = _request(row)
+            if associations is None:
+                raise IntegrityError(
+                    "Chat metadata association locks are missing",
+                )
+            chat_id = await install_chat_metadata(
+                self.db,
+                request,
+                plan.chat_metadata,
+                row,
+                index,
+                associations,
+                target_session=target_session,
+            )
+            await self.db.execute(
+                f"UPDATE {TABLE} SET chat_id=%s WHERE id=%s",
+                (chat_id, row["id"]),
+            )
         if plan.recovery_block is not None:
             if row["base_state_revision"] is None:
                 raise ConflictError(
@@ -476,6 +625,7 @@ class PublicationStore:
                     "publication has no confirmed durable NAS body",
                 )
             request = _request(initial)
+            plan = CommitPlan.parse(initial["result_metadata_text"])
             index = await self._nas_io(
                 operation_key,
                 self.bundles.inspect,
@@ -485,18 +635,37 @@ class PublicationStore:
             if index.metadata.get("operation_key") != operation_key:
                 raise IntegrityError("bundle operation identity mismatch")
             async with self.db.transaction():
-                associations = await self._lock_associations(request)
+                target_session = None
+                if plan.chat_metadata is not None:
+                    associations, target_session = (
+                        await self._lock_metadata_associations(
+                            request,
+                            plan.chat_metadata,
+                        )
+                    )
+                else:
+                    associations = await self._lock_associations(request)
                 row = await self.get(operation_key, lock=True)
                 self._matches(row, request, initial["result_metadata_text"])
                 if row["state"] == "committed":
                     return row
                 if row["state"] != "prepared":
                     raise ConflictError("publication operation is aborted")
-                self._validate_authority(request, *associations)
+                if plan.chat_metadata is not None:
+                    self._validate_associations(request, *associations)
+                    if (
+                        associations[1] is not None
+                        and associations[1]["deleted_at"] is not None
+                    ):
+                        raise ConflictError("Chat was deleted")
+                else:
+                    self._validate_authority(request, *associations)
                 await self._install(
                     row,
-                    CommitPlan.parse(row["result_metadata_text"]),
+                    plan,
                     index,
+                    associations=associations,
+                    target_session=target_session,
                 )
                 await self.db.execute(
                     f"UPDATE {TABLE} SET state='committed',committed_at=UTC_TIMESTAMP(6) "
@@ -514,8 +683,24 @@ class PublicationStore:
         if not owner_stopped:
             raise ConflictError("original owner must be confirmed stopped")
         try:
+            initial = await self.get(request.operation_key)
+            metadata_plan = None
+            if initial is not None:
+                self._matches(initial, request)
+                metadata_plan = CommitPlan.parse(
+                    initial["result_metadata_text"],
+                ).chat_metadata
             async with self.db.transaction():
-                session, chat, turn = await self._lock_associations(request)
+                if metadata_plan is not None:
+                    associations, _ = await self._lock_metadata_associations(
+                        request,
+                        metadata_plan,
+                    )
+                    session, chat, turn = associations
+                else:
+                    session, chat, turn = await self._lock_associations(
+                        request,
+                    )
                 self._validate_associations(request, session, chat, turn)
                 await self._insert(
                     request,
@@ -529,6 +714,7 @@ class PublicationStore:
                 if (
                     session is not None
                     and session["generation"] == request.generation
+                    and request.kind != "chat_metadata"
                 ):
                     await self.db.execute(
                         "UPDATE swe_conversation_sessions SET generation=generation+1,"
