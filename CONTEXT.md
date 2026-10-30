@@ -1089,6 +1089,10 @@ _Avoid_: one-shot plan flag, global plan switch
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
 
+**Scheduled Execution Credentials (定时执行凭据)**:
+同一租户与来源作用域中，供定时执行使用的用户身份信息、访问凭据及其有效期与刷新状态。该作用域内的多个 Agent 和 Scheduled Job 共用这份状态，清理凭据表示移除整份状态。
+_Avoid_: 单任务凭据、Agent 专属凭据、仅 Token
+
 **Scheduler-managed Scheduled Job**:
 A Scheduled Job created under the Cron Scheduling Service's management responsibility, including its distributed child jobs. This ownership is distinct from creation date or the presence of an imported snapshot.
 _Avoid_: all recently created jobs, imported legacy snapshot as takeover
