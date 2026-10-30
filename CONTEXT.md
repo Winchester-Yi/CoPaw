@@ -382,8 +382,8 @@ The Definition-ID-bound companion directory `agents/<definition-id>.dependencies
 _Avoid_: shared workspace dependency directory, Agent-wide Skill/MCP directory, Definition Package migration
 
 **Expert Dependency Session Initialization**:
-The one-time initialization of a Chat's Session-scoped Expert Dependency View when the user first selects or invokes a Community Expert. The resulting frozen dependency view remains available through later turns of that Chat and is released when the Chat ends.
-_Avoid_: per-turn dependency loading, Agent Profile installation, cross-chat dependency reuse
+In SubAgent execution mode, the one-time initialization of a Chat's Session-scoped Expert Dependency View when the user first selects or invokes a Community Expert. Expert Main Execution instead uses the private dependencies of its selected local Expert version for each message, with already-started messages retaining their original snapshot.
+_Avoid_: Agent Profile installation, cross-chat dependency reuse, mixed-version expert dependencies
 
 **Explicit Expert Selection**:
 The structured user action in the Chat composer's Expert control that selects one enabled Agent-owned or Received Community Expert. It produces a per-message Selected Expert Execution by default, or a Chat Expert Binding when the Expert Main Execution Switch is enabled, independently of keyword delegation and autonomous discovery.
@@ -405,8 +405,24 @@ _Avoid_: SubAgent Run, Main Agent summary, Profile memory inheritance, recursive
 The searchable list of valid enabled local and Received Community Experts in the currently selected Agent Profile, shown by the Chat composer's Expert control. Community listings are not directly callable; an expert must first be received by that Agent Profile.
 _Avoid_: global expert chooser, direct community invocation, disabled expert catalog, cross-Agent expert list
 
+**Expert-as-Main Model Resolution**:
+The model choice for Expert Main Execution: a usable model configured for the Expert takes precedence, otherwise the Chat's currently selected model is used. Model choice does not change the Expert's capability boundaries.
+_Avoid_: unconditional Chat model override, unavailable expert model enforcement, fallback to Default Agent
+
+**Expert Main Execution Limit**:
+The per-message, per-dimension upper bound on Expert Main Execution, taking the stricter of the Expert's configured execution limit and the Main Agent's applicable global limit. Successive messages receive independent budgets rather than consuming a lifetime Chat allowance.
+_Avoid_: unlimited expert conversation, automatic Main Agent budget expansion
+
+**Unavailable Chat Expert Binding**:
+A retained Chat Expert Binding whose Expert is disabled, deleted, withdrawn, or invalid and therefore cannot execute the submitted message. It is presented as unavailable rather than silently substituted by another Expert or the Default Agent.
+_Avoid_: automatic Default Agent fallback, successful expert execution, hidden binding reset
+
+**Chat Expert Binding Recovery**:
+The return of an unavailable Chat Expert Binding to executable status when the same Expert identity becomes valid again, subject to validation before the next message. A newly created Expert with the same display name is a different identity, and this recovery does not restore a binding released by the user, mode change, reset, or disabled Source switch.
+_Avoid_: same-name expert replacement, restoration of released binding, approval bypass
+
 **Selected Expert Execution**:
-The direct start of the single Expert named by an Explicit Expert Selection for that submitted message. The Main Agent may hand off the objective and summarize the result but cannot skip, substitute, or select another expert.
+In SubAgent execution mode, the direct start of the single Expert named by an Explicit Expert Selection for that submitted message. The Main Agent may hand off the objective and summarize the result but cannot skip, substitute, or select another expert.
 _Avoid_: optional selected-expert use, multiple expert fan-out, Main Agent routing decision
 
 **Selected Expert Model Resolution**:
@@ -418,7 +434,7 @@ The composer interaction rule that Explicit Expert Selection and Plan Mode canno
 _Avoid_: disabled mode switch, hidden expert clearing, expert-assisted Plan Mode, conflicting execution modes
 
 **Synchronous Expert Conversation**:
-The Chat interaction in which a Selected Expert Execution displays progress and cancellation while the current message awaits the SubAgent Run, then automatically presents the Main Agent's summary in that same conversation turn. Failures, timeouts, and cancellation are likewise reported in the current turn while the underlying SubAgent Run remains observable.
+The SubAgent-mode Chat interaction in which a Selected Expert Execution displays progress and cancellation while the current message awaits the SubAgent Run, then automatically presents the Main Agent's summary in that same conversation turn. Failures, timeouts, and cancellation are likewise reported in the current turn while the underlying SubAgent Run remains observable.
 _Avoid_: result-polling follow-up, detached-only expert run, hidden failure state
 
 **Expert Dependency Publication Scan**:
