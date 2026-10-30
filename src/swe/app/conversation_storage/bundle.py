@@ -240,6 +240,24 @@ class BundleStore:
         with self._directory(self.path_for(operation_key), create=True):
             pass
 
+    def confirm_durable(self, relative_path: str) -> BundleIndex:
+        """Re-fsync an existing exclusive result after a lost publish response."""
+        index = self.inspect(relative_path)
+        with self._directory(relative_path, create=True) as (directory, name):
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise IntegrityError("bundle must be a regular file")
+                os.fsync(descriptor)
+                os.fsync(directory)
+            finally:
+                os.close(descriptor)
+        return self.inspect(relative_path, expected_length=index.byte_length)
+
     def publish(
         self,
         operation_key: str,
