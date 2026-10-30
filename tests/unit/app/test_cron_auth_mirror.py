@@ -179,6 +179,61 @@ async def test_cli_lifecycle_opens_once_and_closes_on_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["refused", "timeout"])
+async def test_cli_local_connection_failure_keeps_file_success(
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    from swe import database
+    from swe.app.crons import auth_mirror
+
+    async def connect():
+        if failure == "refused":
+            raise ConnectionRefusedError("database-password-secret")
+        await asyncio.sleep(10)
+
+    connection = SimpleNamespace(
+        connect=AsyncMock(side_effect=connect),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        database,
+        "DatabaseConnection",
+        Mock(return_value=connection),
+    )
+    monkeypatch.setattr(
+        database,
+        "get_database_config",
+        lambda: SimpleNamespace(host="localhost"),
+    )
+    monkeypatch.setattr(auth_mirror, "MIRROR_TIMEOUT_SECONDS", 0.01)
+    warning = Mock()
+    monkeypatch.setattr(auth_mirror.logger, "warning", warning)
+    path = tmp_path / "cron_auth.json"
+    monkeypatch.setattr(
+        auth_state,
+        "get_cron_auth_file_path",
+        lambda **_: path,
+    )
+
+    async def save():
+        async with auth_mirror.cli_cron_auth_mirror():
+            assert auth_mirror._repository is None
+            await auth_state.save_cron_auth_state(
+                auth_state.CronAuthState(auth_token="refreshed"),
+            )
+
+    await asyncio.wait_for(save(), timeout=0.5)
+    assert json.loads(path.read_text())["auth_token"] == "refreshed"
+    connection.connect.assert_awaited_once()
+    connection.close.assert_awaited_once()
+    warning.assert_called_once()
+    assert "database-password-secret" not in str(warning.call_args)
+    assert auth_mirror._repository is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["save", "delete"])
 async def test_cancelled_file_mutation_finishes_its_mirror_attempt(
     mirror,
@@ -231,14 +286,15 @@ async def test_cancelled_file_mutation_finishes_its_mirror_attempt(
 
 
 @pytest.mark.asyncio
-async def test_cli_config_does_not_log_database_credentials(monkeypatch):
+@pytest.mark.parametrize("host", ["mysql", "localhost"])
+async def test_cli_config_does_not_log_database_credentials(monkeypatch, host):
     import logging
     from swe import database
     from swe.app.crons import auth_mirror
 
     raw = "BEE_cli-password-secret"
     monkeypatch.setenv("SWE_DB_ACCESS", raw)
-    monkeypatch.setenv("SWE_DB_HOST", "mysql")
+    monkeypatch.setenv("SWE_DB_HOST", host)
     info = Mock()
     monkeypatch.setattr(logging.getLogger("swe.database.config"), "info", info)
     connection = SimpleNamespace(connect=AsyncMock(), close=AsyncMock())
@@ -249,6 +305,7 @@ async def test_cli_config_does_not_log_database_credentials(monkeypatch):
     )
     async with auth_mirror.cli_cron_auth_mirror():
         pass
+    connection.connect.assert_awaited_once()
     assert "cli-password-secret" not in str(info.call_args_list)
     assert raw not in str(info.call_args_list)
 

@@ -1,6 +1,7 @@
 # 定时执行凭据镜像排查
 
 - 在线镜像入口 src/swe/app/crons/auth_mirror.py；严格完整快照仓库 auth_repository.py。数据库失败只影响镜像，业务继续读文件。
+- CLI 刷新对所有非空数据库主机配置（含 localhost、IPv4/IPv6 回环地址）尝试限时连接；连接失败或超时不阻止文件更新，不应按主机名跳过镜像。
 - 内部运维入口 auth_migration_api.py，任务 auth_migration_tasks.py，进度 auth_migration_progress.py，扫描 auth_migration_source.py，操作 auth_migration_service.py。
 - 独立任务类型 cron.auth.migration，service=swe，复用既有异步进度表，不复用任务定义迁移的业务 Store。
 - [部署与四种操作](../../docs/deploy/cron-auth-database-mirror.md)：先手工 SQL，确认实例挂载及权限，小范围 preview → import → verify，再显式范围 prune。

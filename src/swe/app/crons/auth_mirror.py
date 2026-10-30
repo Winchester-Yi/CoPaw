@@ -62,7 +62,7 @@ async def cli_cron_auth_mirror():
     try:
         try:
             config = get_database_config()
-            if config.host and config.host != "localhost":
+            if config.host:
                 connection = DatabaseConnection(config)
                 await asyncio.wait_for(
                     connection.connect(),

@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from click.testing import CliRunner
 
 from swe.cli import auth_cmd
@@ -12,9 +13,14 @@ from swe.app.crons import auth_mirror
 from swe.app.crons.auth_state import ResolvedAuthToken
 
 
+@pytest.mark.parametrize(
+    "host",
+    ["mysql", "localhost", "127.0.0.1", "::1"],
+)
 def test_refresh_command_uses_one_connection_and_preserves_output(
     tmp_path,
     monkeypatch,
+    host,
 ):
     connection = SimpleNamespace(connect=AsyncMock(), close=AsyncMock())
     factory = Mock(return_value=connection)
@@ -22,7 +28,7 @@ def test_refresh_command_uses_one_connection_and_preserves_output(
     monkeypatch.setattr(
         database,
         "get_database_config",
-        lambda: SimpleNamespace(host="mysql"),
+        lambda: SimpleNamespace(host=host),
     )
     monkeypatch.setattr(
         auth_cmd,
