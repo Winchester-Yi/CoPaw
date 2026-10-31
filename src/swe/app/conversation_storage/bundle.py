@@ -215,7 +215,10 @@ class BundleStore:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         descriptors = []
         try:
-            descriptors.append(os.open(self.root, flags))
+            try:
+                descriptors.append(os.open(self.root, flags))
+            except FileNotFoundError as error:
+                raise IntegrityError("bundle root is unavailable") from error
             for part in parts[:-1]:
                 parent = descriptors[-1]
                 if create:
@@ -239,6 +242,30 @@ class BundleStore:
     def prepare_directory(self, operation_key):
         with self._directory(self.path_for(operation_key), create=True):
             pass
+
+    def reclaim(self, operation_key: str) -> bool:
+        """Unlink only one server-generated regular bundle, then fsync its dir."""
+        relative_path = self.path_for(operation_key)
+        try:
+            with self._directory(relative_path) as (directory, name):
+                try:
+                    details = os.stat(
+                        name,
+                        dir_fd=directory,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    os.fsync(directory)
+                    return False
+                if not stat.S_ISREG(details.st_mode):
+                    raise IntegrityError(
+                        "reclaimed bundle must be a regular file",
+                    )
+                os.unlink(name, dir_fd=directory)
+                os.fsync(directory)
+                return True
+        except FileNotFoundError:
+            return False
 
     def confirm_durable(self, relative_path: str) -> BundleIndex:
         """Re-fsync an existing exclusive result after a lost publish response."""

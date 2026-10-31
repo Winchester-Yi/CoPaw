@@ -12,6 +12,17 @@ from swe.app.conversation_storage.bundle import (
 from swe.app.conversation_storage.errors import IntegrityError
 
 
+def test_reclaim_refuses_missing_nas_root(tmp_path):
+    root = tmp_path / "missing"
+    with pytest.raises(IntegrityError, match="root is unavailable"):
+        BundleStore(root).reclaim("a" * 64)
+    assert not root.exists()
+
+
+def test_reclaim_absent_generated_directory_is_idempotent(tmp_path):
+    assert BundleStore(tmp_path).reclaim("a" * 64) is False
+
+
 def test_bundle_roundtrip_has_byte_extents_and_no_body_in_index(tmp_path):
     store = BundleStore(tmp_path)
     operation = new_operation_key()
@@ -165,7 +176,7 @@ def test_failed_directory_fsync_keeps_exclusive_file_for_reconciliation(
 
 def test_bundle_requires_a_provisioned_root(tmp_path):
     root = tmp_path / "unprovisioned"
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(IntegrityError, match="root is unavailable"):
         BundleStore(root).publish(
             new_operation_key(),
             [BundleBlock("root", "recovery", b"{}")],
