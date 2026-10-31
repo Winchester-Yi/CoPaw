@@ -49,6 +49,24 @@ def make_readonly(root):
     root.chmod(0o555)
 
 
+def test_inventory_blocks_oversized_native_artifact_before_import(tmp_path):
+    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
+
+    root, _ = source(tmp_path)
+    with (root / "large-native.bin").open("wb") as stream:
+        stream.truncate(MAX_READ_BYTES + 1)
+    make_readonly(root)
+    report = inventory(
+        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        boundary(),
+    )
+    assert not report["ready"]
+    assert any(
+        item["code"] == "source_artifact_oversized"
+        for item in report["blockers"]
+    )
+
+
 def test_inventory_uses_trusted_mapping_and_forward_filename_only(tmp_path):
     root, chat = source(tmp_path)
     make_readonly(root)

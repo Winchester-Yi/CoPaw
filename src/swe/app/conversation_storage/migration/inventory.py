@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Inventory explicit frozen workspace mappings without deriving identities."""
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import stat
 
@@ -10,6 +10,7 @@ from swe.app.runner.session import sanitize_filename
 from swe.app.chat_sharing.models import ChatShareRecord, ChatShareSnapshot
 from ..chat_mutations import load_metadata_json
 from ..identity import SessionIdentity, WorkspaceScope, chat_key_bytes
+from ..bundle import MAX_READ_BYTES
 from .legacy import read_archive, read_session, safe_files
 from .manifest import SourceBoundary
 
@@ -185,6 +186,14 @@ def _workspace(mapping, report, index):
         for path in files
     )
     for path in files:
+        if path.stat().st_size > MAX_READ_BYTES:
+            _block(
+                report,
+                "source_artifact_oversized",
+                position,
+                str(path.relative_to(root))
+                + ": exceeds supported migration reader limit; split-file migration required",
+            )
         if "quarantine" in path.name:
             _block(
                 report,
@@ -205,6 +214,7 @@ def _workspace(mapping, report, index):
         _block(report, "registry_invalid", position, error)
         return {
             "position": position,
+            "root": str(root),
             "scope": [
                 mapping.scope.tenant_id,
                 mapping.scope.source_id,
@@ -221,6 +231,7 @@ def _workspace(mapping, report, index):
     _ledger_generations(mapping, sessions, report, position)
     return {
         "position": position,
+        "root": str(root),
         "scope": [
             mapping.scope.tenant_id,
             mapping.scope.source_id,
@@ -344,6 +355,10 @@ def inventory(mappings, boundary, *, shares=()):
         raise ValueError("duplicate workspace source roots")
     report = {
         "version": 1,
+        "source_boundary": {
+            **asdict(boundary),
+            "evidence_refs": list(boundary.evidence_refs),
+        },
         "files": [],
         "workspaces": [],
         "shares": [],

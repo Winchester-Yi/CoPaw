@@ -82,6 +82,8 @@ class MigrationManifest:
         if str(UUID(self.data["migration_id"])) != self.data["migration_id"]:
             raise ValueError("invalid migration identity")
         SourceBoundary(**self.data["source_boundary"])
+        if self.data.get("target") is not None:
+            self._validate_target(self.data["target"])
         ids = {}
         operations = set()
         for kind, assignments in self.data["assignments"].items():
@@ -160,6 +162,11 @@ class MigrationManifest:
                 raise ValueError(
                     "known migration assignment changed or removed",
                 )
+        if (
+            self.data.get("target") is not None
+            and current.data.get("target") != self.data["target"]
+        ):
+            raise ValueError("migration target changed")
         self.data = current.data
 
     def _persist(self):
@@ -217,6 +224,38 @@ class MigrationManifest:
                 }
                 self._persist()
             return dict(assignments[source_position])
+
+    def bind_target(self, target):
+        self._validate_target(target)
+        with self._lock():
+            self._refresh()
+            if (
+                self.data.get("target") is not None
+                and self.data["target"] != target
+            ):
+                raise ValueError("migration target changed")
+            self.data["target"] = dict(target)
+            self._persist()
+
+    def _validate_target(self, target):
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"schema", "nas_root", "migration_id"}
+            or target["migration_id"] != self.migration_id
+        ):
+            raise ValueError("invalid migration target binding")
+        if not re.fullmatch(
+            r"(?:test_conversation_[a-zA-Z0-9_]+|conversation_staging_[a-zA-Z0-9_]+)",
+            target["schema"],
+        ):
+            raise ValueError("invalid migration staging schema binding")
+        root = Path(target["nas_root"])
+        if (
+            not root.is_absolute()
+            or ".." in root.parts
+            or str(root.resolve()) != target["nas_root"]
+        ):
+            raise ValueError("invalid migration NAS root binding")
 
     def set_batch_state(self, source_position, state):
         with self._lock():
