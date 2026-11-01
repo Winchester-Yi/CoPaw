@@ -495,3 +495,118 @@ async def test_command_binds_complete_root_and_commits_empty_user_before_reply(
     assert binding[3]()["agent"]["memory"] == {"content": []}
     assert binding[4] is None
     await source.aclose()
+
+
+async def test_unknown_settlement_requires_ended_local_request():
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    indexed = IndexedQuery(storage, owner, request, execution)
+    indexed.authority = ExecutionAuthority(
+        execution.identity,
+        1,
+        2,
+        3,
+        1,
+        "owner",
+    )
+    indexed.pending_operation = "a" * 64
+    storage.publications = SimpleNamespace(
+        get=AsyncMock(return_value={"state": "prepared"}),
+        reconcile=AsyncMock(),
+    )
+    with pytest.raises(UnknownCommit):
+        await indexed.finish("failed")
+    storage.publications.reconcile.assert_not_awaited()
+    assert not indexed.request_ended
+
+
+async def test_request_ended_proof_follows_source_cleanup(monkeypatch):
+    from swe.app.conversation_storage import runner_integration as integration
+
+    storage, owner, execution, request, question, _ = setup_runtime()
+    states = []
+
+    @asynccontextmanager
+    async def execute(*args, **kwargs):
+        yield execution
+
+    async def source(*args):
+        try:
+            yield question, False
+            raise UnknownCommit("a" * 64)
+        finally:
+            states.append(execution.indexed_query.request_ended)
+            await asyncio.sleep(0)
+            states.append(execution.indexed_query.request_ended)
+
+    storage.session_for("console").execution = execute
+    monkeypatch.setattr(integration, "_stream_admitted", source)
+    with pytest.raises(UnknownCommit):
+        _ = [
+            frame
+            async for frame in integration.stream_indexed_query(
+                owner,
+                storage,
+                [question],
+                request=request,
+                query="hello",
+            )
+        ]
+    assert states == [False, False]
+    assert execution.indexed_query.request_ended
+
+
+@pytest.mark.parametrize(
+    "changed,ignore_renewal_loss",
+    [
+        ({}, True),
+        ({"state": "prepared"}, False),
+        ({"kind": "state"}, False),
+        ({"owner_key": b"another"}, False),
+        ({"generation": 2}, False),
+        ({"turn_id": 4}, False),
+    ],
+)
+async def test_renewal_loss_after_own_terminal_commit_does_not_cancel_cleanup(
+    monkeypatch,
+    changed,
+    ignore_renewal_loss,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.app.conversation_storage.errors import ConflictError
+    from swe.app.conversation_storage.publications import PublicationRequest
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    query = integration.IndexedQuery(storage, owner, request, execution)
+    query.authority = ExecutionAuthority(
+        execution.identity,
+        1,
+        2,
+        3,
+        1,
+        "owner",
+    )
+    query.terminal_operation = "a" * 64
+    row = PublicationRequest(
+        query.terminal_operation,
+        execution.identity.scope,
+        "terminal",
+        "owner",
+        1,
+        session_id=1,
+        chat_id=2,
+        turn_id=3,
+    ).fields()
+    row.update({"state": "committed", **changed})
+    storage.publications = SimpleNamespace(get=AsyncMock(return_value=row))
+    loss = ConflictError("execution authority changed")
+    storage.executions.renew.side_effect = loss
+    parent = SimpleNamespace(cancel=Mock())
+    monkeypatch.setattr(integration.asyncio, "sleep", AsyncMock())
+
+    await query._renew(parent)
+
+    assert parent.cancel.called is not ignore_renewal_loss
+    assert query.renew_error is (None if ignore_renewal_loss else loss)

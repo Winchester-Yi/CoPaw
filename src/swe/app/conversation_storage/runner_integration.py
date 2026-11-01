@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from .bundle import new_operation_key
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
+from .execution import ExecutionAuthority
+from .publications import _request
 
 
 class IndexedQuery:
@@ -21,16 +23,41 @@ class IndexedQuery:
         self.authority = None
         self.observation = None
         self.pending_operation = None
+        self.pending_request = None
         self.terminal_operation = None
         self.terminal_status = None
         self.renew_error = None
         self.stop_requested = False
         self.runtime = None
+        self.semantic_publisher = None
         self.question_key = None
         self.chat = None
+        self.request_ended = False
+        self._admission_args = None
 
     @asynccontextmanager
     async def admit(self, messages):
+        try:
+            async with self._admit(messages):
+                yield self
+        finally:
+            # The caller closes its source first; _admit drains its renewer and
+            # every PublicationStore NAS operation drains cancellation workers.
+            self.request_ended = True
+
+    def _register(self):
+        self.execution.indexed_query = self
+        self.execution.defer_close = True
+        identity = (
+            self.owner._answer_turn_identity(self.request)
+            if hasattr(self.owner, "_answer_turn_identity")
+            else None
+        )
+        if identity is not None:
+            self.owner._answer_turn_runtimes[identity] = (None, self.execution)
+
+    @asynccontextmanager
+    async def _admit(self, messages):
         if not messages or getattr(messages[-1], "role", None) != "user":
             raise ValueError(
                 "SQL admission requires the submitted user message",
@@ -47,19 +74,28 @@ class IndexedQuery:
             request=self.request,
             turn_id=runtime_key,
         )
-        admission = await self.storage.executions.reserve_admission(
-            self.execution.identity,
-            self.chat.id,
-            self.question_key,
-            operation_key=new_operation_key(),
-            runtime_turn_key=runtime_key,
-            expected_state_revision=self.execution.revision,
-        )
+        self._admission_args = {
+            "operation_key": new_operation_key(),
+            "runtime_turn_key": runtime_key,
+            "expected_state_revision": self.execution.revision,
+        }
+        try:
+            admission = await self.storage.executions.reserve_admission(
+                self.execution.identity,
+                self.chat.id,
+                self.question_key,
+                **self._admission_args,
+            )
+        except UnknownCommit as error:
+            self._register()
+            self._unknown(error)
+            raise
         if not admission.created:
             self.observation = admission
             yield self
             return
         self.authority = admission.authority
+        self._register()
         state = deepcopy(self.execution.state)
         state.setdefault("turn_states", {})[self.question_key] = {
             "status": "admitted",
@@ -76,25 +112,18 @@ class IndexedQuery:
             )
             self.execution.accept_committed_state(state)
             await self.storage.executions.start(self.authority)
-        except UnknownCommit as error:
-            self._unknown(error)
+        except (Exception, asyncio.CancelledError) as error:
+            self._unknown(
+                (
+                    error
+                    if isinstance(error, UnknownCommit)
+                    else UnknownCommit(
+                        self._admission_args["operation_key"],
+                    )
+                ),
+            )
             raise
         async with self.session.bind_authority(self.authority):
-            self.execution.indexed_query = self
-            self.execution.defer_close = True
-            identity = (
-                self.owner._answer_turn_identity(self.request)
-                if hasattr(
-                    self.owner,
-                    "_answer_turn_identity",
-                )
-                else None
-            )
-            if identity is not None:
-                self.owner._answer_turn_runtimes[identity] = (
-                    None,
-                    self.execution,
-                )
             parent = asyncio.current_task()
             renewer = asyncio.create_task(self._renew(parent))
             try:
@@ -109,8 +138,15 @@ class IndexedQuery:
                     await renewer
 
     def _unknown(self, error):
+        if self.pending_operation != error.operation_key:
+            self.pending_request = None
         self.pending_operation = error.operation_key
         self.execution.pending_operation = error.operation_key
+        self.pending_request = (
+            error.publication_request or self.pending_request
+        )
+        if self.pending_request is not None:
+            self.execution.pending_request = self.pending_request
 
     async def _renew(self, parent):
         while True:
@@ -118,13 +154,36 @@ class IndexedQuery:
             try:
                 await self.storage.executions.renew(self.authority)
             except Exception as error:
+                if await self._own_terminal_committed():
+                    return
                 self.renew_error = error
                 if parent is not None:
                     parent.cancel()
                 return
 
-    def bind_runtime(self, runtime):
+    async def _own_terminal_committed(self):
+        # Terminal SQL releases ownership before asynchronous reader cleanup.
+        # Only this request's exact committed terminal explains renewal loss.
+        if self.terminal_operation is None:
+            return False
+        try:
+            row = await self.storage.publications.get(self.terminal_operation)
+            if row is None or (
+                row["state"] != "committed" or row["kind"] != "terminal"
+            ):
+                return False
+            self._validate_pending_request(_request(row))
+            return True
+        except Exception:
+            return False
+
+    async def bind_runtime(self, runtime):
         """Snapshot the current Agent plus every unknown recovery module."""
+        from .semantic_runtime import SemanticRuntimePublisher
+
+        if self.semantic_publisher is not None:
+            await self.semantic_publisher.close()
+            self.semantic_publisher.check()
         self.runtime = runtime
 
         def root_provider():
@@ -132,11 +191,17 @@ class IndexedQuery:
             state["agent"] = runtime.agent.state_dict()
             return state
 
+        self.semantic_publisher = SemanticRuntimePublisher(
+            runtime.agent,
+            self.execution,
+            root_provider,
+            batch=getattr(self, "semantic_batch", None),
+        ).install()
         self.storage.archive.bind_memory(
             runtime.agent.memory,
             runtime.chat.id,
             self.execution,
-            root_provider,
+            self.semantic_publisher._root,
             self.authority,
         )
 
@@ -151,8 +216,13 @@ class IndexedQuery:
         if pending is not None:
             await self._confirm_pending_terminal(pending)
             return
-        state = deepcopy(self.execution.state)
-        if self.runtime is not None:
+        publisher = getattr(self, "semantic_publisher", None)
+        state = (
+            await publisher.snapshot()
+            if publisher is not None
+            else deepcopy(self.execution.state)
+        )
+        if self.runtime is not None and publisher is None:
             state["agent"] = self.runtime.agent.state_dict()
         state.setdefault("turn_states", {}).setdefault(
             self.question_key,
@@ -178,6 +248,10 @@ class IndexedQuery:
     async def _confirm_pending_terminal(self, operation_key):
         """Observe completed reconciliation without touching a closed snapshot."""
         row = await self.storage.publications.get(operation_key)
+        if self.request_ended:
+            row = await self._settle_pending(operation_key, row)
+            if self.terminal_status == "rejected":
+                return
         if row is None or row["state"] not in ("committed", "aborted"):
             raise UnknownCommit(operation_key)
         authority = self.authority
@@ -247,11 +321,167 @@ class IndexedQuery:
             raise IntegrityError("reconciled terminal history status mismatch")
         self.terminal_status = turn["history_status"]
         self.pending_operation = self.execution.pending_operation = None
+        self.pending_request = self.execution.pending_request = None
+
+    async def _settle_pending(self, operation_key, row):
+        """Use ended local request evidence; lease expiry is never death proof."""
+        if self.authority is None:
+            if row is None:
+                if self._admission_args is None:
+                    raise UnknownCommit(operation_key)
+                result = await self.storage.executions.reserve_admission(
+                    self.execution.identity,
+                    self.chat.id,
+                    self.question_key,
+                    **self._admission_args,
+                )
+                row = result.publication
+                if (
+                    row is None
+                    or row["operation_key"].decode("ascii") != operation_key
+                ):
+                    raise UnknownCommit(operation_key)
+            self.authority = ExecutionAuthority(
+                self.execution.identity,
+                row["session_id"],
+                row["chat_id"],
+                row["turn_id"],
+                row["generation"],
+                row["owner_key"].decode("utf-8"),
+            )
+        if row is None:
+            request = self.pending_request or getattr(
+                self.execution,
+                "pending_request",
+                None,
+            )
+            if request is None or request.operation_key != operation_key:
+                raise UnknownCommit(operation_key)
+            self._validate_pending_request(request)
+            await self.storage.publications.abort(request, owner_stopped=True)
+            row = await self.storage.publications.get(operation_key)
+            if row is None:
+                raise UnknownCommit(operation_key)
+        request = _request(row)
+        self._validate_pending_request(request)
+        authority = self.authority
+        if row["state"] == "prepared":
+            row = await self._settle_prepared(operation_key, row, request)
+            if self.terminal_status == "rejected":
+                return row
+        if row["kind"] == "terminal" and row["state"] == "committed":
+            return row
+        if row["kind"] == "admission" and row["state"] == "aborted":
+            await self.storage.executions.reject_ended_admission(
+                authority,
+                request,
+                owner_stopped=True,
+            )
+            self.terminal_status = "rejected"
+            self.pending_operation = self.execution.pending_operation = None
+            return row
+        if self.terminal_operation == operation_key:
+            self.terminal_operation = None
+        # Only confirmed durable history is used. The complete root, including
+        # modules unknown to this version, is loaded through the normal reader.
+        state = await self.session.get_session_state_dict(
+            authority.identity.session_id,
+            authority.identity.user_id,
+        )
+        self.terminal_operation = (
+            self.terminal_operation or new_operation_key()
+        )
+        try:
+            terminal = await self.storage.executions.settle_ended_terminal(
+                authority,
+                state,
+                operation_key=self.terminal_operation,
+                owner_stopped=True,
+            )
+        except UnknownCommit as error:
+            self._unknown(error)
+            raise
+        self.pending_operation = self.execution.pending_operation = (
+            self.terminal_operation
+        )
+        return terminal
+
+    async def _settle_prepared(self, operation_key, row, request):
+        authority = self.authority
+        if not row.get("durable_at"):
+            try:
+                await self.storage.publications.confirm_bundle(
+                    operation_key,
+                )
+            except FileNotFoundError:
+                if row["kind"] == "admission":
+                    await self.storage.executions.reject_ended_admission(
+                        authority,
+                        request,
+                        owner_stopped=True,
+                    )
+                    self.terminal_status = "rejected"
+                    self.pending_operation = (
+                        self.execution.pending_operation
+                    ) = None
+                    return await self.storage.publications.get(
+                        operation_key,
+                    )
+                await self.storage.publications.abort(
+                    request,
+                    owner_stopped=True,
+                )
+                row = await self.storage.publications.get(operation_key)
+        if row["state"] == "prepared":
+            session = await self.session._row(authority.identity)
+            try:
+                row = await self.storage.publications.reconcile(
+                    operation_key,
+                    owner_stopped=True,
+                    expected_generation=session["generation"],
+                )
+            except ConflictError:
+                # A Stop or changed CAS baseline can reject the immutable
+                # result. Retain its body and fence its original key.
+                row = await self.storage.publications.abort(
+                    request,
+                    owner_stopped=True,
+                )
+        return row
+
+    def _validate_pending_request(self, request):
+        authority = self.authority
+        if request.scope != authority.identity.scope or (
+            request.session_id,
+            request.chat_id,
+            request.turn_id,
+            request.generation,
+            request.owner_key,
+        ) != (
+            authority.session_id,
+            authority.chat_id,
+            authority.turn_id,
+            authority.generation,
+            authority.owner_key,
+        ):
+            raise IntegrityError(
+                "pending operation execution identity mismatch",
+            )
 
     async def stream(self, source):
+        try:
+            async for frame in self._stream(source):
+                yield frame
+        finally:
+            if self.semantic_publisher is not None:
+                await self.semantic_publisher.close()
+
+    async def _stream(self, source):
         pending = None
         try:
             async for message, last in source:
+                if self.semantic_publisher is not None:
+                    self.semantic_publisher.check()
                 if pending is not None:
                     yield pending[0], False
                     pending = None
@@ -259,6 +489,9 @@ class IndexedQuery:
                     pending = (message, last)
                 else:
                     yield message, last
+            if self.semantic_publisher is not None:
+                await self.semantic_publisher.close()
+                self.semantic_publisher.check()
             if self.terminal_status is None:
                 await self.finish(
                     "stopped" if self.stop_requested else "completed",
@@ -269,6 +502,9 @@ class IndexedQuery:
         except StorageError:
             raise
         except asyncio.CancelledError:
+            if self.semantic_publisher is not None:
+                await self.semantic_publisher.close()
+                self.semantic_publisher.check()
             if self.renew_error is not None:
                 raise self.renew_error
             if self.terminal_status is None:
@@ -295,6 +531,10 @@ async def _observe(query):
     from agentscope.message import Msg
 
     turn = query.observation.turn
+    if turn["state"] == "rejected":
+        raise ConflictError(
+            "original question admission was rejected; submit a new question",
+        )
     if turn["state"] not in (
         "succeeded",
         "failed",
@@ -415,5 +655,8 @@ async def stream_indexed_query(owner, storage, messages, *, request, query):
                 execution,
                 indexed,
             )
-            async for frame in indexed.stream(source):
-                yield frame
+            try:
+                async for frame in indexed.stream(source):
+                    yield frame
+            finally:
+                await source.aclose()

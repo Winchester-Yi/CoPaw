@@ -147,3 +147,64 @@ def test_missing_fixed_source_boundary_rejected(migration):
     result = invoke(migration, "import", "--apply")
     assert result.exit_code != 0
     assert "snapshot_id" in result.output
+
+
+def test_recovery_preview_requires_exact_ended_owner_manifest_and_never_connects(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.database.connection import DatabaseConnection
+
+    async def forbidden(*args):
+        pytest.fail("recovery preview connected")
+
+    monkeypatch.setattr(DatabaseConnection, "connect", forbidden)
+    nas = tmp_path / "nas"
+    nas.mkdir()
+    evidence = tmp_path / "owner-exit.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "schema": "business",
+                "nas_root": str(nas),
+                "scope": {
+                    "tenant_id": "tenant",
+                    "source_id": "source",
+                    "agent_id": "agent",
+                },
+                "session": {
+                    "user_id": "alice",
+                    "channel": "console",
+                    "session_id": "session",
+                },
+                "turn_id": 7,
+                "owner": {
+                    "owner_key": "original-owner-incarnation",
+                    "generation": 3,
+                    "evidence_ref": "audit/pod-uid-exit-and-drain",
+                    "operator": "alice-ops",
+                    "owner_stopped": True,
+                    "io_drained": True,
+                },
+            },
+        ),
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["conversation-storage", "recover", "--evidence", str(evidence)],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["preview"] is True
+    result = CliRunner().invoke(
+        cli,
+        [
+            "conversation-storage",
+            "recover",
+            "--evidence",
+            str(evidence),
+            "--apply",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "confirm-ended-owner" in result.output

@@ -2,6 +2,7 @@
 """Short Session authority transactions; model/tool IO never runs under SQL locks."""
 
 from dataclasses import dataclass
+from copy import deepcopy
 import asyncio
 import json
 import secrets
@@ -16,7 +17,7 @@ from .identity import (
     runtime_turn_key_bytes,
 )
 from .message_installs import MessageInstall, TurnInstall
-from .publications import CommitPlan, PublicationRequest
+from .publications import CommitPlan, PublicationRequest, PublicationStore
 from .retention import RetentionStore
 
 IDENTITY_WHERE = (
@@ -305,6 +306,7 @@ class ExecutionStore:
         turn_install = TurnInstall("terminal", history_status=history_status)
         BundleStore.path_for(operation_key)
         recovery_bytes = _json_bytes(recovery)
+        request = None
         try:
             async with self.db.transaction():
                 await self._assert_writes_allowed(authority.identity)
@@ -350,10 +352,140 @@ class ExecutionStore:
                 [BundleBlock("recovery", "recovery", recovery_bytes), *blocks],
             )
             return await self.publications.commit(operation_key)
-        except (StorageError, ValueError, TypeError, KeyError):
+        except StorageError as error:
+            if (
+                isinstance(error, UnknownCommit)
+                and error.publication_request is None
+            ):
+                error.publication_request = request
+            raise
+        except (ValueError, TypeError, KeyError):
             raise
         except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(operation_key) from error
+            raise UnknownCommit(operation_key, request) from error
+
+    async def settle_ended_terminal(
+        self,
+        authority,
+        recovery,
+        *,
+        operation_key,
+        owner_stopped,
+    ):
+        """Publish interruption after the original request and its IO ended."""
+        if not owner_stopped:
+            raise ConflictError("original owner must be confirmed stopped")
+        request = None
+        try:
+            async with self.db.transaction():
+                await self._assert_writes_allowed(authority.identity)
+                associations = await self._turn_associations(
+                    authority.identity,
+                    authority.chat_id,
+                    authority.turn_id,
+                )
+                session, chat, turn = associations
+                status = (
+                    "stopped" if turn["state"] == "stopping" else "interrupted"
+                )
+                if recovery.get("revision") != session["state_revision"]:
+                    raise ConflictError("Session changed during settlement")
+                request = PublicationRequest(
+                    operation_key,
+                    authority.identity.scope,
+                    "terminal",
+                    authority.owner_key,
+                    authority.generation,
+                    session_id=authority.session_id,
+                    chat_id=authority.chat_id,
+                    turn_id=authority.turn_id,
+                    base_state_revision=session["state_revision"],
+                    base_history_revision=chat["history_revision"],
+                    epoch=chat["epoch"],
+                )
+                PublicationStore._validate_reconciliation(
+                    request,
+                    associations,
+                    session["generation"],
+                )
+                await self.db.execute(
+                    "UPDATE swe_conversation_sessions SET generation=generation+1,owner_key=NULL,lease_until=NULL WHERE id=%s",
+                    (authority.session_id,),
+                )
+                generation = session["generation"] + 1
+                await self.publications.reserve(
+                    request,
+                    CommitPlan(
+                        recovery_block="recovery",
+                        turn_install=TurnInstall(
+                            "terminal",
+                            history_status=status,
+                        ),
+                    ),
+                )
+            state = deepcopy(recovery)
+            state["revision"] += 1
+            state.setdefault("turn_states", {}).setdefault(
+                turn["question_msg_key"].decode("utf-8"),
+                {},
+            )["status"] = status
+            await self.publications.write_bundle(
+                operation_key,
+                [BundleBlock("recovery", "recovery", _json_bytes(state))],
+            )
+            return await self.publications.reconcile(
+                operation_key,
+                owner_stopped=True,
+                expected_generation=generation,
+            )
+        except StorageError as error:
+            if (
+                isinstance(error, UnknownCommit)
+                and error.publication_request is None
+            ):
+                error.publication_request = request
+            raise
+        except (ValueError, TypeError, KeyError):
+            raise
+        except (Exception, asyncio.CancelledError) as error:
+            raise UnknownCommit(operation_key, request) from error
+
+    async def reject_ended_admission(
+        self,
+        authority,
+        request,
+        *,
+        owner_stopped,
+    ):
+        """Reject an unpublished original admission and release its reservation."""
+        if not owner_stopped:
+            raise ConflictError("original owner must be confirmed stopped")
+        async with self.db.transaction():
+            await self._assert_writes_allowed(authority.identity)
+            associations = await self._turn_associations(
+                authority.identity,
+                authority.chat_id,
+                authority.turn_id,
+            )
+            session, _, turn = associations
+            if turn["state"] == "rejected":
+                return
+            PublicationStore._validate_reconciliation(
+                request,
+                associations,
+                session["generation"],
+            )
+            row = await self.publications.abort(request, owner_stopped=True)
+            if row["state"] != "aborted":
+                raise ConflictError("admission committed during rejection")
+            await self.db.execute(
+                "UPDATE swe_conversation_turns SET state='rejected',terminal_at=UTC_TIMESTAMP(6) WHERE id=%s",
+                (authority.turn_id,),
+            )
+            await self.db.execute(
+                "UPDATE swe_conversation_sessions SET active_turn_id=NULL,owner_key=NULL,lease_until=NULL WHERE id=%s",
+                (authority.session_id,),
+            )
 
     async def _session(self, identity):
         if not isinstance(identity, SessionIdentity):

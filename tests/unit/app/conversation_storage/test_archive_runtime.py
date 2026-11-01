@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Request-local indexed archive injection and atomic memory updates."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -77,7 +78,11 @@ async def test_request_binding_prunes_memory_only_after_confirmed_publication(
         content=[(first, []), (second, [])],
         _compressed_summary="old",
     )
-    tx = SimpleNamespace(accept_committed_state=Mock())
+    tx = SimpleNamespace(
+        accept_committed_state=Mock(),
+        mutation_lock=asyncio.Lock(),
+        pending_operation=None,
+    )
     facade = MySQLArchiveStore(
         SimpleNamespace(),
         WorkspaceScope("t", "s", "a"),
@@ -95,6 +100,8 @@ async def test_request_binding_prunes_memory_only_after_confirmed_publication(
     assert memory.content == [(first, []), (second, [])]
     assert memory._compressed_summary == "old"
     tx.accept_committed_state.assert_not_called()
+    assert tx.pending_operation == "op"
+    tx.pending_operation = None
     facade.compact = AsyncMock(
         return_value=SimpleNamespace(
             boundary="boundary",
@@ -130,7 +137,11 @@ async def test_reset_binding_publishes_clear_root_before_memory_changes(
         BundleStore(tmp_path),
         SimpleNamespace(),
     )
-    tx = SimpleNamespace(accept_committed_state=Mock())
+    tx = SimpleNamespace(
+        accept_committed_state=Mock(),
+        mutation_lock=asyncio.Lock(),
+        pending_operation=None,
+    )
     facade.bind_memory(
         memory,
         "chat",
@@ -287,7 +298,11 @@ async def test_candidate_compact_root_contains_new_checkpoint_projection(
     store.bind_memory(
         memory,
         "chat",
-        SimpleNamespace(accept_committed_state=Mock()),
+        SimpleNamespace(
+            accept_committed_state=Mock(),
+            mutation_lock=asyncio.Lock(),
+            pending_operation=None,
+        ),
         root,
         None,
     )
@@ -313,3 +328,90 @@ async def test_archive_root_provider_result_is_detached_before_publication():
     root = await binding._root([], "new")
     state["unknown"]["keep"] = False
     assert root["unknown"]["keep"] is True
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["add", "compact", "reset", "projection"],
+)
+async def test_memory_mutation_waits_for_request_publication_lock(
+    tmp_path,
+    operation,
+):
+    from agentscope.memory import InMemoryMemory
+    from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.agents.memory.chat_checkpoint import CheckpointRecord
+
+    memory = InMemoryMemory()
+    message = Msg("user", "one", "user")
+    lock = asyncio.Lock()
+    tx = SimpleNamespace(
+        mutation_lock=lock,
+        pending_operation=None,
+        accept_committed_state=Mock(),
+    )
+    store = MySQLArchiveStore(
+        SimpleNamespace(),
+        WorkspaceScope("t", "s", "a"),
+        BundleStore(tmp_path),
+        SimpleNamespace(),
+    )
+    store.bind_memory(memory, "chat", tx, lambda: {"revision": 1}, None)
+    committed = SimpleNamespace(
+        recovery_state={"revision": 2},
+        boundary="boundary",
+        state=SimpleNamespace(current_epoch=2),
+    )
+    store.append_message = AsyncMock(return_value=committed)
+    store.compact = AsyncMock(return_value=committed)
+    store.reset = AsyncMock(return_value=committed)
+    store.write_active_checkpoint = AsyncMock(return_value=committed)
+    record = CheckpointRecord.new(chat_id="chat", epoch=1)
+    store.read_checkpoint_state = AsyncMock(
+        return_value=SimpleNamespace(record=record, events=[]),
+    )
+    operations = {
+        "add": lambda: memory.add(message),
+        "compact": lambda: memory.archive_compacted_messages([]),
+        "reset": lambda: memory.reset_context_epoch(reason="clear"),
+        "projection": lambda: memory.install_checkpoint_projection(record),
+    }
+    async with lock:
+        task = asyncio.create_task(operations[operation]())
+        await asyncio.sleep(0)
+        waiting = not task.done()
+        unmodified = not memory.content
+    await task
+    assert waiting, "archive mutation bypassed request publication lock"
+    assert unmodified, "memory changed before publication lock was acquired"
+
+
+async def test_unknown_publication_blocks_memory_and_archive_side_effects(
+    tmp_path,
+):
+    from agentscope.memory import InMemoryMemory
+    from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.errors import UnknownCommit
+    from swe.app.conversation_storage.identity import WorkspaceScope
+
+    memory = InMemoryMemory()
+    tx = SimpleNamespace(
+        mutation_lock=asyncio.Lock(),
+        pending_operation="original-key",
+        accept_committed_state=Mock(),
+    )
+    store = MySQLArchiveStore(
+        SimpleNamespace(),
+        WorkspaceScope("t", "s", "a"),
+        BundleStore(tmp_path),
+        SimpleNamespace(),
+    )
+    store.bind_memory(memory, "chat", tx, lambda: {"revision": 1}, None)
+    store.append_message = AsyncMock()
+    with pytest.raises(UnknownCommit, match="original-key"):
+        await memory.add(Msg("user", "later", "user"))
+    assert not memory.content
+    store.append_message.assert_not_called()

@@ -159,3 +159,19 @@ async def test_state_save_checks_backup_fence_before_session_creation():
     with pytest.raises(ConflictError, match="backup fence"):
         await session._save_state(session.identity("s"), {"revision": 0})
     session._ensure_session.assert_not_awaited()
+
+
+async def test_latest_turn_state_matches_legacy_question_state_pair_contract():
+    session = adapter()
+    session._row = AsyncMock(return_value={"id": 1})
+    session.db.fetch_one = AsyncMock(
+        return_value={"question_msg_key": b"question"},
+    )
+    value = {"status": "completed", "snapshot": {"keep": True}}
+    session.get_turn_state = AsyncMock(return_value=value)
+    assert await session.get_latest_turn_state("s", "user", {}, "chat") == (
+        "question",
+        value,
+    )
+    session.get_turn_state.return_value = None
+    assert await session.get_latest_turn_state("s", "user", {}, "chat") is None

@@ -265,7 +265,7 @@ class PublicationStore(PublicationAssociations):
         except (StorageError, ValueError):
             raise
         except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(request.operation_key) from error
+            raise UnknownCommit(request.operation_key, request) from error
 
     async def write_bundle(
         self,
@@ -481,6 +481,7 @@ class PublicationStore(PublicationAssociations):
         PublicationStore._validate_associations(request, *associations)
         if request.scope_kind == "legacy_share":
             return
+        PublicationStore._validate_revisions(request, *associations[:2])
         chat = associations[1]
         if chat["deleted_at"] is not None:
             raise ConflictError("share Chat was deleted")
@@ -700,7 +701,7 @@ class PublicationStore(PublicationAssociations):
             await lock_share_selection(self.db, request, plan.share)
         return associations, target_session
 
-    async def commit(self, operation_key: str):
+    async def commit(self, operation_key: str, *, _settlement_generation=None):
         sources = SourceMessages()
         projected_refs = ProjectionReferences()
         request = None
@@ -771,7 +772,12 @@ class PublicationStore(PublicationAssociations):
                     return row
                 if row["state"] != "prepared":
                     raise ConflictError("publication operation is aborted")
-                self._validate_commit_authority(request, plan, associations)
+                await self._validate_commit_mode(
+                    request,
+                    plan,
+                    associations,
+                    _settlement_generation,
+                )
                 archive_payloads.validate_chat(associations[1])
                 await sources.install_dependencies(self, request, row)
                 await self._install(
@@ -795,7 +801,7 @@ class PublicationStore(PublicationAssociations):
         except StorageError:
             raise
         except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(operation_key) from error
+            raise UnknownCommit(operation_key, request) from error
         finally:
             if request is not None:
                 await sources.finish(self, request.scope)
@@ -817,6 +823,30 @@ class PublicationStore(PublicationAssociations):
             projected_refs,
         )
         return committed
+
+    async def _validate_commit_mode(
+        self,
+        request,
+        plan,
+        associations,
+        generation,
+    ):
+        if generation is None:
+            self._validate_commit_authority(request, plan, associations)
+            return
+        self._validate_reconciliation(request, associations, generation)
+        await self.db.execute(
+            "UPDATE swe_conversation_sessions SET generation=generation+1,owner_key=NULL,lease_until=NULL WHERE id=%s",
+            (request.session_id,),
+        )
+        if (
+            plan.turn_install is None
+            and associations[2]["state"] != "stopping"
+        ):
+            await self.db.execute(
+                "UPDATE swe_conversation_turns SET state='settling' WHERE id=%s",
+                (request.turn_id,),
+            )
 
     def _validate_commit_authority(self, request, plan, associations):
         if plan.share is not None:
@@ -922,7 +952,7 @@ class PublicationStore(PublicationAssociations):
         except StorageError:
             raise
         except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(request.operation_key) from error
+            raise UnknownCommit(request.operation_key, request) from error
 
     @staticmethod
     def _validate_reconciliation(request, associations, expected_generation):
@@ -961,12 +991,10 @@ class PublicationStore(PublicationAssociations):
             or turn["generation"] != request.generation
         ):
             raise ConflictError("reconciliation Turn authority changed")
-        if turn["state"] not in (
-            "admitted",
-            "running",
-            "stopping",
-            "settling",
-        ):
+        allowed_states = {"admitted", "running", "stopping", "settling"}
+        if request.kind == "admission":
+            allowed_states = {"reserved"}
+        if turn["state"] not in allowed_states:
             raise ConflictError("reconciliation Turn is no longer admitted")
 
     async def reconcile(
@@ -979,59 +1007,11 @@ class PublicationStore(PublicationAssociations):
         """Settle one durable result after observed owner exit; never resume Agent IO."""
         if not owner_stopped:
             raise ConflictError("original owner must be confirmed stopped")
-        try:
-            initial = await self.get(operation_key)
-            if initial is None:
-                raise UnknownCommit(operation_key)
-            if initial["state"] == "committed":
-                return initial
-            if initial["state"] != "prepared" or not initial.get("durable_at"):
-                raise ConflictError(
-                    "reconciliation requires a durable prepared publication",
-                )
-            request = _request(initial)
-            index = await self._nas_io(
-                operation_key,
-                self.bundles.inspect,
-                _text(initial["relative_path"]),
-                expected_length=initial["byte_length"],
+        if type(expected_generation) is not int or expected_generation < 0:
+            raise ConflictError(
+                "reconciliation generation must be a nonnegative integer",
             )
-            if index.metadata.get("operation_key") != operation_key:
-                raise IntegrityError("bundle operation identity mismatch")
-            async with self.db.transaction():
-                await self._assert_writes_allowed(request)
-                associations = await self._lock_associations(request)
-                row = await self.get(operation_key, lock=True)
-                self._matches(row, request, initial["result_metadata_text"])
-                if row["state"] == "committed":
-                    return row
-                if row["state"] != "prepared":
-                    raise ConflictError("publication operation is aborted")
-                self._validate_reconciliation(
-                    request,
-                    associations,
-                    expected_generation,
-                )
-                await self.db.execute(
-                    "UPDATE swe_conversation_sessions SET generation=generation+1,owner_key=NULL,lease_until=NULL WHERE id=%s",
-                    (request.session_id,),
-                )
-                await self.db.execute(
-                    "UPDATE swe_conversation_turns SET state='settling' WHERE id=%s",
-                    (request.turn_id,),
-                )
-                await self._install(
-                    row,
-                    CommitPlan.parse(row["result_metadata_text"]),
-                    index,
-                    associations=associations,
-                )
-                await self.db.execute(
-                    f"UPDATE {TABLE} SET state='committed',committed_at=UTC_TIMESTAMP(6) WHERE state='prepared' AND id=%s",
-                    (row["id"],),
-                )
-            return await self.get(operation_key)
-        except StorageError:
-            raise
-        except (Exception, asyncio.CancelledError) as error:
-            raise UnknownCommit(operation_key) from error
+        return await self.commit(
+            operation_key,
+            _settlement_generation=expected_generation,
+        )

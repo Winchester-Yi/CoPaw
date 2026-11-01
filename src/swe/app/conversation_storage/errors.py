@@ -21,8 +21,9 @@ class ConflictError(StorageError):
 class UnknownCommit(StorageUnavailable):
     """The original operation must be reconciled before execution advances."""
 
-    def __init__(self, operation_key: str):
+    def __init__(self, operation_key: str, publication_request=None):
         self.operation_key = operation_key
+        self.publication_request = publication_request
         super().__init__(
             f"Conversation commit outcome is unknown: {operation_key}",
         )

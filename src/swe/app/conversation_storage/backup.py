@@ -1032,7 +1032,8 @@ def _restored_rows(snapshot, evidence):
             "stopping",
             "settling",
         ):
-            row["state"] = "settling"
+            if row["state"] not in ("reserved", "stopping"):
+                row["state"] = "settling"
             changes.append(
                 {
                     "table": "turns",
@@ -1056,7 +1057,7 @@ def _settlement_report(document, snapshot, database, bundles):
     pending = []
     for turn in snapshot["turns"]:
         if (
-            turn["state"] != "settling"
+            turn["state"] not in ("reserved", "stopping", "settling")
             or sessions[turn["session_id"]]["active_turn_id"] != turn["id"]
         ):
             continue

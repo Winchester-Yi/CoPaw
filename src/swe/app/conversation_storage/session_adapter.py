@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
+import asyncio
 import json
 import time
 
 from .bundle import BundleBlock, new_operation_key
 from .chat_mutations import load_metadata_json
-from .errors import ConflictError, IntegrityError, UnknownCommit
+from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
 from .execution import IDENTITY_WHERE, ExecutionAuthority
 from .identity import SessionIdentity
 from .publications import CommitPlan, PublicationRequest, PublicationStore
@@ -63,8 +64,10 @@ class DatabaseSessionExecution:
         self._active = False
         self._dirty = False
         self.pending_operation = None
+        self.pending_request = None
         self.defer_close = False
         self._projection_cache = None
+        self.mutation_lock = asyncio.Lock()
 
     @property
     def is_active(self):
@@ -145,6 +148,7 @@ class DatabaseSessionExecution:
             self._state = await self.adapter._save_state(self.identity, state)
         except UnknownCommit as error:
             self.pending_operation = error.operation_key
+            self.pending_request = error.publication_request
             raise
         self._dirty = False
         return self._state
@@ -331,36 +335,49 @@ class MySQLSessionAdapter:
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-        async with self.db.transaction():
-            await self.retentions.assert_writes_allowed()
-            row = await self._ensure_session(identity)
-            if row["state_revision"] != revision:
-                raise ConflictError("Session state revision changed")
-            if row["active_turn_id"] is not None and authority is None:
-                raise ConflictError(
-                    "Session is busy; execution authority is required",
+        request = None
+        try:
+            async with self.db.transaction():
+                await self.retentions.assert_writes_allowed()
+                row = await self._ensure_session(identity)
+                if row["state_revision"] != revision:
+                    raise ConflictError("Session state revision changed")
+                if row["active_turn_id"] is not None and authority is None:
+                    raise ConflictError(
+                        "Session is busy; execution authority is required",
+                    )
+                request = PublicationRequest(
+                    operation,
+                    identity.scope,
+                    "state",
+                    authority.owner_key if authority else self.owner_key,
+                    authority.generation if authority else row["generation"],
+                    session_id=row["id"],
+                    chat_id=authority.chat_id if authority else None,
+                    turn_id=authority.turn_id if authority else None,
+                    base_state_revision=revision,
                 )
-            request = PublicationRequest(
+                await self.publications.reserve(
+                    request,
+                    CommitPlan(recovery_block="recovery"),
+                )
+            await self.publications.write_bundle(
                 operation,
-                identity.scope,
-                "state",
-                authority.owner_key if authority else self.owner_key,
-                authority.generation if authority else row["generation"],
-                session_id=row["id"],
-                chat_id=authority.chat_id if authority else None,
-                turn_id=authority.turn_id if authority else None,
-                base_state_revision=revision,
+                [BundleBlock("recovery", "recovery", payload)],
             )
-            await self.publications.reserve(
-                request,
-                CommitPlan(recovery_block="recovery"),
-            )
-        await self.publications.write_bundle(
-            operation,
-            [BundleBlock("recovery", "recovery", payload)],
-        )
-        await self.publications.commit(operation)
-        return committed_state
+            await self.publications.commit(operation)
+            return committed_state
+        except StorageError as error:
+            if (
+                isinstance(error, UnknownCommit)
+                and error.publication_request is None
+            ):
+                error.publication_request = request
+            raise
+        except (ValueError, TypeError, KeyError):
+            raise
+        except (Exception, asyncio.CancelledError) as error:
+            raise UnknownCommit(operation, request) from error
 
     async def save_session_state(
         self,
@@ -683,16 +700,11 @@ class MySQLSessionAdapter:
             "SELECT t.question_msg_key FROM swe_conversation_turns t JOIN swe_conversation_chats c ON c.id=t.chat_id WHERE t.session_id=%s AND c.external_chat_key=%s AND t.admission_publication_id IS NOT NULL ORDER BY t.turn_order DESC LIMIT 1",
             (session["id"], chat_id.encode("utf-8")),
         )
-        return (
-            await self.get_turn_state(
-                session_id,
-                user_id,
-                state,
-                latest["question_msg_key"].decode("utf-8"),
-            )
-            if latest
-            else None
-        )
+        if latest is None:
+            return None
+        key = latest["question_msg_key"].decode("utf-8")
+        value = await self.get_turn_state(session_id, user_id, state, key)
+        return (key, value) if value is not None else None
 
     async def delete_turn_state(self, session_id, turn_id, user_id=""):
         raise ConflictError(

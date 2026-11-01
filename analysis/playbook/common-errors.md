@@ -839,3 +839,10 @@
 - **周期自定义后遮挡频率列**：App 的 ConfigProvider 使用 `prefixCls="swe"`，只匹配 `.ant-picker` 的日期框尺寸规则在正式页面不会生效，日期框会越过周期列边界。通过 `.taskDatePicker` 自有类名控制宽度、高度和输入字体，避免依赖组件前缀；验证同时覆盖 `swe` 与 `ant`，并使用正式 ConfigProvider、主题和全局样式。只挂裸页面的模拟验证不能代表正式尺寸。
 - **其他检查**：顶栏和 Toast 的 inset 改用常规定位；焦点提示改用 :focus；min-inline-size 和 border-block-color 改用常规宽度及上下边框。`clamp()`、普通 Grid 已兼容 Chromium 80，保留；Flex gap 在 80–83 不支持，按用户确认暂不整改。Popover 和请求取消 API 已有能力检测或兼容处理。
 - **验证**：普通/自定义周期、多条不同排程、长场景名、客户数、排序、删除、空状态，及 1280、1440、1920 宽度与头部隐藏场景。真实内核版本和极速/兼容模式仍需在目标环境确认；仅修改 User-Agent 不能模拟 CSS 支持能力。完整边界见 [财富工作台兼容性记录](../../console/src/pages/WealthWorkbench/COMPATIBILITY.md)。
+
+## MySQL 会话 publication 结果未知后 Session 长时间 busy
+
+- `UnknownCommit` 不代表事务回滚，也不能通过 lease 过期断言旧 Pod 已死亡。始终保留原 `operation_key`、publication 行和 NAS 正文。
+- 本进程请求已结束且 source、续约任务和 NAS worker 已收敛时，Runner 用原 operation 对账：durable prepared 复用完整提交校验；已提交 admission/语义边界从完整恢复根提交 interrupted；未发布准入用原 key 的 aborted tombstone 拒绝并清理 reserved 槽。
+- 预留行缺失时，仅当保留原 `PublicationRequest` 元数据或原准入参数，才参与同 key 的唯一键竞争。缺少原身份/CAS 基线、主库不可达、正文损坏或跨进程 owner 退出证据不足时保持 unavailable/busy，不猜 revision/epoch、不重跑模型或工具。
+- 排查入口：`conversation_storage/runner_integration.py:IndexedQuery`、`execution.py`、`publications.py:reconcile`；回归入口：`tests/integrated/conversation_storage/test_runner_integration_mysql.py`。恢复根必须保留未知顶层模块与 managed cron receipts。

@@ -672,3 +672,52 @@ def test_inactive_locator_rejects_unknown_gc_state():
     data["publications"][0]["gc_state"] = "unknown"
     with pytest.raises(IntegrityError):
         snapshot_publication_ids(data)
+
+
+def test_restore_keeps_unpublished_admission_reserved_for_rejection_or_commit():
+    from swe.app.conversation_storage.backup import _restored_rows
+
+    snapshot = {
+        "sessions": [
+            {
+                "id": 1,
+                "generation": 3,
+                "owner_key": b"old",
+                "lease_until": None,
+                "active_turn_id": 2,
+            },
+        ],
+        "turns": [{"id": 2, "state": "reserved"}],
+        "retentions": [],
+    }
+    restored, _ = _restored_rows(
+        snapshot,
+        RestoreEvidence("stopped", "isolated"),
+    )
+    assert restored["turns"][0]["state"] == "reserved"
+    assert restored["sessions"][0]["generation"] == 4
+    assert restored["sessions"][0]["owner_key"] is None
+    assert restored["sessions"][0]["active_turn_id"] == 2
+
+
+def test_restore_preserves_stop_intent_for_terminal_cas():
+    from swe.app.conversation_storage.backup import _restored_rows
+
+    snapshot = {
+        "sessions": [
+            {
+                "id": 1,
+                "generation": 3,
+                "owner_key": b"old",
+                "lease_until": None,
+                "active_turn_id": 2,
+            },
+        ],
+        "turns": [{"id": 2, "state": "stopping"}],
+        "retentions": [],
+    }
+    restored, _ = _restored_rows(
+        snapshot,
+        RestoreEvidence("stopped", "isolated"),
+    )
+    assert restored["turns"][0]["state"] == "stopping"

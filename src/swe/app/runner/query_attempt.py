@@ -406,7 +406,7 @@ async def stream_single_query_attempt(
             None,
         )
         if indexed_query is not None:
-            indexed_query.bind_runtime(runtime)
+            await indexed_query.bind_runtime(runtime)
         retry_state.agent = runtime.agent
         retry_state.session_state_loaded = attempt_state.session_state_loaded
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(

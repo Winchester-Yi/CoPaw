@@ -81,3 +81,34 @@ swe conversation-storage export --manifest /audit/manifest.json --apply
 `tests/integrated/conversation_storage/test_install.py` 的真实数据库用例只创建/删除随机生成的隔离 schema；覆盖探针失败原子性、七表安装、启动前逆向、无关业务表保持不变。连接缺失时跳过，不能把 skip 视为验收。运行时应使用项目虚拟环境及测试数据库环境变量，不输出连接配置/凭据。
 
 生产门禁仍需目标数据库实例的完整探针/权限/MDL验收、真实原 NAS 原语与双 Pod、停机预算、固定旧镜像读取并继续写、以及全 scope 新写后反向导出。代码测试通过不能替代这些环境证据。
+
+## SQL authority 进程退出后的结算
+
+请求仍在本进程登记时，Runner 使用已关闭并排空 IO 的 IndexedQuery 对原 operation 对账；这不证明进程重启后的恢复。进程退出、Pod 被删除或一致性 restore 后，由离线 recover 命令从 SQL 重建原 Session/Turn/publication 身份。禁止凭 lease 到期判断进程死亡；先关闭该 scope 入口和全部重试，核查精确 Pod UID/进程 incarnation 已退出、模型/工具子任务已终止、NAS 写入已排空。保存控制面和 IO 排空证据。外部工具的业务副作用不会重放或撤销。
+
+建立经过人工核对的 JSON 证据；owner_key、generation、turn_id 来自原准入 publication 和 Turn，不使用当前 Session generation 猜测；scope/Session 必须为原始逻辑身份。原 NAS 和 workspace 必须已经存在。
+
+    {
+      "version": 1,
+      "schema": "shared_business_schema",
+      "workspace_root": "/existing/workspace",
+      "nas_root": "/existing/original/nas/root",
+      "scope": {"tenant_id": "tenant", "source_id": "source", "agent_id": "agent"},
+      "session": {"user_id": "alice", "channel": "console", "session_id": "original-session"},
+      "turn_id": 123,
+      "owner": {
+        "owner_key": "exact-original-owner-incarnation",
+        "generation": 7,
+        "evidence_ref": "change-record/pod-uid-exit-and-io-drain",
+        "operator": "reviewed-operator",
+        "owner_stopped": true,
+        "io_drained": true
+      }
+    }
+
+    swe conversation-storage recover --evidence /audit/owner-exit.json
+    swe conversation-storage recover --evidence /audit/owner-exit.json --apply --confirm-ended-owner exact-original-owner-incarnation --receipt /audit/recovery.jsonl
+
+预览不连接数据库、不写文件；apply 要求确认字符串与原 owner 完全相同，且配置中的数据库与证据 schema 一致。命令在任何 DB 写入前将完整证据写入并 fsync receipt，结束记录 completed 或 unavailable。证据是操作者核实的声明，CLI 无法自行验证 Kubernetes/进程退出，自动化调用必须通过 EndedOwnerRecovery.verify_stopped 接入真实控制面验证。命令不初始化业务 workspace、不执行 DDL。
+
+恢复先校验完整关联、原 owner/generation 和 active Turn，再 fence writer。已有 durable prepared 结果按原 key 和原不可变正文提交；缺失且尚未确认 durable 的原操作留下 aborted tombstone；未准入且没有正文的 reservation 标为 rejected 并释放。没有可提交终态时，以已确认完整 recovery root（含未知模块/Cron receipts）发布 interrupted；Stop 已获胜则发布 stopped。任何已确认正文缺失/截断、身份漂移、另一 owner 或未能确定提交结果都保持 busy/unavailable，修复后用相同证据重试，不伪造 completed、不重跑模型或工具。receipt 中 unavailable 不表示回滚。还需在目标 NAS 和真实 Pod 崩溃环境演练本段流程。

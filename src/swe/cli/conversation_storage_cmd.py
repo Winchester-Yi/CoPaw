@@ -317,3 +317,31 @@ for _operation in ("inventory", "plan", "verify", "inspect"):
     _register(_operation)
 for _operation in ("import", "export", "install"):
     _register(_operation, mutable=True)
+
+
+@conversation_storage_group.command("recover")
+@click.option(
+    "--evidence",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--apply", is_flag=True)
+@click.option(
+    "--confirm-ended-owner",
+    help="Exact owner incarnation whose process has exited and IO has drained.",
+)
+@click.option("--receipt", type=click.Path(dir_okay=False, path_type=Path))
+def recover(evidence, apply, confirm_ended_owner, receipt):
+    """Settle a reviewed stopped incarnation; never resume model or tool work."""
+    from swe.app.conversation_storage.recovery_cli import RecoveryJob
+
+    try:
+        job = RecoveryJob(evidence)
+        result = (
+            asyncio.run(job.apply(confirm_ended_owner, receipt))
+            if apply
+            else job.preview()
+        )
+        click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        raise click.ClickException(str(error)) from None

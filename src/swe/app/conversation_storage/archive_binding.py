@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from ...agents.memory.chat_checkpoint import render_checkpoint_projection
-from .errors import ConflictError
+from .errors import ConflictError, UnknownCommit
 
 
 @dataclass
@@ -131,6 +131,21 @@ def attach_bound_memory(memory, store, chat_id):
             )
         return result
 
+    def serialized(function):
+        async def call(*args, **kwargs):
+            execution = binding().execution
+            async with execution.mutation_lock:
+                if execution.pending_operation is not None:
+                    raise UnknownCommit(execution.pending_operation)
+                try:
+                    return await function(*args, **kwargs)
+                except UnknownCommit as error:
+                    execution.pending_operation = error.operation_key
+                    execution.pending_request = error.publication_request
+                    raise
+
+        return call
+
     async def archive(messages, *, summary=None):
         return (await binding().compact(messages, summary=summary)).boundary
 
@@ -200,13 +215,13 @@ def attach_bound_memory(memory, store, chat_id):
     async def recover(**kwargs):
         return await store.recover_evidence(chat_id=chat_id, **kwargs)
 
-    memory.archive_compacted_messages = archive
-    memory.archive_checkpoint_messages = checkpoint
-    memory.commit_ready_precompaction = ready
-    memory.install_checkpoint_projection = projection
-    memory.install_degraded_checkpoint = degraded
-    memory.reset_context_epoch = reset
+    memory.archive_compacted_messages = serialized(archive)
+    memory.archive_checkpoint_messages = serialized(checkpoint)
+    memory.commit_ready_precompaction = serialized(ready)
+    memory.install_checkpoint_projection = serialized(projection)
+    memory.install_degraded_checkpoint = serialized(degraded)
+    memory.reset_context_epoch = serialized(reset)
     memory.recover_evidence = recover
     if original_add is not None:
-        memory.add = add
+        memory.add = serialized(add)
     return memory
