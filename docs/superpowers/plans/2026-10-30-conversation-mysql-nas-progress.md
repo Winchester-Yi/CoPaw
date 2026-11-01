@@ -17,12 +17,22 @@
 | T5 reader/dependency pin 基础 | 11a0861fa | 17 单元通过；真实 MySQL 4 passed；取消时排空 NAS worker、released key 不复用、guard 形状验证 |
 | T6 SQL Chat 与原子完整 metadata | b20722f84 | 独立复审通过；真实 MySQL 14 passed；最后删除读取竞态新增回归；综合单元与旧分页/专家契约 155 passed；提交钩子全通过 |
 | T7 索引历史与归档查询增量 | 209de073a | 已提交；完整入口验收仍按 T10/T14 记录 |
-| T11 稳定清单与多格式导入核验 | 32044ca56、eab7f222f | 已提交 inventory/import/verify；后续离线零写入修复仍待提交 |
-| T8/T9/T10 执行、归档及分享发布基础 | fe7d0b1db | 已提交；生产运行时装配尚待独立提交与全入口验收 |
+| T11 稳定清单与多格式导入核验 | 32044ca56、eab7f222f | 已提交 inventory/import/verify；离线零写入修复已在 b93ebbf4e 提交 |
+| T8/T9/T10 执行、归档及分享发布基础 | fe7d0b1db | 已提交；后续运行时装配已提交；外部全入口验收见 Gate |
 | NAS 根缺失不冒充已回收 | 33cc6e2f6 | 失败回归确认后修复；bundle 专项与提交钩子通过 |
 | 原 workspace 的 SQL runtime 装配 | 72a7161a1 | 独立复审发现项已回归；564 单元/旧契约、3 真实 MySQL，提交前显式范围 hooks 全通过 |
+| T15 scope-fenced GC | d5fd5e053 | READ COMMITTED、锁序、取消 drain、迟到文件精确重扫；最终隔离 MySQL 29 passed，默认 report-only |
+| T12 一致备份/恢复 | ed24a35be | 有效引用闭包、fence/pin、空目标恢复；Python legacy NAS-only 路径拒绝 SQL authority |
+| T12 完整反向导出 | 9169ca33d | v3 ledger/journal/新提交/删除语义，旧 reader/writer 本地回归；固定旧镜像仍未验收 |
+| schema 漂移检查 | e39380f1f | charset/collation 与 share locator 属性精确验证 |
+| T13 离线 CLI 与原子安装 | b93ebbf4e | 七命令、零写 verify、七表 RENAME/回退及手册；49 测试混合真实 DB 与 fixtures |
+| T14 NAS 与停机验收工具 | a1fc353b9 | 两节点 Indexed Job 模板、真实 Pod/PVC/imageID 证据采集和故障测试；未部署目标集群 |
+| 旧维护路径正文保护 | 58ee8c62b | 真实 bundle direct/alias 治理保护、Shell backup/restore SQL authority 拒绝；97 组合回归及精确文件集 hooks 通过 |
+| semantic failure-hook fence | 4228d9167 | storage publication failure fences prompt/command/HTTP failure hooks; 170 unit/hook-fence tests and six real semantic SQL cases pass |
+| final SQL fixture contract delta | 0ff2f5ee8 | 12 focused real MySQL integration cases pass; updated stale fixture lock/latest-turn tuple; W+ scope mypy narrowing; exact hooks pass |
 
-上述 T4/T5 仅是基础增量，完整 Message/Turn/archive 发布和历史授权 snapshot 等仍待后续接入；不把基础组件通过当作任务全部验收。
+上述提交证明各个实现增量存在，不代表全部目标环境验收通过。完整状态以
+[逐项审计](../reports/2026-11-01-conversation-completion-audit.md) 和最终回归为准。
 
 ## 本次收敛与证据
 
@@ -46,12 +56,20 @@
 - Console 原有兼容契约：8 个测试文件、93 passed；按 T14 计划执行 contextUsage、
   sessionApi、shareSelection、useExpertBinding。仅临时链接既有依赖，测试后已移除。
 - T12 既有真实回退集：7 passed（366.919 秒），另 prepared 收敛/恢复验证 2 passed
-  （60.532 秒）。XML 已核对；随后发现 GC 后备份不兼容，修复及回归尚在进行。
+  （60.532 秒）。后续 GC→backup 交叉缺口已由最终集成 suite 覆盖。
 - T15 既有真实 GC：26 passed，后补并发专项 10 passed；最终收集 29 cases，不能把
   两次数量直接相加。独立审查确认默认 report-only，并发现 GC→backup 交叉缺口。
 
-T12/T13/T15 未提交代码的专项通过不等于生产门槛通过。最终功能报告与测试报告仍待
-全目标完成后输出；本文件只是可续接的实施记录。
+最终源码 HEAD `0ff2f5ee8` 的跨模块回归为 1,238 passed（63 个文件，17.81 秒）；
+实际 MySQL 集成目录首次全量运行 268 passed、2 failed（47:25），暴露一个旧测试
+执行 fixture 未含新 mutation lock，以及一个 latest-turn tuple 断言已过期。更新后，
+涉及的两个集成文件最终真实 MySQL delta 为 12 passed、0 skipped（157.14 秒），隔离
+control schema 已清理。全量最初结果保留在测试报告，不以 delta 冒充目录全量单次通过。
+
+三文件最终 SQL delta 在提交前精确 hooks 通过。全仓 hooks 仍未通过：worktree 的
+TypeScript compiler/node_modules 缺失；全仓 mypy 最终 feature/main 均为 85 条，
+逐条差异为空。格式 hooks 改写的 199 个无关 tracked 文件已经恢复，未动用户主树文件。
+所有范围测试数量不相加，避免重叠计数；详见测试报告。
 
 ## 环境与边界
 
@@ -62,19 +80,17 @@ T12/T13/T15 未提交代码的专项通过不等于生产门槛通过。最终�
   业务七表安装或部署。
 - 真实 NAS、跨节点双 Pod、全量生产规模迁移、完整恢复/回退和停机预算仍未验收。
 
-## 当前开放项
+## 外部验收门槛
 
-- T10 生产装配最终检视与小步提交；T14 全入口与故障矩阵，尤其 unknown/prepared
-  操作的完整运维结算及进程恢复，不能靠重跑模型或工具解除。
-- T12/T15 有效引用语义统一：合法回收隐藏/删除 locator 后仍须能备份/恢复与反导；
-  新的端到端回归正在实施。默认不启用物理 GC。
-- T12 保留 v3 ledger 反导时，新增 SQL Turn 必须分配 admission_order 并推进水位；
-  独立检视已复现旧 reader 在首次继续写入前错误选择旧 Turn，修复正在实施。
-- T13 离线 verify 必须证明 SQL/manifest 零写入，包括嵌套 projection 和分享 reader；
-  CLI/安装器需完成独立审查、真实隔离 MySQL 重跑和小步提交。
-- T14 固定旧镜像恢复继续写、目标 NAS 原语、跨节点双 Pod、全量规模及停机预算仍缺
-  实际验收证据。本机 context 为 orbstack；已询问目标隔离环境参数。
-- 逐项核对十五任务复选项、Console 兼容回归及最终全范围检查；不能用专项单测通过
-  代替未运行的环境门槛。
+- T10 全入口分支清单已提交：
+  [conversation-storage-entry-inventory.md](../../../analysis/playbook/conversation-storage-entry-inventory.md)。
+- governance/Shell bypass 已修复；最终直接入口与 SQL authority 分支记录在 entry inventory。
+- 目标 MySQL/TDSQL capabilities、权限、MDL 和 atomic RENAME；原 NAS durability、跨节点
+  双 Pod/迟到 IO 与 Pod death；固定旧生产镜像反向导出后读写；全部生产 scope 历史导入与
+  full verify；完整规模 backup/restore、连续停机及 RSS/NAS/锁等待/p95/p99 测量均待目标
+  环境验收。当前本机不能代表生产挂载或 Kubernetes。目标参数此前已询问，当前无需阻塞本地交付。
 
-本记录不替代主计划的逐项验收；最终功能报告和测试报告在全部要求有证据后交付。
+上述外部 Gate 未完成，因此 15 项计划的本地实现和报告交付不等于生产切换验收；生产
+SQL authority 仍 opt-in，默认 legacy，不执行 DDL、业务数据迁移、停机或部署。
+
+本记录不替代主计划的逐项验收；外部目标环境范围仍未验收。
