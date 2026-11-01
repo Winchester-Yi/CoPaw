@@ -15,7 +15,7 @@ from agentscope.model import ChatModelBase, ChatResponse
 from agentscope.pipeline import stream_printing_messages
 from agentscope.tool import Toolkit, ToolResponse
 
-from swe.app.conversation_storage.errors import UnknownCommit
+from swe.app.conversation_storage.errors import StorageError, UnknownCommit
 from swe.app.conversation_storage.runner_integration import IndexedQuery
 from swe.app.conversation_storage.session_adapter import SemanticBatch
 from swe.agents.tool_guard_mixin import ToolGuardMixin
@@ -470,3 +470,201 @@ async def test_parallel_boundary_failure_drains_started_peer_without_replay():
     assert peer_drained.is_set()
     assert all(task.done() for task in query.semantic_publisher.producers)
     assert model.calls == 1
+
+
+@pytest.mark.parametrize("handler_type", ["prompt", "command", "http"])
+@pytest.mark.parametrize("failure_site", ["tool_result", "post_context"])
+@pytest.mark.parametrize(
+    "error_type",
+    [UnknownCommit, StorageError, ValueError],
+)
+async def test_configured_tool_failure_hook_fences_storage_failure(
+    tmp_path,
+    monkeypatch,
+    handler_type,
+    failure_site,
+    error_type,
+):
+    from swe.agents.hook_runtime.models import (
+        HookConfig,
+        HookEventName,
+        HookHandlerResult,
+        HookOutput,
+    )
+
+    error = error_type("a" * 64)
+    started = []
+
+    class GuardAgent(ToolGuardMixin, ReActAgent):
+        async def _acting_impl(self, tool_call):
+            return await self._run_guarded_tool_call(
+                None,
+                tool_call,
+                tool_call["name"],
+                {},
+                "",
+            )
+
+        async def _execute_guard_action_or_tool_call(self, *args):
+            await self.memory.add(Msg("system", "tool-fact", "system"))
+            return None
+
+    async def script(turn):
+        yield ChatResponse(content=[{"type": "text", "text": "unused"}])
+
+    query, runtime, question, _, _ = runtime_fixture(
+        script,
+        agent_type=GuardAgent,
+    )
+    agent = runtime.agent
+    agent._request_context = {"session_id": "s", "channel": "console"}
+    agent._workspace_dir = tmp_path
+    options = {
+        "prompt": {"prompt": "Review the failure"},
+        "command": {"command": "echo {}"},
+        "http": {"url": "https://failure.invalid/hook"},
+    }
+    agent._agent_config = SimpleNamespace(
+        hooks=HookConfig.model_validate(
+            {
+                "enabled": True,
+                "events": {
+                    "PostToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "id": "post",
+                                    "type": "command",
+                                    "command": "echo {}",
+                                },
+                            ],
+                        },
+                    ],
+                    "PostToolUseFailure": [
+                        {
+                            "hooks": [
+                                {
+                                    "id": "failure",
+                                    "type": handler_type,
+                                    **options[handler_type],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            },
+        ),
+    )
+    agent._load_tenant_hook_config = HookConfig
+    agent._extract_current_tool_response = lambda *args, **kwargs: None
+    agent._emit_tool_trace_end = AsyncMock()
+
+    async def execute(handler, context, *, workspace_dir):
+        started.append((handler.type, context.hook_event_name))
+        return HookHandlerResult(
+            handler_id=handler.id,
+            order=0,
+            output=HookOutput(
+                hook_specific_output={
+                    "additionalContext": "post-context",
+                },
+            ),
+        )
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        execute,
+    )
+    original_add = agent.memory.add
+
+    async def add(message, *args, **kwargs):
+        target = (
+            "tool-fact" if failure_site == "tool_result" else "post-context"
+        )
+        if target in message.get_text_content():
+            if isinstance(error, UnknownCommit):
+                query.execution.pending_operation = error.operation_key
+            raise error
+        return await original_add(message, *args, **kwargs)
+
+    agent.memory.add = add
+    async with query.admit([question]):
+        await query.bind_runtime(runtime)
+        try:
+            with pytest.raises(error_type) as caught:
+                await agent._acting(
+                    {"id": "one", "name": "record", "input": {}},
+                )
+            assert caught.value is error
+            failure_started = any(
+                event == HookEventName.POST_TOOL_USE_FAILURE
+                for _, event in started
+            )
+            if isinstance(error, StorageError):
+                assert not failure_started
+                assert query.semantic_publisher.error is error
+                with pytest.raises(error_type) as next_step:
+                    await query.semantic_publisher.pre_step(agent, {})
+                assert next_step.value is error
+            else:
+                assert failure_started
+                assert query.semantic_publisher.error is None
+            if isinstance(error, UnknownCommit):
+                assert query.execution.pending_operation == error.operation_key
+        finally:
+            await query.semantic_publisher.close()
+    assert "_conversation_check_tool_failure" not in agent.__dict__
+
+
+async def test_close_keeps_failure_fence_until_cancelled_tool_is_drained():
+    started = asyncio.Event()
+    cleanup_checks = []
+
+    class GuardAgent(ToolGuardMixin, ReActAgent):
+        async def _acting_impl(self, tool_call):
+            return await self._run_guarded_tool_call(
+                None,
+                tool_call,
+                tool_call["name"],
+                {},
+                "",
+            )
+
+        async def _execute_guard_action_or_tool_call(self, *args):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_checks.append(self._conversation_check_tool_failure)
+                raise RuntimeError("tool converted cancellation") from None
+
+    async def script(turn):
+        yield ChatResponse(content=[{"type": "text", "text": "unused"}])
+
+    query, runtime, question, _, _ = runtime_fixture(
+        script,
+        agent_type=GuardAgent,
+    )
+    agent = runtime.agent
+    previous = Mock()
+    agent._conversation_check_tool_failure = previous
+    agent._emit_tool_hook = AsyncMock()
+    async with query.admit([question]):
+        await query.bind_runtime(runtime)
+        publisher = query.semantic_publisher
+        producer = asyncio.create_task(
+            agent._acting(
+                {
+                    "id": "cancel",
+                    "name": "record",
+                    "input": {},
+                },
+            ),
+        )
+        await started.wait()
+        await publisher.close()
+        assert producer.cancelled()
+        assert cleanup_checks == [publisher.check_tool_failure]
+        agent._emit_tool_hook.assert_not_awaited()
+        assert agent._conversation_check_tool_failure is previous
+        previous.assert_not_called()

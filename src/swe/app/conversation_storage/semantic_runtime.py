@@ -6,6 +6,7 @@ from contextlib import suppress
 from copy import deepcopy
 import inspect
 
+from .errors import StorageError
 from .session_adapter import SemanticBatch
 
 
@@ -28,6 +29,9 @@ class SemanticRuntimePublisher:
         self.closed = False
         self.acting_override = agent.__dict__.get("_acting")
         self.acting = agent._acting
+        self.failure_check_override = agent.__dict__.get(
+            "_conversation_check_tool_failure",
+        )
 
     def install(self):
         for kind, callback in (
@@ -45,6 +49,7 @@ class SemanticRuntimePublisher:
         # metaclass. Wrap the actual dispatch target so guard/approval paths
         # have the same durable boundary as ReActAgent's tool implementation.
         self.agent._acting = self._acting
+        self.agent._conversation_check_tool_failure = self.check_tool_failure
         return self
 
     async def _acting(self, tool_call):
@@ -62,6 +67,14 @@ class SemanticRuntimePublisher:
             from .errors import UnknownCommit
 
             raise UnknownCommit(self.execution.pending_operation)
+
+    def check_tool_failure(self, error):
+        """Fence configured external failure hooks after a storage failure."""
+        if isinstance(error, StorageError) and self.error is None:
+            self.error = error
+        self.check()
+        if self.closed:
+            raise asyncio.CancelledError()
 
     async def _root(self):
         root = self.root_provider()
@@ -205,3 +218,9 @@ class SemanticRuntimePublisher:
             del self.agent._acting
         else:
             self.agent._acting = self.acting_override
+        if self.failure_check_override is None:
+            del self.agent._conversation_check_tool_failure
+        else:
+            self.agent._conversation_check_tool_failure = (
+                self.failure_check_override
+            )

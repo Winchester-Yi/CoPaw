@@ -1899,6 +1899,13 @@ class ToolGuardMixin:
         except PreToolUseTerminalStop:
             raise
         except Exception as e:
+            failure_check = getattr(
+                self,
+                "_conversation_check_tool_failure",
+                None,
+            )
+            if failure_check is not None:
+                failure_check(e)
             failure_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE_FAILURE,
                 tool_name=tool_name,
