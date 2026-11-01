@@ -27,6 +27,22 @@ async def stream_admission(
     user_id: str,
 ) -> AsyncIterator[tuple[Msg, bool]]:
     """Resolve admission before command or normal query execution."""
+    workspace = getattr(owner, "_workspace", None)
+    storage = getattr(workspace, "conversation_storage", None)
+    if storage is not None:
+        from ...conversation_storage.runner_integration import (
+            stream_indexed_query,
+        )
+
+        async for frame in stream_indexed_query(
+            owner,
+            storage,
+            msgs,
+            request=request,
+            query=query,
+        ):
+            yield frame
+        return
     async with global_tracer.start_as_current_span("agent.admission"):
         async with _query_session_execution(
             owner,

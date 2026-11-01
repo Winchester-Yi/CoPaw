@@ -190,9 +190,12 @@ def init_chat_sharing_module(db: Any | None = None) -> None:
     global _service
     if db is None or not getattr(db, "is_connected", False):
         raise RuntimeError("Chat sharing requires a connected database")
+    from ..conversation_storage.runtime import runtime_shares
+
     _service = ChatSharingService(
         ChatShareStore(db),
         WORKING_DIR / "chat_shares",
+        conversation_shares=runtime_shares(),
     )
 
 
@@ -262,6 +265,13 @@ async def create_chat_share(
     workspace=Depends(get_workspace),
 ) -> ChatShareCreateResponse:
     service = get_service()
+    storage = getattr(workspace, "conversation_storage", None)
+    if storage is not None:
+        service = ChatSharingService(
+            storage.shares.store,
+            storage.workspace_root,
+            conversation_shares=storage.shares,
+        )
     user_id = _request_user_id(request)
     try:
         chat = await workspace.chat_manager.get_chat(chat_id)
@@ -286,7 +296,11 @@ async def create_chat_share(
             selected_turn_ids=payload.turn_ids,
             turn_statuses=statuses,
             creator_id=user_id,
-            tenant_id=_request_tenant_id(request),
+            tenant_id=(
+                storage.scope.tenant_id
+                if storage is not None
+                else _request_tenant_id(request)
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

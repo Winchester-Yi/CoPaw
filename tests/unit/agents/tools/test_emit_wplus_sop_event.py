@@ -1,5 +1,8 @@
+# -*- coding: utf-8 -*-
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -42,8 +45,11 @@ async def test_event_tool_fails_closed_without_agent_turn_context():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sql_storage", [False, True])
 async def test_event_tool_appends_to_the_owned_precreated_session(
     tmp_path: Path,
+    monkeypatch,
+    sql_storage,
 ):
     ownership = OwnershipTuple(
         tenant_id="tenant-1",
@@ -78,6 +84,20 @@ async def test_event_tool_appends_to_the_owned_precreated_session(
             status=RunStatus.CLAIMED,
         ),
     )
+    if sql_storage:
+        from swe.app.runner.models import ChatSpec
+
+        chat = ChatSpec(id="chat-1", session_id="logical-1", user_id="user-1")
+        repository = SimpleNamespace(
+            get_chat=AsyncMock(return_value=chat),
+            update_chat_if_exists=AsyncMock(side_effect=lambda value: value),
+        )
+        monkeypatch.setattr(
+            "swe.app.conversation_storage.runtime.workspace_storage",
+            lambda workspace: SimpleNamespace(chats=repository),
+        )
+        # The indexed path must work even when the old registry is absent.
+        assert not (tmp_path / "chats.json").exists()
     set_current_agent_id("agent-1")
     chat_token = set_current_task_progress_chat_id("chat-1")
     try:
@@ -111,6 +131,15 @@ async def test_event_tool_appends_to_the_owned_precreated_session(
     body = _tool_payload(response)
     assert body["ok"] is True
     assert body["session"]["state"] == "AwaitingQueueConfirmation"
-    assert WPlusSopStore(
-        store_path_for_workspace(tmp_path),
-    ).get_session("sop-1").projection.state_version == 2
+    if sql_storage:
+        assert body["chat_projection_events"] > 0
+        repository.update_chat_if_exists.assert_awaited()
+        assert not (tmp_path / "chats.json").exists()
+    assert (
+        WPlusSopStore(
+            store_path_for_workspace(tmp_path),
+        )
+        .get_session("sop-1")
+        .projection.state_version
+        == 2
+    )

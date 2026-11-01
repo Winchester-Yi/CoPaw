@@ -27,6 +27,10 @@ async def create_chat_service(ws: "Workspace", service):
     from ..runner.manager import ChatManager
     from ..runner.repo.json_repo import JsonChatRepository
 
+    storage = getattr(ws, "conversation_storage", None)
+    if storage is not None:
+        return await storage.bind_workspace(ws)
+
     if service is not None:
         # Reused ChatManager - just wire to new runner
         cm = service

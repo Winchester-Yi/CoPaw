@@ -3278,14 +3278,31 @@ class AgentRunner(Runner):
         identity = channel_meta.get("answer_turn_identity")
         return identity if isinstance(identity, TurnIdentity) else None
 
+    async def persist_stop(self, identity: TurnIdentity) -> None:
+        """Make the indexed Turn stop durable before cancellation effects."""
+        _, execution = self._answer_turn_runtimes.get(identity, (None, None))
+        indexed = getattr(execution, "indexed_query", None)
+        if indexed is not None and not getattr(
+            indexed,
+            "stop_requested",
+            False,
+        ):
+            await indexed.storage.executions.request_stop(
+                indexed.authority.identity,
+                identity.msgid,
+            )
+            indexed.stop_requested = True
+
     async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
         """Ask the active agent to stop without terminating its task."""
+        await self.persist_stop(identity)
         runtime, _ = self._answer_turn_runtimes.get(identity, (None, None))
         if runtime is not None:
             await runtime.agent.interrupt()
 
     async def hard_cancel(self, identity: TurnIdentity) -> None:
         """Cancel the execution task that still owns *identity*."""
+        await self.persist_stop(identity)
         task = self._answer_turn_tasks.get(identity)
         if task is not None and not task.done():
             task.cancel()
@@ -3296,6 +3313,11 @@ class AgentRunner(Runner):
         outcome: TurnOutcome,
         terminal_status: str,
     ) -> bool:
+        indexed = getattr(session_execution, "indexed_query", None)
+        if indexed is not None:
+            if getattr(indexed, "terminal_status", None) is None:
+                await indexed.finish(terminal_status)
+            return True
         if session_execution is None or not getattr(
             session_execution,
             "is_active",
@@ -6124,6 +6146,10 @@ class AgentRunner(Runner):
             return
         if await coordinator.status(identity) != TurnStatus.STOPPING:
             return
+        indexed = getattr(session_execution, "indexed_query", None)
+        if indexed is not None and indexed.terminal_status is None:
+            indexed.stop_requested = True
+            return
         self._answer_turn_runtimes[identity] = (runtime, session_execution)
         await coordinator.settle(TurnOutcome.cancelled(identity))
 
@@ -6826,6 +6852,15 @@ class AgentRunner(Runner):
     ) -> None:
         if identity is None:
             return
+        _, execution = self._answer_turn_runtimes.get(identity, (None, None))
+        indexed = getattr(execution, "indexed_query", None)
+        committed = getattr(indexed, "terminal_status", None)
+        if committed is not None:
+            status = (
+                "cancelled"
+                if committed in ("stopped", "interrupted")
+                else committed
+            )
         if status == "cancelled":
             outcome = TurnOutcome.cancelled(identity)
         elif status == "failed":
@@ -7187,12 +7222,13 @@ class AgentRunner(Runner):
 
         storage_session_id = _coerce_session_storage_id(session_id)
         storage_user_id = _coerce_session_storage_user_id(user_id)
-        path = self.session._get_save_path(  # pylint: disable=protected-access
-            storage_session_id,
-            storage_user_id,
-        )
-        if session_execution is None and not Path(path).exists():
-            return
+        path = None
+        if session_execution is None:
+            save_path = getattr(self.session, "_get_save_path", None)
+            if save_path is not None:
+                path = save_path(storage_session_id, storage_user_id)
+                if not Path(path).exists():
+                    return
 
         try:
             modified = False
@@ -7226,7 +7262,13 @@ class AgentRunner(Runner):
             if session_execution is not None:
                 updated = _cleanup_state(session_execution.state)
                 if updated is not None:
-                    await session_execution.commit_state(updated)
+                    if (
+                        getattr(session_execution, "indexed_query", None)
+                        is not None
+                    ):
+                        session_execution.mark_state_dirty()
+                    else:
+                        await session_execution.commit_state(updated)
             else:
                 await self.session.mutate_session_state(
                     session_id=storage_session_id,
@@ -7239,7 +7281,7 @@ class AgentRunner(Runner):
                 return
             logger.info(
                 "Tool guard: cleaned up denied session memory in %s",
-                path,
+                path or storage_session_id,
             )
         except Exception:  # pylint: disable=broad-except
             logger.warning(
@@ -7454,6 +7496,10 @@ class AgentRunner(Runner):
         """
         Init handler.
         """
+        storage = getattr(self._workspace, "conversation_storage", None)
+        if storage is not None:
+            self.session = storage.session_for("console")
+            return
         # Load environment variables from .env file
         # env_path = Path(__file__).resolve().parents[4] / ".env"
         env_path = Path("./") / ".env"

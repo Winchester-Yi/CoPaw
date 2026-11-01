@@ -310,7 +310,7 @@ Expected：同 publication 恢复点全有或全无；失败候选/迟到 worker
 - `src/swe/app/crons/managed_resources.py`、`managed_receipts.py`
 - `src/swe/app/_app.py` 的依赖注入与 schema readiness 检查
 
-- [ ] 先测试新 workspace 工厂、W+ 无 chats.json、目标 scope 路由、Cron 回执持久化，以及 DB 不可用时无文件回退。测试关闭旧类构造入口，意外调用直接失败，避免假装迁完却仍走文件。
+- [ ] 先测试原有 workspace 的新存储装配、W+ 无 chats.json、目标 scope 路由、Cron 回执持久化，以及 DB 不可用时无文件回退。复用现有 workspace 与已挂载 NAS，不初始化新 workspace；仅使用受控的新 bundle 前缀。测试关闭旧类构造入口，意外调用直接失败，避免假装迁完却仍走文件。
 - [ ] 工厂从已解析的 workspace 取 tenant/source/agent，注入同 `DatabaseConnection` 和可信 NAS root。保留现有部署 affinity；不新增跨 Pod 代理或请求自带可伪造 scope。
 - [ ] 分享 record 增加 locator，原八列/API 保留。选中问答以用户 source msgid 读取，状态/权限创建前重验；publication+share INSERT 同连接同事务。
 - [ ] 删除 service 当前 catch 任意 DB 错就 unlink 的补偿；对原 operation 对账。token GET 不 JOIN Chat 存活，原 Chat 已删仍读；缺 token404，正文/计数失败503。legacy_share 只供导入 token 读取，不能创建普通会话。

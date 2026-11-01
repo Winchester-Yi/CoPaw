@@ -400,6 +400,13 @@ async def stream_single_query_attempt(
                 "msgid",
             ),
         )
+        indexed_query = getattr(
+            attempt_input.session_execution,
+            "indexed_query",
+            None,
+        )
+        if indexed_query is not None:
+            indexed_query.bind_runtime(runtime)
         retry_state.agent = runtime.agent
         retry_state.session_state_loaded = attempt_state.session_state_loaded
         skill_freshness_refresh = await owner._refresh_session_skill_freshness(
@@ -535,6 +542,12 @@ async def _stream_retry_attempt(
         attempt_state.should_return = True
         return
     except Exception as exc:
+        from ..conversation_storage.errors import StorageError
+
+        if isinstance(exc, StorageError):
+            if session_execution is not None and hasattr(exc, "operation_key"):
+                session_execution.pending_operation = exc.operation_key
+            raise
         if getattr(outcome, "stop_append_started", False):
             log_append_diagnostic(
                 "Stop append finalization failed category=%s trace_id=%s",

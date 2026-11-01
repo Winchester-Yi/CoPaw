@@ -30,7 +30,12 @@ class TurnStreamPort(Protocol):
         # Protocol declaration; the concrete stream owner performs cleanup.
         ...
 
+
 class TurnExecutionPort(Protocol):
+    async def persist_stop(self, identity: TurnIdentity) -> None:
+        # Commit the stop claim before local state or cancellation effects.
+        ...
+
     async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
         # Protocol declaration; Runner implements cooperative cancellation.
         ...

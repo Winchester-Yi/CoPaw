@@ -5,7 +5,10 @@ import asyncio
 
 import pytest
 
-from swe.app.answer_turn.coordinator import AnswerTurnCoordinator
+from swe.app.answer_turn.coordinator import (
+    AnswerTurnCoordinator,
+    TurnSettlementPendingError,
+)
 from swe.app.answer_turn.in_memory import (
     InMemoryApproval,
     InMemoryExecution,
@@ -118,11 +121,19 @@ async def test_attach_and_before_start_are_bound_to_active_turn_identity():
         msgid="msg-1",
         before_start=before_start,
     )
+    with pytest.raises(TurnSettlementPendingError, match="different question"):
+        await coordinator.start_or_attach(
+            "chat-1",
+            {"q": 2},
+            producer,
+            msgid="msg-2",
+            before_start=before_start,
+        )
     second = await coordinator.start_or_attach(
         "chat-1",
-        {"q": 2},
+        {"q": 1},
         producer,
-        msgid="msg-2",
+        msgid="msg-1",
         before_start=before_start,
     )
     attached = await coordinator.attach("chat-1", msgid="msg-1")
@@ -187,6 +198,41 @@ async def test_claim_stop_rejects_stale_msgid_and_hard_cancels_only_live_turn():
     await coordinator.claim_stop(lease.identity, msgid="turn-1")
     await asyncio.sleep(0.03)
     assert adapters["execution"].hard_cancel_calls == [lease.identity]
+    await coordinator.settle(TurnOutcome.cancelled(lease.identity))
+
+
+@pytest.mark.asyncio
+async def test_stop_persistence_precedes_effects_and_failure_is_retryable():
+    coordinator, adapters = _coordinator()
+    events = []
+
+    async def producer(_identity, _payload):
+        await asyncio.Event().wait()
+
+    async def persist_stop(_identity):
+        events.append("durable")
+        if len(events) == 1:
+            raise RuntimeError("database unavailable")
+
+    async def supersede(_identity):
+        events.append("effects")
+
+    adapters["execution"].persist_stop = persist_stop
+    adapters["approval"].supersede_for_turn = supersede
+    lease = await coordinator.start_or_attach(
+        "chat-1",
+        {},
+        producer,
+        msgid="turn-1",
+    )
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await coordinator.claim_stop(lease.identity, msgid="turn-1")
+    assert await coordinator.status(lease.identity) == TurnStatus.RUNNING
+    assert not adapters["execution"].cancel_calls
+    assert not adapters["goal"].calls
+    assert not adapters["subagent"].calls
+    await coordinator.claim_stop(lease.identity, msgid="turn-1")
+    assert events == ["durable", "durable", "effects"]
     await coordinator.settle(TurnOutcome.cancelled(lease.identity))
 
 

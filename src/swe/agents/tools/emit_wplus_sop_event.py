@@ -86,11 +86,14 @@ async def emit_wplus_sop_event(
     if (
         record is None
         or not record.projection.holds_chat_slot
-        or record.projection.ownership.tenant_id != tenant_id
-        or record.projection.ownership.source_id != source_id
-        or record.projection.ownership.user_id != user_id
-        or record.projection.ownership.agent_id != agent_id
-        or record.projection.ownership.chat_id != chat_id
+        or (
+            record.projection.ownership.tenant_id,
+            record.projection.ownership.source_id,
+            record.projection.ownership.user_id,
+            record.projection.ownership.agent_id,
+            record.projection.ownership.chat_id,
+        )
+        != (tenant_id, source_id, user_id, agent_id, chat_id)
     ):
         return _response(
             {
@@ -102,10 +105,22 @@ async def emit_wplus_sop_event(
     ownership = OwnershipTuple.model_validate(
         record.projection.ownership,
     )
+    from ...app.conversation_storage.runtime import workspace_storage
+    from ...app.conversation_storage.identity import WorkspaceScope
+    from ...app.runner.manager import ChatManager
+
+    storage = workspace_storage(
+        SimpleNamespace(
+            workspace_dir=workspace_dir,
+            agent_id=agent_id,
+            conversation_scope=WorkspaceScope(tenant_id, source_id, agent_id),
+        ),
+    )
     chats_path = Path(workspace_dir) / "chats.json"
     chat_manager = None
-    if chats_path.is_file():
-        from ...app.runner.manager import ChatManager
+    if storage is not None:
+        chat_manager = ChatManager(repo=storage.chats)
+    elif chats_path.is_file():
         from ...app.runner.repo.json_repo import JsonChatRepository
 
         chat_manager = ChatManager(

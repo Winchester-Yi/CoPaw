@@ -7,6 +7,7 @@ Yields (Msg, last) compatible with query_handler stream.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import logging
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 from agentscope.message import Msg, TextBlock
 
 from . import control_commands
+from ..conversation_storage.errors import StorageError
 from .daemon_commands import (
     DaemonContext,
     DaemonCommandHandlerMixin,
@@ -226,6 +228,28 @@ def _command_error(text: str, *, prefix: str = "**Error**\n\n") -> Msg:
     )
 
 
+def _bind_command_memory(runner, memory, context, session_execution):
+    workspace = getattr(runner, "_workspace", None)
+    storage = getattr(workspace, "conversation_storage", None)
+    if storage is None:
+        return
+    if session_execution is None or not context.chat_id:
+        raise RuntimeError("Indexed command requires its Session and Chat")
+
+    def root_provider():
+        state = deepcopy(session_execution.state)
+        state.setdefault("agent", {})["memory"] = memory.state_dict()
+        return state
+
+    storage.archive.bind_memory(
+        memory,
+        context.chat_id,
+        session_execution,
+        root_provider,
+        None,
+    )
+
+
 async def _run_conversation_command(
     query: str,
     request,
@@ -246,6 +270,7 @@ async def _run_conversation_command(
         session_state = await session_execution.read_state()
     memory_state = session_state.get("agent", {}).get("memory", {})
     memory.load_state_dict(memory_state, strict=False)
+    _bind_command_memory(runner, memory, context, session_execution)
 
     expert = bool(
         getattr(runner, "_get_expert_main_execution", lambda _: None)(request)
@@ -282,6 +307,8 @@ async def _run_conversation_command(
         response_msg = await conv_handler.handle_conversation_command(query)
     except asyncio.CancelledError:
         raise
+    except StorageError:
+        raise
     except Exception:
         logger.exception("Conversation command failed: %s", query)
         command = query.strip().split(maxsplit=1)[0]
@@ -290,13 +317,13 @@ async def _run_conversation_command(
             "Please retry or check server logs.",
             prefix="**Command Failed**\n\n",
         )
-    yield response_msg, True
-    if context.session_id and context.user_id:
+    if context.session_id:
         if session_execution is not None:
             state = session_execution.state
             agent_state = state.setdefault("agent", {})
             agent_state["memory"] = memory.state_dict()
             await session_execution.commit_state(state)
+            yield response_msg, True
             return
         await runner.session.update_session_state(
             session_id=context.session_id,
@@ -304,7 +331,9 @@ async def _run_conversation_command(
             value=memory.state_dict(),
             user_id=context.user_id,
         )
+        yield response_msg, True
         return
+    yield response_msg, True
     logger.warning(
         "Skipping session_state update for conversation memory due to missing "
         "session_id or user_id (session_id=%r, user_id=%r)",

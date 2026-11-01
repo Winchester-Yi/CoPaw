@@ -1008,6 +1008,9 @@ async def lifespan(
     configure_cron_auth_mirror(db_connection)
 
     try:
+        from .conversation_storage.runtime import configure_runtime
+
+        await configure_runtime(db_connection)
         await _initialize_tracing_manager(db_connection)
         logger.info("Instance module initialized")
 
@@ -1060,7 +1063,12 @@ async def lifespan(
         await _start_lifespan_background_services(app, multi_agent_manager)
         yield
     finally:
-        await _shutdown_lifespan_resources(app, db_connection)
+        from .conversation_storage.runtime import reset_runtime
+
+        try:
+            await _shutdown_lifespan_resources(app, db_connection)
+        finally:
+            reset_runtime()
 
 
 app = FastAPI(

@@ -92,6 +92,10 @@ class AnswerTurnCoordinator:
                     f"settlement pending for chat {chat_id}",
                 )
             if state is not None and state.status not in TERMINAL_STATUSES:
+                if msgid is not None and msgid != state.identity.msgid:
+                    raise TurnSettlementPendingError(
+                        f"different question is busy for chat {chat_id}",
+                    )
                 queue = await self.stream.attach(state.identity)
                 if queue is None:
                     state.transport_ended = True
@@ -268,6 +272,7 @@ class AnswerTurnCoordinator:
                 return StopClaim(False, identity=identity, status=state.status)
             if state.status == TurnStatus.STOPPING:
                 return StopClaim(True, identity=identity, status=state.status)
+            await self.execution.persist_stop(identity)
             state.status = TurnStatus.STOPPING
             if not state.stop_effects_started:
                 state.stop_effects_started = True

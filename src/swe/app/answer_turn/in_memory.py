@@ -52,6 +52,9 @@ class InMemoryExecution:
     def hard_cancel_calls(self):
         return [identity for identity, hard in self.cancel_calls if hard]
 
+    async def persist_stop(self, identity):
+        return None
+
     async def request_cooperative_stop(self, identity):
         self.cancel_calls.append((identity, False))
 
