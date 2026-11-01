@@ -1168,6 +1168,8 @@ async def list_chats(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if _indexed_history(workspace) is not None:
+            return chat_page
         statuses = await runtime_statuses(
             [spec.id for spec in chat_page.items],
         )
@@ -1184,6 +1186,8 @@ async def list_chats(
             page=page,
             page_size=page_size,
         )
+        if _indexed_history(workspace) is not None:
+            return chat_page
         statuses = await runtime_statuses(
             [spec.id for spec in chat_page.items],
         )
@@ -1194,6 +1198,8 @@ async def list_chats(
         return chat_page.model_copy(update={"items": items})
 
     chats = await mgr.list_chats(user_id=user_id, channel=channel)
+    if _indexed_history(workspace) is not None:
+        return chats
     statuses = await runtime_statuses([spec.id for spec in chats])
     return [
         spec.model_copy(update={"status": statuses.get(spec.id, "idle")})

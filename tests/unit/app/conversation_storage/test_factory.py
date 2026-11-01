@@ -543,6 +543,10 @@ async def test_share_creation_uses_trusted_workspace_storage(
 
     shares = SimpleNamespace(
         store=object(),
+        selection_snapshot=AsyncMock(return_value={"state_revision": 1}),
+        prove_selection=AsyncMock(
+            return_value={"snapshot": {"state_revision": 1}},
+        ),
         create_snapshot=AsyncMock(
             return_value=ChatShareRecord(
                 token="token",
@@ -603,4 +607,9 @@ async def test_share_creation_uses_trusted_workspace_storage(
         "selected_question_keys"
     ] == ("q",)
     assert shares.create_snapshot.await_args.kwargs["tenant_id"] == "t"
+    assert shares.create_snapshot.await_args.kwargs["selection_proof"] == {
+        "snapshot": {"state_revision": 1},
+    }
+    shares.selection_snapshot.assert_awaited_once_with("chat")
+    shares.prove_selection.assert_awaited_once()
     assert not list(tmp_path.iterdir())

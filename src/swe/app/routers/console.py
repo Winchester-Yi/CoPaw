@@ -1163,6 +1163,35 @@ async def _resolve_current_recovery_chat(
     return None
 
 
+async def _indexed_recovery_watermark(storage, chat):
+    async with storage.db.transaction():
+        current = await storage.history._chat(chat.id)
+        session = await storage.db.fetch_one(
+            "SELECT state_revision,history_high,context_epoch,active_turn_id,generation "
+            "FROM swe_conversation_sessions WHERE id=%s",
+            (current["session_id"],),
+        )
+    identity = tuple(
+        current[key].decode("utf-8")
+        for key in ("external_session_key", "user_key", "channel_key")
+    )
+    if identity != (chat.session_id, chat.user_id, chat.channel):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if current["projected_status"] != "idle":
+        raise HTTPException(
+            status_code=503,
+            detail="Chat settlement is pending",
+            headers={"Retry-After": "1"},
+        )
+    return (
+        current["id"],
+        current["history_revision"],
+        current["history_high"],
+        current["epoch"],
+        session,
+    )
+
+
 async def _current_recovery_terminal_snapshot(
     workspace: Any,
     chat: Any,
@@ -1170,7 +1199,17 @@ async def _current_recovery_terminal_snapshot(
     """Build the durable terminal recovery payload for one selected Chat."""
     from ..runner.api import _build_chat_history, _read_history_state
 
-    session = workspace.runner.session
+    storage = getattr(workspace, "conversation_storage", None)
+    watermark = (
+        await _indexed_recovery_watermark(storage, chat)
+        if storage is not None
+        else None
+    )
+    session = (
+        storage.session_for(chat.channel)
+        if storage is not None
+        else workspace.runner.session
+    )
     state = await _read_history_state(
         session,
         chat.session_id,
@@ -1193,6 +1232,14 @@ async def _current_recovery_terminal_snapshot(
             chat.id,
         )
         turn_states = dict([latest]) if latest is not None else {}
+    if storage is not None and (
+        await _indexed_recovery_watermark(storage, chat) != watermark
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Chat settlement is pending",
+            headers={"Retry-After": "1"},
+        )
     if not isinstance(turn_states, dict):
         return history.model_dump(mode="json"), None, None
     for msgid, turn_state in reversed(tuple(turn_states.items())):
@@ -1203,7 +1250,7 @@ async def _current_recovery_terminal_snapshot(
         status = turn_state.get("status")
         if not isinstance(status, str):
             continue
-        if status == "admitted":
+        if status == "admitted" and storage is None:
 
             orphan_msgid = msgid
 
@@ -1224,6 +1271,8 @@ async def _current_recovery_terminal_snapshot(
                 reconcile_orphaned_turn,
                 user_id=chat.user_id,
             )
+            status = "failed"
+        if storage is not None and status == "interrupted":
             status = "failed"
         if status not in {"completed", "stopped", "cancelled", "failed"}:
             continue

@@ -27,6 +27,7 @@ class ShareInstall:
     access_count: int = 0
     last_access_at: str | None = None
     selected_question_keys: tuple[str, ...] = ()
+    selection_proof: dict | None = None
 
     def __post_init__(self):
         for value, limit in (
@@ -59,6 +60,11 @@ class ShareInstall:
             if not key:
                 raise ValueError("selected share question key is required")
             identity_bytes(key, 256)
+        if self.selection_proof is not None:
+            _validate_selection_proof(
+                self.selection_proof,
+                self.selected_question_keys,
+            )
 
     def to_dict(self):
         return asdict(self)
@@ -104,6 +110,117 @@ def validate_share_request(request, plan):
         raise ValueError("new share requires selected source questions")
 
 
+def _validate_selection_proof(proof, keys):
+    if not isinstance(proof, dict) or set(proof) != {
+        "snapshot",
+        "questions",
+    }:
+        raise ValueError("invalid share selection proof")
+    snapshot = proof["snapshot"]
+    if (
+        not isinstance(snapshot, dict)
+        or set(snapshot)
+        != {
+            "session_id",
+            "chat_id",
+            "state_revision",
+            "history_revision",
+            "session_history_high",
+            "archive_history_high",
+            "epoch",
+        }
+        or any(
+            type(value) is not int or value < 0 for value in snapshot.values()
+        )
+    ):
+        raise ValueError("invalid share selection snapshot")
+    questions = proof["questions"]
+    if not isinstance(questions, dict) or set(questions) != set(keys):
+        raise ValueError("invalid share selection questions")
+    for item in questions.values():
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "message_id",
+                "publication_id",
+                "layer",
+                "status",
+            }
+            or any(
+                type(item[name]) is not int or item[name] <= 0
+                for name in ("message_id", "publication_id")
+            )
+        ):
+            raise ValueError("invalid share source occurrence")
+        if item["status"] != "completed" or item["layer"] not in (
+            "archive",
+            "memory",
+            "task",
+            "error",
+            "anchor",
+        ):
+            raise ValueError("share selection is not completed")
+
+
+async def _lock_selection_proof(db, request, proof):
+    snapshot = proof["snapshot"]
+    if (
+        request.base_state_revision != snapshot["state_revision"]
+        or request.base_history_revision != snapshot["history_revision"]
+    ):
+        raise ConflictError("share selection revision is missing")
+    current = await db.fetch_one(
+        "SELECT s.id AS session_id,c.id AS chat_id,s.state_revision,c.history_revision,"
+        "s.history_high AS session_history_high,c.history_high AS archive_history_high,c.epoch "
+        "FROM swe_conversation_sessions s JOIN swe_conversation_chats c ON c.session_id=s.id "
+        "WHERE s.id=%s AND c.id=%s AND c.deleted_at IS NULL FOR UPDATE",
+        (request.session_id, request.chat_id),
+    )
+    if current != snapshot:
+        raise ConflictError("share selection history changed")
+
+
+async def _lock_proven_occurrence(db, request, key, proof, turn):
+    item = proof["questions"][key.decode("utf-8")]
+    row = await db.fetch_one(
+        "SELECT * FROM swe_conversation_messages WHERE id=%s FOR UPDATE",
+        (item["message_id"],),
+    )
+    expected = {
+        "session_id": request.session_id,
+        "source_msg_key": key,
+        "role_key": b"user",
+        "deleted_at": None,
+        "publication_id": item["publication_id"],
+        "layer": item["layer"],
+    }
+    if row is None or any(
+        row[name] != value for name, value in expected.items()
+    ):
+        raise ConflictError("selected share source occurrence changed")
+    if turn is not None and row["turn_id"] not in (None, turn["id"]):
+        raise ConflictError("selected share source occurrence changed")
+    if row["layer"] == "archive":
+        valid = (
+            row["archive_chat_id"] == request.chat_id
+            and row["archive_order"]
+            <= proof["snapshot"]["archive_history_high"]
+        )
+    else:
+        valid = (
+            row["current_visible"]
+            and row["session_order"]
+            <= proof["snapshot"]["session_history_high"]
+            and (
+                row["layer"] != "anchor"
+                or row["origin_chat_id"] in (None, request.chat_id)
+            )
+        )
+    if not valid:
+        raise ConflictError("selected share question is no longer visible")
+
+
 async def lock_share_selection(db, request, plan):
     if request.kind != "share":
         return
@@ -119,16 +236,22 @@ async def lock_share_selection(db, request, plan):
         (request.session_id, *keys),
     )
     by_key = {row["question_msg_key"]: row for row in turns}
-    if len(by_key) != len(keys):
+    proof = plan.selection_proof
+    if proof is not None:
+        await _lock_selection_proof(db, request, proof)
+    elif len(by_key) != len(keys):
         raise ConflictError("selected share question has no durable Turn")
     for key in keys:
-        turn = by_key[key]
-        if (
+        turn = by_key.get(key)
+        if turn is not None and (
             turn["chat_id"] != request.chat_id
             or turn["state"] != "succeeded"
             or turn["history_status"] != "completed"
         ):
             raise ConflictError("selected share Turn is not completed")
+        if proof is not None:
+            await _lock_proven_occurrence(db, request, key, proof, turn)
+            continue
         occurrences = await db.fetch_all(
             "SELECT m.* FROM swe_conversation_messages m WHERE "
             "m.session_id=%s AND m.current_visible=1 AND m.deleted_at IS NULL "
@@ -251,6 +374,135 @@ class ShareStorage:
                 "share creation time differs from publication",
             )
 
+    async def selection_snapshot(self, chat_id):
+        """Capture revisions before reading any Session or history payload."""
+        row = await self.db.fetch_one(
+            "SELECT s.id AS session_id,c.id AS chat_id,s.state_revision,c.history_revision,"
+            "s.history_high AS session_history_high,c.history_high AS archive_history_high,c.epoch "
+            "FROM swe_conversation_sessions s JOIN swe_conversation_chats c ON c.session_id=s.id "
+            "WHERE c.tenant_key=%s AND c.source_key=%s AND c.agent_key=%s "
+            "AND c.external_chat_key=%s AND c.deleted_at IS NULL",
+            (*self.scope.sql_values, chat_key_bytes(chat_id)),
+        )
+        if row is None:
+            raise KeyError(chat_id)
+        return row
+
+    async def prove_selection(
+        self,
+        chat_id,
+        snapshot,
+        keys,
+        messages,
+        statuses,
+    ):
+        """Bind the legacy slice to real source occurrences and fixed revisions."""
+        from ..runner.api import _slice_answer_turn
+
+        keys = tuple(dict.fromkeys(keys))
+        for key in keys:
+            if (
+                statuses.get(key) != "completed"
+                or _slice_answer_turn(messages, msgid=key) is None
+            ):
+                raise ValueError("Only completed answer turns can be shared")
+        questions = await self._selection_occurrences(chat_id, snapshot, keys)
+        if await self.selection_snapshot(chat_id) != snapshot:
+            raise ConflictError("share history changed while reading")
+        proof = {"snapshot": snapshot, "questions": questions}
+        _validate_selection_proof(proof, keys)
+        return proof
+
+    async def _selection_occurrences(self, chat_id, snapshot, keys):
+        from ..runner import api
+        from .history import HistorySnapshot, HistoryStore, VISIBLE_ONLINE
+
+        history = HistoryStore(
+            self.db,
+            self.scope,
+            self.bundles,
+            cursor_secret=b"share-selection",
+        )
+        encoded = tuple(identity_bytes(key, 256) for key in keys)
+        if not encoded:
+            return {}
+        marks = ",".join(["%s"] * len(encoded))
+        async with self.db.transaction():
+            chat = await history._chat(chat_id)
+            rows = await self.db.fetch_all(
+                "SELECT m.* FROM swe_conversation_messages m WHERE ("
+                "(m.archive_chat_id=%s AND m.deleted_at IS NULL AND m.archive_order<=%s) OR ("
+                + VISIBLE_ONLINE
+                + " AND m.session_order<=%s)) "
+                "AND m.source_msg_key IN (" + marks + ") "
+                "ORDER BY m.archive_order,m.session_order,m.id",
+                (
+                    chat["id"],
+                    snapshot["archive_history_high"],
+                    chat["session_id"],
+                    chat["id"],
+                    snapshot["session_history_high"],
+                    *encoded,
+                ),
+            )
+            batches = await history._pins(chat, rows, [])
+            view = HistorySnapshot(chat, rows, [], batches)
+        try:
+            payloads = await history._payloads(view)
+            entries = []
+            primary = {
+                row["source_msg_key"]
+                for row in rows
+                if row["layer"] != "anchor"
+            }
+            for row, payload in zip(rows, payloads):
+                if (
+                    row["layer"] == "anchor"
+                    and row["source_msg_key"] in primary
+                ):
+                    continue
+                converted = await history._convert(
+                    [row],
+                    [payload],
+                    (
+                        chat_id
+                        if row["layer"] == "archive"
+                        else chat["external_session_key"].decode("utf-8")
+                    ),
+                )
+                if converted:
+                    entries.append((row, converted[0]))
+            archived = [
+                item for item in entries if item[0]["layer"] == "archive"
+            ]
+            current = [
+                item for item in entries if item[0]["layer"] != "archive"
+            ]
+            current.sort(
+                key=lambda item: (
+                    item[0]["layer"] == "anchor",
+                    item[0]["session_order"],
+                    item[0]["id"],
+                ),
+            )
+            current.sort(key=lambda item: api._message_sort_key(item[1]))
+            result = {}
+            for row, message in [*archived, *current]:
+                key = row["source_msg_key"].decode("utf-8")
+                if key in result:
+                    continue
+                if message.role != "user":
+                    raise ValueError("Selected answer turn was not found")
+                result[key] = {
+                    "message_id": row["id"],
+                    "publication_id": row["publication_id"],
+                    "layer": row["layer"],
+                    "status": "completed",
+                }
+            return result
+        finally:
+            await history._finish(view)
+
     async def create_snapshot(
         self,
         *,
@@ -259,6 +511,7 @@ class ShareStorage:
         tenant_id,
         payload,
         selected_question_keys=(),
+        selection_proof=None,
     ):
         from .publications import (
             CommitPlan,
@@ -292,6 +545,7 @@ class ShareStorage:
             f"{tenant_id}/chat_shares/{token}.json",
             created.isoformat(),
             selected_question_keys=tuple(selected_question_keys),
+            selection_proof=selection_proof,
         )
         request = PublicationRequest(
             operation,
@@ -301,6 +555,16 @@ class ShareStorage:
             0,
             session_id=chat["session_id"],
             chat_id=chat["id"],
+            base_state_revision=(
+                selection_proof["snapshot"]["state_revision"]
+                if selection_proof
+                else None
+            ),
+            base_history_revision=(
+                selection_proof["snapshot"]["history_revision"]
+                if selection_proof
+                else None
+            ),
         )
         publications = PublicationStore(self.db, self.bundles)
         await publications.reserve(request, CommitPlan(share=plan))

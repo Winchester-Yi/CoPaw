@@ -73,6 +73,7 @@ class ChatSharingService:
         turn_statuses: dict[str, str],
         creator_id: str,
         tenant_id: str = "default",
+        selection_proof: dict | None = None,
     ) -> ChatShareRecord:
         if not selected_turn_ids:
             raise ValueError("Select at least one answer turn")
@@ -106,6 +107,11 @@ class ChatSharingService:
                 tenant_id=tenant_id,
                 payload=payload,
                 selected_question_keys=tuple(dict.fromkeys(selected_turn_ids)),
+                **(
+                    {"selection_proof": selection_proof}
+                    if selection_proof is not None
+                    else {}
+                ),
             )
         tenant_component = self._safe_component(tenant_id, "tenant")
         token = secrets.token_urlsafe(32)
