@@ -576,6 +576,7 @@ KEEP_FILES = {
 
 KEEP_DIRS = {
     "agents",
+    "bundles",
     ".disabled_skills",
     "hooks",
     "memory",
@@ -759,9 +760,13 @@ def _resolve_workspace_file(
         raise HTTPException(status_code=409, detail="File is protected")
     file_path = workspace_dir / Path(*relative_path.split("/"))
     try:
-        file_path.resolve().relative_to(workspace_dir.resolve())
+        resolved_path = (
+            file_path.resolve().relative_to(workspace_dir.resolve()).as_posix()
+        )
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
+    if _is_root_keep_file(resolved_path) or _is_keep_dir_path(resolved_path):
+        raise HTTPException(status_code=403, detail="Protected path")
     return relative_path, file_path
 
 
@@ -2420,7 +2425,7 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
         try:
             for item in dir_path.iterdir():
                 relative_path = item.relative_to(relative_base).as_posix()
-                if item.name.startswith("."):
+                if item.name.startswith(".") or item.is_symlink():
                     continue
 
                 # Skip directories in keep list (at root level only)

@@ -4,6 +4,7 @@
 import zipfile
 
 import pytest
+from unittest.mock import AsyncMock
 
 
 def test_mysql_authority_rejects_nas_only_backup_and_restore(
@@ -24,6 +25,96 @@ def test_mysql_authority_rejects_nas_only_backup_and_restore(
     with zipfile.ZipFile(zipped) as archive:
         with pytest.raises(ValueError, match="MySQL"):
             validate_restore_target(archive, tmp_path / "target")
+
+
+@pytest.mark.parametrize("operation", ["compress", "decompress"])
+async def test_mysql_authority_rejects_shell_executor_before_script(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    from swe.app.backup.config import ShellScriptConfig
+    from swe.app.backup.shell_worker import ShellScriptExecutor
+
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
+    executor = ShellScriptExecutor(ShellScriptConfig())
+    execute = AsyncMock(return_value=("", "", 0))
+    monkeypatch.setattr(executor, "_execute_script", execute)
+    with pytest.raises(ValueError, match="MySQL"):
+        if operation == "compress":
+            await executor.run_compress(
+                ["alice"],
+                tmp_path,
+                "2026-11-01",
+                0,
+                "test",
+            )
+        else:
+            await executor.run_decompress(tmp_path, ["alice"], None, "test")
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("operation", ["backup", "restore"])
+async def test_mysql_authority_shell_worker_stops_before_external_io(
+    monkeypatch,
+    operation,
+):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from swe.app.backup.models import (
+        BackupTask,
+        BackupTaskStatus,
+        BackupTaskType,
+    )
+    from swe.app.backup.shell_worker import ShellBackupWorker
+
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
+    worker = object.__new__(ShellBackupWorker)
+    worker.task_store = SimpleNamespace(save=Mock())
+    worker._get_all_tenant_ids = Mock(
+        side_effect=AssertionError("must reject before inventory"),
+    )
+    worker._get_restore_tenant_ids = Mock(
+        side_effect=AssertionError("must reject before download"),
+    )
+    worker._do_rollback = AsyncMock()
+    task = BackupTask(
+        task_id="sql-boundary",
+        task_type=BackupTaskType(operation),
+        status=BackupTaskStatus.PENDING,
+        created_at=datetime.now(timezone.utc),
+        backup_date="2026-11-01",
+    )
+    await getattr(worker, f"run_{operation}_task")(task)
+    assert "MySQL conversation authority" in str(task.error_message)
+    worker._get_all_tenant_ids.assert_not_called()
+    worker._get_restore_tenant_ids.assert_not_called()
+    worker._do_rollback.assert_not_awaited()
+    assert task.status == BackupTaskStatus.FAILED
+
+
+@pytest.mark.parametrize("script", ["compress.sh", "decompress.sh"])
+def test_mysql_authority_rejects_direct_shell_backup_script(
+    tmp_path,
+    monkeypatch,
+    script,
+):
+    import subprocess
+    from pathlib import Path
+
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
+    scripts = Path(__file__).resolve().parents[4] / "scripts" / "backup"
+    output = tmp_path / "untouched"
+    result = subprocess.run(
+        ["bash", str(scripts / script), "--working-dir", str(output)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "MySQL conversation authority" in result.stderr
+    assert not output.exists()
 
 
 def test_restore_refuses_merge_of_versioned_memory(tmp_path):

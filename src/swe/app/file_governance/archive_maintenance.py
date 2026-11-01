@@ -33,6 +33,7 @@ KEEP_FILES = {
 
 KEEP_DIRS = {
     "agents",
+    "bundles",
     ".disabled_skills",
     "hooks",
     "memory",
@@ -194,9 +195,13 @@ def resolve_workspace_file(
         raise HTTPException(status_code=409, detail="File is protected")
     file_path = workspace_dir / Path(*relative_path.split("/"))
     try:
-        file_path.resolve().relative_to(workspace_dir.resolve())
+        resolved_path = (
+            file_path.resolve().relative_to(workspace_dir.resolve()).as_posix()
+        )
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
+    if is_root_keep_file(resolved_path) or is_keep_dir_path(resolved_path):
+        raise HTTPException(status_code=403, detail="Protected path")
     return relative_path, file_path
 
 
@@ -210,7 +215,7 @@ def scan_orphan_files(workspace_dir: Path) -> list[OrphanFile]:
     def scan_directory(dir_path: Path, relative_base: Path) -> None:
         try:
             for item in dir_path.iterdir():
-                if item.name.startswith("."):
+                if item.name.startswith(".") or item.is_symlink():
                     continue
                 if item.is_dir():
                     if item.name in KEEP_DIRS and dir_path == workspace_dir:

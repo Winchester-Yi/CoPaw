@@ -25,6 +25,7 @@ from swe.config.utils import (
 
 from .config import BackupEnvironmentConfig, ShellScriptConfig
 from .io_worker import run_backup_io
+from .memory_storage import RestoreTargetRejected, require_legacy_storage
 from .models import BackupTask, BackupTaskStatus
 from .s3_client import S3BackupClient
 from .task_store import TaskStore
@@ -70,6 +71,7 @@ class ShellScriptExecutor:
         Returns:
             (tenant_ids, zip_paths) 成功压缩的结果
         """
+        require_legacy_storage()
         cmd = self._build_compress_command(
             tenant_ids,
             output_dir,
@@ -98,6 +100,7 @@ class ShellScriptExecutor:
         Returns:
             (restored_tenants, rollback_paths) 成功恢复的结果
         """
+        require_legacy_storage()
         cmd = self._build_decompress_command(
             zip_dir,
             tenant_ids,
@@ -264,6 +267,7 @@ class ShellBackupWorker:
 
         try:
             # 1. 获取租户列表
+            require_legacy_storage()
             if task.target_tenant_ids:
                 tenant_ids = task.target_tenant_ids
             else:
@@ -538,6 +542,7 @@ class ShellBackupWorker:
         rollback_paths = []
 
         try:
+            require_legacy_storage()
             instance_id = task.instance_id or "default"
             backup_date = task.backup_date
 
@@ -608,6 +613,10 @@ class ShellBackupWorker:
             task.status = BackupTaskStatus.COMPLETED
             task.progress_percent = 100
 
+        except RestoreTargetRejected as error:
+            task.error_message = str(error)
+            task.current_step = "failed"
+            task.status = BackupTaskStatus.FAILED
         except Exception as e:
             task.error_message = str(e)
             task.current_step = "rolling_back"

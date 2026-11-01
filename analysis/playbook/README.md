@@ -30,6 +30,7 @@
 | [NAS 数据与 CRUD 迁移方案](../../docs/superpowers/specs/2026-10-30-nas-conversation-migration-plan.md) | 多格式离线导入、统一读写适配、一次连续停机整体切换及固定镜像回退 |
 | [会话数据库迁移实施计划](../../docs/superpowers/plans/2026-10-30-conversation-mysql-nas-implementation.md) | 15 项代码/工具任务、文件职责、故障回归、七表安装及目标环境验收 |
 | [conversation-storage-cutover.md](conversation-storage-cutover.md) | 离线 CLI、七表原子安装、一次连续停机审计、未知 RENAME 对账及保留新写的回退步骤 |
+| [conversation-storage-entry-inventory.md](conversation-storage-entry-inventory.md) | SQL authority 全入口分支、legacy reader 的离线边界及正文治理/备份旁路保护 |
 | [python-memory-hotspots.md](python-memory-hotspots.md) | Python 后端前五内存热点、引用持有链、运行时验证与第一阶段生命周期及临时缓存设计入口 |
 | [python-installation-denial.md](python-installation-denial.md) | Shell pip 安装平台拒绝、语法识别边界、Hook 改写与前后台执行入口 |
 | [skill-freshness-and-span-write-performance.md](skill-freshness-and-span-write-performance.md) | 技能递归 freshness 检查与 Tracing 批量写入的 CPU 成本、隔离基准及优化边界 |
