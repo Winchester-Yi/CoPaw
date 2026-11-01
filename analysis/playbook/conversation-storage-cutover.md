@@ -119,3 +119,26 @@ swe conversation-storage export --manifest /audit/manifest.json --apply
 预览不连接数据库、不写文件；apply 要求确认字符串与原 owner 完全相同，且配置中的数据库与证据 schema 一致。命令在任何 DB 写入前将完整证据写入并 fsync receipt，结束记录 completed 或 unavailable。证据是操作者核实的声明，CLI 无法自行验证 Kubernetes/进程退出，自动化调用必须通过 EndedOwnerRecovery.verify_stopped 接入真实控制面验证。命令不初始化业务 workspace、不执行 DDL。
 
 恢复先校验完整关联、原 owner/generation 和 active Turn，再 fence writer。已有 durable prepared 结果按原 key 和原不可变正文提交；缺失且尚未确认 durable 的原操作留下 aborted tombstone；未准入且没有正文的 reservation 标为 rejected 并释放。没有可提交终态时，以已确认完整 recovery root（含未知模块/Cron receipts）发布 interrupted；Stop 已获胜则发布 stopped。任何已确认正文缺失/截断、身份漂移、另一 owner 或未能确定提交结果都保持 busy/unavailable，修复后用相同证据重试，不伪造 completed、不重跑模型或工具。receipt 中 unavailable 不表示回滚。还需在目标 NAS 和真实 Pod 崩溃环境演练本段流程。
+
+## 多 scope 七表整体恢复
+
+备份仍按 scope 捕获。恢复同一业务库的多个 scope 时，必须把完整备份路径列表一次传给
+`restore_backup(database, bundles, backup_paths, evidence=RestoreEvidence(...))`；不能逐个
+恢复到已含数据的目标。单一路径调用保持原语义。目标仍必须是生成的隔离测试/staging
+schema，七表和目标 NAS 目录均为空；不直接覆盖共享业务库，也不初始化业务 workspace。
+
+操作者必须在捕获整组备份前停止全部相关 scope writer、重试及 GC，并保持停止直至捕获结束；
+保存同一源库、完整 scope 清单和停止边界证据。代码验证源 schema 相同、scope 无重复及
+每份备份完整性；它不能从给定路径自行推断是否漏掉某个业务 scope。
+
+恢复先合并并校验全部元数据与引用。同 tenant 的 legacy_share publication、分享记录及
+正文必须一致，重复共享记录只写一次；不同 scope 的非共享 ID 冲突直接拒绝。共享 reader/
+backup_fence 的 active→released 差异仅按已停源证据结算，其余字段不得漂移。
+任何冲突在目标目录创建和 SQL 安装前阻断。七表随后在一个事务中安装，完整比对并逐 scope
+核验真实 reader。多 scope 报告使用 `backup_ids`、`snapshot_refs`、`scopes` 和聚合计数，
+不要把单份备份的验证报告当成全部 scope 的恢复证据。
+
+长期 Session 的恢复引用和发布前历史读取按每批最多 4096 个 publication pin；整个引用集
+仍在同一事务快照内授权，NAS IO 排空后释放全部批次。提交阶段的依赖锁定也按 ID 顺序分批，
+依赖安装仍在同一事务内完成，不通过删除 Cron/task 历史绕过规模问题。
+修复与验证范围见[专项报告](../../docs/superpowers/reports/2026-11-01-conversation-r1-r2-fixes.md)。
