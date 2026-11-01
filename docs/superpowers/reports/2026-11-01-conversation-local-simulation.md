@@ -142,3 +142,55 @@ question/answer。RED/XML 为 `/private/tmp/conversation-answer-turn-red.xml`，
 SHA-256 无新增、缺失或变化。两个生成 schema 均删除，未初始化业务 workspace、
 未写业务 schema。源完整性证据仅覆盖选定原 workspace 的 regular file 路径和正文，
 不包含其他 workspace、symlink 元数据或生产全量身份清单。
+
+## 本地连续阶段演练
+
+证据目录：`/private/tmp/conversation-local-stages-20261101-r2`；临时 driver 为
+`/private/tmp/conversation_local_stages.py`。driver 从上述冻结可解析子集中选取
+一个真实 Session/Chat，只复制到临时 working 目录；调用正式
+`scripts/rehearse_conversation_storage.py rehearse --apply` 执行十阶段。
+数据库只创建随机隔离应用 schema 和对应 staging schema，NAS 使用本机临时目录。
+
+`ledger/report.json` 的 `scope=isolated-copy`、`status=passed`，十阶段退出码
+均为 0，总计 98.1515 秒。每阶段另有 `*-audit.json`，记录 operator、UTC
+起止时间、argv 和退出码。阶段实测值如下，不代表生产停机预算：
+
+| 阶段 | 秒数 | 实际操作 |
+| --- | --- | --- |
+| drain | 2.575 | 独立旧 writer 在真实 `SafeJSONSession.execution` 中写 running Turn 并持锁；等待 0.15 秒超时，随后发停止信号、提交 stopped、等待进程退出 0；安装未开始 |
+| stop_writers | 1.572 | 重开临时旧 Session，核实 stopped 和 writer 退出证据 |
+| backup | 1.562 | 冻结只读副本并逐文件比较哈希，生成明确标记本地未验证镜像的 manifest |
+| import | 33.251 | 正式 `OfflineJob` 导入 |
+| verify | 9.533 | 正式逐字段核验通过 |
+| install | 17.325 | 正式隔离七表安装，保留旧永久 token/count=17 和无关业务表 id=91 |
+| startup | 3.114 | 原 workspace adapter 的 schema readiness 和既有 Chat 读取；未启动完整 FastAPI 进程 |
+| smoke | 18.937 | 正式 admission/start/finish、新问答、未知模块、解绑和新分享 |
+| restore_traffic | 2.598 | 本地读取新 share，SQL 访问计数变为 2；未操作生产入口 |
+| rollback | 7.683 | 历史及新增两个 scope 分别一致备份/反向导出，当前树 legacy reader 读取并继续写；不执行逆向 RENAME |
+
+历史 scope 为 `default/RMASSIST/default`，新写 helper scope 为
+`tenant/source/agent`，两个 scope 均有独立 backup/export 结果。
+`rollback-result.json` 的 `passed=true`，但 `image_verified=false`、
+`fixed_old_image_verified=false`、`rollback_ready=false`；当前树 legacy reader
+不能替代固定旧生产镜像。峰值 RSS 197,525,504 字节是 wait4 的单进程
+high-water 值，不是并发进程树内存之和。DB lock wait、p95/p99、NAS bytes/files
+均为 null，未用 0 补齐。
+
+`source-before.json`/`source-after.json` 确认原业务目录仍为 205 个 regular files、
+4,140,461 字节，逐文件 SHA-256 不变；`cleanup.json` 的
+`generated_schemas_removed=true`，该标记在两条 DROP 成功返回后写出，未保存独立
+清理后查询。drain 的超时由 `Popen.wait(0.15)` 观察，随后由 driver 发 stop 信号；
+该阶段最终 exit 0 继续执行，不是生产 drain API 或失败阶段中止 ledger。
+本地独立 writer 超时/停止与完整 operator ledger 已补证；目标入口、队列和
+全部 Pod writer 的真实排空仍不在本次证据内。
+
+首次目录 `/private/tmp/conversation-local-stages-20261101` 的 import 被
+OfflineJob schema 一致性保护拒绝：包装器尚未把生成 schema 同步到进程环境。
+该次已清理生成库；r2 显式同步生成 schema 后完整重跑通过。首次失败记录保留，
+不算生产实现的有效 RED。
+
+本轮故障测试已提交 `aa846b947`；修改的 install/rollback/legacy-roundtrip
+三个集成文件完整复跑为 74 passed、0 failures/errors/skips，1376.02 秒，
+XML `/private/tmp/conversation-cutover-final-three-files.xml`，包装器退出 0、
+生成 control schema 清理。当前已提交基线全目录另为 274 passed/1 skipped，
+收集早于新增参数，二者不累计；精确范围见配套测试报告。

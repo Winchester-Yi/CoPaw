@@ -1,6 +1,7 @@
 # Conversation migration completion audit
 
-2026-11-01, Asia/Shanghai. Audit of feature source `74057c17b`, including the
+2026-11-01, Asia/Shanghai. Audit of runtime source `74057c17b` and test delta
+`aa846b947`, including the
 typed-Turn answer-boundary fix, local historical-order and app-bootstrap deltas. This report distinguishes implementation, local
 proof, and target-environment acceptance. HTTP, semantic-runtime, and ended-owner
 recovery reviews are complete. A complete integrated MySQL run found two stale
@@ -56,9 +57,20 @@ includes all final API cases. The existing-workspace/NAS factory rerun is 28/0. 
 commands/results and baseline static-check limitations are in the
 [test report](2026-11-01-conversation-test-report.md). None of these runs
 substitutes for the required target NAS, old-image, or production-scale gates.
-The later `3176050f5` baseline has focused evidence only: 15 import unit cases,
-13 real-MySQL history cases, and one real app lifespan/auth/SQL case. The full
-270-case directory was not rerun after those changes. A real historical subset
+The later `3176050f5` baseline initially had focused evidence: 15 import unit cases,
+13 real-MySQL history cases, and one real app lifespan/auth/SQL case. A new full
+directory run at `35f749b4e`/runtime `74057c17b` completed with 274 passed, zero
+failures/errors, one skipped, and two existing xunit2 warnings in 2910.12s. The
+app-bootstrap case skipped because the local sample was not configured; its
+separate configured one-case pass remains distinct evidence. Exit 0 and generated
+control-schema cleanup were observed. XML:
+`/private/tmp/conversation-current-74057c17b-full-mysql.xml`. This run collected
+before the current fault-test delta; the changed three-file rerun separately
+passed 74 cases with zero failures/errors/skips in 1376.02s, exit 0, and generated
+control-schema cleanup observed. Its XML is
+`/private/tmp/conversation-cutover-final-three-files.xml`.
+A fresh plan-unit/legacy-contract run passed 614 cases without failures or skips.
+A real historical subset
 of 40 Sessions/55 Chats passed import, idempotent reentry, 139 semantic verify
 checks, consistent backup/full empty-schema restore, and current-tree legacy
 read/continue-write. The complete inventory remains blocked by missing files
@@ -72,6 +84,11 @@ increment rehearsal covers formal admission/start/finish, fresh readers,
 post-write backup and second empty-schema restore, reverse export and continued
 current-tree legacy writes. Original workspace regular-file hashes are unchanged.
 This adds local evidence only; fixed-old-image rollback remains unverified.
+The complete local ten-stage ledger is now recorded in the local simulation
+report: operator/UTC/argv/exit evidence, 98.1515s, all ten exits 0. The independent
+legacy writer wait-timeout/stop probe is local and does not call production drain
+or prove ingress/queue/all-Pod drain. Cleanup records successful generated-schema
+DROP calls, without an independent post-cleanup query.
 
 ## All 78 plan checkbox steps
 
@@ -147,10 +164,10 @@ Step numbers are the checkbox order within each original task.
 | T12.5 | Empty-target restore/legacy command refusal | Local: backup/CLI boundary tests |
 | T13.1 | Offline CLI/preview/apply/manifest | Local: seven commands committed in b93ebbf4e |
 | T13.2 | Fail-fast controls and zero-write verify | Local: CLI/install/readonly tests; full integration run exercised installer suite |
-| T13.3 | Same-instance/schema/privileges/MDL | Local: installer checks and simulated failures; Gate: target permission/MDL probe |
+| T13.3 | Same-instance/schema/privileges/MDL | Local: installer checks; independent real SQL share-table MDL blocks install with zero receipt/table change; Gate: target permissions/instrumentation/MDL |
 | T13.4 | Atomic seven-table RENAME/receipt | Local: actual isolated rename and reversal; Gate: target engine atomic capability |
-| T13.5 | Continuous-outage audited runbook | Local runbook; Record/Gate: completed operator/time/exit/report ledger from rehearsal |
-| T13.6 | Every outage failure branch rehearsed | Local component/fault tests; Gate: actual stage rehearsal including after-new-write rollback |
+| T13.5 | Continuous-outage audited runbook | Local: runbook and ten-stage isolated-copy ledger, operator/UTC/argv/exit records, 98.1515s; Gate: target continuous-outage execution and budget |
+| T13.6 | Every outage failure branch rehearsed | Local: independent legacy writer timeout/stop, real SQL timeout/pins, import interruption/resume, missing-body verify, atomic/version, independent MDL, post-RENAME reply loss, installed-schema readiness failure, post-new-write smoke/export, and full isolated operator stage ledger; Gate: target ingress/queue/all-writer drain, real target outage/old-image reverse import |
 | T14.1 | Two different-node Pods/NAS evidence | Gate: namespace, empty equivalent RWX PVC, fixed verifier digest; no Job run |
 | T14.2 | Full real adapter/environment faults | Local: real MySQL/NAS publication/restore/failure cases; Gate: target NAS/Pod failures |
 | T14.3 | Complete §10 same-adapter matrix | Local: HTTP matrix plus separate real lifespan/Auth/Tenant/SQL existing-workspace case; Gate: target deployment auth/bootstrap, NAS and external tracing |

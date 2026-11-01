@@ -34,6 +34,7 @@
 | 旧历史显示顺序 | 0be85c33f | primary memory/task/error 对齐 runtime 排序；15 单元、13 真实 MySQL 通过，anchor 规则未改 |
 | 既有 workspace 真 app 装配 | 3176050f5 | lifespan/Auth/Tenant/SQL 1 项通过；非 loopback 坏 token 401、有效 token 200 |
 | 持久 Turn 答案边界修复 | 74057c17b | RED/GREEN 三场景、34 回答单元、78 MySQL 回归；显式 hooks 与实际提交钩子通过 |
+| 本地切换故障矩阵 | aa846b947 | import commit 后中断续跑、verify 缺正文、独立 MDL、RENAME 丢回复、readiness/smoke 失败、backup 超时/缺正文；专项验证与独立审查/提交钩子通过 |
 
 上述提交证明各个实现增量存在，不代表全部目标环境验收通过。完整状态以
 [逐项审计](../reports/2026-11-01-conversation-completion-audit.md) 和最终回归为准。
@@ -78,7 +79,12 @@ MySQL 集成目录复跑为 270 passed、0 failed、0 skipped、2 warnings（287
 TypeScript compiler/node_modules 缺失；全仓 mypy 最终 feature/main 均为 85 条，
 逐条差异为空。格式 hooks 改写的 199 个无关 tracked 文件已经恢复，未动用户主树文件。
 所有范围测试数量不相加，避免重叠计数；详见测试报告。
-后续源码基线 `3176050f5` 仅执行新增专项，未重跑完整 270 项 MySQL 目录。
+后续 `3176050f5` 的新增专项与当前 `35f749b4e`/runtime `74057c17b` 完整目录
+分别记账：当前完整目录 274 passed、0 failures/errors、1 skipped，2910.12 秒，
+生成控制库清理。唯一 skip 为本机样本未配置的 app-bootstrap，该项另有配置样本
+后单独通过证据；本轮新增故障参数晚于该次收集，修改的三个集成文件完整复跑
+另为 74 passed、0 failures/errors/skips，1376.02 秒，退出 0，生成控制库清理。
+XML 为 `/private/tmp/conversation-cutover-final-three-files.xml`，不与基线相加。
 用户确认暂无 K8s/NAS，授权基于 `~/.swe` 本地模拟；只读复制既有 workspace，
 40 Session / 55 Chat 可解析子集导入、幂等重入、139 项 verify、一致备份与空库
 恢复、当前树 legacy reader 继续写通过。完整 inventory 仍因缺失文件和可信映射
@@ -112,7 +118,9 @@ fresh readers、增量备份与第二空库恢复、反向导出、当前树 leg
 - 目标 MySQL/TDSQL capabilities、权限、MDL 和 atomic RENAME；原 NAS durability、跨节点
   双 Pod/迟到 IO 与 Pod death；固定旧生产镜像反向导出后读写；全部生产 scope 历史导入与
   full verify；完整规模 backup/restore、连续停机及 RSS/NAS/锁等待/p95/p99 测量均待目标
-  环境验收。当前本机不能代表生产挂载或 Kubernetes。目标参数此前已询问，当前无需阻塞本地交付。
+  环境验收。本地隔离十阶段 rehearsal ledger 已完成，覆盖独立旧 writer 等待超时/停止到
+  反向导出/legacy 续写；单历史 Session/Chat，不代表目标入口/Pod 排空、生产挂载或
+  Kubernetes。当前完整 MySQL 目录复跑证据与本轮新增故障测试范围分别记录。
 
 上述外部 Gate 未完成，因此 15 项计划的本地实现和报告交付不等于生产切换验收；生产
 SQL authority 仍 opt-in，默认 legacy，不执行 DDL、业务数据迁移、停机或部署。

@@ -3,7 +3,11 @@
 本报告属于 Task 14。它记录验证范围与复现方法，不构成上线批准。2026-11-01 本次执行
 未部署任何集群资源，未修改生产库或生产会话目录。当前 kubectl context 为本地
 `orbstack`，不能代替目标 Kubernetes/NAS。目标 namespace、专用 PVC、包含当前脚本的
-固定镜像 digest、固定旧镜像和全量数据副本仍需操作者提供。
+固定镜像 digest、固定旧镜像和全量数据副本仍需操作者提供。用户随后确认当前
+没有可用 Kubernetes/NAS，授权基于既有 `~/.swe` 只读副本做本地模拟；最新证据见
+[本地模拟报告](../reports/2026-11-01-conversation-local-simulation.md) 与
+[测试报告](../reports/2026-11-01-conversation-test-report.md)。本表的本地通过与目标
+环境验收分开记录，不把本机目录或双进程替代真实网络 NAS/跨节点 Pod。
 
 ## 本次可复现证据
 
@@ -125,9 +129,9 @@ PYTHONPATH=src venv/bin/python scripts/rehearse_conversation_storage.py rehearse
 | 目标两节点/PVC/NAS | 未验证 | 真实 Job 双 Pod 日志和 cluster-evidence.json |
 | 目标 MySQL/TDSQL 原子 DDL/索引/未知提交 | 未验证 | 隔离目标库的完整 integrated pytest 与 EXPLAIN/安装前后状态 |
 | 文件 durable 前不可安装引用 | 隔离 MySQL 新增4例通过；目标环境仍待验收 | test_faults.py；跳过不能解除门槛 |
-| owner 崩溃、迟到 writer、Stop/终态竞争、reader/GC/backup fence | 必须运行同 adapter 故障矩阵 | test_publications_mysql、test_execution_mysql、test_retention_mysql、test_gc_mysql，以及备份集成证据 |
-| §10 全量 API 查询矩阵 | 未验证 | 在同一 MySQL adapter 上运行契约；旧 NAS 单测不能替代 |
-| Console 兼容 | 交由总验收记录 | Task14 规定四组前端测试实际输出 |
+| owner 崩溃、迟到 writer、Stop/终态竞争、reader/GC/backup fence | 本地同 adapter 故障矩阵已有通过证据；目标 Pod/网络 NAS 故障仍未验收 | 当前 `35f749b4e`/runtime `74057c17b` 完整 MySQL 目录 274 passed/1 skipped（未配置样本的 app-bootstrap）；无 failures/errors，控制库清理；晚于收集的故障参数另跑。精确范围及 XML 见测试报告。 |
+| §10 API 查询矩阵 | 本地实际 SQL/HTTP 矩阵已运行；部署环境 auth/bootstrap、NAS/外部 tracing 仍是独立边界 | [API 逐项矩阵](../reports/2026-11-01-conversation-api-evidence.md) 列出 58 个唯一 API/share case 的证据与未覆盖变体；既有 workspace 另有真实 lifespan/Auth/Tenant/SQL 1 项通过。 |
+| Console 兼容 | 已有 8 文件、93 passed 的契约证据 | 四组前端测试精确范围见测试报告；不等于浏览器/跨 worker 实时 attach 全流程验收。 |
 | 固定旧镜像反向导出验读/写入 | 未验证 | digest、原始命令、出口记录计数/身份及旧 reader/writer 结果 |
 | 全量规模持续停机与回退预算 | 未验证 | 各阶段秒数、总时长、RSS、NAS规模、锁等待、p95/p99、回退耗时 |
 
@@ -140,3 +144,72 @@ W+ 无 chats.json。未跑到真实 adapter 的条目须单列，不能用测试
 
 当前没有可测量的全量迁移时长，不给出分钟数或上线窗口承诺。后续执行应附原始
 JSON/日志与运行环境，而非仅手工修改本表状态。
+
+## 既有 workspace 本地模拟补充
+
+原业务 workspace 未重新初始化。只读复制后的可解析 40 Session / 55 Chat 子集
+完成导入、同 manifest 幂等重入、139 项语义核验和一致备份/空库恢复；新问答增量
+又完成 fresh readers、增量备份/第二空库恢复、反向导出和当前树 legacy reader
+继续写。源 workspace 205 个 regular files、4,140,461 字节逐文件 SHA-256 不变。
+完整 inventory 仍因缺失源文件与可信身份映射 `ready=false`，不得当成全量验收。
+本地 NAS 故障及双进程 20 轮竞争均有机器报告，但 `network_nas_tested=false`、
+`two_nodes_tested=false`、`kubernetes_tested=false`。固定旧镜像没有提供，所有本地
+导出 `image_verified=false`、`rollback_ready=false`；完整报告链接见本文开头。
+
+## 本地切换故障证据矩阵
+
+本轮仅扩充测试和验收记录，不修改生产实现。真实 MySQL 仍只操作生成的隔离
+schema；NAS 为本机临时目录，原业务 workspace 保持只读。以下逐项区分真实
+组件操作、应用边界注入和缺失的部署证据，不把测试函数退出 0 等同于生产演练。
+
+| 故障 | 本地证据与断言 | 保留边界 |
+| --- | --- | --- |
+| 排空/未收敛超时 | `test_backup_prepared_timeout_leaves_no_fence_and_original_can_commit` 使用真实 prepared publication；期限设 0 后失败、无 active fence、原 operation 仍可 commit，重试成功；十阶段本地 ledger 另记录独立旧 writer running/持锁时等待超时，停止后提交 stopped 并退出 0，随后才导入/安装 | 独立本地 writer/备份收敛证据；部署入口关闭、全部活跃旧 Turn/队列与 Pod 排空仍未验证 |
+| 备份正文不可读 | `test_backup_missing_body_retains_real_sql_pins` 实际删除 committed bundle；capture 失败、不产生成功 report，真实 SQL backup pins 保留；恢复正文后重试成功且旧 pins 未释放 | 本地文件缺失，不是真实 NAS 权限/网络故障 |
+| 导入中断 | `import-interruption` 与 `v3-interrupted-message-batch` 分别在 source-artifact 和真实消息批次 commit 后、manifest 更新前抛错；磁盘 manifest 为 importing，SQL 为 committed，重载 manifest 后续跑、原行和 bundle 字节不变，verify 通过；v3 再重入计数不变并保留完整历史语义 | 应用异常注入，不是真实进程 kill；恢复必须保持原批次参数 |
+| verify 正文缺失 | `missing-body` 实际 unlink 导入正文；verify 返回 position/detail blocker，install 拒绝且不生成 receipt，业务旧态与 staging 七表保留；恢复正文后核验成功 | 不跳过 blocker，不执行 RENAME |
+| 原子冲突/版本不支持 | 既有真实探针验证冲突失败保持旧态、成功完整七表切换；新增四版本 fail-fast 单测确认任何 DDL 之前拒绝 | 版本返回值是 test double；不代表真实旧版本或目标 TDSQL 能力实测 |
+| MDL 占用 | `metadata-lock` 独立真实连接事务 SELECT 原 share 持锁，install 被 preflight 拒绝、无 receipt、表名/计数不变；释放后同测试完成正常 install | 目标权限、instrumentation 和锁等待预算仍需目标环境验证 |
+| RENAME 丢回复 | `lost-rename-reply` 先执行真实精确 RENAME，再在应用边界抛错；独立 observer 看到完整新态、旧 share 副本和无关表 91 不变，receipt 保持 rename_pending | 非真实网络断线；重试拒绝来自 staging 已移走后的 verify，receipt guard 另由单测覆盖 |
+| 安装后启动失败 | `startup-failure` 实际安装后 readiness 先通过，真实删索引后 `verify_schema` 拒绝；禁止后续 DDL，仍 capture/export，永久 token/count=17 和无关表 91 保留 | readiness gate，非完整 FastAPI lifespan/进程启动失败；旧镜像未验证 |
+| 已有新写后 smoke 失败 | `after-new-write-smoke-failure` 实际安装后正式 admission/start/finish，写问答/未知模块/解绑/新分享/新旧计数，再截断真实 share body 触发 StorageUnavailable；恢复正文后完整 backup/export，当前树 legacy reader 继续写 | 禁止逆向 RENAME；receipt 静态 phase 不充当无新写证明；固定旧镜像未验证，rollback_ready=false |
+
+已核读的机器结果：四类 install fault 最终 XML
+`/private/tmp/conversation-cutover-four-faults-final.xml` 为 4 passed，119.89 秒；
+备份两项 `/private/tmp/conversation-backup-two-faults.xml` 为 2 passed，47.84 秒；
+启动 readiness `/private/tmp/conversation-post-install-startup-failure.xml` 为
+1 passed，33.92 秒；新写后 smoke
+`/private/tmp/conversation-post-install-rollback-green.xml` 为 1 passed，47.54 秒；
+四版本拒绝 `/private/tmp/conversation-install-version-failfast.xml` 为 4 passed，
+1.25 秒。上述 XML 均为 0 failures/errors/skips，数据库包装器均确认隔离控制库清理
+（版本 test double 用例不连接数据库）。不同运行不累计为一个 suite 总数。
+消息批次专项 `/private/tmp/conversation-import-message-interruption-final.xml`
+为 1 passed、0 failures/errors/skips，260.40 秒，包装器退出 0 且生成 control schema
+清理；覆盖完整 v3 历史、消息重复 ID、archive、share 与源字节不变。
+
+首轮四类故障 3 passed/1 failed 是测试重载 manifest 后未同步父对象，已修正并完整
+重跑四类；不是生产导入器 bug 的有效 RED。新写后 smoke 首轮失败是非法 UUID
+夹具；修正后通过。原始失败证据保留在测试报告，不把夹具失败描述为生产缺陷。
+
+## 本地完整阶段 ledger
+
+正式 rehearsal 工具以 `--apply` 执行的本地记录位于
+`/private/tmp/conversation-local-stages-20261101-r2/ledger/report.json`：
+drain、stop_writers、backup、import、verify、install、startup、smoke、
+restore_traffic、rollback 十阶段均 exit 0，总计 98.1515 秒；每阶段 audit
+含 operator、UTC 起止、argv、exit。原业务目录 205 个 regular files、
+4,140,461 字节的逐文件哈希不变，生成 schema 已清理。
+
+这是一个历史 Session/Chat 的隔离副本演练；startup 为 schema readiness，
+restore_traffic 为本地 share 访问，rollback 为两个 scope 的一致 backup/export
+与当前树 legacy reader 续写。固定旧镜像未验证，rollback_ready=false。
+单进程 high-water RSS 最大 197,525,504 字节；锁等待、p95/p99、NAS bytes/files
+仍为 null。逐阶段值和首轮包装器 schema 配置失败记录见
+[本地模拟报告](../reports/2026-11-01-conversation-local-simulation.md)。
+本地 ledger 缺口已补，目标环境连续停机/入口/全 writer 与规模预算 gate 保留。
+
+本轮测试提交 `aa846b947` 的三个修改集成文件完整复跑：74 passed、
+0 failures/errors/skips，1376.02 秒；XML
+`/private/tmp/conversation-cutover-final-three-files.xml`，包装器退出 0、
+生成 control schema 清理。该次包含全部新增故障参数及三文件原有用例，
+与基线全目录 274 passed/1 skipped 分开记账。

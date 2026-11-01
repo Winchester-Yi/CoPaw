@@ -56,6 +56,7 @@ SQL authority 显式 opt-in，默认 legacy；新权威模式数据库不可用�
 | `0be85c33f` | 无 turn_states 的旧历史按 runtime primary 显示顺序导入及核验 |
 | `3176050f5` | 既有 workspace 的真实 app lifespan/Auth/SQL 隔离验收 |
 | `74057c17b` | 持久 Turn 按完整 scoped/visible 消息读取，避免 recovery 问题副本截断答案 |
+| `aa846b947` | 本地切换故障矩阵、真实消息批次 commit 后恢复与 backup 失败边界；仅扩充测试 |
 
 此前部分修复提交在精确同文件集 hooks 显式通过后使用 `--no-verify` 提交，避免共享 worktree
 提交钩子 stash 干扰；不把它表述为 commit hook 自动通过。合并后范围 hooks 再次通过。
@@ -72,7 +73,11 @@ SQL authority 显式 opt-in，默认 legacy；新权威模式数据库不可用�
 修正后 12 项真实 MySQL delta 与精确 hooks 通过；独立 settlement 复审无 blocker。
 源码 `0ff2f5ee8` 的完整 MySQL 集成目录再次运行，270 项全部通过、无失败/跳过，退出码 0，隔离
 control schema 清理已确认。首次失败与局部修正证据仍保留在测试报告。
-后续 `3176050f5` 基线仅有新增专项证据，未重跑整个 270 项目录；详见
+后续新增专项与当前已提交基线完整目录分别记账：`35f749b4e`/runtime `74057c17b`
+完整目录 274 passed、0 failed/errors、1 skipped（本机样本未配置的 app-bootstrap；
+该项另有配置样本后单独通过证据），2910.12 秒，控制库清理确认。本轮新增故障参数
+晚于该次收集；修改的三个集成文件完整复跑另为 74 passed、0 failures/errors/skips，
+1376.02 秒，退出 0 且控制库清理。十阶段隔离演练完整 ledger 见
 [本地模拟报告](2026-11-01-conversation-local-simulation.md)。
 真实历史增量演练又发现 admission 问题在 recovery projection 中重复出现时，
 `answer_turn` 会误以该 user occurrence 为下一轮边界而截掉答案。修复后，选中问题
@@ -86,6 +91,9 @@ legacy reader 继续写通过，原 workspace 未变；固定旧镜像仍未验�
 
 目标 MySQL/TDSQL capabilities/权限/MDL、原 NAS 跨两节点双 Pod、固定旧生产镜像读回
 继续写、全量生产 scope 数据、完整规模恢复与连续停机/RSS/NAS/锁等待/p95/p99 尚未验收。
+本地十阶段演练覆盖旧 writer 等待超时与停止、离线备份/导入/核验/安装、readiness、
+新写、share 访问、反向导出和当前树 legacy 续写；不是目标入口与所有 Pod writer 的排空，
+也未验证固定旧镜像。
 未执行生产 DDL、业务数据迁移、停机、部署、push 或将 feature 合回用户主工作树。
 默认批次 64 KiB/64 events/1 秒仅为当前实现值，未完成生产基准调优；time 触发发布
 不承诺远端 SQL/NAS durability 在固定毫秒内结束。已启动并行工具的外部副作用不可撤销。

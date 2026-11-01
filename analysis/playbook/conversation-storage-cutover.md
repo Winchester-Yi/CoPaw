@@ -76,6 +76,13 @@ swe conversation-storage export --manifest /audit/manifest.json --apply
 
 演练至少逐项记录：排空超时、备份不可读、导入批次中断并续跑、故意缺失正文的 verify blocker、原子探针冲突/不支持、MDL 阻塞、RENAME 响应丢失、启动失败、冒烟后新会话和分享计数更新。最后两项必须证明选择完整反向导出而非直接恢复旧快照。
 
+本地隔离副本的十阶段 operator ledger：
+`/private/tmp/conversation-local-stages-20261101-r2/ledger/report.json`。
+十阶段 exit 0，总 98.1515 秒；逐阶段 UTC/argv/exit 和边界见
+`docs/superpowers/reports/2026-11-01-conversation-local-simulation.md`。
+该证据覆盖一个历史 Session/Chat、独立旧 writer 超时/停止和当前树 legacy 续写；
+不覆盖目标 ingress、全部队列/Pod writer 排空、全 scope 或固定旧镜像。
+
 ## 本地证据与生产门禁
 
 `tests/integrated/conversation_storage/test_install.py` 的真实数据库用例只创建/删除随机生成的隔离 schema；覆盖探针失败原子性、七表安装、启动前逆向、无关业务表保持不变。连接缺失时跳过，不能把 skip 视为验收。运行时应使用项目虚拟环境及测试数据库环境变量，不输出连接配置/凭据。
