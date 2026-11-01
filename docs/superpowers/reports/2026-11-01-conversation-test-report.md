@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | 合并后会话与主线 cross-regression | 1,238 passed，0 failed，0 skipped，17.72s | `/private/tmp/conversation-final-head-cross-regression.xml`；63 个测试文件，含 storage、Runner/approval/Stop、nickname/delegation/Guard。首次沙箱运行有 26 项因本机 psutil 进程枚举和 `~/.swe.secret` 锁目录权限失败；获批提升权限后原命令全过。 |
 | 首次完整真实 MySQL 集成目录 | 268 passed，2 failed，0 skipped，47:25 | `/private/tmp/conversation-final-full-mysql.xml`。两个失败分别为 archive runtime 测试 doubles 缺少新 `mutation_lock`/`pending_operation`，以及旧测试错误地把 `get_latest_turn_state` 的 `(question_key, state)` tuple 当成 state。隔离 control schema 已清理。 |
+| 原 workspace/NAS 装配专项复核 | 28 passed，0 failed，0 skipped，0.56s | `../../venv/bin/python -m pytest tests/unit/app/conversation_storage/test_factory.py -q --tb=short --junitxml=/private/tmp/conversation-existing-workspace-final.xml`；验证原 workspace/共享 NAS 复用、缺失根不创建、scope 拒绝与旧数据遗漏阻断。独立只读复核未发现该迁移路径初始化新业务 workspace。 |
 | SQL 合同修正 delta | 12 passed，0 failed，0 skipped，157.02s | `/private/tmp/conversation-final-contract-delta-mysql.xml`；重跑 archive runtime 与 execution 两个真实 MySQL 测试文件；隔离 control schema 已清理。此 delta 不伪装成整个 270 项目录的一次全绿运行。 |
 | API/分享 MySQL 全矩阵及增量 | 57 passed + 2 passed，其中 1 项重叠，共 58 个唯一 SQL case | `/private/tmp/conversation-api-matrix-final-report.xml`、`/private/tmp/conversation-api-final-delta-report.xml`。没有单一 58-case XML；无失败/错误/skip，生成隔离 schema 均清理。详见 [API 矩阵证据](2026-11-01-conversation-api-evidence.md)。 |
 | 语义发布最终真实 MySQL/NAS 专项 | 6 passed，0 failed，0 skipped，270.29s | `/private/tmp/conversation-semantic-mysql-report.xml`；包含合并后 failure-hook gate 回归。使用测试 NAS 根，不代表目标 NAS 双节点验收。 |

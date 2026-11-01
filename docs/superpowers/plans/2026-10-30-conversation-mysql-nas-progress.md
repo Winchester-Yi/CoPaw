@@ -76,6 +76,8 @@ TypeScript compiler/node_modules 缺失；全仓 mypy 最终 feature/main 均为
 - 数据库连接读取原工作区 `src/swe/config/envs/dev.json`，仅用于生成的一次性隔离 schema；
   不输出凭证、不提交用户配置、不修改业务表。每次测试生成的控制库/子库在结束清理。
 - 用户明确复用原有 workspace/NAS 挂载；无需初始化新 workspace。新 bundle 使用受控新前缀。
+  用户澄清后重新核读 factory/runtime/离线导入/recover，独立审查无确认 blocker；
+  `test_factory.py` 本次 28 passed（0.56 秒），缺失业务根被拒绝且不创建目录。
 - 运行时 SQL authority 为显式 opt-in，默认仍是 legacy；未修改生产配置、执行生产停机、
   业务七表安装或部署。
 - 真实 NAS、跨节点双 Pod、全量生产规模迁移、完整恢复/回退和停机预算仍未验收。

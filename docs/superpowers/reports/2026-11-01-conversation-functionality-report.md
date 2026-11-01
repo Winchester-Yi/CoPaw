@@ -12,6 +12,11 @@ UTF-8 user/channel/session；不从目录反推身份。六表保存元数据、
 正文写入原 NAS 下受控的 `bundles/` 不可变前缀。原分享表保留八旧列并增加 locator。
 SQL authority 显式 opt-in，默认 legacy；新权威模式数据库不可用时不回退文件。
 
+用户澄清后的专项复核：factory/runtime/recover 均要求原 workspace 和 NAS 根已经存在；
+离线导入不实例化业务 Workspace，正常空 workspace 接入分支也只登记已有目录的映射。
+28 项装配测试通过，独立只读审查未发现确认 blocker；SQL staging schema、冻结源工作副本
+和代码 Git worktree 不属于新业务 workspace。
+
 ## 已实现能力
 
 - Chat CRUD、完整 metadata、专家绑定 CAS、同 Session 多 Chat、旧/新 cursor、无分页数组
