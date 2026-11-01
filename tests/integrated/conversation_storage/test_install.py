@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Installer gates are exercised without any application-schema DDL."""
+"""Installer gates use generated isolated schemas, never business schemas."""
+
+import json
 
 import pytest
 
@@ -158,6 +160,30 @@ async def test_cross_server_staging_rejected_before_ddl(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "version",
+    ["5.7.44", "8.0.20", "10.6.12-MariaDB", "unknown"],
+)
+async def test_atomic_probe_rejects_unreviewed_version_before_ddl(version):
+    from swe.app.conversation_storage.migration.install import (
+        probe_atomic_rename,
+    )
+
+    class ReadOnly:
+        async def fetch_one(self, _query, _params=None):
+            return {
+                "server_uuid": "server",
+                "version": version,
+                "schema_name": "test",
+            }
+
+        async def execute(self, _query, _params=None):
+            pytest.fail("unsupported version must be rejected before any DDL")
+
+    with pytest.raises(ValueError, match="reviewed MySQL"):
+        await probe_atomic_rename(ReadOnly())
+
+
 async def test_live_isolated_atomic_rename_probe(conversation_test_database):
     from swe.app.conversation_storage.migration.install import (
         probe_atomic_rename,
@@ -170,9 +196,23 @@ async def test_live_isolated_atomic_rename_probe(conversation_test_database):
 
 
 # pylint: disable=too-many-statements
-async def test_live_seven_table_install_and_before_startup_reversal(
+@pytest.mark.parametrize(
+    "failure_branch",
+    [
+        "before-startup",
+        "after-new-write-smoke-failure",
+        "import-interruption",
+        "missing-body",
+        "metadata-lock",
+        "lost-rename-reply",
+        "startup-failure",
+    ],
+)
+async def test_live_seven_table_install_and_rollback_boundary(
     conversation_test_database,
     tmp_path,
+    monkeypatch,
+    failure_branch,
 ):
     from uuid import uuid4
     from swe.app.chat_sharing.store import ChatShareStore
@@ -258,9 +298,22 @@ async def test_live_seven_table_install_and_before_startup_reversal(
                 },
             ],
         )
-        await ConversationImporter(staging, bundles, manifest, target).run(
-            report,
-        )
+        importer = ConversationImporter(staging, bundles, manifest, target)
+        if failure_branch == "import-interruption":
+            from tests.integrated.conversation_storage.cutover_faults import (
+                resume_committed_import,
+            )
+
+            await resume_committed_import(importer, report, monkeypatch)
+        else:
+            await importer.run(report)
+        if failure_branch == "missing-body":
+            from tests.integrated.conversation_storage.cutover_faults import (
+                reject_missing_body,
+            )
+
+            await reject_missing_body(installer, staging, bundles, report)
+            return
         from swe.app.conversation_storage.migration.verify import verify_import
         from swe.cli.conversation_storage_cmd import _readonly_manifest
 
@@ -276,12 +329,89 @@ async def test_live_seven_table_install_and_before_startup_reversal(
         assert checked["passed"], checked["blockers"]
         assert await retention_snapshot(staging) == before_retention
         assert manifest.path.read_bytes() == before_manifest
+        if failure_branch == "metadata-lock":
+            from tests.integrated.conversation_storage.cutover_faults import (
+                reject_held_metadata_lock,
+            )
+
+            await reject_held_metadata_lock(
+                installer,
+                staging,
+                bundles,
+                report,
+            )
+        if failure_branch == "lost-rename-reply":
+            from tests.integrated.conversation_storage.cutover_faults import (
+                inspect_lost_rename_reply,
+            )
+
+            await inspect_lost_rename_reply(
+                installer,
+                staging,
+                bundles,
+                report,
+                monkeypatch,
+            )
+            return
         receipt = await installer.install(staging, bundles, report)
         assert receipt["phase"] == "installed_before_startup"
         assert set(receipt["after"]["application_tables"]) == set(TABLES)
         assert (await app.fetch_one("SELECT id FROM unrelated_business"))[
             "id"
         ] == 91
+        if failure_branch == "startup-failure":
+            from tests.integrated.conversation_storage.cutover_rehearsal import (
+                post_install_startup_failure,
+            )
+
+            await post_install_startup_failure(
+                app,
+                bundles,
+                tmp_path,
+                monkeypatch,
+            )
+            assert json.loads(installer.receipt_path.read_text()) == receipt
+            assert (
+                await staging.fetch_one(
+                    f"SELECT access_count FROM `{installer.old_share}` "
+                    "WHERE token='permanent'",
+                )
+            )["access_count"] == 17
+            return
+        if failure_branch == "after-new-write-smoke-failure":
+            from tests.integrated.conversation_storage.cutover_rehearsal import (
+                post_install_smoke_failure,
+            )
+
+            await post_install_smoke_failure(
+                app,
+                bundles,
+                tmp_path,
+                monkeypatch,
+            )
+            assert json.loads(installer.receipt_path.read_text()) == receipt
+            names = await app.fetch_all(
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA=%s",
+                (app_schema,),
+            )
+            assert set(TABLES).issubset({row["TABLE_NAME"] for row in names})
+            assert (
+                await staging.fetch_one(
+                    f"SELECT access_count FROM `{installer.old_share}` "
+                    "WHERE token='permanent'",
+                )
+            )["access_count"] == 17
+            assert (
+                await app.fetch_one(
+                    "SELECT id FROM unrelated_business",
+                )
+            )["id"] == 91
+            assert (source / "chats.json").read_text() == '{"chats": []}'
+            assert (source / "share.json").read_text() == (
+                '{"chat_name": "old", "messages": []}'
+            )
+            return
         # No new process has started, and no data write occurred after install.
         # This is the only direct-rename rollback window.
         await app.execute(receipt["reverse_sql_before_any_startup_or_write"])

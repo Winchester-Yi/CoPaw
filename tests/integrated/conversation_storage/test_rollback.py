@@ -846,6 +846,93 @@ async def test_backup_waits_for_original_prepared_commit_before_scope_fence(
                 pass
 
 
+async def test_backup_prepared_timeout_leaves_no_fence_and_original_can_commit(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage import backup
+    from swe.app.conversation_storage.bundle import BundleBlock
+    from swe.app.conversation_storage.errors import ConflictError
+    from swe.app.conversation_storage.publications import (
+        CommitPlan,
+        PublicationRequest,
+    )
+
+    db = conversation_test_database
+    scope, bundles, _, _, _, _ = await seed_new_data(db, tmp_path / "source")
+    publications = PublicationStore(db, bundles)
+    operation = new_operation_key()
+    await publications.reserve(
+        PublicationRequest(operation, scope, "backup_probe", "writer", 0),
+        CommitPlan(),
+    )
+    await publications.write_bundle(
+        operation,
+        [BundleBlock("probe", "probe", b"{}")],
+    )
+    monkeypatch.setattr(backup, "BACKUP_SETTLE_SECONDS", 0)
+    destination = tmp_path / "timed-out-backup"
+    with pytest.raises(ConflictError, match="settle"):
+        await ConversationBackup(db, bundles, scope).capture(destination)
+    assert not list(destination.iterdir())
+    assert not await db.fetch_all(
+        "SELECT id FROM swe_conversation_retentions WHERE kind='backup_fence' AND state='active'",
+    )
+    assert (await publications.get(operation))["state"] == "prepared"
+    await publications.commit(operation)
+    assert (await publications.get(operation))["state"] == "committed"
+    assert (
+        await ConversationBackup(db, bundles, scope).capture(
+            tmp_path / "recovered-backup",
+        )
+    )["passed"]
+
+
+async def test_backup_missing_body_retains_real_sql_pins(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    scope, bundles, _, _, _, _ = await seed_new_data(db, tmp_path / "source")
+    row = await db.fetch_one(
+        "SELECT id,relative_path FROM swe_conversation_publications "
+        "WHERE state='committed' AND gc_state='live' ORDER BY id LIMIT 1",
+    )
+    path = bundles.root / row["relative_path"].decode()
+    body = path.read_bytes()
+    destination = tmp_path / "failed-backup"
+    path.unlink()
+    try:
+        with pytest.raises(OSError):
+            await ConversationBackup(db, bundles, scope).capture(destination)
+        assert (destination / "metadata.json").exists()
+        assert not (destination / "report.json").exists()
+        assert not await db.fetch_all(
+            "SELECT id FROM swe_conversation_retentions WHERE kind='backup_fence' AND state='active'",
+        )
+        pins = await db.fetch_all(
+            "SELECT publication_id,snapshot_ref FROM swe_conversation_retentions "
+            "WHERE kind='backup' AND state='active'",
+        )
+        assert row["id"] in {pin["publication_id"] for pin in pins}
+        assert all(
+            pin["snapshot_ref"] == str(destination).encode() for pin in pins
+        )
+    finally:
+        path.write_bytes(body)
+    assert (
+        await ConversationBackup(db, bundles, scope).capture(
+            tmp_path / "recovered-backup",
+        )
+    )["passed"]
+    assert await db.fetch_all(
+        "SELECT publication_id FROM swe_conversation_retentions "
+        "WHERE kind='backup' AND state='active' AND snapshot_ref=%s",
+        (str(destination).encode(),),
+    )
+
+
 async def add_collectable_message(
     db,
     bundles,

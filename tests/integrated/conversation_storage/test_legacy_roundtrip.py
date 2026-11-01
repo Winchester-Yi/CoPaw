@@ -95,11 +95,18 @@ async def reject_tampered_reentry(importer, report, db, manifest):
     )
 
 
-@pytest.mark.parametrize("source_version", [1, 2, 3])
+@pytest.mark.parametrize(
+    ("source_version", "interrupt_messages"),
+    [(1, False), (2, False), (3, False), (3, True)],
+    ids=["v1", "v2", "v3", "v3-interrupted-message-batch"],
+)
+# pylint: disable=too-many-statements
 async def test_complete_legacy_import_reentry_and_semantics(
     conversation_test_database,
     tmp_path,
     source_version,
+    interrupt_messages,
+    monkeypatch,
 ):
     db = conversation_test_database
     await ChatShareStore(db).ensure_schema()
@@ -216,7 +223,19 @@ async def test_complete_legacy_import_reentry_and_semantics(
         target,
         batch_size=2,
     )
-    await importer.run(report)
+    if interrupt_messages:
+        from tests.integrated.conversation_storage.cutover_faults import (
+            resume_committed_import,
+        )
+
+        await resume_committed_import(
+            importer,
+            report,
+            monkeypatch,
+            message_batch=True,
+        )
+    else:
+        await importer.run(report)
     counts = [
         (await db.fetch_one("SELECT COUNT(*) n FROM " + table))["n"]
         for table in (
