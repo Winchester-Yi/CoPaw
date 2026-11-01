@@ -8,6 +8,27 @@ from click.testing import CliRunner
 from swe.cli.main import cli
 
 
+def test_mysql_authority_requires_conversation_backup_instead_of_nas_commands(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
+    result = CliRunner().invoke(
+        cli,
+        [
+            "memory-storage",
+            "session",
+            "--sessions-dir",
+            str(tmp_path),
+            "--session-id",
+            "s",
+            "preview",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "MySQL" in result.output
+
+
 def test_session_preview_apply_validate_and_export(tmp_path):
     sessions = tmp_path / "sessions"
     sessions.mkdir()

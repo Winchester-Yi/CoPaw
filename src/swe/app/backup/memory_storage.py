@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import zipfile
 
@@ -11,8 +12,19 @@ class RestoreTargetRejected(ValueError):
     """Restore preflight failed before any destination was modified."""
 
 
+def require_legacy_storage():
+    authority = os.environ.get("SWE_CONVERSATION_STORAGE_AUTHORITY", "legacy")
+    if authority not in ("legacy", "mysql"):
+        raise ValueError("Invalid conversation storage authority")
+    if authority == "mysql":
+        raise RestoreTargetRejected(
+            "MySQL conversation authority requires a complete metadata and NAS backup/restore; memory-storage is offline legacy-format maintenance only",
+        )
+
+
 def capture_memory_roots(source: Path) -> dict[str, str]:
     """Refuse in-flight cold writes and fingerprint published roots."""
+    require_legacy_storage()
     roots = {}
     if not source.exists():
         return roots
@@ -49,6 +61,7 @@ def verify_memory_roots(source: Path, before: dict[str, str]) -> None:
 
 def validate_restore_target(archive: zipfile.ZipFile, target: Path) -> None:
     """New generations require a fresh tree, never merge into live data."""
+    require_legacy_storage()
     incoming = any(
         "/.turn-ledger/" in f"/{name}" or Path(name).name == "state-v2.json"
         for name in archive.namelist()

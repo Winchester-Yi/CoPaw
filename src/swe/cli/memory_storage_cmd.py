@@ -49,6 +49,12 @@ def memory_storage_group():
     New formats are opt-in. Migrations preview by default; --apply publishes.
     Paths are trusted local maintenance paths, never HTTP request inputs.
     """
+    from swe.app.backup.memory_storage import require_legacy_storage
+
+    try:
+        require_legacy_storage()
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
 
 
 @memory_storage_group.command("session")

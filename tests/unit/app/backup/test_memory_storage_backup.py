@@ -6,6 +6,26 @@ import zipfile
 import pytest
 
 
+def test_mysql_authority_rejects_nas_only_backup_and_restore(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.backup.memory_storage import (
+        capture_memory_roots,
+        validate_restore_target,
+    )
+
+    monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
+    with pytest.raises(ValueError, match="MySQL"):
+        capture_memory_roots(tmp_path)
+    zipped = tmp_path / "old.zip"
+    with zipfile.ZipFile(zipped, "w") as archive:
+        archive.writestr("sessions/s.json", "{}")
+    with zipfile.ZipFile(zipped) as archive:
+        with pytest.raises(ValueError, match="MySQL"):
+            validate_restore_target(archive, tmp_path / "target")
+
+
 def test_restore_refuses_merge_of_versioned_memory(tmp_path):
     from swe.app.backup.memory_storage import validate_restore_target
 

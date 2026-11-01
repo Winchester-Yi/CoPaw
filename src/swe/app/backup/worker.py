@@ -26,7 +26,7 @@ from .config import BackupEnvironmentConfig
 from .io_worker import run_backup_io
 from .listing import find_latest_backup_hour, list_restore_tenants
 from .models import BackupTask, BackupTaskStatus
-from .memory_storage import RestoreTargetRejected
+from .memory_storage import RestoreTargetRejected, require_legacy_storage
 from .s3_client import S3BackupClient
 from .task_store import TaskStore
 
@@ -141,6 +141,7 @@ class BackupWorker:
         self.task_store.save(task)
 
         try:
+            require_legacy_storage()
             if task.target_tenant_ids:
                 tenant_ids = task.target_tenant_ids
             else:
@@ -316,6 +317,7 @@ class BackupWorker:
         modified_tenants: set[str] = set()
 
         try:
+            require_legacy_storage()
             instance_id = task.instance_id or "default"
             backup_date = task.backup_date
             backup_hour = task.backup_hour
