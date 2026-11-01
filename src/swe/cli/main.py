@@ -116,6 +116,11 @@ class LazyGroup(click.Group):
             "init_source_template_cmd",
             ".init_cmd",
         ),
+        "conversation-storage": (
+            "swe.cli.conversation_storage_cmd",
+            "conversation_storage_group",
+            ".conversation_storage_cmd",
+        ),
         "memory-storage": (
             "swe.cli.memory_storage_cmd",
             "memory_storage_group",

@@ -13,6 +13,8 @@ from mysql.connector.errors import Error as MySQLError
 from ..history import HistoryStore
 from ..archive_reader import ArchiveReader
 from .importer import archive_batches, message_body, task_projections
+from .manifest import SourceBoundary
+from .readonly import ReadOnlyDatabase, ReadOnlyRetention, read_only_adapter
 
 VERIFY_ERRORS = (
     ValueError,
@@ -80,6 +82,10 @@ async def verify_import(database, bundles, manifest, inventory, target):
                 "verification workspace mapping differs from manifest",
             )
         await OfflineImportStore(database, bundles, target).validate_target()
+        database = ReadOnlyDatabase(
+            database,
+            SourceBoundary(**manifest.data["source_boundary"]),
+        )
     except VERIFY_ERRORS as error:
         report["blockers"].append(
             {"position": "migration", "detail": str(error)},
@@ -191,6 +197,7 @@ async def _verify_session(database, bundles, manifest, workspace, session):
         bundles,
         channel=identity[4],
     )
+    read_only_adapter(adapter)
     actual = await adapter.get_session_state_dict(
         identity[5],
         identity[3],
@@ -264,7 +271,9 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
 
 async def _verify_chat(database, bundles, manifest, workspace, chat):
     scope = WorkspaceScope(*workspace["scope"])
-    actual = await MySQLChatRepository(database, scope, bundles).get_chat(
+    actual = await read_only_adapter(
+        MySQLChatRepository(database, scope, bundles),
+    ).get_chat(
         chat["spec"]["id"],
     )
     if chat["archive"]["deleted"]:
@@ -356,7 +365,11 @@ async def _verify_share(database, bundles, share):
     ):
         raise ValueError("complete share snapshot differs")
     if (
-        await ShareStorage(database, bundles).verify_snapshot(
+        await ShareStorage(
+            database,
+            bundles,
+            retention_factory=ReadOnlyRetention,
+        ).verify_snapshot(
             share["record"]["token"],
         )
         != share["snapshot"]
@@ -377,6 +390,7 @@ async def _verify_runtime_chat(database, bundles, scope, chat, workspace):
         bundles,
         cursor_secret=b"offline-verification",
     )
+    read_only_adapter(history)
     actual = await history.current(spec.id)
     session = next(
         item
@@ -494,7 +508,9 @@ async def _verify_checkpoint(database, bundles, scope, chat_id, chat):
     if not chat["archive"]["epochs"]:
         return
     current = chat["archive"]["epochs"][0]
-    checkpoint = await ArchiveReader(database, scope, bundles).checkpoint(
+    checkpoint = await read_only_adapter(
+        ArchiveReader(database, scope, bundles),
+    ).checkpoint(
         chat_id,
     )
     events = [

@@ -154,13 +154,14 @@ async def snapshot_projection(
     index,
     *,
     current_id,
+    retentions=None,
 ):
     snapshot = ProjectionReferences()
     if envelope is None:
         return snapshot
     refs = references(envelope)
     cached_bodies = _cached_bodies(request, envelope)
-    retentions = RetentionStore(service.db, request.scope)
+    retentions = retentions or RetentionStore(service.db, request.scope)
     try:
         async with service.db.transaction():
             await _snapshot_rows(service, request, refs, snapshot)
@@ -274,6 +275,7 @@ async def hydrate_projection(adapter, envelope, session, publication, batch):
         envelope,
         index,
         current_id=publication["id"],
+        retentions=adapter.retentions,
     )
     try:
         return hydrate_state(

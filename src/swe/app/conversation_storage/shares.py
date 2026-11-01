@@ -210,10 +210,18 @@ async def install_share(db, request, plan, publication, index):
 class ShareStorage:
     """Token reads derive their namespace solely from publication metadata."""
 
-    def __init__(self, database, bundles, *, scope=None):
+    def __init__(
+        self,
+        database,
+        bundles,
+        *,
+        scope=None,
+        retention_factory=RetentionStore,
+    ):
         self.db = database
         self.bundles = bundles
         self.scope = scope
+        self.retention_factory = retention_factory
         self.store = ChatShareStore(database)
         self.owner_key = new_operation_key()
 
@@ -351,7 +359,7 @@ class ShareStorage:
                 )
                 if scope.tenant_id != record.tenant_id:
                     raise IntegrityError("share publication tenant mismatch")
-                retentions = RetentionStore(
+                retentions = self.retention_factory(
                     self.db,
                     scope,
                     scope_kind=publication["scope_kind"],
