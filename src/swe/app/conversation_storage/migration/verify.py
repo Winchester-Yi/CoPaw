@@ -233,7 +233,7 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
         "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer<>%s ORDER BY session_order",
         (sid, "archive"),
     )
-    from .importer import extract_messages
+    from .importer import display_order_messages, extract_messages
 
     messages = extract_messages(
         expected,
@@ -251,6 +251,7 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
         for item in session_chats
     ):
         task_projections(messages, expected)
+    messages = display_order_messages(messages)
     if len(rows) != len(messages):
         raise ValueError("Session Message occurrence count differs")
     for row, message in zip(rows, messages):

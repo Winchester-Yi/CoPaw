@@ -2,6 +2,7 @@
 import pytest
 
 from swe.app.conversation_storage.migration.importer import (
+    display_order_messages,
     extract_messages,
     validate_inventory,
 )
@@ -39,6 +40,76 @@ def test_extract_messages_preserves_duplicate_occurrences_and_unknown_turn_statu
     assert [item["source_occurrence_no"] for item in values[:2]] == [0, 1]
     assert values[-1]["layer"] == "anchor" and values[-1]["turn_key"] == "old"
     assert "status" not in state["turn_states"]["old"]
+
+
+def test_display_order_messages_stably_interleaves_error_layer():
+    from agentscope.message import Msg
+
+    question = Msg(
+        "user",
+        "question",
+        "user",
+        timestamp="2026-10-30T00:00:01Z",
+    )
+    question.id = "q"
+    error = {
+        "id": "e",
+        "code": "model_call_failed",
+        "message": "failed",
+        "timestamp": "2026-10-30T00:00:02Z",
+    }
+    later = Msg("user", "later", "user", timestamp="2026-10-30T00:00:03Z")
+    later.id = "later"
+    messages = extract_messages(
+        {
+            "agent": {
+                "memory": {"content": [question.to_dict(), later.to_dict()]},
+            },
+            "model_call_failed_messages": [error],
+        },
+        context_epoch=0,
+    )
+
+    ordered = display_order_messages(messages)
+
+    assert [item["payload"]["id"] for item in ordered] == ["q", "e", "later"]
+    assert [item["source_occurrence_no"] for item in ordered] == [0, 0, 1]
+
+
+def test_display_order_messages_keeps_equal_and_missing_timestamp_order():
+    messages = [
+        {
+            "layer": "memory",
+            "payload": {
+                "id": "equal-first",
+                "timestamp": "2026-10-30T00:00:01Z",
+            },
+        },
+        {
+            "layer": "error",
+            "payload": {"id": "missing-first"},
+        },
+        {
+            "layer": "memory",
+            "payload": {
+                "id": "equal-second",
+                "timestamp": "2026-10-30T00:00:01Z",
+            },
+        },
+        {
+            "layer": "task",
+            "payload": {"id": "missing-second", "timestamp": "invalid"},
+        },
+    ]
+
+    ordered = display_order_messages(messages)
+
+    assert [item["payload"]["id"] for item in ordered] == [
+        "equal-first",
+        "equal-second",
+        "missing-first",
+        "missing-second",
+    ]
 
 
 def test_inventory_blockers_cannot_be_overridden_with_ready_boolean():

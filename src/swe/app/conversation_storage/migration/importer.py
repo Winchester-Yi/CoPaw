@@ -79,6 +79,25 @@ def extract_messages(state, *, context_epoch):
     return messages
 
 
+def display_order_messages(messages):
+    """Stably interleave primary layers; preserve fallback anchor order."""
+    from types import SimpleNamespace
+    from ...runner import api
+
+    def key(item):
+        return api._message_sort_key(
+            SimpleNamespace(timestamp=item["payload"].get("timestamp")),
+        )
+
+    return [
+        *sorted(
+            (item for item in messages if item["layer"] != "anchor"),
+            key=key,
+        ),
+        *(item for item in messages if item["layer"] == "anchor"),
+    ]
+
+
 def _turn_anchors(state, context_epoch):
     messages = []
     turns = state.get("turn_states", {})
@@ -538,6 +557,7 @@ class ConversationImporter:
             if item["spec"]["id"] in chats
         ):
             task_projections(messages, state)
+        messages = display_order_messages(messages)
         for start in range(0, len(messages), self.batch_size):
             batch = messages[start : start + self.batch_size]
             rows = []

@@ -251,6 +251,62 @@ async def test_legacy_answer_turn_is_point_range_and_unknown_status_stays_none(
         await store.answer_turn("answer", chat_id="chat-a", user_id="alice")
 
 
+async def test_import_display_order_preserves_interleaved_error_answer_turn(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    session, chat, _, store = await dataset(db, tmp_path)
+    from swe.app.conversation_storage.migration.importer import (
+        display_order_messages,
+        extract_messages,
+    )
+
+    messages = display_order_messages(
+        extract_messages(
+            {
+                "agent": {
+                    "memory": {
+                        "content": [
+                            source("q1", "user", stamp="2026-10-30T00:00:01Z"),
+                            source("q2", "user", stamp="2026-10-30T00:00:03Z"),
+                        ],
+                    },
+                },
+                "model_call_failed_messages": [
+                    {
+                        "id": "e1",
+                        "role": "assistant",
+                        "code": "model_call_failed",
+                        "message": "failed",
+                        "timestamp": "2026-10-30T00:00:02Z",
+                    },
+                ],
+            },
+            context_epoch=0,
+        ),
+    )
+    await add_messages(
+        db,
+        store,
+        session,
+        chat,
+        [
+            (item["layer"], item["payload"], order)
+            for order, item in enumerate(messages, start=1)
+        ],
+    )
+
+    result = await store.answer_turn("q1", chat_id="chat-a", user_id="alice")
+
+    assert [
+        api._message_original_id(message) for message in result.messages
+    ] == [
+        "q1",
+        "e1",
+    ]
+
+
 async def test_history_rechecks_deletion_after_nas_and_releases_pins(
     conversation_test_database,
     tmp_path,
