@@ -7,7 +7,7 @@ transaction as pin(); NAS IO follows only after that transaction commits.
 Released rows remain evidence; no TTL guesses that a reader or writer died.
 """
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 import asyncio
 import secrets
@@ -22,9 +22,9 @@ SCOPE_WHERE = (
 MAX_PIN_BATCH = 4096
 
 
-def _ids(values):
+def _ids(values, *, bounded=True):
     result = sorted(set(values))
-    if len(result) > MAX_PIN_BATCH or any(
+    if (bounded and len(result) > MAX_PIN_BATCH) or any(
         type(value) is not int or value <= 0 for value in result
     ):
         raise ValueError(
@@ -77,6 +77,38 @@ class PinBatch:
                 {worker for worker in self._workers if worker.done()},
             )
         return cancelled
+
+
+class ReaderPins:
+    """Keep all bounded batches in one locator snapshot until IO has drained."""
+
+    def __init__(self, store):
+        self.store = store
+        self.batches = []
+        self._cleanup = AsyncExitStack()
+
+    @property
+    def publications(self):
+        return tuple(
+            row for batch in self.batches for row in batch.publications
+        )
+
+    async def pin(self, ids):
+        ordered = sorted(set(ids))
+        for start in range(0, len(ordered), MAX_PIN_BATCH):
+            batch = await self.store.pin(
+                ordered[start : start + MAX_PIN_BATCH],
+                kind="reader",
+            )
+            self.batches.append(batch)
+            self._cleanup.push_async_callback(self.store.finish_reader, batch)
+
+    async def read(self, function, *args, **kwargs):
+        # All batches remain pinned together; one tracks their shared NAS IO.
+        return await self.batches[-1].read(function, *args, **kwargs)
+
+    async def finish(self):
+        await self._cleanup.aclose()
 
 
 class RetentionStore:
@@ -356,13 +388,20 @@ class RetentionStore:
             raise asyncio.CancelledError
 
     async def add_dependencies(self, source_id: int, target_ids):
-        targets = _ids(target_ids)
+        targets = _ids(target_ids, bounded=False)
         if any(value >= source_id for value in targets):
             raise IntegrityError(
                 "dependencies must point to older publications",
             )
         async with self.db.transaction():
-            rows = await self._lock_publications([*targets, source_id])
+            ordered = [*targets, source_id]
+            rows = []
+            for start in range(0, len(ordered), MAX_PIN_BATCH):
+                rows.extend(
+                    await self._lock_publications(
+                        ordered[start : start + MAX_PIN_BATCH],
+                    ),
+                )
             source = rows[-1]
             if source["gc_state"] != "live" or source["state"] not in (
                 "prepared",

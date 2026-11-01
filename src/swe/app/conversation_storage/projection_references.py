@@ -6,7 +6,7 @@ import json
 
 from .errors import IntegrityError
 from .identity import WorkspaceScope
-from .retention import RetentionStore
+from .retention import ReaderPins, RetentionStore
 from .session_projection import hydrate_state, is_projection
 from .projection_cache import active, cache_key, cached, remember
 
@@ -46,7 +46,7 @@ class ProjectionReferences:
 
     async def finish(self, retentions):
         if self.batch is not None:
-            await retentions.finish_reader(self.batch)
+            await self.batch.finish()
             self.batch = None
 
     async def revalidate(self, db):
@@ -162,6 +162,7 @@ async def snapshot_projection(
     refs = references(envelope)
     cached_bodies = _cached_bodies(request, envelope)
     retentions = retentions or RetentionStore(service.db, request.scope)
+    snapshot.batch = ReaderPins(retentions)
     try:
         async with service.db.transaction():
             await _snapshot_rows(service, request, refs, snapshot)
@@ -177,7 +178,7 @@ async def snapshot_projection(
                     "recovery dependencies must point to older publications",
                 )
             if ids:
-                snapshot.batch = await retentions.pin(ids, kind="reader")
+                await snapshot.batch.pin(ids)
                 snapshot.publications = {
                     row["id"]: row for row in snapshot.batch.publications
                 }

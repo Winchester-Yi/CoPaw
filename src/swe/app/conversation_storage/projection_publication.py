@@ -10,7 +10,7 @@ from .bundle import BundleBlock
 from .chat_mutations import load_metadata_json
 from .errors import IntegrityError
 from .message_installs import MessageInstall
-from .retention import RetentionStore
+from .retention import ReaderPins, RetentionStore
 from .identity import WorkspaceScope
 from .projection_cache import cached, remember, cache_key
 from .session_projection import (
@@ -77,7 +77,6 @@ async def _existing(service, row):
     if row["session_id"] is None or not hasattr(service.db, "fetch_all"):
         remember(cache_key(row), result)
         return result
-    batch = None
     retentions = RetentionStore(
         service.db,
         WorkspaceScope(
@@ -86,18 +85,15 @@ async def _existing(service, row):
             _text(row["agent_key"]),
         ),
     )
-    async with service.db.transaction():
-        rows = await service.db.fetch_all(
-            "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer IN ('memory','task','error') AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order",
-            (row["session_id"],),
-        )
-        if rows:
-            batch = await retentions.pin(
-                [item["publication_id"] for item in rows],
-                kind="reader",
-            )
+    batch = ReaderPins(retentions)
     try:
-        if batch is None:
+        async with service.db.transaction():
+            rows = await service.db.fetch_all(
+                "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer IN ('memory','task','error') AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order",
+                (row["session_id"],),
+            )
+            await batch.pin([item["publication_id"] for item in rows])
+        if not rows:
             return result
         publications = {item["id"]: item for item in batch.publications}
         for item in rows:
@@ -125,8 +121,7 @@ async def _existing(service, row):
         remember(cache_key(row), result)
         return result
     finally:
-        if batch is not None:
-            await retentions.finish_reader(batch)
+        await batch.finish()
 
 
 async def prepare_recovery_blocks(service, row, plan, blocks):

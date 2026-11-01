@@ -702,8 +702,7 @@ class PublicationStore(PublicationAssociations):
         return associations, target_session
 
     async def commit(self, operation_key: str, *, _settlement_generation=None):
-        sources = SourceMessages()
-        projected_refs = ProjectionReferences()
+        sources, projected_refs = SourceMessages(), ProjectionReferences()
         request = None
         try:
             initial = await self.get(operation_key)
@@ -804,10 +803,12 @@ class PublicationStore(PublicationAssociations):
             raise UnknownCommit(operation_key, request) from error
         finally:
             if request is not None:
-                await sources.finish(self, request.scope)
-                await projected_refs.finish(
-                    RetentionStore(self.db, request.scope),
-                )
+                try:
+                    await sources.finish(self, request.scope)
+                finally:
+                    await projected_refs.finish(
+                        RetentionStore(self.db, request.scope),
+                    )
 
     async def _committed_projection(
         self,
