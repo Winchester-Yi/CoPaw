@@ -1,7 +1,7 @@
 # 会话 MySQL / NAS 功能交付报告
 
 日期：2026-11-01，Asia/Shanghai。实现分支 `feature/conversation-mysql-nas-migration`，
-最终源码 HEAD `0ff2f5ee8`（含主线合并 `201deb168`）。本报告说明代码实现与本地隔离验证；
+本轮修复源码 `74057c17b`（含主线合并 `201deb168`）。本报告说明代码实现与本地隔离验证；
 不表示生产切换或目标环境验收已完成。
 
 ## 存储与身份契约
@@ -52,9 +52,14 @@ SQL authority 显式 opt-in，默认 legacy；新权威模式数据库不可用�
 | `201deb168` | 合入主线 `5c8e96e5c` 的 nickname/catalog-only 变更 |
 | `4228d9167` | 存储发布失败时禁止 PostToolUseFailure 外部 hook 继续执行 |
 | `0ff2f5ee8` | SQL 集成 fixture/tuple 契约与 W+ scope 类型收窄 |
+| `7eec5aa0f` | 真实 AgentScope semantic batch 本地基准与测量边界 |
+| `0be85c33f` | 无 turn_states 的旧历史按 runtime primary 显示顺序导入及核验 |
+| `3176050f5` | 既有 workspace 的真实 app lifespan/Auth/SQL 隔离验收 |
+| `74057c17b` | 持久 Turn 按完整 scoped/visible 消息读取，避免 recovery 问题副本截断答案 |
 
-修复提交在精确同文件集 hooks 显式通过后使用 `--no-verify` 提交，避免共享 worktree
+此前部分修复提交在精确同文件集 hooks 显式通过后使用 `--no-verify` 提交，避免共享 worktree
 提交钩子 stash 干扰；不把它表述为 commit hook 自动通过。合并后范围 hooks 再次通过。
+本轮 `74057c17b` 同时通过提交前显式检查和实际提交钩子。
 主线 nickname/catalog-only、通用审批 replay 和明确 Stop 的通用子代理取消保持；不恢复
 自然结束时强制 selected-expert wait/cancel。
 
@@ -65,8 +70,18 @@ SQL authority 显式 opt-in，默认 legacy；新权威模式数据库不可用�
 终态已提交但续租取消清理、Stop restore 语义、reconcile None sentinel、分享/重连竞态，
 以及存储失败后继续派发工具失败 hook 的旁路。后续全量 SQL 集成还发现两处旧测试契约；
 修正后 12 项真实 MySQL delta 与精确 hooks 通过；独立 settlement 复审无 blocker。
-最终完整 MySQL 集成目录再次运行，270 项全部通过、无失败/跳过，退出码 0，隔离
+源码 `0ff2f5ee8` 的完整 MySQL 集成目录再次运行，270 项全部通过、无失败/跳过，退出码 0，隔离
 control schema 清理已确认。首次失败与局部修正证据仍保留在测试报告。
+后续 `3176050f5` 基线仅有新增专项证据，未重跑整个 270 项目录；详见
+[本地模拟报告](2026-11-01-conversation-local-simulation.md)。
+真实历史增量演练又发现 admission 问题在 recovery projection 中重复出现时，
+`answer_turn` 会误以该 user occurrence 为下一轮边界而截掉答案。修复后，选中问题
+关联持久 Turn 时按原 scope、Chat 和可见性读取该 Turn 的完整消息；legacy 未关联
+记录仍按原 session_order 区间读取，archive-anchor suppression 与读后重验保留。
+真实 Msg 的三个边界场景（无后续 Turn、同 Chat 后续 Turn、另一 Chat 后续 Turn）
+均通过，严格返回原 question/answer；当前修复源码的四模块真实 MySQL 回归
+78 passed、0 failed、0 skipped。修复后的历史增量备份/空库恢复、反向导出与当前树
+legacy reader 继续写通过，原 workspace 未变；固定旧镜像仍未验证。
 合并静态审查未发现确认 blocker；测试证据见配套测试报告。
 
 目标 MySQL/TDSQL capabilities/权限/MDL、原 NAS 跨两节点双 Pod、固定旧生产镜像读回
@@ -80,5 +95,6 @@ control schema 清理已确认。首次失败与局部修正证据仍保留在�
 - [测试报告](2026-11-01-conversation-test-report.md)
 - [逐项审计（78 个复选步骤）](2026-11-01-conversation-completion-audit.md)
 - [API 查询矩阵证据](2026-11-01-conversation-api-evidence.md)
+- [既有 workspace 本地模拟](2026-11-01-conversation-local-simulation.md)
 - [切换与恢复手册](../../../analysis/playbook/conversation-storage-cutover.md)
 - [直接入口清单](../../../analysis/playbook/conversation-storage-entry-inventory.md)

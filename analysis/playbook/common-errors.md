@@ -1,5 +1,18 @@
 # 常见报错
 
+## SQL 会话已 completed 但 answer_turn 只有问题
+
+- 先比较同一 scope/Session 的完整恢复根、current history 与 answer_turn；如果前两者
+  都含回答，且 Turn 为 completed，应检查 `conversation_storage/history.py` 的
+  `_turn_snapshot()`，不要重新执行模型或修改已提交的终态。
+- admission anchor 和 recovery memory 可能各有同一 question 的 occurrence。
+  已关联持久 Turn 的问题应在原 Session/Chat 可见性约束下按 Turn 取消息；
+  若仍按下一条 user occurrence 截断，会把重复问题当作下一轮并漏掉回答。
+  legacy／未关联问题继续使用原区间，不能移除 scope、归档可见性或读取后重验。
+- 回归入口：`tests/integrated/conversation_storage/test_execution_mysql.py` 的
+  `test_answer_turn_includes_response_after_admission_projects_question`，覆盖无后续
+  Turn、同 Chat 后续 Turn 和另一 Chat 后续 Turn；使用完整 `Msg.to_dict()` 夹具。
+
 ## 选择专家后提示无法启动
 
 - **现象**：提示 `The selected expert could not be started`，但这条兜底提示本身不能区分启动拒绝与结果解析失败。

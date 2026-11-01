@@ -1,10 +1,10 @@
 # Conversation migration completion audit
 
-2026-11-01, Asia/Shanghai. Audit of feature HEAD `0ff2f5ee8`, including the final
-committed validation delta. This report distinguishes implementation, local
+2026-11-01, Asia/Shanghai. Audit of feature source `74057c17b`, including the
+typed-Turn answer-boundary fix, local historical-order and app-bootstrap deltas. This report distinguishes implementation, local
 proof, and target-environment acceptance. HTTP, semantic-runtime, and ended-owner
 recovery reviews are complete. A complete integrated MySQL run found two stale
-test contracts; the corrected full directory now passes 270 cases in one run,
+test contracts; the corrected full directory at `0ff2f5ee8` passed 270 cases in one run,
 with the generated control schema removed. No push,
 production DDL, cluster deployment, or business-data migration has been run.
 
@@ -19,7 +19,7 @@ MySQL/NAS, two-Pod, fixed-old-image, or full-scale gates.
 
 ## Evidence and remaining gates
 
-- T1–T13 and report-only T15 have implementation commits through `0ff2f5ee8`.
+- T1–T13 and report-only T15 have implementation commits through `3176050f5`.
   T14 tools are committed in `a1fc353b9`; the progress document now records those
   commits instead of the obsolete uncommitted status.
 - T8.5 has production wiring: `SemanticRuntimePublisher` is installed by
@@ -35,7 +35,8 @@ MySQL/NAS, two-Pod, fixed-old-image, or full-scale gates.
 - The HTTP/MySQL §10.1 matrix is implemented and reviewed. The 57-case full run
   and two-case final delta cover 58 unique cases (one overlaps). Helpers exercise
   actual ASGI/SQL routes; production auth/bootstrap and live TCP CLI remain
-  outside this harness.
+  outside this harness. A separate local existing-workspace test exercises real
+  app lifespan/Auth/Tenant middleware and SQL (1 passed); target NAS is outside it.
 - T10 direct-entry inventory is committed in `58ee8c62b`, with authority branches
   for legacy and SQL paths. That audit found and fixed NAS bundle deletion through
   generic file governance and SQL-authority bypass through Shell backup/restore.
@@ -45,7 +46,7 @@ MySQL/NAS, two-Pod, fixed-old-image, or full-scale gates.
   delta hooks, the 1,238-case cross regression, and the 78-step evidence ledger
   are recorded in the linked reports. Original failures remain recorded.
 
-Final evidence: cross-regression 1,238/0 failures; the final full real-MySQL
+Prior-baseline evidence (`0ff2f5ee8`): cross-regression 1,238/0 failures; the full real-MySQL
 directory rerun passes 270 cases with no failures/errors/skips in 2873.82s
 (47:53), exit code 0, and generated control schema cleanup confirmed. Its XML is
 `/private/tmp/conversation-final-full-mysql-rerun.xml`. The original 268 passed/2
@@ -55,6 +56,22 @@ includes all final API cases. The existing-workspace/NAS factory rerun is 28/0. 
 commands/results and baseline static-check limitations are in the
 [test report](2026-11-01-conversation-test-report.md). None of these runs
 substitutes for the required target NAS, old-image, or production-scale gates.
+The later `3176050f5` baseline has focused evidence only: 15 import unit cases,
+13 real-MySQL history cases, and one real app lifespan/auth/SQL case. The full
+270-case directory was not rerun after those changes. A real historical subset
+of 40 Sessions/55 Chats passed import, idempotent reentry, 139 semantic verify
+checks, consistent backup/full empty-schema restore, and current-tree legacy
+read/continue-write. The complete inventory remains blocked by missing files
+and identity mappings; see the [local simulation report](2026-11-01-conversation-local-simulation.md).
+The subsequent typed-Turn fix preserves scoped visibility and legacy order-range
+behavior while avoiding the recovery-projected question as a false next-Turn
+boundary. Three real-Msg boundary cases pass; the current-source execution,
+history, session-projection and API MySQL modules pass 78 cases with no failures
+or skips (766.13s), with control-schema cleanup confirmed. The successful local
+increment rehearsal covers formal admission/start/finish, fresh readers,
+post-write backup and second empty-schema restore, reverse export and continued
+current-tree legacy writes. Original workspace regular-file hashes are unchanged.
+This adds local evidence only; fixed-old-image rollback remains unverified.
 
 ## All 78 plan checkbox steps
 
@@ -136,7 +153,7 @@ Step numbers are the checkbox order within each original task.
 | T13.6 | Every outage failure branch rehearsed | Local component/fault tests; Gate: actual stage rehearsal including after-new-write rollback |
 | T14.1 | Two different-node Pods/NAS evidence | Gate: namespace, empty equivalent RWX PVC, fixed verifier digest; no Job run |
 | T14.2 | Full real adapter/environment faults | Local: real MySQL/NAS publication/restore/failure cases; Gate: target NAS/Pod failures |
-| T14.3 | Complete §10 same-adapter matrix | Local: HTTP evidence report maps rows/limits; Gate: full auth/bootstrap and target NAS |
+| T14.3 | Complete §10 same-adapter matrix | Local: HTTP matrix plus separate real lifespan/Auth/Tenant/SQL existing-workspace case; Gate: target deployment auth/bootstrap, NAS and external tracing |
 | T14.4 | Console compatibility | Local: 8 files/93 passed; exact command and limits in test report |
 | T14.5 | Full-scale outage/performance/rollback budget | Gate: production-scale frozen copy, complete stage timings/RSS/NAS/locks/p95/p99/rollback |
 | T14.6 | Final checks and baseline separation | Local: final exact changed-file hooks and 1,238 cross regressions pass; all-files hooks fail (console `tsc` missing; 85 mypy errors exactly match main baseline after fixing two W+ scope typing errors; formatting hooks rewrote 199 unrelated files, restored); first sandbox cross run hit process/secret-dir permissions, escalated final run passed |

@@ -30,6 +30,10 @@
 | 旧维护路径正文保护 | 58ee8c62b | 真实 bundle direct/alias 治理保护、Shell backup/restore SQL authority 拒绝；97 组合回归及精确文件集 hooks 通过 |
 | semantic failure-hook fence | 4228d9167 | storage publication failure fences prompt/command/HTTP failure hooks; 170 unit/hook-fence tests and six real semantic SQL cases pass |
 | final SQL fixture contract delta | 0ff2f5ee8 | 12 focused real MySQL integration cases pass; updated stale fixture lock/latest-turn tuple; W+ scope mypy narrowing; exact hooks pass |
+| semantic batch 本地基准 | 7eec5aa0f | 真实 AgentScope print，单 producer/state-only 的三组顺序测量；不代替生产调优 |
+| 旧历史显示顺序 | 0be85c33f | primary memory/task/error 对齐 runtime 排序；15 单元、13 真实 MySQL 通过，anchor 规则未改 |
+| 既有 workspace 真 app 装配 | 3176050f5 | lifespan/Auth/Tenant/SQL 1 项通过；非 loopback 坏 token 401、有效 token 200 |
+| 持久 Turn 答案边界修复 | 74057c17b | RED/GREEN 三场景、34 回答单元、78 MySQL 回归；显式 hooks 与实际提交钩子通过 |
 
 上述提交证明各个实现增量存在，不代表全部目标环境验收通过。完整状态以
 [逐项审计](../reports/2026-11-01-conversation-completion-audit.md) 和最终回归为准。
@@ -60,7 +64,7 @@
 - T15 既有真实 GC：26 passed，后补并发专项 10 passed；最终收集 29 cases，不能把
   两次数量直接相加。独立审查确认默认 report-only，并发现 GC→backup 交叉缺口。
 
-最终源码 HEAD `0ff2f5ee8` 的跨模块回归为 1,238 passed（63 个文件，17.81 秒）；
+先前源码基线 `0ff2f5ee8` 的跨模块回归为 1,238 passed（63 个文件，17.81 秒）；
 实际 MySQL 集成目录首次全量运行 268 passed、2 failed（47:25），暴露一个旧测试
 执行 fixture 未含新 mutation lock，以及一个 latest-turn tuple 断言已过期。更新后，
 涉及的两个集成文件最终真实 MySQL delta 为 12 passed、0 skipped（157.14 秒），隔离
@@ -74,6 +78,20 @@ MySQL 集成目录复跑为 270 passed、0 failed、0 skipped、2 warnings（287
 TypeScript compiler/node_modules 缺失；全仓 mypy 最终 feature/main 均为 85 条，
 逐条差异为空。格式 hooks 改写的 199 个无关 tracked 文件已经恢复，未动用户主树文件。
 所有范围测试数量不相加，避免重叠计数；详见测试报告。
+后续源码基线 `3176050f5` 仅执行新增专项，未重跑完整 270 项 MySQL 目录。
+用户确认暂无 K8s/NAS，授权基于 `~/.swe` 本地模拟；只读复制既有 workspace，
+40 Session / 55 Chat 可解析子集导入、幂等重入、139 项 verify、一致备份与空库
+恢复、当前树 legacy reader 继续写通过。完整 inventory 仍因缺失文件和可信映射
+ready=false，不猜测身份。证据与增量演练结果见
+[本地模拟报告](../reports/2026-11-01-conversation-local-simulation.md)。
+真实历史增量演练暴露 typed Turn 的 recovery 问题副本误作下一轮边界，已最小修复
+并保留 legacy 区间行为。真实 Msg 回归有效 RED 1 failed，最终三参数 GREEN
+3 passed；回答相关单元 34 passed。当前修复源码 execution/history/projection/API
+四模块 MySQL 回归 78 passed、0 failed、0 skipped（766.13 秒），隔离 control
+schema 已清理。最终增量演练报告 `passed=true`：正式 admission/start/finish、
+fresh readers、增量备份与第二空库恢复、反向导出、当前树 legacy reader 续写均通过；
+原 workspace 205 文件、4,140,461 字节的逐文件 SHA-256 不变，生成 schema 均清理。
+固定旧镜像不可用，`image_verified=false`、`rollback_ready=false`；不关闭外部门槛。
 
 ## 环境与边界
 
