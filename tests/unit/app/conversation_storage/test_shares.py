@@ -353,14 +353,26 @@ async def test_access_count_requires_confirmed_affected_row():
     await ChatShareStore(db).record_access("token")
 
 
+def installed_locator_columns():
+    return [
+        {
+            "COLUMN_NAME": name,
+            "COLUMN_TYPE": "bigint unsigned",
+            "IS_NULLABLE": "YES",
+            "COLUMN_DEFAULT": None,
+            "EXTRA": "",
+            "GENERATION_EXPRESSION": "",
+            "CHARACTER_SET_NAME": None,
+            "COLLATION_NAME": None,
+        }
+        for name in ("publication_id", "byte_offset", "byte_length")
+    ]
+
+
 async def test_new_mode_schema_check_is_read_only_and_refuses_unmigrated_rows():
-    names = ("publication_id", "byte_offset", "byte_length")
     db = SimpleNamespace(
         fetch_all=AsyncMock(
-            return_value=[
-                {"COLUMN_NAME": name, "COLUMN_TYPE": "bigint unsigned"}
-                for name in names
-            ],
+            return_value=installed_locator_columns(),
         ),
         fetch_one=AsyncMock(return_value=None),
         execute=AsyncMock(),
@@ -371,5 +383,26 @@ async def test_new_mode_schema_check_is_read_only_and_refuses_unmigrated_rows():
     with pytest.raises(RuntimeError, match="migration"):
         await ChatShareStore(db).verify_locator_schema()
     db.fetch_all.return_value = []
+    with pytest.raises(RuntimeError, match="schema"):
+        await ChatShareStore(db).verify_locator_schema()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("IS_NULLABLE", "NO"),
+        ("COLUMN_DEFAULT", "0"),
+        ("EXTRA", "STORED GENERATED"),
+        ("GENERATION_EXPRESSION", "NULL"),
+        ("COLLATION_NAME", "ascii_bin"),
+    ],
+)
+async def test_new_mode_rejects_share_locator_schema_drift(field, value):
+    columns = installed_locator_columns()
+    columns[0][field] = value
+    db = SimpleNamespace(
+        fetch_all=AsyncMock(return_value=columns),
+        fetch_one=AsyncMock(return_value=None),
+    )
     with pytest.raises(RuntimeError, match="schema"):
         await ChatShareStore(db).verify_locator_schema()

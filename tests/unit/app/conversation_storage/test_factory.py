@@ -95,6 +95,7 @@ def installed_schema_rows():
         INDEXES,
         DEFAULTS,
         EXTRAS,
+        CHARSETS,
     )
 
     columns = [
@@ -105,6 +106,12 @@ def installed_schema_rows():
             "IS_NULLABLE": nullable,
             "COLUMN_DEFAULT": DEFAULTS[table].get(name),
             "EXTRA": EXTRAS[table].get(name, ""),
+            "CHARACTER_SET_NAME": CHARSETS[table][name][0],
+            "COLLATION_NAME": (
+                "utf8mb4_0900_ai_ci"
+                if CHARSETS[table][name][0] == "utf8mb4"
+                else CHARSETS[table][name][1]
+            ),
         }
         for table, fields in COLUMNS.items()
         for name, (kind, nullable) in fields.items()
@@ -202,6 +209,35 @@ async def test_readiness_accepts_exact_columns_and_indexes_without_ddl(
         call.args[0].lstrip().startswith("SELECT")
         for call in db.fetch_all.await_args_list
     )
+
+
+async def test_readiness_refuses_ascii_text_that_cannot_store_chinese(
+    tmp_path,
+):
+    from swe.app.conversation_storage.factory import (
+        WorkspaceConversationStorage,
+    )
+
+    columns, indexes, tables = installed_schema_rows()
+    title = next(
+        row
+        for row in columns
+        if row["TABLE_NAME"] == "swe_conversation_chats"
+        and row["COLUMN_NAME"] == "title"
+    )
+    title.update(CHARACTER_SET_NAME="ascii", COLLATION_NAME="ascii_bin")
+    db = SimpleNamespace(
+        fetch_all=AsyncMock(side_effect=[columns, indexes, tables]),
+    )
+    storage = WorkspaceConversationStorage(
+        db,
+        WorkspaceScope("t", "s", "a"),
+        tmp_path,
+        cursor_secret=b"secret",
+    )
+    storage.shares.store.verify_locator_schema = AsyncMock()
+    with pytest.raises(RuntimeError, match="schema.*charset"):
+        await storage.verify_schema()
 
 
 @pytest.mark.parametrize(

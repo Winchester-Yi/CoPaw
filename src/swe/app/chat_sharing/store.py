@@ -36,18 +36,28 @@ class ChatShareStore:
     async def verify_locator_schema(self) -> None:
         """New authority mode validates installed schema and never performs DDL."""
         columns = await self.db.fetch_all(
-            "SELECT COLUMN_NAME,COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+            "SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,GENERATION_EXPRESSION,CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
             (_TABLE,),
         )
         actual = {
-            row["COLUMN_NAME"]: row["COLUMN_TYPE"].lower() for row in columns
+            row["COLUMN_NAME"]: (
+                row["COLUMN_TYPE"].lower(),
+                row["IS_NULLABLE"],
+                row["COLUMN_DEFAULT"],
+                row["EXTRA"],
+                row["GENERATION_EXPRESSION"],
+                row["CHARACTER_SET_NAME"],
+                row["COLLATION_NAME"],
+            )
+            for row in columns
+            if row["COLUMN_NAME"]
+            in ("publication_id", "byte_offset", "byte_length")
         }
         required = {
-            "publication_id": "bigint unsigned",
-            "byte_offset": "bigint unsigned",
-            "byte_length": "bigint unsigned",
+            name: ("bigint unsigned", "YES", None, "", "", None, None)
+            for name in ("publication_id", "byte_offset", "byte_length")
         }
-        if any(actual.get(name) != kind for name, kind in required.items()):
+        if actual != required:
             raise RuntimeError("Chat share locator schema is not installed")
         if await self.db.fetch_one(
             f"SELECT token FROM {_TABLE} WHERE publication_id IS NULL OR byte_offset IS NULL OR byte_length IS NULL LIMIT 1",

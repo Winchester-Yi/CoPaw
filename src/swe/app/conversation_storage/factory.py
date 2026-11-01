@@ -2,6 +2,7 @@
 """One SQL authority injected into an existing workspace and NAS mount."""
 
 from pathlib import Path
+from fnmatch import fnmatchcase
 import stat
 
 from .archive_runtime import MySQLArchiveStore
@@ -13,7 +14,7 @@ from .identity import WorkspaceScope
 from .publications import PublicationStore
 from .session_adapter import MySQLSessionAdapter
 from .shares import ShareStorage
-from .schema_contract import COLUMNS, INDEXES, DEFAULTS, EXTRAS
+from .schema_contract import COLUMNS, INDEXES, DEFAULTS, EXTRAS, CHARSETS
 
 TABLES = tuple(
     "swe_conversation_" + suffix
@@ -124,7 +125,7 @@ class WorkspaceConversationStorage:
     async def verify_schema(self):
         """Readiness validates the installed schema without creating objects."""
         rows = await self.db.fetch_all(
-            "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA FROM information_schema.COLUMNS "
+            "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS "
             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ("
             + ",".join(["%s"] * len(TABLES))
             + ")",
@@ -142,6 +143,18 @@ class WorkspaceConversationStorage:
             ].lower() != EXTRAS[table].get(name, ""):
                 raise RuntimeError(
                     "Conversation metadata schema defaults or generated identity differ",
+                )
+            charset, pattern = CHARSETS[table][name]
+            collation = row["COLLATION_NAME"]
+            collation_matches = (
+                collation is None
+                if pattern is None
+                else isinstance(collation, str)
+                and fnmatchcase(collation, pattern)
+            )
+            if row["CHARACTER_SET_NAME"] != charset or not collation_matches:
+                raise RuntimeError(
+                    "Conversation metadata schema charset or collation differs",
                 )
             columns.setdefault(row["TABLE_NAME"], {})[row["COLUMN_NAME"]] = (
                 row["COLUMN_TYPE"].lower(),

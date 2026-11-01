@@ -374,3 +374,23 @@ EXTRAS = {
     "swe_conversation_messages": {"id": "auto_increment"},
     "swe_conversation_retentions": {"id": "auto_increment"},
 }
+
+# Every VARCHAR in the reviewed DDL explicitly uses ascii/ascii_bin. Body-free
+# TEXT metadata inherits the table's utf8mb4 charset; its server-default
+# utf8mb4 collation is intentionally not pinned to one MySQL release.
+# Asterisk is the only collation wildcard; noncharacter fields require None.
+CHARSETS = {
+    table: {
+        column: (
+            ("ascii", "ascii_bin")
+            if column_type.startswith("varchar(")
+            else (
+                ("utf8mb4", "utf8mb4_*")
+                if column_type in ("text", "mediumtext")
+                else (None, None)
+            )
+        )
+        for column, (column_type, _nullable) in columns.items()
+    }
+    for table, columns in COLUMNS.items()
+}
