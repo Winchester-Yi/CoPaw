@@ -20,6 +20,7 @@
 | T11 稳定清单与多格式导入核验 | 32044ca56、eab7f222f | 已提交 inventory/import/verify；后续离线零写入修复仍待提交 |
 | T8/T9/T10 执行、归档及分享发布基础 | fe7d0b1db | 已提交；生产运行时装配尚待独立提交与全入口验收 |
 | NAS 根缺失不冒充已回收 | 33cc6e2f6 | 失败回归确认后修复；bundle 专项与提交钩子通过 |
+| 原 workspace 的 SQL runtime 装配 | 72a7161a1 | 独立复审发现项已回归；564 单元/旧契约、3 真实 MySQL，提交前显式范围 hooks 全通过 |
 
 上述 T4/T5 仅是基础增量，完整 Message/Turn/archive 发布和历史授权 snapshot 等仍待后续接入；不把基础组件通过当作任务全部验收。
 
@@ -42,6 +43,8 @@
   `/private/tmp/conversation-increment-regression.xml`。
 - 真实 MySQL readiness/已关闭 execution 的未知终态确认：3 passed，0 skipped，17.955 秒；
   `/private/tmp/conversation-runtime-mysql-report.xml`；生成隔离库已清理。
+- Console 原有兼容契约：8 个测试文件、93 passed；按 T14 计划执行 contextUsage、
+  sessionApi、shareSelection、useExpertBinding。仅临时链接既有依赖，测试后已移除。
 - T12 既有真实回退集：7 passed（366.919 秒），另 prepared 收敛/恢复验证 2 passed
   （60.532 秒）。XML 已核对；随后发现 GC 后备份不兼容，修复及回归尚在进行。
 - T15 既有真实 GC：26 passed，后补并发专项 10 passed；最终收集 29 cases，不能把
@@ -65,6 +68,8 @@ T12/T13/T15 未提交代码的专项通过不等于生产门槛通过。最终�
   操作的完整运维结算及进程恢复，不能靠重跑模型或工具解除。
 - T12/T15 有效引用语义统一：合法回收隐藏/删除 locator 后仍须能备份/恢复与反导；
   新的端到端回归正在实施。默认不启用物理 GC。
+- T12 保留 v3 ledger 反导时，新增 SQL Turn 必须分配 admission_order 并推进水位；
+  独立检视已复现旧 reader 在首次继续写入前错误选择旧 Turn，修复正在实施。
 - T13 离线 verify 必须证明 SQL/manifest 零写入，包括嵌套 projection 和分享 reader；
   CLI/安装器需完成独立审查、真实隔离 MySQL 重跑和小步提交。
 - T14 固定旧镜像恢复继续写、目标 NAS 原语、跨节点双 Pod、全量规模及停机预算仍缺
