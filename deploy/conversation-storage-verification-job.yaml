@@ -1,0 +1,77 @@
+# Render ${VERIFICATION_NAMESPACE}, ${VERIFICATION_IMAGE}, ${VERIFICATION_PVC}
+# explicitly before applying. VERIFICATION_IMAGE must be repository@sha256:<64hex>.
+# Use a dedicated RWX PVC on the production-equivalent NAS, never business data.
+# Script evidence remains under a prefix generated from the Kubernetes Job UID.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swe-conversation-storage-verification
+  namespace: ${VERIFICATION_NAMESPACE}
+  labels:
+    app: swe-conversation-storage-verification
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  template:
+    metadata:
+      labels:
+        app: swe-conversation-storage-verification
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: swe-conversation-storage-verification
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: verifier
+          image: ${VERIFICATION_IMAGE}
+          imagePullPolicy: Always
+          workingDir: /app
+          command:
+            - python3
+            - /app/scripts/rehearse_conversation_storage.py
+            - nas
+            - --mount
+            - /mnt/verification
+            - --indexed
+          env:
+            - name: VERIFICATION_IMAGE
+              value: ${VERIFICATION_IMAGE}
+            - name: PYTHONPATH
+              value: /app/src
+            - name: JOB_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['batch.kubernetes.io/controller-uid']
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: verification
+              mountPath: /mnt/verification
+      volumes:
+        - name: verification
+          persistentVolumeClaim:
+            claimName: ${VERIFICATION_PVC}
