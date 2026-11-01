@@ -60,14 +60,15 @@ async def empty_clone(db):
         await db.execute("DROP DATABASE " + schema)
 
 
-async def seed_new_data(db, root):
-    root.mkdir()
-    await ChatShareStore(db).ensure_schema()
-    await apply_sql_script(
-        db,
-        SQL_ROOT / "conversation_share_publication_extension.sql",
-    )
-    scope = WorkspaceScope("tenant", "source", "agent")
+async def seed_new_data(db, root, scope=None, *, initialize_schema=True):
+    root.mkdir(exist_ok=True)
+    if initialize_schema:
+        await ChatShareStore(db).ensure_schema()
+        await apply_sql_script(
+            db,
+            SQL_ROOT / "conversation_share_publication_extension.sql",
+        )
+    scope = scope or WorkspaceScope("tenant", "source", "agent")
     bundles = BundleStore(root)
     repo = MySQLChatRepository(db, scope, bundles)
     chat = str(uuid4())
@@ -89,7 +90,7 @@ async def seed_new_data(db, root):
         chat,
         "new-question",
         operation_key=new_operation_key(),
-        runtime_turn_key="runtime",
+        runtime_turn_key="runtime-" + chat,
     )
     question = {
         "id": "new-question",
@@ -121,7 +122,7 @@ async def seed_new_data(db, root):
     share = await ShareStorage(db, bundles, scope=scope).create_snapshot(
         chat_id=chat,
         creator_id="alice",
-        tenant_id="tenant",
+        tenant_id=scope.tenant_id,
         payload={"chat_name": "new-share", "messages": [question]},
         selected_question_keys=("new-question",),
     )

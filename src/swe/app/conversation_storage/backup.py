@@ -1098,9 +1098,16 @@ def _settlement_report(document, snapshot, database, bundles):
 
 
 async def restore_backup(database, bundles, backup_path, *, evidence):
+    """Atomically restore one path or a complete list of scope backup paths."""
+    from .backup_set import load_restore_set
+
     if not isinstance(evidence, RestoreEvidence):
         raise ValueError("restore requires explicit evidence")
-    document = await asyncio.to_thread(load_backup, backup_path)
+    documents, captured, sources = await asyncio.to_thread(
+        load_restore_set,
+        backup_path,
+    )
+    document = {**documents[0], "snapshot": captured}
     _restore_target(database, document.get("source_schema"))
     current_schema = await database.fetch_one("SELECT DATABASE() AS name")
     if current_schema["name"] != database.config.database:
@@ -1113,12 +1120,16 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
             "n"
         ]:
             raise ConflictError("restore requires an empty metadata target")
-    snapshot, report = _restored_rows(document["snapshot"], evidence)
-    source = BundleStore(Path(backup_path) / "nas")
+    snapshot, report = _restored_rows(captured, evidence)
     ids = snapshot_publication_ids(snapshot)
     by_id = {row["id"]: row for row in snapshot["publications"]}
     for identity in ids:
-        await asyncio.to_thread(_copy_bundle, source, target, by_id[identity])
+        await asyncio.to_thread(
+            _copy_bundle,
+            sources[identity],
+            target,
+            by_id[identity],
+        )
     async with database.transaction():
         for table in TABLES.values():
             if await database.fetch_all(
@@ -1178,7 +1189,8 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
                 + ",".join(fields),
             )
     validate_backup(actual, bundles)
-    await _verify_restored_readers(database, bundles, document)
+    for member in documents:
+        await _verify_restored_readers(database, bundles, member)
     report.update(
         passed=True,
         backup_id=document["backup_id"],
@@ -1191,6 +1203,17 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
         },
     )
     report.update(_settlement_report(document, snapshot, database, bundles))
+    if len(documents) > 1:
+        for key in ("backup_id", "snapshot_ref", "scope"):
+            report.pop(key)
+        report.update(
+            backup_ids=[member["backup_id"] for member in documents],
+            snapshot_refs=[member["snapshot_ref"] for member in documents],
+            scopes=[
+                [value.decode() for value in member["scope"]]
+                for member in documents
+            ],
+        )
     return report
 
 
