@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Runtime façade uses existing workspace bundles and SQL occurrence locators."""
 
+import asyncio
 from types import SimpleNamespace
 
 from agentscope.message import Msg
@@ -161,7 +162,11 @@ async def test_runtime_binding_updates_complete_root_only_after_compact_confirma
         current.clear()
         current.update(state)
 
-    execution = SimpleNamespace(accept_committed_state=accept)
+    execution = SimpleNamespace(
+        accept_committed_state=accept,
+        mutation_lock=asyncio.Lock(),
+        pending_operation=None,
+    )
 
     async def root():
         return {

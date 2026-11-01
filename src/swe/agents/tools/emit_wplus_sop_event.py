@@ -80,6 +80,9 @@ async def emit_wplus_sop_event(
             },
         )
 
+    assert tenant_id is not None
+    assert source_id is not None
+    assert agent_id is not None
     store = WPlusSopStore(store_path_for_workspace(workspace_dir))
     assert trusted_runtime is not None
     record = store.get_session(trusted_runtime.sop_session_id)

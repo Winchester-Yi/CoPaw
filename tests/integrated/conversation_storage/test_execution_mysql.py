@@ -307,8 +307,7 @@ async def test_session_adapter_pins_complete_root_and_cold_turn_lookup(
     assert cold == state["turn_states"]["question"]
     assert (
         await adapter.get_latest_turn_state("session", "alice", {}, "one")
-        == cold
-    )
+    ) == ("question", cold)
     await adapter.update_session_state(
         "session",
         ["future", "added"],
