@@ -4,7 +4,8 @@
 committed validation delta. This report distinguishes implementation, local
 proof, and target-environment acceptance. HTTP, semantic-runtime, and ended-owner
 recovery reviews are complete. A complete integrated MySQL run found two stale
-test contracts; a focused real-SQL rerun is recorded in the test report. No push,
+test contracts; the corrected full directory now passes 270 cases in one run,
+with the generated control schema removed. No push,
 production DDL, cluster deployment, or business-data migration has been run.
 
 The scope remains the complete backend and historic-data migration in the
@@ -44,11 +45,13 @@ MySQL/NAS, two-Pod, fixed-old-image, or full-scale gates.
   delta hooks, the 1,238-case cross regression, and the 78-step evidence ledger
   are recorded in the linked reports. Original failures remain recorded.
 
-Final evidence: cross-regression 1,238/0 failures; full real-MySQL directory
-268 passed/2 failed followed by 12/0 focused passing cases after correcting two
-stale test assumptions; semantic post-fence SQL 6/0; API full 57/0 plus delta
-2/0 with one overlap. The final full SQL run includes all final API cases, but
-the directory was not rerun as one all-green 270-case invocation. Exact
+Final evidence: cross-regression 1,238/0 failures; the final full real-MySQL
+directory rerun passes 270 cases with no failures/errors/skips in 2873.82s
+(47:53), exit code 0, and generated control schema cleanup confirmed. Its XML is
+`/private/tmp/conversation-final-full-mysql-rerun.xml`. The original 268 passed/2
+failed run and 12/0 focused correction remain recorded. Semantic post-fence SQL
+is 6/0; API full 57/0 plus delta 2/0 with one overlap. The final full SQL run
+includes all final API cases. The existing-workspace/NAS factory rerun is 28/0. Exact
 commands/results and baseline static-check limitations are in the
 [test report](2026-11-01-conversation-test-report.md). None of these runs
 substitutes for the required target NAS, old-image, or production-scale gates.

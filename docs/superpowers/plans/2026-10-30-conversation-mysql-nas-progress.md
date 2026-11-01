@@ -64,7 +64,11 @@
 实际 MySQL 集成目录首次全量运行 268 passed、2 failed（47:25），暴露一个旧测试
 执行 fixture 未含新 mutation lock，以及一个 latest-turn tuple 断言已过期。更新后，
 涉及的两个集成文件最终真实 MySQL delta 为 12 passed、0 skipped（157.14 秒），隔离
-control schema 已清理。全量最初结果保留在测试报告，不以 delta 冒充目录全量单次通过。
+control schema 已清理。首次失败和 delta 均保留在测试报告。随后同一最终源码的完整
+MySQL 集成目录复跑为 270 passed、0 failed、0 skipped、2 warnings（2873.82 秒 / 47:53），
+`PYTEST_EXIT_CODE 0` 且 `GENERATED_CONTROL_SCHEMA_REMOVED`；XML 为
+`/private/tmp/conversation-final-full-mysql-rerun.xml`，已核读。两个 warning 是既有
+`record_property` 与 xunit2 的格式兼容提示，不是测试失败。
 
 三文件最终 SQL delta 在提交前精确 hooks 通过。全仓 hooks 仍未通过：worktree 的
 TypeScript compiler/node_modules 缺失；全仓 mypy 最终 feature/main 均为 85 条，

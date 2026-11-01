@@ -65,6 +65,8 @@ SQL authority 显式 opt-in，默认 legacy；新权威模式数据库不可用�
 终态已提交但续租取消清理、Stop restore 语义、reconcile None sentinel、分享/重连竞态，
 以及存储失败后继续派发工具失败 hook 的旁路。后续全量 SQL 集成还发现两处旧测试契约；
 修正后 12 项真实 MySQL delta 与精确 hooks 通过；独立 settlement 复审无 blocker。
+最终完整 MySQL 集成目录再次运行，270 项全部通过、无失败/跳过，退出码 0，隔离
+control schema 清理已确认。首次失败与局部修正证据仍保留在测试报告。
 合并静态审查未发现确认 blocker；测试证据见配套测试报告。
 
 目标 MySQL/TDSQL capabilities/权限/MDL、原 NAS 跨两节点双 Pod、固定旧生产镜像读回
