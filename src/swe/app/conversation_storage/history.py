@@ -650,6 +650,7 @@ class HistoryStore:
                 raise IntegrityError(
                     "question occurrence Turn association mismatch",
                 )
+            typed_turn = turn is not None and anchor["turn_id"] == turn["id"]
             high = await self.db.fetch_one(
                 "SELECT history_high FROM swe_conversation_sessions "
                 "WHERE id=%s",
@@ -672,24 +673,25 @@ class HistoryStore:
                 if next_user["next_order"] is not None
                 else high["history_high"] + 1
             )
-            turn_filter = (
+            # Recovery projection may repeat the admission question. It is
+            # not a new Turn boundary when the persisted Turn owns the slice.
+            message_filter = (
                 " AND m.turn_id=%s"
-                if turn is not None and anchor["turn_id"] == turn["id"]
-                else ""
+                if typed_turn
+                else " AND m.session_order>=%s AND m.session_order<%s"
             )
-            turn_params = [turn["id"]] if turn_filter else []
+            message_params = (
+                (turn["id"],) if typed_turn else (anchor["session_order"], end)
+            )
             rows = await self.db.fetch_all(
                 MESSAGE_SELECT
                 + VISIBLE_ONLINE
-                + turn_filter
-                + " AND m.session_order>=%s AND m.session_order<%s "
-                "ORDER BY m.session_order,m.id",
+                + message_filter
+                + " ORDER BY m.session_order,m.id",
                 (
                     chat["session_id"],
                     chat["id"],
-                    *turn_params,
-                    anchor["session_order"],
-                    end,
+                    *message_params,
                 ),
             )
             anchors = [

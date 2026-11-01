@@ -5,6 +5,7 @@ import asyncio
 import json
 
 import pytest
+from agentscope.message import Msg
 
 from swe.app.conversation_storage.bundle import BundleStore, new_operation_key
 from swe.app.conversation_storage.errors import (
@@ -13,6 +14,7 @@ from swe.app.conversation_storage.errors import (
     UnknownCommit,
 )
 from swe.app.conversation_storage.execution import ExecutionStore
+from swe.app.conversation_storage.history import HistoryStore
 from swe.app.conversation_storage.identity import (
     SessionIdentity,
     WorkspaceScope,
@@ -67,6 +69,78 @@ async def admit(service, question="question", chat="one", recovery=None):
             recovery or {"unknown_module": {"keep": True}},
         )
     return result
+
+
+@pytest.mark.parametrize(
+    "following_chat",
+    [None, "one", "two"],
+)
+async def test_answer_turn_includes_response_after_admission_projects_question(
+    conversation_test_database,
+    tmp_path,
+    following_chat,
+):
+    db = conversation_test_database
+    await seed(db)
+    service = store(db, tmp_path, "owner")
+    question = Msg("user", "hello", "user")
+    question.id = "question"
+    answer = Msg("assistant", "reply", "assistant")
+    answer.id = "answer"
+    question = question.to_dict()
+    answer = answer.to_dict()
+    state = {"agent": {"memory": {"content": [[question, []]]}}}
+    admission = await admit(service, recovery=state)
+    await service.start(admission.authority)
+    state["agent"]["memory"]["content"].append([answer, []])
+    await service.finish(
+        admission.authority,
+        "completed",
+        state,
+        operation_key=new_operation_key(),
+    )
+    if following_chat is not None:
+        next_question = Msg("user", "next question", "user")
+        next_question.id = "next-question"
+        next_answer = Msg("assistant", "next reply", "assistant")
+        next_answer.id = "next-answer"
+        state["agent"]["memory"]["content"].append(
+            [next_question.to_dict(), []],
+        )
+        following = await admit(
+            service,
+            question=next_question.id,
+            chat=following_chat,
+            recovery=state,
+        )
+        await service.start(following.authority)
+        state["agent"]["memory"]["content"].append(
+            [next_answer.to_dict(), []],
+        )
+        await service.finish(
+            following.authority,
+            "completed",
+            state,
+            operation_key=new_operation_key(),
+        )
+    history = HistoryStore(
+        db,
+        identity().scope,
+        service.publications.bundles,
+        cursor_secret=b"test",
+    )
+    result = await history.answer_turn(
+        "question",
+        chat_id="one",
+        user_id="alice",
+    )
+    from swe.app.runner import api
+
+    assert [api._message_original_id(item) for item in result.messages] == [
+        "question",
+        "answer",
+    ]
+    assert result.turn_status == "completed"
 
 
 async def test_same_session_two_chats_have_one_admission_and_same_question_never_replays(
