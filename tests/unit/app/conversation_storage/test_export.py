@@ -1,6 +1,41 @@
 # -*- coding: utf-8 -*-
 import pytest
 
+
+def test_explicit_foreign_export_rejects_before_backup_body_validation(
+    tmp_path,
+    monkeypatch,
+):
+    import json
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import backup
+    from swe.app.conversation_storage.migration.exporter import (
+        ConversationExporter,
+    )
+
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "backup_id": "backup",
+                "service_unit_id": "B",
+                "scope": ["B", "t", "s", "a"],
+                "snapshot": {},
+            },
+        ),
+    )
+    validate = Mock(side_effect=AssertionError("foreign body validated"))
+    monkeypatch.setattr(backup, "_validate_snapshot_scopes", lambda *_: None)
+    monkeypatch.setattr(backup, "validate_backup", validate)
+    with pytest.raises(backup.IntegrityError, match="service"):
+        ConversationExporter(
+            tmp_path,
+            OldFormatTarget("old@sha256:" + "a" * 64, 3, 2),
+            service_unit_id="A",
+        )
+    validate.assert_not_called()
+
+
 from swe.app.conversation_storage.migration.exporter import (
     OldFormatTarget,
     export_session_state,

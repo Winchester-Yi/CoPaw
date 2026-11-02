@@ -26,9 +26,16 @@ tests/unit/scripts/test_benchmark_conversation_semantic.py
 tests/unit/agents/tools/test_emit_wplus_sop_event.py
 ```
 
-最终完整结果：637 passed，0 failure/error/skip，38.90s。
+最终完整结果：638 passed，0 failure/error/skip，37.39s。
 XML：`/private/tmp/conversation-service-all-unit-final.xml`。
-任务变更文件的全部 pre-commit hooks（含 mypy、Black、flake8、pylint）通过；
+最终完整 MySQL 迁移/安装批次：13 passed，0 failure/error/skip，1574.08s；
+API/W+ 事件工具、结束 owner 恢复与持久性故障批次：7 passed，0 failure/error/skip，
+147.27s。随机 control schema 和各测试 child schema 均已清理。
+
+主实现提交 `3feea8911` 后，独立检视发现 exporter 在读取备份正文前没有把显式 service
+传入 loader。已添加回归测试，确保错误服务绑定在正文校验及 NAS 内容访问前失败；此修复
+包含在后续修复提交中。单测 XML 是应用该修复后的完整重跑结果。
+相关任务文件的全部 pre-commit hooks（含 mypy、Black、flake8、pylint）通过；
 `git diff --check` 通过。
 
 ## 真实 MySQL 与本地 NAS 模拟
@@ -42,16 +49,32 @@ schema，并脱敏数据库输出。正文位于 pytest 临时目录，未读写
 子类构造器未传服务；已修复夹具并列入最终重跑。离线首次完整迁移测试进一步发现迁移
 专用锁上下文的交互，以及 archive helper 未传 scope，均有定向回归与修复。
 
-API/W+ 事件工具、重复归档问题分享证明、结束 owner 恢复 CLI 与 fsync/正文损坏故障路径最终 7 项通过（147.37s）；证据 `conversation-service-mysql-api.xml`。完整迁移与安装数据库重跑结果待追加。失败的中间 XML 保留，不用通过的子集掩盖失败：
+API/W+ 事件工具、重复归档问题分享证明、结束 owner 恢复 CLI 与 fsync/正文损坏故障路径最终 7 项通过；证据 `conversation-service-mysql-api.xml`。完整迁移与安装最终数据库重跑 13 项通过；证据 `conversation-service-mysql-final.xml`。失败的中间 XML 保留，不用通过的子集掩盖失败：
 `conversation-service-mysql-first.xml`、`conversation-service-mysql-runtime.xml`、
 `conversation-service-mysql-offline.xml`、`conversation-service-mysql-regression.xml` 均在
 `/private/tmp/`。最终证据使用独立 XML。
+
+最终 13 项数据库批次命令（包装器只创建随机隔离 schema、注入测试连接并在 finally 清理）：
+
+```bash
+../../venv/bin/python /private/tmp/run_conversation_service_mysql_final.py \
+  'tests/integrated/conversation_storage/test_legacy_roundtrip.py::test_complete_legacy_import_reentry_and_semantics[v3-interrupted-message-batch]' \
+  tests/integrated/conversation_storage/test_legacy_roundtrip.py::test_coordinated_two_service_import_keeps_same_identity_nas_separate \
+  tests/integrated/conversation_storage/test_chat_repository_mysql.py::test_draft_commit_uses_ordinary_chat_created_after_preflight \
+  tests/integrated/conversation_storage/test_chat_repository_mysql.py::test_conflicting_metadata_abort_does_not_fence_active_execution \
+  tests/integrated/conversation_storage/test_gc_mysql.py::test_unknown_and_scope_dangling_rows_are_quarantined \
+  tests/integrated/conversation_storage/test_gc_mysql.py::test_report_only_does_not_mutate_and_explicit_reclaim_preserves_tombstone \
+  tests/integrated/conversation_storage/test_install.py::test_live_seven_table_install_and_rollback_boundary \
+  --maxfail=2
+```
 
 ## 独立检视与边界
 
 子代理 `review_service_runtime_spec`、`review_service_migration_spec`、
 `review_service_maintenance_spec` 分别只读检视运行时、离线迁移和维护链路。
 确认问题均修复并复核；检视不连接数据库、不访问 NAS、不修改文件。
+提交后 `post_commit_service_review` 独立检查 `d4a691892..3feea8911`，发现上述 exporter
+校验顺序 P2；修复后的窄范围复核确认该问题关闭，无新增确认缺陷。
 
 token 排序规则冲突检查每次最多 512 个参数，保留跨批等价冲突检测；批次数 B 时约
 `B(B+1)/2` 次查询，是当前离线预检的性能取舍。

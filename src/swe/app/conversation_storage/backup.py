@@ -1040,12 +1040,18 @@ class ConversationBackup:
                 await store.release(key.encode())
 
 
-def load_backup(path, *, expected_scope=None):
+def load_backup(path, *, expected_scope=None, expected_service_unit_id=None):
     root = Path(path).resolve(strict=True)
     document = decode_metadata((root / "metadata.json").read_text())
     if document.get("version") != 2 or not document.get("backup_id"):
         raise IntegrityError("unsupported backup metadata")
     scope = WorkspaceScope.from_values(document["scope"])
+    if expected_service_unit_id is not None:
+        service_unit_bytes(expected_service_unit_id)
+        if scope.service_unit_id != expected_service_unit_id:
+            raise IntegrityError(
+                "backup service differs from explicit binding",
+            )
     if expected_scope is not None and scope != expected_scope:
         raise IntegrityError("backup release scope differs")
     if document.get("service_unit_id") != scope.service_unit_id:

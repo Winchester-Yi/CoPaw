@@ -66,6 +66,6 @@ Files: `migration/inventory.py`, `manifest.py`, `importer.py`, `install_records.
 ## 6. Integration, review and delivery
 
 - [x] Run `../../venv/bin/python -m pytest tests/unit/app/conversation_storage tests/unit/cli/test_conversation_storage_cmd.py tests/unit/scripts/test_rehearse_conversation_storage.py -q`.
-- [ ] Use only generated isolated MySQL schemas for the two-service runtime/NAS test and representative execution/share/backup/migration/GC tests. Record exact commands and XML counts, remove generated schemas, and never use business NAS as scratch space.
-- [ ] Run pre-commit on changed files, inspect the full SQL access diff, and request independent spec-compliance and code-quality reviews. Fix confirmed issues and repeat relevant checks.
-- [ ] Commit only task-owned changes, update the design with actual implementation/evidence limits, preserve pre-existing user changes, and report any outstanding work accurately.
+- [x] Use only generated isolated MySQL schemas for the two-service runtime/NAS test and representative execution/share/backup/migration/GC tests. Record exact commands and XML counts, remove generated schemas, and never use business NAS as scratch space.
+- [x] Run pre-commit on changed files, inspect the full SQL access diff, and request independent spec-compliance and code-quality reviews. Fix confirmed issues and repeat relevant checks.
+- [x] Commit only task-owned changes, update the design with actual implementation/evidence limits, preserve pre-existing user changes, and report any outstanding work accurately.

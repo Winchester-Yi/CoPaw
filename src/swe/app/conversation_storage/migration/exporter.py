@@ -80,7 +80,10 @@ class ConversationExporter:
             raise TypeError("export requires an explicit old image target")
         self.root = Path(backup_path)
         self.target = target
-        self.document = load_backup(backup_path)
+        self.document = load_backup(
+            backup_path,
+            expected_service_unit_id=service_unit_id,
+        )
         self.snapshot = self.document["snapshot"]
         from ..identity import WorkspaceScope
 
