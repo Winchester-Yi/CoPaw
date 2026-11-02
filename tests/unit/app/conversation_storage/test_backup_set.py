@@ -567,3 +567,97 @@ async def test_restore_token_preflight_bounds_queries_and_checks_cross_batch():
     queries = database.fetch_one.await_args_list[1:]
     assert max(len(call.args[1]) for call in queries) <= 512
     assert len(queries[-1].args[1]) == 257
+
+
+@pytest.mark.parametrize("occupied", [None, "jobs", "entries"])
+async def test_old_backup_restore_with_precreated_controls(
+    tmp_path,
+    monkeypatch,
+    occupied,
+):
+    path = make_backup(tmp_path / "old", "t", "s", 1)
+
+    class Target(MemoryTarget):
+        async def fetch_one(self, query, params=None):
+            if "information_schema.TABLES" in query:
+                return {"n": 2}
+            if "swe_conversation_migration_" in query:
+                return {"n": int(occupied in query)} if occupied else {"n": 0}
+            return await super().fetch_one(query, params)
+
+        async def fetch_all(self, query, params=None):
+            if "swe_conversation_migration_" in query:
+                return [{"id": 1}] if occupied and occupied in query else []
+            return await super().fetch_all(query, params)
+
+    target = Target()
+    monkeypatch.setattr(backup, "_restore_target", lambda *_: None)
+    if occupied:
+        with pytest.raises(backup.IntegrityError, match="migration authority"):
+            await backup.restore_backup(
+                target,
+                BundleStore(tmp_path / "nas"),
+                path,
+                evidence=backup.RestoreEvidence("stopped", "isolated"),
+            )
+        assert not (tmp_path / "nas").exists()
+    else:
+        result = await backup.restore_backup(
+            target,
+            BundleStore(tmp_path / "nas"),
+            path,
+            evidence=backup.RestoreEvidence("stopped", "isolated"),
+        )
+        assert result["passed"]
+
+
+async def test_old_backup_rejects_partial_controls(tmp_path, monkeypatch):
+    path = make_backup(tmp_path / "old", "t", "s", 1)
+
+    class Target(MemoryTarget):
+        async def fetch_one(self, query, params=None):
+            if "information_schema.TABLES" in query:
+                return {"n": 1}
+            return await super().fetch_one(query, params)
+
+    monkeypatch.setattr(backup, "_restore_target", lambda *_: None)
+    with pytest.raises(
+        backup.IntegrityError,
+        match="both migration control tables",
+    ):
+        await backup.restore_backup(
+            Target(),
+            BundleStore(tmp_path / "nas"),
+            path,
+            evidence=backup.RestoreEvidence("stopped", "isolated"),
+        )
+    assert not (tmp_path / "nas").exists()
+
+
+async def test_old_backup_rechecks_controls_in_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    path = make_backup(tmp_path / "old", "t", "s", 1)
+
+    class Target(MemoryTarget):
+        async def fetch_one(self, query, params=None):
+            if "information_schema.TABLES" in query:
+                return {"n": 2}
+            return await super().fetch_one(query, params)
+
+        async def fetch_all(self, query, params=None):
+            if "swe_conversation_migration_" in query:
+                return [{"id": 1}] if "FOR UPDATE" in query else []
+            return await super().fetch_all(query, params)
+
+    target = Target()
+    monkeypatch.setattr(backup, "_restore_target", lambda *_: None)
+    with pytest.raises(backup.IntegrityError, match="migration authority"):
+        await backup.restore_backup(
+            target,
+            BundleStore(tmp_path / "nas"),
+            path,
+            evidence=backup.RestoreEvidence("stopped", "isolated"),
+        )
+    assert all(not rows for rows in target.rows.values())

@@ -360,6 +360,9 @@ async def _execute(operation, manifest, inventory, output):
 
 def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
     if operation not in (
+        "inventory",
+        "plan",
+        "inspect",
         "preflight",
         "import",
         "resume",
@@ -385,6 +388,31 @@ def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
                 ):
                     raise ValueError("source and target NAS roots overlap")
     inventory = inventory_v3(manifest)
+    if operation in ("inventory", "plan", "inspect"):
+        return {
+            "version": 3,
+            "operation": operation,
+            "migration_id": manifest.migration_id,
+            "preview": True,
+            "application_schema": manifest.data["offline"][
+                "application_schema"
+            ],
+            "source_boundary": inventory["source_boundary"],
+            "source_scopes": [
+                {
+                    "scope": item["scope"],
+                    "root": item["root"],
+                    "sessions": len(item["sessions"]),
+                    "chats": len(item["chats"]),
+                }
+                for item in inventory["workspaces"]
+            ],
+            "files": len(inventory["files"]),
+            "workspaces": len(inventory["workspaces"]),
+            "shares": len(inventory["shares"]),
+            "blockers": inventory["blockers"],
+            "ready": inventory["ready"],
+        }
     if not inventory.get("ready") or inventory.get("blockers"):
         raise ValueError("frozen inventory has blockers")
     if operation in ("import", "resume", "finalize") and not apply:

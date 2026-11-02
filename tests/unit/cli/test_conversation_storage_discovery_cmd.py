@@ -92,6 +92,22 @@ def test_discover_and_freeze_existing_roots(tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert json.loads(manifest.read_text())["version"] == 3
+    from swe.cli.conversation_storage_cmd import conversation_storage_group
+
+    for operation in ("inventory", "plan", "inspect"):
+        result = CliRunner().invoke(
+            conversation_storage_group,
+            [operation, "--manifest", str(manifest)],
+        )
+        assert result.exit_code == 0, result.output
+        report = json.loads(result.output)
+        assert report["version"] == 3
+        assert report["operation"] == operation
+        assert report["blockers"] == []
+        assert (
+            report["migration_id"]
+            == json.loads(manifest.read_text())["migration_id"]
+        )
 
 
 def test_discover_refuses_report_inside_frozen_source(tmp_path):

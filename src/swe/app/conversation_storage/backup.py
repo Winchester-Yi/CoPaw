@@ -1255,6 +1255,17 @@ def _service_snapshot(snapshot, service):
     }
 
 
+async def _check_empty_migration_controls(database, tables, *, lock=False):
+    for table in tables:
+        suffix = " FOR UPDATE" if lock else ""
+        if await database.fetch_all(
+            "SELECT * FROM " + table + " LIMIT 1" + suffix,
+        ):
+            raise IntegrityError(
+                "old backup lacks migration authority receipt",
+            )
+
+
 # pylint: disable-next=too-many-statements
 async def restore_backup(
     database,
@@ -1280,6 +1291,14 @@ async def restore_backup(
         "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "
         "('swe_conversation_migration_jobs','swe_conversation_migration_entries')",
     )
+    control_tables = (
+        "swe_conversation_migration_jobs",
+        "swe_conversation_migration_entries",
+    )
+    if int(controls["n"]) == 1:
+        raise IntegrityError("restore requires both migration control tables")
+    if not int(controls["n"]):
+        control_tables = ()
     if any(receipt is not None for receipt in receipts):
         if not all(receipt is not None for receipt in receipts):
             raise IntegrityError(
@@ -1293,8 +1312,8 @@ async def restore_backup(
             raise IntegrityError(
                 "restore authority requires precreated migration controls",
             )
-    elif int(controls["n"]):
-        raise IntegrityError("old backup lacks migration authority receipt")
+    else:
+        await _check_empty_migration_controls(database, control_tables)
     document = {**documents[0], "snapshot": captured}
     _restore_target(database, document.get("source_schema"))
     current_schema = await database.fetch_one("SELECT DATABASE() AS name")
@@ -1323,6 +1342,12 @@ async def restore_backup(
             by_id[identity],
         )
     async with database.transaction():
+        if not any(receipt is not None for receipt in receipts):
+            await _check_empty_migration_controls(
+                database,
+                control_tables,
+                lock=True,
+            )
         for table in TABLES.values():
             if await database.fetch_all(
                 "SELECT * FROM "
