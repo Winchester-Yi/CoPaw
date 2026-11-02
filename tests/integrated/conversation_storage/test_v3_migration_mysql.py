@@ -81,6 +81,25 @@ async def test_v3_discovery_import_resume_verify_finalize(
     (source / "default_SRC" / "config.json").write_text(
         json.dumps({"agents": {"profiles": profiles}}),
     )
+    import shutil
+
+    source2 = tmp_path / "source2"
+    nas2 = tmp_path / "nas2"
+    runtime2 = nas2 / "default_SRC" / "workspaces" / "agent0"
+    runtime2.mkdir(parents=True)
+    workspace2 = source2 / "default_SRC" / "workspaces" / "agent0"
+    shutil.copytree(
+        source / "default_SRC" / "workspaces" / "agent0",
+        workspace2,
+    )
+    profile2 = {
+        "id": "agent0",
+        "workspace_dir": str(runtime2),
+        "enabled": True,
+    }
+    (source2 / "default_SRC" / "config.json").write_text(
+        json.dumps({"agents": {"profiles": {"agent0": profile2}}}),
+    )
     snapshot = source / "default" / "chat_shares" / "share-token.json"
     snapshot.parent.mkdir(parents=True)
     snapshot.write_text(
@@ -107,9 +126,10 @@ async def test_v3_discovery_import_resume_verify_finalize(
     shares = await db.fetch_all(
         "SELECT token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at FROM swe_chat_shares",
     )
-    for path in source.rglob("*"):
-        path.chmod(0o555 if path.is_dir() else 0o444)
-    source.chmod(0o555)
+    for root in (source, source2):
+        for path in root.rglob("*"):
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        root.chmod(0o555)
     service = {
         "service_unit_id": "TEST-SERVICE",
         "source_root": str(source),
@@ -118,7 +138,14 @@ async def test_v3_discovery_import_resume_verify_finalize(
         "nas_root": str(nas),
         "snapshot_root": str(source),
     }
-    report = discover_services([service], shares=shares)
+    service2 = {
+        "service_unit_id": "TEST-SERVICE2",
+        "source_root": str(source2),
+        "config_root": str(source2),
+        "original_root": str(nas2),
+        "nas_root": str(nas2),
+    }
+    report = discover_services([service, service2], shares=shares)
     assert report["ready"], report["blockers"]
     boundary = SourceBoundary(
         "snapshot",
@@ -133,9 +160,9 @@ async def test_v3_discovery_import_resume_verify_finalize(
         db.config.database,
     )
     inventory = inventory_v3(manifest)
-    assert len(inventory["workspaces"]) == 2
-    assert sum(len(item["chats"]) for item in inventory["workspaces"]) == 2
-    assert sum(len(item["sessions"]) for item in inventory["workspaces"]) == 2
+    assert len(inventory["workspaces"]) == 3
+    assert sum(len(item["chats"]) for item in inventory["workspaces"]) == 3
+    assert sum(len(item["sessions"]) for item in inventory["workspaces"]) == 3
     monkeypatch.setattr(
         "swe.database.config.get_database_config",
         lambda: db.config,
@@ -196,11 +223,12 @@ async def test_v3_discovery_import_resume_verify_finalize(
     )
 
     runtime_paths = list((tmp_path / "output").glob("*.runtime.json"))
-    assert len(runtime_paths) == 1
-    runtime = json.loads(runtime_paths[0].read_text())
-    assert (await validate_authority(db, runtime))[
-        "migration_id"
-    ] == manifest.migration_id
+    assert len(runtime_paths) == 2
+    for runtime_path in runtime_paths:
+        runtime = json.loads(runtime_path.read_text())
+        assert (await validate_authority(db, runtime))[
+            "migration_id"
+        ] == manifest.migration_id
     state = await db.fetch_one(
         "SELECT state FROM swe_conversation_migration_jobs WHERE migration_id=%s",
         (manifest.migration_id.encode(),),
