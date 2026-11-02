@@ -5,9 +5,16 @@
 -- Deploy only with service-aware adapters, schema readiness and migration tooling.
 -- Six NEW tables. Existing swe_chat_shares uses the separate extension script.
 -- Finalize share service ownership after verified backfill with conversation_share_service_unit_finalize.sql.
+-- Pending v3 direct-import amendment (not implemented):
+-- docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md
+-- DBA precreates these six tables in the application schema; v3 CLI uses DML only.
+-- DBA separately applies conversation_migration_control_tables.sql for v3 journals.
+-- Current v2 CLI still requires staging; do not use it against precreated targets.
 -- Proposed target: MySQL 8.0.21+, InnoDB DYNAMIC, page size >= 16 KiB, strict mode.
 -- Confirm actual MySQL/TDSQL compatibility; no automatic startup DDL.
--- Explicitly select an EMPTY review schema. Existing tables require inspected migrations.
+-- Explicitly select the reviewed schema. These six table names must not exist.
+-- Other application tables, including the original share table, may already exist.
+-- Existing conversation tables require inspected migrations; do not replay this file.
 -- DDL implicitly commits. There is deliberately no IF NOT EXISTS or DROP.
 -- All times UTC DATETIME(6). Identities are exact UTF-8 bytes, never hashes.
 -- TEXT fields contain application-validated serialized metadata, never SQL JSON types.

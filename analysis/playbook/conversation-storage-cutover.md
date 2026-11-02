@@ -2,6 +2,10 @@
 
 适用：旧文件实现 → 七张 MySQL 元数据表及原 NAS 上的不可变 bundle。整个过程是一次连续停机；不做双写，不启新 workspace，不把 `SWE_DB_NAME` 改为源快照，也不备份/恢复整个共享业务库。
 
+## 待实施的操作简化方案
+
+自动发现与人工预建表的 v3 改造见 [设计稿](../../docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md)。该方案要求 CLI 零 DDL、原分享表就地回填及 SQL 日志续跑，尚未实现。下文记录当前 v2 工具约束，不能用 v2 写命令执行 v3 操作，也不能把 staging/换表当作迁移业务本身的必需条件。
+
 ## 准备和清单
 
 使用审核过的源码 checkout（安装器读取该 checkout 的 `scripts/sql/`）；普通 wheel 不包含这些离线 DDL。运行账号需要目标实例的 schema/global CREATE、ALTER、DROP、INSERT、SELECT、UPDATE、DELETE，以及 information_schema / performance_schema 可见权限。仅通过 role 获得的权限保守拒绝，须另行审核。

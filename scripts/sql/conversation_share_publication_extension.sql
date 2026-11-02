@@ -3,12 +3,13 @@
 -- Target DDL only. Runtime adapters and readiness must implement the same service scope.
 -- Inspect SHOW CREATE TABLE swe_chat_shares before reviewing this script.
 -- Existing tokens, column definitions, collations, defaults and counters survive.
--- Apply once in an isolated review database after the six-table draft.
--- Not idempotent; apply to the final-source staging copy during the continuous
--- outage migration. Validate/backfill before installing the seven-table set.
--- service_unit_key is nullable ONLY during staging backfill, with no service default.
--- Then run conversation_share_service_unit_finalize.sql before seven-table installation.
--- Keep the original share table unchanged for rollback before new-version writes.
+-- DBA applies manually once in a reviewed target after the six-table draft.
+-- Not idempotent. Pending v3 uses the original application share table during
+-- the outage; DML backfills only the four added columns. Current v2 uses staging.
+-- Pending v3 spec: docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md
+-- service_unit_key is nullable ONLY during offline backfill, with no service default.
+-- DBA runs conversation_share_service_unit_finalize.sql before activation.
+-- Preserve all eight original fields and tokens; retain a consistent backup before DDL.
 -- DDL implicitly commits. This script is not a rollbackable transaction.
 -- Annotate all eight legacy fields using their actual definitions, including
 -- deployment-specific character sets/collations/defaults. Indexes stay intact.
@@ -70,7 +71,7 @@ ALTER TABLE swe_chat_shares
     ADD COLUMN byte_length BIGINT UNSIGNED NULL
         COMMENT '分享正文字节长度；旧记录回填前为NULL，读取前检查范围',
     ADD COLUMN service_unit_key VARBINARY(256) NULL
-        COMMENT '分享所属NAS服务单元原值；仅staging回填期间可NULL，安装前须收紧为NOT NULL',
+        COMMENT '分享所属NAS服务单元原值；仅离线回填期间可NULL，启用前须收紧为NOT NULL',
     ADD KEY ix_swe_chat_shares_publication (publication_id),
     ADD KEY ix_swe_chat_shares_service_chat (service_unit_key, chat_id),
     ADD KEY ix_swe_chat_shares_service_creator (service_unit_key, creator_id),

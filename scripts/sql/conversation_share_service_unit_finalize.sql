@@ -1,6 +1,8 @@
 -- DESIGN DRAFT / NOT APPLIED TO PRODUCTION, updated 2026-11-02.
 -- Spec: docs/superpowers/specs/2026-11-02-conversation-service-unit-isolation-design.md
--- Run once ONLY in stopped-writer staging after extension and verified ownership backfill.
+-- DBA runs once ONLY after extension and verified ownership backfill, with writers stopped.
+-- Pending v3 uses precreated application tables; current v2 uses staging.
+-- Pending v3 spec: docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md
 -- Source ownership must come from the coordinated migration inventory, never a DB default.
 -- This guard verifies share ownership/locator completeness, not the full NAS/semantic closure.
 -- Full importer validation must also reject invalid service identities and check all extents.
