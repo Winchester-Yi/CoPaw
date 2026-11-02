@@ -261,3 +261,20 @@ def test_multiservice_export_validates_all_ownership_before_output(
     with pytest.raises(ValueError, match="service differs"):
         OfflineJob(migration.path).export()
     assert not writes
+
+
+@pytest.mark.parametrize("command", ["import", "install"])
+def test_legacy_apply_is_denied_before_database_access(
+    migration,
+    monkeypatch,
+    command,
+):
+    from swe.database.connection import DatabaseConnection
+
+    async def forbidden(*args):
+        pytest.fail("legacy write opened database")
+
+    monkeypatch.setattr(DatabaseConnection, "connect", forbidden)
+    result = invoke(migration, command, "--apply")
+    assert result.exit_code != 0
+    assert "legacy v2" in result.output

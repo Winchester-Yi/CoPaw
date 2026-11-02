@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -63,7 +64,10 @@ async def test_configured_service_remains_bound_after_environment_change(
     monkeypatch.setenv(runtime.CURSOR_ENV, "secret")
     monkeypatch.delenv("CMB_CAAS_SERVICEUNITID", raising=False)
     monkeypatch.setattr(runtime, "_runtime", None)
-    database = SimpleNamespace(is_connected=True)
+    database = SimpleNamespace(
+        is_connected=True,
+        fetch_one=AsyncMock(return_value={"n": 0}),
+    )
     with pytest.raises(ValueError, match="CMB_CAAS_SERVICEUNITID"):
         await runtime.configure_runtime(database)
 

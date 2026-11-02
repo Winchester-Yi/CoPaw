@@ -249,7 +249,16 @@ class ImportBatch:
 class ConversationImporter:
     """Bounded, resumable import into the manifest's exclusive offline target."""
 
-    def __init__(self, database, bundles, manifest, target, *, batch_size=128):
+    def __init__(
+        self,
+        database,
+        bundles,
+        manifest,
+        target,
+        *,
+        batch_size=128,
+        store_factory=None,
+    ):
         from .install_records import OfflineImportStore
 
         if not 1 <= batch_size <= 512:
@@ -273,7 +282,7 @@ class ConversationImporter:
             },
         )
         self.stores = {
-            key: OfflineImportStore(
+            key: (store_factory or OfflineImportStore)(
                 database,
                 store,
                 target,
@@ -289,6 +298,18 @@ class ConversationImporter:
     def assigned(self, kind, position):
         return self.manifest.allocate(kind, position)["target_id"]
 
+    async def _allocate(self, kind, position):
+        return self.manifest.allocate(kind, position)
+
+    async def _assigned(self, kind, position):
+        return (await self._allocate(kind, position))["target_id"]
+
+    async def _set_batch_state(self, position, state):
+        self.manifest.set_batch_state(position, state)
+
+    async def _batch_finished(self, position):
+        self._batch_committed(position)
+
     async def _publish(self, position, scope, rows, blocks, *, spec=None):
         self.bundles = self.bundle_stores[scope.service_unit_id]
         self.store = self.stores[scope.service_unit_id]
@@ -303,7 +324,7 @@ class ConversationImporter:
         from ..publications import PublicationRequest, CommitPlan
         from .install_records import plan_block
 
-        assignment = self.manifest.allocate("publication", position)
+        assignment = await self._allocate("publication", position)
         operation = assignment["operation_key"]
         request = PublicationRequest(
             operation,
@@ -334,9 +355,9 @@ class ConversationImporter:
                 load_metadata_json(body.content),
             )
             await self.store.verify_blocks(current, [body, *blocks])
-            self._batch_committed(position)
+            await self._batch_finished(position)
             return current
-        self.manifest.set_batch_state(position, "importing")
+        await self._set_batch_state(position, "importing")
         if not current.get("durable_at"):
             path = self.bundles.root / assignment["relative_path"]
             if path.exists():
@@ -348,7 +369,7 @@ class ConversationImporter:
             [body, *blocks],
         )
         result = await self.store.commit(operation)
-        self._batch_committed(position)
+        await self._batch_finished(position)
         return result
 
     def _batch_committed(self, position):
@@ -513,7 +534,7 @@ class ConversationImporter:
         for session in workspace["sessions"]:
             position = session["position"]
             identity = session["identity"]
-            sid = self.assigned("session", position)
+            sid = await self._assigned("session", position)
             self.session_ids[position] = sid
             source = session["legacy"]["state"]
             now = self.manifest.data["source_boundary"]["captured_at"]
@@ -537,7 +558,7 @@ class ConversationImporter:
             for index in session["chat_positions"]:
                 item = workspace["chats"][index]
                 spec = ChatSpec.model_validate(item["spec"])
-                cid = self.assigned("chat", item["position"])
+                cid = await self._assigned("chat", item["position"])
                 self.chat_ids[item["position"]] = cid
                 light, content = split_metadata(spec.meta)
                 binding = read_expert_binding(spec)
@@ -590,7 +611,7 @@ class ConversationImporter:
         for key, value in turns.items():
             chat = chats.get(value.get("chat_id"))
             if chat is not None:
-                self.turn_ids[(sid, key)] = self.assigned(
+                self.turn_ids[(sid, key)] = await self._assigned(
                     "turn",
                     session["position"] + "/turn:" + key,
                 )
@@ -609,7 +630,7 @@ class ConversationImporter:
             blocks = []
             for index, item in enumerate(batch, start=start):
                 position = session["position"] + "/message:" + str(index)
-                mid = self.assigned("message", position)
+                mid = await self._assigned("message", position)
                 block = "message:" + str(mid)
                 turn = self.turn_ids.get((sid, item["turn_key"]))
                 origin = chats.get(item["chat_key"])
@@ -716,7 +737,6 @@ class ConversationImporter:
         if type(revision) is not int or revision < 0:
             raise ValueError("legacy Session revision is invalid")
         root_position = session["position"] + "/recovery"
-        self.assigned("publication", root_position)
         turns = list(state.get("turn_states", {}).items())
         for start in range(0, len(turns), self.batch_size):
             rows = []
@@ -874,7 +894,7 @@ class ConversationImporter:
             first = archive_order + 1
             for index, payload in enumerate(batch["messages"]):
                 archive_order += 1
-                mid = self.assigned(
+                mid = await self._assigned(
                     "message",
                     chat["position"]
                     + "/archive:"
@@ -907,7 +927,7 @@ class ConversationImporter:
                 )
                 rows.append({"table": "messages", "values": values})
                 blocks.append(_block(name, "archive", payload))
-            pub = self.manifest.allocate(
+            pub = await self._allocate(
                 "publication",
                 chat["position"] + "/boundary:" + boundary["id"],
             )
@@ -950,7 +970,7 @@ class ConversationImporter:
         epochs = chat["archive"]["epochs"]
         for item in reversed(epochs):
             position = chat["position"] + "/epoch:" + str(item["epoch"])
-            pub = self.manifest.allocate("publication", position)
+            pub = await self._allocate("publication", position)
             record = item["record"]
             events = [
                 event
@@ -1149,7 +1169,8 @@ def _message_row(
 def bundle_stores(bundles, manifest):
     """Bind every source service explicitly to one isolated NAS store."""
     services = {
-        item["service_unit_id"] for item in manifest.data["workspaces"]
+        item["service_unit_id"]
+        for item in manifest.data.get("services", manifest.data["workspaces"])
     }
     if isinstance(bundles, dict):
         stores = dict(bundles)

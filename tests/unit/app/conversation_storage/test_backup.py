@@ -216,7 +216,10 @@ async def test_copy_failure_retains_backup_pins_after_fence_release(
         service_unit_id="schema-test-service",
     )
     service = ConversationBackup(
-        SimpleNamespace(execute=AsyncMock(return_value=1)),
+        SimpleNamespace(
+            execute=AsyncMock(return_value=1),
+            fetch_one=AsyncMock(return_value={"n": 0}),
+        ),
         BundleStore(tmp_path / "nas"),
         scope,
     )
@@ -299,7 +302,7 @@ async def test_capture_cannot_mark_unsettled_restore_ready(tmp_path):
         service_unit_id="schema-test-service",
     )
     service = ConversationBackup(
-        SimpleNamespace(),
+        SimpleNamespace(fetch_one=AsyncMock(return_value={"n": 0})),
         BundleStore(tmp_path),
         scope,
     )

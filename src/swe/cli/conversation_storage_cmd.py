@@ -336,6 +336,28 @@ def _readonly_manifest(manifest):
 
 def _command(operation, path, apply=False):
     try:
+        from swe.app.conversation_storage.chat_mutations import (
+            load_metadata_json,
+        )
+
+        version = load_metadata_json(path.read_bytes()).get("version")
+        if version == 3:
+            from swe.cli.conversation_storage_v3_cmd import run_v3_command
+
+            result = run_v3_command(operation, path, apply=apply)
+            click.echo(
+                json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+            if result.get("passed") is False or result.get("blockers"):
+                raise click.ClickException(
+                    "conversation storage verification has blockers",
+                )
+            return
         job = OfflineJob(path)
         report = job.inventory()
         if apply or operation == "verify":
@@ -344,6 +366,10 @@ def _command(operation, path, apply=False):
             )
 
             validate_inventory(report)
+        if apply and operation in {"import", "install"}:
+            raise ValueError(
+                "legacy v2 import/install is disabled; use the v3 migration CLI",
+            )
         if operation == "export" and apply:
             result = job.export()
         elif operation in {"verify"} or apply:
@@ -369,6 +395,15 @@ def _command(operation, path, apply=False):
 @click.group("conversation-storage")
 def conversation_storage_group():
     """Offline maintenance. Freeze all writers; mutations require --apply."""
+
+
+from swe.cli.conversation_storage_discovery_cmd import (
+    register_discovery_commands,
+)
+from swe.cli.conversation_storage_v3_cmd import register_v3_commands
+
+register_discovery_commands(conversation_storage_group)
+register_v3_commands(conversation_storage_group)
 
 
 def _register(operation, mutable=False):

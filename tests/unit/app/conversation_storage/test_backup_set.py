@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=use-dict-literal
 """Several scope backups restore together, never by weakening empty-target checks."""
 
 from contextlib import asynccontextmanager
@@ -83,6 +84,8 @@ class MemoryTarget:
             raise
 
     async def fetch_one(self, query, params=None):
+        if "information_schema.TABLES" in query:
+            return {"n": 0}
         if query == "SELECT DATABASE() AS name":
             return {"name": self.config.database}
         return {"n": len(self.rows[query.split()[-1]])}
@@ -146,6 +149,94 @@ async def test_restore_all_scopes_to_one_empty_target(tmp_path, monkeypatch):
             paths,
             evidence=backup.RestoreEvidence("stopped-all", "isolated"),
         )
+
+
+@pytest.mark.parametrize("verification_fails", [False, True])
+async def test_restore_receipt_commits_only_after_complete_verification(
+    tmp_path,
+    monkeypatch,
+    verification_fails,
+):
+    from swe.app.conversation_storage.migration import authority
+
+    path = make_backup(tmp_path / "backup", "t", "s", 1)
+    document = backup.decode_metadata((path / "metadata.json").read_text())
+    scope = ["schema-test-service", "t", "s", "a"]
+    proof = {
+        "version": 1,
+        "migration_id": "00000000-0000-4000-8000-000000000001",
+        "services": {
+            scope[0]: {
+                "nas_root": str(tmp_path / "source"),
+                "workspaces": [
+                    {
+                        "root": str(tmp_path / "source" / "workspace"),
+                        "scope": scope,
+                    },
+                ],
+            },
+        },
+    }
+    document.update(version=3, migration_authority=proof)
+    backup._atomic_json(path / "metadata.json", document)
+
+    class AuthorityTarget(MemoryTarget):
+        def __init__(self):
+            super().__init__()
+            self.rows["swe_conversation_migration_jobs"] = []
+
+        async def fetch_one(self, query, params=None):
+            if "information_schema.TABLES" in query:
+                return {"n": 2}
+            if "@@server_uuid" in query:
+                return {
+                    "server_uuid": "restored-server",
+                    "schema_name": self.config.database,
+                }
+            return await super().fetch_one(query, params)
+
+    (tmp_path / "existing-workspace").mkdir()
+    target = AuthorityTarget()
+    monkeypatch.setattr(backup, "_restore_target", lambda *_: None)
+    original = backup._verify_restored_readers
+
+    async def checked(*args):
+        assert target.transactions == 1
+        assert not target.rows["swe_conversation_migration_jobs"]
+        if verification_fails:
+            raise backup.IntegrityError("reader verification failed")
+        await original(*args)
+
+    monkeypatch.setattr(backup, "_verify_restored_readers", checked)
+    kwargs = dict(
+        evidence=backup.RestoreEvidence("stopped", "isolated"),
+        workspace_roots={tuple(scope): str(tmp_path / "existing-workspace")},
+    )
+    if verification_fails:
+        with pytest.raises(backup.IntegrityError, match="reader verification"):
+            await backup.restore_backup(
+                target,
+                BundleStore(tmp_path / "new-nas"),
+                path,
+                **kwargs,
+            )
+        assert all(not rows for rows in target.rows.values())
+    else:
+        result = await backup.restore_backup(
+            target,
+            BundleStore(tmp_path / "new-nas"),
+            path,
+            **kwargs,
+        )
+        restored = authority.validate_receipt(result["migration_authority"])
+        assert restored["migration_id"] != proof["migration_id"]
+        assert (
+            target.rows["swe_conversation_migration_jobs"][0]["state"]
+            == "ready"
+        )
+        assert result["runtime_manifests"][scope[0]]["workspaces"][0][
+            "root"
+        ] == str(tmp_path / "existing-workspace")
 
 
 @pytest.mark.parametrize("conflict", ["scope", "schema", "id"])

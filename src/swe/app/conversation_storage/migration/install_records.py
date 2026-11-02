@@ -685,15 +685,17 @@ class OfflineImportStore(PublicationStore):
         for item in imported["updates"]:
             await self._apply_record(item, row, index, update=True)
         if plan.share is not None:
-            from ..shares import install_share
-
-            await install_share(
-                self.db,
+            await self._install_share(
                 PublicationRequestFrom(row),
                 plan.share,
                 row,
                 index,
             )
+
+    async def _install_share(self, request, plan, row, index):
+        from ..shares import install_share
+
+        await install_share(self.db, request, plan, row, index)
 
     def _resolve(self, values, publication, index):
         result = {}

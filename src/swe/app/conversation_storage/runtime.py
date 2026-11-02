@@ -106,9 +106,19 @@ def mysql_authority():
 class ConversationRuntime:
     """One database and NAS root, mapped to existing workspace identities."""
 
-    def __init__(self, database, document, cursor_secret, *, service_unit_id):
+    def __init__(
+        self,
+        database,
+        document,
+        cursor_secret,
+        *,
+        service_unit_id,
+        authority_validated=False,
+    ):
         service_unit_bytes(service_unit_id)
-        if document.get("version") != 2 or set(document) != {
+        if document.get("version") != 2 or set(document) - {
+            "migration_authority",
+        } != {
             "version",
             "service_unit_id",
             "nas_root",
@@ -135,7 +145,9 @@ class ConversationRuntime:
                 raise ValueError("duplicate installed workspace identity")
             self.mappings[root] = scope
             scopes.add(scope)
-        if not self.mappings:
+        if not self.mappings and not (
+            authority_validated and document.get("migration_authority")
+        ):
             raise ValueError("conversation scope manifest has no workspaces")
         self.shares = ShareStorage(
             database,
@@ -172,7 +184,18 @@ class ConversationRuntime:
         return self._workspaces[root]
 
     async def verify(self):
-        root, scope = next(iter(self.mappings.items()))
+        root, scope = next(
+            iter(self.mappings.items()),
+            (
+                self.nas_root,
+                WorkspaceScope(
+                    "",
+                    "",
+                    "",
+                    service_unit_id=self.service_unit_id,
+                ),
+            ),
+        )
         await WorkspaceConversationStorage(
             self.database,
             scope,
@@ -198,11 +221,16 @@ async def configure_runtime(database):
             "conversation storage requires installed scopes and cursor secret",
         )
     document = load_metadata_json(Path(path).read_bytes())
+    service_unit_id = service_unit_from_env()
+    from .migration.authority import validate_authority
+
+    authority = await validate_authority(database, document)
     candidate = ConversationRuntime(
         database,
         document,
         secret.encode(),
-        service_unit_id=service_unit_from_env(),
+        service_unit_id=service_unit_id,
+        authority_validated=authority is not None,
     )
     await candidate.verify()
     _runtime = candidate

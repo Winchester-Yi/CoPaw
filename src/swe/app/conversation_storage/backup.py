@@ -913,6 +913,11 @@ class ConversationBackup:
                 None,
             ),
         }
+        from .migration.authority import backup_authority
+
+        authority = await backup_authority(self.db, self.scope)
+        if authority is not None:
+            document.update(version=3, migration_authority=authority)
         await asyncio.to_thread(
             _atomic_json,
             destination / "metadata.json",
@@ -1043,8 +1048,19 @@ class ConversationBackup:
 def load_backup(path, *, expected_scope=None, expected_service_unit_id=None):
     root = Path(path).resolve(strict=True)
     document = decode_metadata((root / "metadata.json").read_text())
-    if document.get("version") != 2 or not document.get("backup_id"):
+    if document.get("version") not in (2, 3) or not document.get("backup_id"):
         raise IntegrityError("unsupported backup metadata")
+    if document.get("version") == 3:
+        from .migration.authority import validate_receipt
+
+        authority = validate_receipt(document.get("migration_authority"))
+        scope = WorkspaceScope.from_values(document["scope"])
+        service = authority["services"].get(scope.service_unit_id)
+        if set(authority["services"]) != {scope.service_unit_id} or not any(
+            item["scope"] == list(scope.values)
+            for item in service["workspaces"]
+        ):
+            raise IntegrityError("backup migration authority scope differs")
     scope = WorkspaceScope.from_values(document["scope"])
     if expected_service_unit_id is not None:
         service_unit_bytes(expected_service_unit_id)
@@ -1239,7 +1255,15 @@ def _service_snapshot(snapshot, service):
     }
 
 
-async def restore_backup(database, bundles, backup_path, *, evidence):
+# pylint: disable-next=too-many-statements
+async def restore_backup(
+    database,
+    bundles,
+    backup_path,
+    *,
+    evidence,
+    workspace_roots=None,
+):
     """Atomically restore one path or a complete list of scope backup paths."""
     from .backup_set import load_restore_set, validate_restore_tokens
 
@@ -1250,6 +1274,27 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
         backup_path,
     )
     stores = _restore_stores(bundles, documents, backup_path)
+    receipts = [member.get("migration_authority") for member in documents]
+    controls = await database.fetch_one(
+        "SELECT COUNT(*) AS n FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "
+        "('swe_conversation_migration_jobs','swe_conversation_migration_entries')",
+    )
+    if any(receipt is not None for receipt in receipts):
+        if not all(receipt is not None for receipt in receipts):
+            raise IntegrityError(
+                "restore set has incomplete migration authority receipts",
+            )
+        if workspace_roots is None:
+            raise IntegrityError(
+                "restore authority requires explicit workspace roots",
+            )
+        if int(controls["n"]) != 2:
+            raise IntegrityError(
+                "restore authority requires precreated migration controls",
+            )
+    elif int(controls["n"]):
+        raise IntegrityError("old backup lacks migration authority receipt")
     document = {**documents[0], "snapshot": captured}
     _restore_target(database, document.get("source_schema"))
     current_schema = await database.fetch_one("SELECT DATABASE() AS name")
@@ -1312,10 +1357,29 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
                     + ")",
                     tuple(row.values()),
                 )
-    await _verify_restored_metadata(database, snapshot, stores)
-    for member in documents:
-        service = WorkspaceScope.from_values(member["scope"]).service_unit_id
-        await _verify_restored_readers(database, stores[service], member)
+        await _verify_restored_metadata(database, snapshot, stores)
+        for member in documents:
+            service = WorkspaceScope.from_values(
+                member["scope"],
+            ).service_unit_id
+            await _verify_restored_readers(database, stores[service], member)
+        restored_authority = None
+        if all(receipt is not None for receipt in receipts):
+            from .migration.authority import restore_authorities
+
+            restored_authority = await restore_authorities(
+                database,
+                receipts,
+                [
+                    WorkspaceScope.from_values(member["scope"])
+                    for member in documents
+                ],
+                {
+                    service: str(Path(store.root).resolve())
+                    for service, store in stores.items()
+                },
+                workspace_roots=workspace_roots,
+            )
     report.update(
         version=2,
         service_unit_id=WorkspaceScope.from_values(
@@ -1369,6 +1433,18 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
                 for member in documents
             ],
         )
+    if restored_authority is not None:
+        report["migration_authority"] = restored_authority
+        report["runtime_manifests"] = {
+            service: {
+                "version": 2,
+                "service_unit_id": service,
+                "nas_root": entry["nas_root"],
+                "workspaces": entry["workspaces"],
+                "migration_authority": restored_authority,
+            }
+            for service, entry in restored_authority["services"].items()
+        }
     return report
 
 
