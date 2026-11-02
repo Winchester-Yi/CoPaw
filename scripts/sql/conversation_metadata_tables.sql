@@ -1,6 +1,10 @@
--- DESIGN DRAFT / NOT EXECUTED, updated 2026-10-30.
+-- DESIGN DRAFT / NOT APPLIED TO PRODUCTION, updated 2026-11-02.
 -- Spec: docs/superpowers/specs/2026-10-29-db-nas-conversation-storage-design.md
+-- Service-unit amendment: docs/superpowers/specs/2026-11-02-conversation-service-unit-isolation-design.md
+-- Target DDL only: the current three-dimensional runtime schema contract is incompatible.
+-- Deploy only with service-aware adapters, schema readiness and migration tooling.
 -- Six NEW tables. Existing swe_chat_shares uses the separate extension script.
+-- Finalize share service ownership after verified backfill with conversation_share_service_unit_finalize.sql.
 -- Proposed target: MySQL 8.0.21+, InnoDB DYNAMIC, page size >= 16 KiB, strict mode.
 -- Confirm actual MySQL/TDSQL compatibility; no automatic startup DDL.
 -- Explicitly select an EMPTY review schema. Existing tables require inspected migrations.
@@ -11,6 +15,7 @@
 
 CREATE TABLE swe_conversation_sessions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',
+    service_unit_key VARBINARY(256) NOT NULL COMMENT 'CMB_CAAS_SERVICEUNITID原值，稳定标识共享同一NAS的服务单元',
     tenant_key VARBINARY(256) NOT NULL COMMENT '租户标识原值，按UTF-8字节精确匹配',
     source_key VARBINARY(256) NOT NULL COMMENT '来源标识原值，按UTF-8字节精确匹配',
     agent_key VARBINARY(256) NOT NULL COMMENT 'Agent标识原值，按UTF-8字节精确匹配',
@@ -34,15 +39,16 @@ CREATE TABLE swe_conversation_sessions (
     updated_at DATETIME(6) NOT NULL COMMENT '最近更新的UTC时间，微秒精度',
     PRIMARY KEY (id),
     UNIQUE KEY uq_conv_session_identity
-        (tenant_key, source_key, agent_key, user_key, channel_key, external_session_key),
-    KEY ix_conv_session_lease (lease_until, active_turn_id),
+        (service_unit_key, tenant_key, source_key, agent_key, user_key, channel_key, external_session_key),
+    KEY ix_conv_session_lease (service_unit_key, lease_until, active_turn_id),
     KEY ix_conv_session_lookup
-        (tenant_key, source_key, agent_key, channel_key, external_session_key, user_key),
+        (service_unit_key, tenant_key, source_key, agent_key, channel_key, external_session_key, user_key),
     KEY ix_conv_session_recovery (recovery_publication_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COMMENT='逻辑会话身份、执行权威及共享在线状态，完整scope内唯一';
 
 CREATE TABLE swe_conversation_chats (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',
+    service_unit_key VARBINARY(256) NOT NULL COMMENT '所属服务单元原值，与关联Session同事务维护，不由客户端指定',
     session_id BIGINT UNSIGNED NOT NULL COMMENT '关联逻辑Session内部ID，由应用事务校验关联和作用域',
     external_chat_key VARBINARY(128) NOT NULL COMMENT '保留现有外部Chat UUID，不替换为数据库整数ID',
     registry_order BIGINT UNSIGNED NOT NULL COMMENT '原registry位置；新增记录递增分配，兼容相同更新时间的选择顺序',
@@ -72,11 +78,11 @@ CREATE TABLE swe_conversation_chats (
     updated_at DATETIME(6) NOT NULL COMMENT '最近更新的UTC时间，微秒精度',
     deleted_at DATETIME(6) NULL COMMENT '逻辑删除UTC时间；NULL表示未删除，权限即时生效',
     PRIMARY KEY (id),
-    UNIQUE KEY uq_conv_chat_external (tenant_key, source_key, agent_key, external_chat_key),
+    UNIQUE KEY uq_conv_chat_external (service_unit_key, tenant_key, source_key, agent_key, external_chat_key),
     KEY ix_conv_chat_recent
-        (tenant_key, source_key, agent_key, user_key, deleted_at, updated_at, external_chat_key),
+        (service_unit_key, tenant_key, source_key, agent_key, user_key, deleted_at, updated_at, external_chat_key),
     KEY ix_conv_chat_channel_recent
-        (tenant_key, source_key, agent_key, user_key, channel_key, deleted_at, updated_at, external_chat_key),
+        (service_unit_key, tenant_key, source_key, agent_key, user_key, channel_key, deleted_at, updated_at, external_chat_key),
     KEY ix_conv_chat_session (session_id, updated_at, registry_order),
     KEY ix_conv_chat_checkpoint (active_checkpoint_publication_id),
     KEY ix_conv_chat_content_meta (content_meta_publication_id)
@@ -84,6 +90,7 @@ CREATE TABLE swe_conversation_chats (
 
 CREATE TABLE swe_conversation_turns (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',
+    service_unit_key VARBINARY(256) NOT NULL COMMENT '所属服务单元原值，与关联Session和Chat一致',
     chat_id BIGINT UNSIGNED NOT NULL COMMENT '关联Chat内部ID；历史归属保留，由应用校验可见性',
     session_id BIGINT UNSIGNED NOT NULL COMMENT '关联逻辑Session内部ID，由应用事务校验关联和作用域',
     question_msg_key VARBINARY(256) NOT NULL COMMENT '用户问题源Msg ID，在完整逻辑Session内唯一，用于幂等与查询',
@@ -101,7 +108,7 @@ CREATE TABLE swe_conversation_turns (
     PRIMARY KEY (id),
     UNIQUE KEY uq_conv_turn_question (session_id, question_msg_key),
     UNIQUE KEY uq_conv_turn_order (chat_id, turn_order),
-    UNIQUE KEY uq_conv_turn_runtime (runtime_turn_key),
+    UNIQUE KEY uq_conv_turn_runtime (service_unit_key, runtime_turn_key),
     KEY ix_conv_turn_session_state (session_id, state, id),
     KEY ix_conv_turn_admission (admission_publication_id),
     KEY ix_conv_turn_terminal (terminal_publication_id)
@@ -109,6 +116,7 @@ CREATE TABLE swe_conversation_turns (
 
 CREATE TABLE swe_conversation_publications (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',
+    service_unit_key VARBINARY(256) NOT NULL COMMENT '不可变内容所属NAS服务单元原值，workspace和legacy_share均需明确归属',
     operation_key VARBINARY(64) NOT NULL COMMENT '首次预留INSERT前生成的随机操作身份；重试复用，不是内容摘要',
     scope_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'workspace' COMMENT '作用域类型：workspace或仅旧孤立分享导入使用的legacy_share',
     tenant_key VARBINARY(256) NOT NULL COMMENT '租户标识原值，按UTF-8字节精确匹配',
@@ -124,7 +132,7 @@ CREATE TABLE swe_conversation_publications (
     base_state_revision BIGINT UNSIGNED NULL COMMENT '提交校验所需的Session状态基线版本',
     base_history_revision BIGINT UNSIGNED NULL COMMENT '提交校验所需的Chat历史基线版本',
     epoch BIGINT UNSIGNED NULL COMMENT '提交所关联的Chat checkpoint epoch',
-    relative_path VARBINARY(1024) NOT NULL COMMENT '由operation key生成的唯一NAS相对路径，每操作一个不可变bundle',
+    relative_path VARBINARY(1024) NOT NULL COMMENT '由operation key生成的服务单元内唯一NAS相对路径，每操作一个不可变bundle',
     format_key VARBINARY(64) NOT NULL COMMENT 'NAS bundle编码格式及版本标识，由应用解析',
     byte_length BIGINT UNSIGNED NULL COMMENT '完整bundle字节长度，持久化后固定；预留阶段可NULL',
     durable_at DATETIME(6) NULL COMMENT 'NAS文件及父目录完成持久化确认的UTC时间',
@@ -158,13 +166,13 @@ CREATE TABLE swe_conversation_publications (
     aborted_at DATETIME(6) NULL COMMENT '经原操作对账后确认终止的UTC时间',
     reclaimed_at DATETIME(6) NULL COMMENT 'NAS bundle实际回收完成的UTC时间',
     PRIMARY KEY (id),
-    UNIQUE KEY uq_conv_publication_operation (operation_key),
-    UNIQUE KEY uq_conv_publication_path (relative_path),
+    UNIQUE KEY uq_conv_publication_operation (service_unit_key, operation_key),
+    UNIQUE KEY uq_conv_publication_path (service_unit_key, relative_path),
     UNIQUE KEY uq_conv_archive_boundary (chat_id, boundary_key),
     UNIQUE KEY uq_conv_archive_order (chat_id, boundary_order),
     UNIQUE KEY uq_conv_checkpoint_revision (chat_id, epoch, checkpoint_revision),
-    KEY ix_conv_publication_pending (state, created_at, id),
-    KEY ix_conv_publication_gc (gc_state, state, retained_history, id),
+    KEY ix_conv_publication_pending (service_unit_key, state, created_at, id),
+    KEY ix_conv_publication_gc (service_unit_key, gc_state, state, retained_history, id),
     KEY ix_conv_publication_events (chat_id, epoch, event_last, id),
     KEY ix_conv_publication_chat (chat_id, id),
     KEY ix_conv_publication_session (session_id, id),
@@ -173,6 +181,7 @@ CREATE TABLE swe_conversation_publications (
 
 CREATE TABLE swe_conversation_messages (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '保留消息occurrence内部ID；源Msg ID可重复，不能据其去重',
+    service_unit_key VARBINARY(256) NOT NULL COMMENT '所属服务单元原值，与Session及正文和归档publication一致',
     session_id BIGINT UNSIGNED NOT NULL COMMENT '关联逻辑Session内部ID，由应用事务校验关联和作用域',
     origin_chat_id BIGINT UNSIGNED NULL COMMENT '准入anchor的来源Chat；NULL兼容旧无归属anchor',
     archive_chat_id BIGINT UNSIGNED NULL COMMENT '归档occurrence所属Chat；非归档行保持NULL',
@@ -211,6 +220,7 @@ CREATE TABLE swe_conversation_messages (
 
 CREATE TABLE swe_conversation_retentions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',
+    service_unit_key VARBINARY(256) NOT NULL COMMENT '保留或保护所属服务单元原值，无publication的guard和fence亦须明确归属',
     retention_key VARBINARY(128) NOT NULL COMMENT '保留集合标识，如reader、backup或依赖集合',
     member_key BIGINT UNSIGNED NOT NULL COMMENT '集合成员键：fence或guard为0，普通pin等于publication内部ID',
     kind VARCHAR(24) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '保留类型：reader/backup/dependency/backup_fence/gc_guard',
@@ -225,19 +235,22 @@ CREATE TABLE swe_conversation_retentions (
     created_at DATETIME(6) NOT NULL COMMENT '创建时间，UTC，微秒精度',
     released_at DATETIME(6) NULL COMMENT '显式释放保留的UTC时间，未释放为NULL',
     PRIMARY KEY (id),
-    UNIQUE KEY uq_conv_retention_member (retention_key, member_key),
-    UNIQUE KEY uq_conv_retention_scope_guard (scope_kind, tenant_key, source_key, agent_key, guard_marker),
+    UNIQUE KEY uq_conv_retention_member (service_unit_key, retention_key, member_key),
+    UNIQUE KEY uq_conv_retention_scope_guard (service_unit_key, scope_kind, tenant_key, source_key, agent_key, guard_marker),
     KEY ix_conv_retention_object (publication_id, state),
-    KEY ix_conv_retention_scope (scope_kind, tenant_key, source_key, agent_key, kind, state)
+    KEY ix_conv_retention_scope (service_unit_key, scope_kind, tenant_key, source_key, agent_key, kind, state)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COMMENT='读取、备份及依赖引用保留与scope级GC并发保护';
 
 -- All relationships use application-managed IDs. The adapter validates all
--- scope/session/chat relationships, committed status, extents and CAS in one transaction.
+-- service/scope/session/chat relationships, committed status, extents and CAS in one transaction.
+-- Integer IDs remain global across all services sharing this schema.
+-- Parent-ID unique keys remain global; every association must also match service_unit_key.
+-- Service keys have no implicit default. Backfill/import must use verified source ownership.
 -- sessions.active_turn_id/draft_chat_id/recovery_publication_id;
 -- chats.active_checkpoint_publication_id/content_meta_publication_id; turns.*_publication_id.
 -- No cascades or automatic age-based history deletion.
 
--- Each scope lazily creates exactly one retention kind=gc_guard row using
+-- Each service + scope lazily creates exactly one retention kind=gc_guard row using
 -- guard_marker=1, member_key=0 and a random opaque retention_key before any
 -- publication/GC/backup in that scope. The scope guard UNIQUE key arbitrates races.
 -- All ordinary pins/fences use guard_marker=NULL. No global GC mutex is required.

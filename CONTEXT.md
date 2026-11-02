@@ -2055,6 +2055,10 @@ _Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
 The authoritative identity, ownership, relationships, lifecycle state, ordering, and content references of Chats, Logical Chat Sessions, Answer Turns, messages, compaction archives, checkpoints, and shares. It includes Chat titles and content locations and extents, but excludes conversation bodies and semantic summaries; related SubAgent and Goal state remains owned by those domains.
 _Avoid_: Chat-list fields only, arbitrary JSON payload, duplicated conversation body
 
+**Conversation Service Unit（会话服务单元）**:
+A stable backend service grouping whose replicas share one conversation NAS mount. Different Conversation Service Units use isolated NAS mounts while sharing the conversation metadata database. A Conversation Service Unit remains the same across replica restarts and scaling and is distinct from a tenant, source, Agent, workspace, or Runtime Instance.
+_Avoid_: Pod identity, execution owner, tenant alias, filesystem path
+
 **Conversation Content**:
 The retained user and assistant messages, tool arguments and results, semantic summaries and checkpoint facts, and Agent recovery snapshot payloads belonging to a conversation. Its identity, ownership, ordering, lifecycle, and extent are described by Conversation Metadata.
 _Avoid_: plain text only, current model context only, conversation metadata

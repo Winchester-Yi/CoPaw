@@ -1,9 +1,13 @@
--- DESIGN DRAFT / NOT EXECUTED, updated 2026-10-30.
+-- DESIGN DRAFT / NOT APPLIED TO PRODUCTION, updated 2026-11-02.
+-- Service-unit amendment: docs/superpowers/specs/2026-11-02-conversation-service-unit-isolation-design.md
+-- Target DDL only. Runtime adapters and readiness must implement the same service scope.
 -- Inspect SHOW CREATE TABLE swe_chat_shares before reviewing this script.
 -- Existing tokens, column definitions, collations, defaults and counters survive.
 -- Apply once in an isolated review database after the six-table draft.
 -- Not idempotent; apply to the final-source staging copy during the continuous
 -- outage migration. Validate/backfill before installing the seven-table set.
+-- service_unit_key is nullable ONLY during staging backfill, with no service default.
+-- Then run conversation_share_service_unit_finalize.sql before seven-table installation.
 -- Keep the original share table unchanged for rollback before new-version writes.
 -- DDL implicitly commits. This script is not a rollbackable transaction.
 -- Annotate all eight legacy fields using their actual definitions, including
@@ -65,7 +69,11 @@ ALTER TABLE swe_chat_shares
         COMMENT '分享正文在NAS bundle中的字节偏移；旧记录回填前为NULL',
     ADD COLUMN byte_length BIGINT UNSIGNED NULL
         COMMENT '分享正文字节长度；旧记录回填前为NULL，读取前检查范围',
+    ADD COLUMN service_unit_key VARBINARY(256) NULL
+        COMMENT '分享所属NAS服务单元原值；仅staging回填期间可NULL，安装前须收紧为NOT NULL',
     ADD KEY ix_swe_chat_shares_publication (publication_id),
+    ADD KEY ix_swe_chat_shares_service_chat (service_unit_key, chat_id),
+    ADD KEY ix_swe_chat_shares_service_creator (service_unit_key, creator_id),
     COMMENT = '永久会话分享索引、不可变快照定位及访问计数，独立于Chat生命周期';
 
 EXECUTE conv_share_comment_stmt;
@@ -74,3 +82,5 @@ SET SESSION group_concat_max_len = @conv_share_old_group_concat_max_len;
 
 -- A permanent share may outlive its Chat. Old NULL locators must be backfilled
 -- and validated before cutover; no runtime file-only fallback is introduced.
+-- Share token remains globally unique under its original primary key/collation.
+-- Never fill all rows from the migration machine's current service environment.

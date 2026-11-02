@@ -1,10 +1,12 @@
 # 会话元数据 MySQL / 正文 NAS 重新设计
 
+> 多服务共享 MySQL、独立 NAS 的新增约束见[服务单元隔离补充草案](2026-11-02-conversation-service-unit-isolation-design.md)。其中服务维度尚待实现，不能按本文原三维 scope 假定支持该部署方式。
+
 - 日期：2026-10-29；状态：**评审草案，未实现、未执行 DDL**。
 - 当前实现基线：本地 `perf/event-loop-optimization`，`93aee5b90`；未拉取远端。
 - 上位决策：[ADR 0038](../../adr/0038-conversation-metadata-in-mysql-content-on-nas.md)、[0039](../../adr/0039-conversation-publication-uses-mysql-commit.md)、[0044](../../adr/0044-conversation-storage-uses-one-production-cutover.md)、[0045](../../adr/0045-conversation-migration-uses-one-continuous-outage.md)。ADR 0040 的窗口丢失许可已由 ADR 0045 替代。
 - 核对证据与当前测试：[设计复核](../../../analysis/playbook/conversation-storage-design-audit.md)。
-- SQL：[六张新表](../../../scripts/sql/conversation_metadata_tables.sql)、[现有分享表扩展](../../../scripts/sql/conversation_share_publication_extension.sql)。
+- SQL：[六张新表](../../../scripts/sql/conversation_metadata_tables.sql)、[现有分享表扩展](../../../scripts/sql/conversation_share_publication_extension.sql)、[分享服务归属收紧](../../../scripts/sql/conversation_share_service_unit_finalize.sql)。服务单元目标 SQL 已同步，须配合补充设计的运行时接入后使用。
 - 后续实施边界与迁移步骤：[NAS 数据与 CRUD 迁移方案](2026-10-30-nas-conversation-migration-plan.md)。
 
 旧详细设计和会话专用初始化 SQL 未找到，本稿替代失效的设计链接。现存运行时仍是

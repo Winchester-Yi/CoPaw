@@ -19,6 +19,8 @@ NOW = datetime(2026, 10, 30)
 
 async def insert_row(db, table, values):
     assert table in TABLES or table == "swe_chat_shares"
+    if table in TABLES:
+        values = {"service_unit_key": b"schema-test-service", **values}
     columns = ", ".join(values)
     placeholders = ", ".join(["%s"] * len(values))
     return await db.insert(
@@ -103,7 +105,7 @@ async def test_mysql_capabilities_and_exact_six_table_schema(
         "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
         "ORDER BY TABLE_NAME, ORDINAL_POSITION",
     )
-    assert len(columns) == 151
+    assert len(columns) == 157
     assert {row["TABLE_NAME"] for row in columns} == set(TABLES)
     draft = (SQL_ROOT / "conversation_metadata_tables.sql").read_text(
         encoding="utf-8",
@@ -124,7 +126,7 @@ async def test_mysql_capabilities_and_exact_six_table_schema(
                 "NO" if "NOT NULL" in attributes else "YES",
                 comment,
             )
-    assert len(expected) == 151
+    assert len(expected) == 157
     for row in columns:
         assert (
             row["COLUMN_TYPE"],
@@ -325,7 +327,7 @@ async def test_share_extension_preserves_legacy_schema_tokens_and_counters(
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
     after = await db.fetch_all("SHOW FULL COLUMNS FROM swe_chat_shares")
-    assert len(after) == 11
+    assert len(after) == 12
     for old, new in zip(before, after):
         for field in (
             "Field",
@@ -341,13 +343,23 @@ async def test_share_extension_preserves_legacy_schema_tokens_and_counters(
     assert [
         row
         for row in await db.fetch_all("SHOW INDEX FROM swe_chat_shares")
-        if row["Key_name"] != "ix_swe_chat_shares_publication"
+        if row["Key_name"]
+        not in {
+            "ix_swe_chat_shares_publication",
+            "ix_swe_chat_shares_service_chat",
+            "ix_swe_chat_shares_service_creator",
+        }
     ] == indexes
     updated = await db.fetch_one("SELECT * FROM swe_chat_shares")
     assert {key: updated[key] for key in record} == record
     assert all(
         updated[key] is None
-        for key in ("publication_id", "byte_offset", "byte_length")
+        for key in (
+            "publication_id",
+            "byte_offset",
+            "byte_length",
+            "service_unit_key",
+        )
     )
 
 
