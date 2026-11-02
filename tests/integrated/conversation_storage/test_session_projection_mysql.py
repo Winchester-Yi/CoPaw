@@ -149,6 +149,7 @@ async def test_cold_turn_independent_block_roundtrip_and_modified_terminal_stays
         owner_key="owner",
         lease_seconds=60,
         publications=store.publications,
+        service_unit_id="schema-test-service",
     )
     identity = SessionIdentity(store.scope, "alice", "console", "session")
     admission = await execution.reserve_admission(

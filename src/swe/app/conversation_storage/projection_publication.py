@@ -24,6 +24,7 @@ from .session_projection import (
 IDENTITY_FIELDS = (
     "operation_key",
     "scope_kind",
+    "service_unit_key",
     "tenant_key",
     "source_key",
     "agent_key",
@@ -79,19 +80,22 @@ async def _existing(service, row):
         return result
     retentions = RetentionStore(
         service.db,
-        WorkspaceScope(
-            _text(row["tenant_key"]),
-            _text(row["source_key"]),
-            _text(row["agent_key"]),
-        ),
+        WorkspaceScope.from_row(row),
     )
     batch = ReaderPins(retentions)
     try:
         async with service.db.transaction():
             rows = await service.db.fetch_all(
-                "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND layer IN ('memory','task','error') AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order",
-                (row["session_id"],),
+                "SELECT * FROM swe_conversation_messages WHERE session_id=%s AND service_unit_key=%s AND layer IN ('memory','task','error') AND current_visible=1 AND deleted_at IS NULL ORDER BY session_order",
+                (row["session_id"], row["service_unit_key"]),
             )
+            if any(
+                item["service_unit_key"] != row["service_unit_key"]
+                for item in rows
+            ):
+                raise IntegrityError(
+                    "projection message service unit mismatch",
+                )
             await batch.pin([item["publication_id"] for item in rows])
         if not rows:
             return result
@@ -150,8 +154,8 @@ async def prepare_recovery_blocks(service, row, plan, blocks):
     )
     supplied = {item.name: item for item in blocks}
     context = await service.db.fetch_one(
-        "SELECT context_epoch FROM swe_conversation_sessions WHERE id=%s",
-        (row["session_id"],),
+        "SELECT context_epoch FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
+        (row["session_id"], row["service_unit_key"]),
     )
     epoch = context["context_epoch"]
     for message in plan.messages:
@@ -242,18 +246,16 @@ async def _frozen_turns(service, row, state):
     ):
         return result
     turns = await service.db.fetch_all(
-        "SELECT * FROM swe_conversation_turns WHERE session_id=%s AND terminal_publication_id IS NOT NULL ORDER BY id",
-        (row["session_id"],),
+        "SELECT * FROM swe_conversation_turns WHERE session_id=%s AND service_unit_key=%s AND terminal_publication_id IS NOT NULL ORDER BY id",
+        (row["session_id"], row["service_unit_key"]),
     )
     retentions = RetentionStore(
         service.db,
-        WorkspaceScope(
-            _text(row["tenant_key"]),
-            _text(row["source_key"]),
-            _text(row["agent_key"]),
-        ),
+        WorkspaceScope.from_row(row),
     )
     for turn in turns:
+        if turn["service_unit_key"] != row["service_unit_key"]:
+            raise IntegrityError("cold Turn service unit mismatch")
         key = _text(turn["question_msg_key"])
         value = state["turn_states"].get(key)
         if (
@@ -469,16 +471,12 @@ async def removed_occurrences(service, row, envelope):
 
     retentions = RetentionStore(
         service.db,
-        WorkspaceScope(
-            _text(row["tenant_key"]),
-            _text(row["source_key"]),
-            _text(row["agent_key"]),
-        ),
+        WorkspaceScope.from_row(row),
     )
     async with service.db.transaction():
         session = await service.db.fetch_one(
-            "SELECT * FROM swe_conversation_sessions WHERE id=%s",
-            (row["session_id"],),
+            "SELECT * FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
+            (row["session_id"], row["service_unit_key"]),
         )
         if session is None or session.get("recovery_publication_id") is None:
             return []
@@ -530,12 +528,13 @@ async def removed_occurrences(service, row, envelope):
                             "previous same-publication recovery locator is invalid",
                         )
                     prior = await service.db.fetch_one(
-                        "SELECT * FROM swe_conversation_messages WHERE publication_id=%s AND byte_offset=%s AND byte_length=%s AND session_id=%s ORDER BY id LIMIT 1",
+                        "SELECT * FROM swe_conversation_messages WHERE publication_id=%s AND byte_offset=%s AND byte_length=%s AND session_id=%s AND service_unit_key=%s ORDER BY id LIMIT 1",
                         (
                             publication["id"],
                             extent.offset,
                             extent.length,
                             row["session_id"],
+                            row["service_unit_key"],
                         ),
                     )
                     if prior is None:

@@ -175,6 +175,7 @@ async def test_partial_session_update_checks_locked_scope_without_scope_in_patch
         fetch_one=AsyncMock(
             return_value={
                 "id": 1,
+                "service_unit_key": b"schema-test-service",
                 "tenant_key": b"t",
                 "source_key": b"s",
                 "agent_key": b"a",
@@ -186,6 +187,7 @@ async def test_partial_session_update_checks_locked_scope_without_scope_in_patch
         db,
         None,
         OfflineTarget("test_conversation_x", "business", "migration"),
+        service_unit_id="schema-test-service",
     )
     token = _LOCKED.set(
         {"sessions": {1: db.fetch_one.return_value}, "chats": {}, "turns": {}},
@@ -195,6 +197,7 @@ async def test_partial_session_update_checks_locked_scope_without_scope_in_patch
             {"table": "sessions", "values": {"id": 1, "history_high": 2}},
             {
                 "id": 4,
+                "service_unit_key": b"schema-test-service",
                 "tenant_key": b"t",
                 "source_key": b"s",
                 "agent_key": b"a",
@@ -223,6 +226,7 @@ async def test_undeclared_update_cannot_take_late_lock():
         db,
         None,
         OfflineTarget("test_conversation_x", "business", "migration"),
+        service_unit_id="schema-test-service",
     )
     with pytest.raises(IntegrityError, match="not locked"):
         await service._apply_record(
@@ -263,9 +267,16 @@ def test_task_projection_preserves_raw_payload_and_final_section():
         == state["agent"]["memory"]["content"][1]
     )
     assert (
-        _message_row(1, 1, messages[1], 1, "message", None, None)[
-            "task_run_key"
-        ]
+        _message_row(
+            1,
+            1,
+            messages[1],
+            1,
+            "message",
+            None,
+            None,
+            service_unit_id="schema-test-service",
+        )["task_run_key"]
         == "run-1"
     )
 
@@ -305,11 +316,19 @@ async def test_verification_reports_storage_error_without_green_result(
         data={
             "target": {
                 "schema": "test_conversation_x",
-                "nas_root": str(tmp_path),
+                "nas_roots": {"schema-test-service": str(tmp_path)},
                 "migration_id": "migration",
             },
             "source_boundary": {},
-            "workspaces": [],
+            "workspaces": [
+                {
+                    "service_unit_id": "schema-test-service",
+                    "tenant_id": "t",
+                    "source_id": "s",
+                    "agent_id": "a",
+                    "root": str(tmp_path),
+                },
+            ],
         },
     )
     target = SimpleNamespace(schema="test_conversation_x")
@@ -318,11 +337,16 @@ async def test_verification_reports_storage_error_without_green_result(
         SimpleNamespace(root=tmp_path),
         manifest,
         {
-            "version": 1,
+            "version": 2,
             "ready": True,
             "blockers": [],
             "source_boundary": {},
-            "workspaces": [],
+            "workspaces": [
+                {
+                    "scope": ["schema-test-service", "t", "s", "a"],
+                    "root": str(tmp_path),
+                },
+            ],
             "shares": [],
         },
         target,

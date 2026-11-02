@@ -9,7 +9,7 @@ from agentscope.message import Msg
 
 def validate_inventory(report):
     if (
-        report.get("version") != 1
+        report.get("version") != 2
         or report.get("blockers")
         or not report.get("ready")
     ):
@@ -21,6 +21,26 @@ def validate_inventory(report):
         list,
     ):
         raise ValueError("migration inventory is incomplete")
+
+    from ..identity import WorkspaceScope, service_unit_bytes
+
+    for item in report["workspaces"]:
+        WorkspaceScope.from_values(item["scope"])
+        for session in item.get("sessions", []):
+            identity = session["identity"]
+            if len(identity) != 7 or identity[:4] != item["scope"]:
+                raise ValueError(
+                    "Session identity differs from explicit service scope",
+                )
+    tokens = set()
+    for item in report["shares"]:
+        token = item["record"]["token"]
+        if token in tokens:
+            raise ValueError("duplicate permanent share token")
+        tokens.add(token)
+        service_unit_bytes(item["service_unit_id"])
+        if item["record"].get("service_unit_id") != item["service_unit_id"]:
+            raise ValueError("share service ownership mismatch")
 
 
 def _entry(
@@ -237,18 +257,31 @@ class ConversationImporter:
         if target.migration_id != manifest.migration_id:
             raise ValueError("migration target identity differs from manifest")
         self.db = database
-        self.bundles = bundles
+        self.bundle_stores = bundle_stores(bundles, manifest)
+        self.bundles = None
         self.manifest = manifest
         self.target = target
         self.batch_size = batch_size
         manifest.bind_target(
             {
                 "schema": target.schema,
-                "nas_root": str(bundles.root.resolve()),
+                "nas_roots": {
+                    key: str(store.root.resolve())
+                    for key, store in self.bundle_stores.items()
+                },
                 "migration_id": target.migration_id,
             },
         )
-        self.store = OfflineImportStore(database, bundles, target)
+        self.stores = {
+            key: OfflineImportStore(
+                database,
+                store,
+                target,
+                service_unit_id=key,
+            )
+            for key, store in self.bundle_stores.items()
+        }
+        self.store = None
         self.session_ids = {}
         self.chat_ids = {}
         self.turn_ids = {}
@@ -257,6 +290,8 @@ class ConversationImporter:
         return self.manifest.allocate(kind, position)["target_id"]
 
     async def _publish(self, position, scope, rows, blocks, *, spec=None):
+        self.bundles = self.bundle_stores[scope.service_unit_id]
+        self.store = self.stores[scope.service_unit_id]
         spec = spec or ImportBatch()
         updates, locks, scope_kind = spec.updates, spec.locks, spec.scope_kind
         session_id, chat_id, turn_id = (
@@ -329,10 +364,10 @@ class ConversationImporter:
         validate_inventory(report)
         self._validate_source_binding(report)
         self._validate_runtime_sources(report)
-        await self.store.validate_target()
+        await next(iter(self.stores.values())).validate_target()
         await self._retain_source_artifacts(report)
         for workspace in report["workspaces"]:
-            scope = WorkspaceScope(*workspace["scope"])
+            scope = WorkspaceScope.from_values(workspace["scope"])
             await self._identities(workspace, scope)
             for session in workspace["sessions"]:
                 await self._session(session, workspace, scope)
@@ -406,7 +441,7 @@ class ConversationImporter:
                     "legacy artifact size changed after inventory",
                 )
             metadata = {
-                "version": 1,
+                "version": 2,
                 "workspace": item["workspace"],
                 "scope": workspace["scope"],
                 "relative_path": item["path"],
@@ -414,14 +449,16 @@ class ConversationImporter:
                 "snapshot_id": report["source_boundary"]["snapshot_id"],
             }
             position = (
-                "source-artifact:"
+                "service:"
+                + workspace["scope"][0]
+                + "/source-artifact:"
                 + str(item["workspace"])
                 + "/"
                 + item["path"]
             )
             await self._publish(
                 position,
-                WorkspaceScope(*workspace["scope"]),
+                WorkspaceScope.from_values(workspace["scope"]),
                 [],
                 [
                     BundleBlock("legacy_artifact", "legacy_artifact", raw),
@@ -450,7 +487,13 @@ class ConversationImporter:
             )
         for mapped, observed in zip(expected, report["workspaces"]):
             scope = [
-                mapped[key] for key in ("tenant_id", "source_id", "agent_id")
+                mapped[key]
+                for key in (
+                    "service_unit_id",
+                    "tenant_id",
+                    "source_id",
+                    "agent_id",
+                )
             ]
             if (
                 scope != observed["scope"]
@@ -476,12 +519,13 @@ class ConversationImporter:
             now = self.manifest.data["source_boundary"]["captured_at"]
             values = {
                 "id": sid,
-                "tenant_key": identity[0],
-                "source_key": identity[1],
-                "agent_key": identity[2],
-                "user_key": identity[3],
-                "channel_key": identity[4],
-                "external_session_key": identity[5],
+                "service_unit_key": identity[0],
+                "tenant_key": identity[1],
+                "source_key": identity[2],
+                "agent_key": identity[3],
+                "user_key": identity[4],
+                "channel_key": identity[5],
+                "external_session_key": identity[6],
                 "generation": 0,
                 "state_revision": 0,
                 "context_epoch": source.get("context_epoch", 0),
@@ -507,6 +551,7 @@ class ConversationImporter:
                     "session_id": sid,
                     "external_chat_key": spec.id,
                     "registry_order": item["registry_order"],
+                    "service_unit_key": scope.service_unit_id,
                     "tenant_key": scope.tenant_id,
                     "source_key": scope.source_id,
                     "agent_key": scope.agent_id,
@@ -538,9 +583,9 @@ class ConversationImporter:
             item["spec"]["id"]: self.chat_ids[item["position"]]
             for item in workspace["chats"]
             if item["position"] in self.chat_ids
-            and item["spec"]["session_id"] == session["identity"][5]
-            and item["spec"]["user_id"] == session["identity"][3]
-            and item["spec"]["channel"] == session["identity"][4]
+            and item["spec"]["session_id"] == session["identity"][6]
+            and item["spec"]["user_id"] == session["identity"][4]
+            and item["spec"]["channel"] == session["identity"][5]
         }
         for key, value in turns.items():
             chat = chats.get(value.get("chat_id"))
@@ -576,6 +621,7 @@ class ConversationImporter:
                     block,
                     turn,
                     origin,
+                    service_unit_id=scope.service_unit_id,
                 )
                 rows.append({"table": "messages", "values": values})
                 blocks.append(_block(block, item["layer"], message_body(item)))
@@ -631,6 +677,7 @@ class ConversationImporter:
                     "table": "turns",
                     "values": {
                         "id": self.turn_ids[(sid, key)],
+                        "service_unit_key": scope.service_unit_id,
                         "session_id": sid,
                         "chat_id": chat,
                         "question_msg_key": key,
@@ -845,6 +892,7 @@ class ConversationImporter:
                     name,
                     None,
                     None,
+                    service_unit_id=scope.service_unit_id,
                 )
                 values.update(
                     session_order=None,
@@ -984,18 +1032,21 @@ class ConversationImporter:
             sid = None
             if cid is not None:
                 chat = await self.db.fetch_one(
-                    "SELECT session_id,tenant_key,source_key,agent_key FROM swe_conversation_chats WHERE id=%s",
+                    "SELECT session_id,service_unit_key,tenant_key,source_key,agent_key FROM swe_conversation_chats WHERE id=%s",
                     (cid,),
                 )
                 sid = chat["session_id"]
-                scope = WorkspaceScope(
-                    *(
-                        chat[key].decode()
-                        for key in ("tenant_key", "source_key", "agent_key")
-                    ),
-                )
+                scope = WorkspaceScope.from_row(chat)
+                if scope.service_unit_id != share["service_unit_id"]:
+                    raise ValueError("share service differs from Chat")
             else:
-                scope = WorkspaceScope(record["tenant_id"], "", "")
+                scope = WorkspaceScope(
+                    record["tenant_id"],
+                    "",
+                    "",
+                    service_unit_id=share["service_unit_id"],
+                )
+            record.pop("service_unit_id")
             plan = CommitPlan(share=ShareInstall(**record))
             await self._publish(
                 share["position"],
@@ -1052,7 +1103,17 @@ def _timestamp(value):
     return parsed.isoformat()
 
 
-def _message_row(identity, session, item, order, block, turn, origin):
+def _message_row(
+    identity,
+    session,
+    item,
+    order,
+    block,
+    turn,
+    origin,
+    *,
+    service_unit_id,
+):
     projection = item.get(
         "history_projection",
         item["payload"].get("metadata", {}),
@@ -1062,6 +1123,7 @@ def _message_row(identity, session, item, order, block, turn, origin):
     )
     return {
         "id": identity,
+        "service_unit_key": service_unit_id,
         "session_id": session,
         "origin_chat_id": origin,
         "archive_chat_id": None,
@@ -1082,3 +1144,30 @@ def _message_row(identity, session, item, order, block, turn, origin):
         "current_visible": 1,
         "message_timestamp": _timestamp(item["payload"].get("timestamp")),
     }
+
+
+def bundle_stores(bundles, manifest):
+    """Bind every source service explicitly to one isolated NAS store."""
+    services = {
+        item["service_unit_id"] for item in manifest.data["workspaces"]
+    }
+    if isinstance(bundles, dict):
+        stores = dict(bundles)
+    elif len(services) == 1:
+        stores = {next(iter(services)): bundles}
+    else:
+        raise ValueError(
+            "multi-service migration requires a NAS store mapping",
+        )
+    if set(stores) != services or not stores:
+        raise ValueError(
+            "NAS store mapping must cover exactly the migration services",
+        )
+    roots = [store.root.resolve() for store in stores.values()]
+    if any(
+        a == b or a.is_relative_to(b) or b.is_relative_to(a)
+        for i, a in enumerate(roots)
+        for b in roots[i + 1 :]
+    ):
+        raise ValueError("service NAS roots must be isolated")
+    return stores

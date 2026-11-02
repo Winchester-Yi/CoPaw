@@ -35,6 +35,7 @@ def migration(tmp_path):
         [
             {
                 "root": str(source),
+                "service_unit_id": "schema-test-service",
                 "tenant_id": "tenant",
                 "source_id": "source",
                 "agent_id": "agent",
@@ -43,7 +44,7 @@ def migration(tmp_path):
     )
     manifest.data["offline"] = {
         "application_schema": "business",
-        "nas_root": str(nas),
+        "nas_roots": {"schema-test-service": str(nas)},
     }
     manifest._persist()
     return manifest
@@ -93,7 +94,11 @@ def test_preview_does_not_write_or_connect(migration, monkeypatch, command):
     "field,value,expected",
     [
         ("staging_schema", "business", "generated staging"),
-        ("nas_root", "/nonexistent-original-root", "existing"),
+        (
+            "nas_roots",
+            {"schema-test-service": "/nonexistent-original-root"},
+            "existing",
+        ),
     ],
 )
 def test_untrusted_targets_rejected(migration, field, value, expected):
@@ -165,10 +170,12 @@ def test_recovery_preview_requires_exact_ended_owner_manifest_and_never_connects
     evidence.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "schema": "business",
                 "nas_root": str(nas),
+                "service_unit_id": "schema-test-service",
                 "scope": {
+                    "service_unit_id": "schema-test-service",
                     "tenant_id": "tenant",
                     "source_id": "source",
                     "agent_id": "agent",
@@ -208,3 +215,49 @@ def test_recovery_preview_requires_exact_ended_owner_manifest_and_never_connects
     )
     assert result.exit_code != 0
     assert "confirm-ended-owner" in result.output
+
+
+def test_multiservice_export_validates_all_ownership_before_output(
+    migration,
+    monkeypatch,
+):
+    from swe.cli.conversation_storage_cmd import OfflineJob
+    from swe.app.conversation_storage.migration import exporter
+
+    second_nas = migration.path.parent / "second-nas"
+    second_nas.mkdir()
+    migration.data["workspaces"].append(
+        {
+            **migration.data["workspaces"][0],
+            "service_unit_id": "second-service",
+        },
+    )
+    migration.data["offline"]["nas_roots"]["second-service"] = str(second_nas)
+    migration.data["offline"]["export"] = {
+        "session_version": 1,
+        "checkpoint_version": 1,
+        "services": {
+            service: {
+                "backup_path": service,
+                "destination": str(
+                    migration.path.parent / (service + "-export"),
+                ),
+            }
+            for service in ("schema-test-service", "second-service")
+        },
+    }
+    migration._persist()
+    writes = []
+
+    class Exporter:
+        def __init__(self, _path, _target, *, service_unit_id):
+            if service_unit_id == "second-service":
+                raise ValueError("backup service differs")
+
+        def export(self, destination):
+            writes.append(destination)
+
+    monkeypatch.setattr(exporter, "ConversationExporter", Exporter)
+    with pytest.raises(ValueError, match="service differs"):
+        OfflineJob(migration.path).export()
+    assert not writes

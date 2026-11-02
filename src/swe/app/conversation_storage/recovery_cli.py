@@ -17,7 +17,7 @@ class RecoveryJob:
     def __init__(self, path):
         self.document = load_metadata_json(Path(path).read_bytes())
         data = self.document
-        if data.get("version") != 1 or not re.fullmatch(
+        if data.get("version") != 2 or not re.fullmatch(
             r"[a-zA-Z0-9_]{1,64}",
             data.get("schema", ""),
         ):
@@ -30,7 +30,13 @@ class RecoveryJob:
             WorkspaceScope(**data["scope"]),
             **data["session"],
         )
-        self.proof = OwnerExitProof(**data["owner"])
+        if data.get("service_unit_id") != self.identity.scope.service_unit_id:
+            raise ValueError("recovery evidence service differs from scope")
+        self.proof = OwnerExitProof(
+            **{"service_unit_id": data["service_unit_id"], **data["owner"]},
+        )
+        if self.proof.service_unit_id != self.identity.scope.service_unit_id:
+            raise ValueError("recovery proof service differs from scope")
         self.turn_id = data["turn_id"]
         if type(self.turn_id) is not int or self.turn_id <= 0:
             raise ValueError("recovery Turn identity must be positive")

@@ -35,7 +35,15 @@ def remember(key, value):
 
 def cache_key(row, revision=None):
     return (
-        *(row[key] for key in ("tenant_key", "source_key", "agent_key")),
+        *(
+            row[key]
+            for key in (
+                "service_unit_key",
+                "tenant_key",
+                "source_key",
+                "agent_key",
+            )
+        ),
         row["session_id"] if "session_id" in row else row["id"],
         row["base_state_revision"] if revision is None else revision,
     )

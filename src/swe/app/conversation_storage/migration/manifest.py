@@ -14,6 +14,7 @@ import fcntl
 
 from ..bundle import BundleStore, new_operation_key
 from ..chat_mutations import load_metadata_json
+from ..identity import WorkspaceScope, service_unit_bytes
 
 KINDS = frozenset(
     {
@@ -77,13 +78,24 @@ class MigrationManifest:
         return self.data["migration_id"]
 
     def _validate(self):
-        if self.data.get("version") != 1:
+        if self.data.get("version") != 2:
             raise ValueError("unsupported migration manifest version")
         if str(UUID(self.data["migration_id"])) != self.data["migration_id"]:
             raise ValueError("invalid migration identity")
         SourceBoundary(**self.data["source_boundary"])
         if self.data.get("target") is not None:
             self._validate_target(self.data["target"])
+        for item in self.data["workspaces"]:
+            if "service_unit_id" not in item:
+                raise ValueError(
+                    "explicit workspace service_unit_id is required",
+                )
+            WorkspaceScope(
+                item["tenant_id"],
+                item["source_id"],
+                item["agent_id"],
+                service_unit_id=item["service_unit_id"],
+            )
         ids = {}
         operations = set()
         for kind, assignments in self.data["assignments"].items():
@@ -115,7 +127,7 @@ class MigrationManifest:
     @classmethod
     def create(cls, path, boundary, workspaces):
         data = {
-            "version": 1,
+            "version": 2,
             "migration_id": str(uuid4()),
             "source_boundary": {
                 **asdict(boundary),
@@ -240,7 +252,7 @@ class MigrationManifest:
     def _validate_target(self, target):
         if (
             not isinstance(target, dict)
-            or set(target) != {"schema", "nas_root", "migration_id"}
+            or set(target) != {"schema", "nas_roots", "migration_id"}
             or target["migration_id"] != self.migration_id
         ):
             raise ValueError("invalid migration target binding")
@@ -249,13 +261,29 @@ class MigrationManifest:
             target["schema"],
         ):
             raise ValueError("invalid migration staging schema binding")
-        root = Path(target["nas_root"])
-        if (
-            not root.is_absolute()
-            or ".." in root.parts
-            or str(root.resolve()) != target["nas_root"]
+        roots = target["nas_roots"]
+        services = {
+            item["service_unit_id"] for item in self.data["workspaces"]
+        }
+        if not isinstance(roots, dict) or set(roots) != services or not roots:
+            raise ValueError("explicit NAS roots must match every service")
+        resolved = []
+        for service, value in roots.items():
+            service_unit_bytes(service)
+            root = Path(value)
+            if (
+                not root.is_absolute()
+                or ".." in root.parts
+                or str(root.resolve()) != value
+            ):
+                raise ValueError("invalid migration NAS root binding")
+            resolved.append(root)
+        if any(
+            a == b or a.is_relative_to(b) or b.is_relative_to(a)
+            for i, a in enumerate(resolved)
+            for b in resolved[i + 1 :]
         ):
-            raise ValueError("invalid migration NAS root binding")
+            raise ValueError("service NAS roots must be isolated")
 
     def set_batch_state(self, source_position, state):
         with self._lock():

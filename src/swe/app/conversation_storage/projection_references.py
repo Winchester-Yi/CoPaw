@@ -52,12 +52,13 @@ class ProjectionReferences:
     async def revalidate(self, db):
         for identity, expected in sorted(self.rows.items()):
             row = await db.fetch_one(
-                "SELECT * FROM swe_conversation_messages WHERE id=%s FOR SHARE",
-                (identity,),
+                "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s FOR SHARE",
+                (identity, expected["service_unit_key"]),
             )
             if row is None or any(
                 row[key] != expected[key]
                 for key in (
+                    "service_unit_key",
                     "session_id",
                     "publication_id",
                     "byte_offset",
@@ -76,12 +77,13 @@ class ProjectionReferences:
                 )
         for identity, expected in sorted(self.turns.items()):
             row = await db.fetch_one(
-                "SELECT * FROM swe_conversation_turns WHERE id=%s",
-                (identity,),
+                "SELECT * FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s",
+                (identity, expected["service_unit_key"]),
             )
             if row is None or any(
                 row[key] != expected[key]
                 for key in (
+                    "service_unit_key",
                     "session_id",
                     "chat_id",
                     "terminal_publication_id",
@@ -95,6 +97,7 @@ class ProjectionReferences:
 def _same_locator(row, request, ref):
     return (
         row is not None
+        and row["service_unit_key"] == request.scope.sql_values[0]
         and row["session_id"] == request.session_id
         and row["deleted_at"] is None
         and (row["publication_id"], row["byte_offset"], row["byte_length"])
@@ -107,11 +110,12 @@ async def _snapshot_rows(service, request, refs, snapshot):
         if "message_id" not in ref:
             if "turn_id" in ref:
                 turn = await service.db.fetch_one(
-                    "SELECT * FROM swe_conversation_turns WHERE id=%s",
-                    (ref["turn_id"],),
+                    "SELECT * FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s",
+                    (ref["turn_id"], request.scope.sql_values[0]),
                 )
                 if (
                     turn is None
+                    or turn["service_unit_key"] != request.scope.sql_values[0]
                     or turn["session_id"] != request.session_id
                     or turn["terminal_publication_id"] != ref["publication_id"]
                 ):
@@ -121,8 +125,8 @@ async def _snapshot_rows(service, request, refs, snapshot):
                 snapshot.turns[turn["id"]] = turn
             continue
         row = await service.db.fetch_one(
-            "SELECT * FROM swe_conversation_messages WHERE id=%s",
-            (ref["message_id"],),
+            "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s",
+            (ref["message_id"], request.scope.sql_values[0]),
         )
         if not _same_locator(row, request, ref):
             raise IntegrityError(
@@ -316,12 +320,13 @@ async def refresh_projection_cache(service, row, envelope, snapshot):
                     )
                 extent = index.blocks[ref["block_name"]]
                 message = await service.db.fetch_one(
-                    "SELECT * FROM swe_conversation_messages WHERE publication_id=%s AND byte_offset=%s AND byte_length=%s AND session_id=%s ORDER BY id LIMIT 1",
+                    "SELECT * FROM swe_conversation_messages WHERE publication_id=%s AND byte_offset=%s AND byte_length=%s AND session_id=%s AND service_unit_key=%s ORDER BY id LIMIT 1",
                     (
                         row["id"],
                         extent.offset,
                         extent.length,
                         row["session_id"],
+                        row["service_unit_key"],
                     ),
                 )
                 if message is None:

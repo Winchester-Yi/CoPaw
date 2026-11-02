@@ -98,12 +98,18 @@ async def test_real_app_auth_bootstrap_uses_existing_workspace_and_sql(
     manifest.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
+                "service_unit_id": "schema-test-service",
                 "nas_root": str(nas_root),
                 "workspaces": [
                     {
                         "root": str(existing / "workspaces" / "default"),
-                        "scope": ["default", "RMASSIST", "default"],
+                        "scope": [
+                            "schema-test-service",
+                            "default",
+                            "RMASSIST",
+                            "default",
+                        ],
                     },
                 ],
             },
@@ -111,6 +117,7 @@ async def test_real_app_auth_bootstrap_uses_existing_workspace_and_sql(
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "schema-test-service")
     monkeypatch.setenv("SWE_AUTH_ENABLED", "true")
     monkeypatch.setenv("SWE_CONVERSATION_STORAGE_AUTHORITY", "mysql")
     monkeypatch.setenv("SWE_CONVERSATION_SCOPE_MANIFEST", str(manifest))
@@ -135,6 +142,10 @@ async def test_real_app_auth_bootstrap_uses_existing_workspace_and_sql(
     await apply_sql_script(
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
+    )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
     )
     session_id = await insert_session(
         db,

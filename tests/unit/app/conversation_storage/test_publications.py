@@ -45,6 +45,7 @@ class PublicationDatabase:
         self.guard = None
         self.transaction_depth = 0
         self.session = {
+            "service_unit_key": b"schema-test-service",
             "id": 1,
             "tenant_key": b"t",
             "source_key": b"s",
@@ -58,6 +59,7 @@ class PublicationDatabase:
             "context_epoch": 0,
         }
         self.chat = {
+            "service_unit_key": b"schema-test-service",
             "id": 2,
             "session_id": 1,
             "tenant_key": b"t",
@@ -69,6 +71,7 @@ class PublicationDatabase:
             "deleted_at": None,
         }
         self.turn = {
+            "service_unit_key": b"schema-test-service",
             "id": 3,
             "session_id": 1,
             "chat_id": 2,
@@ -109,7 +112,7 @@ class PublicationDatabase:
         if "swe_conversation_turns" in query:
             return deepcopy(self.turn)
         if "operation_key" in query:
-            return deepcopy(self.rows.get(params[0]))
+            return deepcopy(self.rows.get(params[-1]))
         return next(
             (
                 deepcopy(row)
@@ -192,7 +195,12 @@ def test_commit_plan_rejects_duplicate_version_field():
 def request(**values):
     return PublicationRequest(
         operation_key=values.pop("operation_key", new_operation_key()),
-        scope=WorkspaceScope("t", "s", "a"),
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
         kind="state",
         owner_key="owner",
         generation=1,
@@ -208,7 +216,11 @@ def request(**values):
 
 async def test_lost_reservation_commit_reuses_original_operation(tmp_path):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     db.lose_commit = True
     with pytest.raises(UnknownCommit) as failure:
@@ -225,7 +237,11 @@ async def test_durable_nas_precedes_visibility_and_lost_final_commit_is_idempote
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     with pytest.raises(ConflictError, match="durable"):
@@ -256,7 +272,11 @@ async def test_backup_fence_blocks_before_session_locks(
     reconcile,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan())
     await service.write_bundle(
@@ -291,7 +311,11 @@ async def test_backup_fence_blocks_prepared_and_durable_metadata(
     phase,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     if phase == "durable":
         await service.reserve(operation, CommitPlan())
@@ -312,7 +336,11 @@ async def test_backup_fence_blocks_prepared_and_durable_metadata(
 
 async def test_same_operation_cannot_change_plan_or_payload_identity(tmp_path):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan())
     with pytest.raises(ConflictError):
@@ -322,7 +350,11 @@ async def test_same_operation_cannot_change_plan_or_payload_identity(tmp_path):
 async def test_old_generation_cannot_commit_or_remove_its_bundle(tmp_path):
     db = PublicationDatabase()
     store = BundleStore(tmp_path)
-    service = PublicationStore(db, store)
+    service = PublicationStore(
+        db,
+        store,
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan())
     index = await service.write_bundle(
@@ -340,7 +372,11 @@ async def test_reconcile_missing_reservation_installs_permanent_aborted_key(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     result = await service.abort(operation, owner_stopped=True)
     assert result["state"] == "aborted"
@@ -353,7 +389,11 @@ async def test_abort_requires_observed_owner_stop_and_primary_availability(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     with pytest.raises(ConflictError, match="owner"):
         await service.abort(operation, owner_stopped=False)
@@ -367,7 +407,11 @@ async def test_commit_locks_guard_session_chat_turn_publication_in_order(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan())
     await service.write_bundle(
@@ -385,7 +429,7 @@ async def test_commit_locks_guard_session_chat_turn_publication_in_order(
         "swe_conversation_chats",
         "swe_conversation_turns",
         "swe_conversation_publications",
-    ]
+    ] * 2
 
 
 async def test_existing_bundle_needs_explicit_durability_confirmation(
@@ -393,7 +437,11 @@ async def test_existing_bundle_needs_explicit_durability_confirmation(
 ):
     db = PublicationDatabase()
     store = BundleStore(tmp_path)
-    service = PublicationStore(db, store)
+    service = PublicationStore(
+        db,
+        store,
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan())
     original = store.publish(
@@ -417,9 +465,22 @@ async def test_cannot_abort_with_a_forged_scope_even_if_owner_is_stopped(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
-    object.__setattr__(operation, "scope", WorkspaceScope("other", "s", "a"))
+    object.__setattr__(
+        operation,
+        "scope",
+        WorkspaceScope(
+            "other",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
+    )
     with pytest.raises(IntegrityError, match="scope"):
         await service.abort(operation, owner_stopped=True)
     assert not db.rows
@@ -429,7 +490,11 @@ async def test_recovery_publication_without_turn_cannot_bypass_active_authority(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     object.__setattr__(operation, "turn_id", None)
     object.__setattr__(operation, "generation", 0)
@@ -449,7 +514,11 @@ async def test_cancellation_waits_for_nas_writer_before_reporting_unknown(
 ):
     db = PublicationDatabase()
     bundles = BundleStore(tmp_path)
-    service = PublicationStore(db, bundles)
+    service = PublicationStore(
+        db,
+        bundles,
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan())
     entered, release, finished = (
@@ -493,7 +562,11 @@ async def test_cancellation_waits_for_nas_writer_before_reporting_unknown(
 
 async def test_failed_install_rolls_back_root_and_publication(tmp_path):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     await service.write_bundle(
@@ -514,7 +587,11 @@ async def test_abort_rejects_missing_associations_before_fencing(
     missing,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     setattr(db, missing, None)
     with pytest.raises(IntegrityError, match="association"):
         await service.abort(request(), owner_stopped=True)
@@ -525,7 +602,11 @@ async def test_explicit_reconciliation_fences_execution_and_installs_original_ro
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     await service.write_bundle(
@@ -559,7 +640,11 @@ async def test_explicit_reconciliation_fences_execution_and_installs_original_ro
 
 async def test_reconciliation_rejects_generation_or_state_progress(tmp_path):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     await service.write_bundle(
@@ -586,7 +671,11 @@ async def test_only_controlled_reconciliation_can_install_fenced_generation(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     await service.write_bundle(
@@ -610,7 +699,11 @@ async def test_only_controlled_reconciliation_can_install_fenced_generation(
 @pytest.mark.parametrize("generation", [1, 2])
 async def test_reconciliation_never_fences_another_owner(tmp_path, generation):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     await service.write_bundle(
@@ -646,7 +739,11 @@ async def test_metadata_reconciliation_confirms_original_operation_and_is_idempo
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = replace(request(), kind="chat_metadata", turn_id=None)
     await service.reserve(operation, metadata_plan())
     committed = {
@@ -681,7 +778,11 @@ async def test_metadata_reconciliation_conflict_aborts_only_original_operation(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = replace(request(), kind="chat_metadata", turn_id=None)
     await service.reserve(operation, metadata_plan())
     service.confirm_bundle = AsyncMock()
@@ -704,7 +805,11 @@ async def test_metadata_reconciliation_missing_body_keeps_original_prepared(
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = replace(request(), kind="chat_metadata", turn_id=None)
     await service.reserve(operation, metadata_plan())
     with pytest.raises(FileNotFoundError):
@@ -720,7 +825,11 @@ async def test_fenced_terminal_reconciliation_installs_original_message_and_root
     tmp_path,
 ):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     plan = CommitPlan(
         recovery_block="root",
@@ -760,7 +869,11 @@ async def test_fenced_terminal_reconciliation_installs_original_message_and_root
 
 async def test_commit_preserves_imported_committed_at(tmp_path):
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     await service.write_bundle(

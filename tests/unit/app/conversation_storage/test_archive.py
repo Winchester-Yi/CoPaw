@@ -117,11 +117,20 @@ async def test_duplicate_prune_ids_use_matching_placeholders_and_parameters():
 
     db = SimpleNamespace(
         fetch_all=AsyncMock(
-            return_value=[{"id": 1, "session_id": 1, "layer": "memory"}],
+            return_value=[
+                {
+                    "id": 1,
+                    "service_unit_key": b"schema-test-service",
+                    "session_id": 1,
+                    "layer": "memory",
+                },
+            ],
         ),
         execute=AsyncMock(),
     )
-    await _prune(db, SimpleNamespace(session_id=1), (1, 1))
+    from tests.unit.app.conversation_storage.test_publications import request
+
+    await _prune(db, request(), (1, 1))
     for call in (*db.fetch_all.await_args_list, *db.execute.await_args_list):
         assert call.args[0].count("%s") == len(call.args[1])
 
@@ -138,7 +147,11 @@ async def test_compact_reservation_requires_replacement_root(tmp_path):
         request,
     )
 
-    service = PublicationStore(PublicationDatabase(), BundleStore(tmp_path))
+    service = PublicationStore(
+        PublicationDatabase(),
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     with pytest.raises(ValueError, match="root"):
         await service.reserve(replace(request(), kind="compact"), CommitPlan())
 
@@ -164,7 +177,11 @@ async def test_canonical_archive_payloads_reject_mismatched_declared_metadata(
         checkpoint_revision=0,
         next_boundary_order=1,
     )
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = replace(request(), epoch=1)
     plan = CommitPlan(checkpoint=CheckpointInstall("checkpoint", 0, 1, 0, 0))
     await service.reserve(operation, plan)
@@ -175,7 +192,9 @@ async def test_canonical_archive_payloads_reject_mismatched_declared_metadata(
     db.queries.clear()
     with pytest.raises(IntegrityError, match="checkpoint"):
         await service.commit(operation.operation_key)
-    assert not any("FOR UPDATE" in query for query in db.queries)
+    # Service ownership is locked before NAS reads; malformed payloads must
+    # still fail before any publication or conversation metadata is changed.
+    assert not any(query.startswith("UPDATE ") for query in db.queries)
 
 
 async def test_event_payload_must_contain_the_claimed_contiguous_range(
@@ -199,7 +218,11 @@ async def test_event_payload_must_contain_the_claimed_contiguous_range(
         checkpoint_revision=0,
         next_boundary_order=1,
     )
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = replace(request(), epoch=1)
     await service.reserve(
         operation,
@@ -240,8 +263,18 @@ async def test_historical_turn_locks_are_complete_and_ascending_before_publicati
     from tests.unit.app.conversation_storage.test_publications import request
 
     turns = {
-        1: {"id": 1, "chat_id": 5, "session_id": 1},
-        3: {"id": 3, "chat_id": 2, "session_id": 1},
+        1: {
+            "service_unit_key": b"schema-test-service",
+            "id": 1,
+            "chat_id": 5,
+            "session_id": 1,
+        },
+        3: {
+            "service_unit_key": b"schema-test-service",
+            "id": 3,
+            "chat_id": 2,
+            "session_id": 1,
+        },
     }
     calls = []
 
@@ -253,6 +286,7 @@ async def test_historical_turn_locks_are_complete_and_ascending_before_publicati
             return {
                 "id": params[0],
                 "session_id": 1,
+                "service_unit_key": b"schema-test-service",
                 "tenant_key": b"t",
                 "source_key": b"s",
                 "agent_key": b"a",
@@ -262,6 +296,7 @@ async def test_historical_turn_locks_are_complete_and_ascending_before_publicati
     service = PublicationStore(
         SimpleNamespace(fetch_one=fetch),
         BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
     )
     await service._lock_associations(request(), archive_turns={1: turns[1]})
     assert [args[0] for query, args in calls if "turns" in query] == [1, 3]
@@ -279,10 +314,19 @@ async def test_archive_turn_snapshot_rejects_original_chat_mismatch(tmp_path):
 
     db = SimpleNamespace(
         fetch_one=AsyncMock(
-            return_value={"id": 7, "session_id": 1, "chat_id": 5},
+            return_value={
+                "service_unit_key": b"schema-test-service",
+                "id": 7,
+                "session_id": 1,
+                "chat_id": 5,
+            },
         ),
     )
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     plan = CommitPlan(
         messages=(
             MessageInstall(
@@ -299,21 +343,22 @@ async def test_archive_turn_snapshot_rejects_original_chat_mismatch(tmp_path):
         await service._archive_turns(request(), plan)
 
 
-def test_archive_chat_must_belong_to_historical_session():
+def test_archive_chat_rebind_preserves_historical_service_scope():
     from swe.app.conversation_storage.publications import PublicationStore
     from tests.unit.app.conversation_storage.test_publications import request
 
-    with pytest.raises(IntegrityError, match="Session"):
-        PublicationStore._validate_archive_chat(
-            request(),
-            {
-                "id": 5,
-                "session_id": 99,
-                "tenant_key": b"t",
-                "source_key": b"s",
-                "agent_key": b"a",
-            },
-        )
+    chat = {
+        "id": 5,
+        "session_id": 99,
+        "service_unit_key": b"schema-test-service",
+        "tenant_key": b"t",
+        "source_key": b"s",
+        "agent_key": b"a",
+    }
+    PublicationStore._validate_archive_chat(request(), chat)
+    chat["service_unit_key"] = b"foreign"
+    with pytest.raises(IntegrityError, match="scope"):
+        PublicationStore._validate_archive_chat(request(), chat)
 
 
 async def test_direct_install_rejects_archive_occurrences_without_boundary(
@@ -331,7 +376,11 @@ async def test_direct_install_rejects_archive_occurrences_without_boundary(
     )
 
     db = PublicationDatabase()
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     row = {**request().fields(), "id": 4}
     with pytest.raises(IntegrityError, match="boundary"):
         await service._install(

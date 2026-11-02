@@ -43,6 +43,7 @@ class HistoryDatabase(RetentionDatabase):
         )
         self.messages = {
             i: {
+                "service_unit_key": b"schema-test-service",
                 "id": i,
                 "publication_id": i,
                 "session_id": 1,
@@ -82,6 +83,7 @@ def history(count):
 
     service = SimpleNamespace(db=db, bundles=SimpleNamespace(read_extent=read))
     row = {
+        "service_unit_key": b"schema-test-service",
         "tenant_key": b"t",
         "source_key": b"s",
         "agent_key": b"a",
@@ -99,7 +101,12 @@ def history(count):
         },
     ).envelope
     request = SimpleNamespace(
-        scope=WorkspaceScope("t", "s", "a"),
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
         session_id=1,
     )
     return db, service, row, request, state, envelope
@@ -280,7 +287,11 @@ async def test_commit_source_cleanup_failure_still_releases_projection_batches(
     )
     db = PublicationDatabase()
     db.session["recovery_publication_id"] = None
-    store = publications.PublicationStore(db, BundleStore(tmp_path))
+    store = publications.PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = publication_request()
     await store.reserve(
         operation,

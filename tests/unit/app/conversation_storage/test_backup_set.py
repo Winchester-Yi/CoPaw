@@ -19,6 +19,7 @@ def make_backup(path, tenant, source, identity, *, shared_state=None):
         {
             "id": identity,
             "scope_kind": "workspace",
+            "service_unit_key": b"schema-test-service",
             "tenant_key": tenant.encode(),
             "source_key": source.encode(),
             "agent_key": b"a",
@@ -33,6 +34,7 @@ def make_backup(path, tenant, source, identity, *, shared_state=None):
             {
                 "id": 99,
                 "scope_kind": "legacy_share",
+                "service_unit_key": b"schema-test-service",
                 "tenant_key": tenant.encode(),
                 "source_key": b"",
                 "agent_key": b"",
@@ -45,9 +47,15 @@ def make_backup(path, tenant, source, identity, *, shared_state=None):
     backup._atomic_json(
         path / "metadata.json",
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "backup_id": path.name,
-            "scope": [tenant.encode(), source.encode(), b"a"],
+            "scope": [
+                b"schema-test-service",
+                tenant.encode(),
+                source.encode(),
+                b"a",
+            ],
             "snapshot": snapshot,
             "pin_keys": [],
             "snapshot_ref": str(path),
@@ -86,6 +94,7 @@ class MemoryTarget:
                 for key in (
                     "id",
                     "scope_kind",
+                    "service_unit_key",
                     "tenant_key",
                     "source_key",
                     "agent_key",
@@ -119,9 +128,9 @@ async def test_restore_all_scopes_to_one_empty_target(tmp_path, monkeypatch):
     )
     assert result["passed"] and result["restore_ready"]
     assert result["scopes"] == [
-        ["t", "s1", "a"],
-        ["t", "s2", "a"],
-        ["other", "s", "a"],
+        ["schema-test-service", "t", "s1", "a"],
+        ["schema-test-service", "t", "s2", "a"],
+        ["schema-test-service", "other", "s", "a"],
     ]
     assert result["backup_ids"] == ["a", "b", "c"]
     assert [row["id"] for row in target.rows[backup.TABLES["retentions"]]] == [
@@ -274,3 +283,196 @@ async def test_duplicate_row_inside_one_scope_is_not_silently_deduplicated(
             evidence=backup.RestoreEvidence("stopped", "isolated"),
         )
     assert not (tmp_path / "nas").exists()
+
+
+def change_service(path, service):
+    document = backup.load_backup(path)
+    document["service_unit_id"] = service
+    document["scope"][0] = service.encode()
+    for rows in document["snapshot"].values():
+        for row in rows:
+            row["service_unit_key"] = service.encode()
+    backup._atomic_json(path / "metadata.json", document)
+
+
+async def test_mixed_service_restore_rejects_single_root_before_mutation(
+    tmp_path,
+):
+    paths = [
+        make_backup(tmp_path / "a", "t", "s", 1),
+        make_backup(tmp_path / "b", "t", "s", 2),
+    ]
+    change_service(paths[1], "service-B")
+    target = MemoryTarget()
+    with pytest.raises(backup.IntegrityError, match="NAS mapping"):
+        await backup.restore_backup(
+            target,
+            BundleStore(tmp_path / "target"),
+            paths,
+            evidence=backup.RestoreEvidence("all-stopped", "isolated"),
+        )
+    assert target.transactions == 0
+    assert not (tmp_path / "target").exists()
+
+
+async def test_mixed_service_restore_installs_one_transaction_with_disjoint_roots(
+    tmp_path,
+    monkeypatch,
+):
+    paths = [
+        make_backup(tmp_path / "a", "t", "s", 1),
+        make_backup(tmp_path / "b", "t", "s", 2),
+    ]
+    change_service(paths[1], "service-B")
+    target = MemoryTarget()
+    monkeypatch.setattr(backup, "_restore_target", lambda *_: None)
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(backup, "_verify_restored_readers", AsyncMock())
+    stores = {
+        "schema-test-service": BundleStore(tmp_path / "target-A"),
+        "service-B": BundleStore(tmp_path / "target-B"),
+    }
+    report = await backup.restore_backup(
+        target,
+        stores,
+        paths,
+        evidence=backup.RestoreEvidence("all-stopped", "isolated"),
+    )
+    assert report["passed"] and target.transactions == 1
+    assert set(report["target_nas_roots"]) == set(stores)
+
+
+@pytest.mark.parametrize("mapping", ["missing", "overlap"])
+async def test_restore_validates_entire_service_root_mapping_before_mutation(
+    tmp_path,
+    mapping,
+):
+    paths = [
+        make_backup(tmp_path / "a", "t", "s", 1),
+        make_backup(tmp_path / "b", "t", "s", 2),
+    ]
+    change_service(paths[1], "service-B")
+    stores = {"schema-test-service": BundleStore(tmp_path / "target")}
+    if mapping == "overlap":
+        stores["service-B"] = BundleStore(tmp_path / "target" / "nested")
+    with pytest.raises(backup.IntegrityError):
+        await backup.restore_backup(
+            MemoryTarget(),
+            stores,
+            paths,
+            evidence=backup.RestoreEvidence("all-stopped", "isolated"),
+        )
+    assert not (tmp_path / "target").exists()
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["old-version", "foreign-service", "old-scope"],
+)
+def test_backup_requires_v2_exact_service_scope(tmp_path, change):
+    path = make_backup(tmp_path / "a", "t", "s", 1)
+    document = backup.load_backup(path)
+    if change == "old-version":
+        document["version"] = 1
+    elif change == "foreign-service":
+        document["service_unit_id"] = "another-service"
+    else:
+        document["scope"] = document["scope"][1:]
+    backup._atomic_json(path / "metadata.json", document)
+    with pytest.raises((ValueError, backup.IntegrityError)):
+        backup.load_backup(path)
+
+
+async def test_collation_equivalent_tokens_fail_before_restore_nas_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import backup_set
+
+    document = {"scope": [b"A", b"t", b"s", b"a"], "source_schema": "source"}
+    captured = {name: [] for name in backup.TABLES}
+    captured["shares"] = [{"token": "ShareToken"}, {"token": "sharetoken"}]
+    monkeypatch.setattr(
+        backup_set,
+        "load_restore_set",
+        lambda *_: ([document], captured, {}),
+    )
+    monkeypatch.setattr(backup, "_restore_target", lambda *_: None)
+    copy = Mock(side_effect=AssertionError("copy started"))
+    monkeypatch.setattr(backup, "_copy_bundle", copy)
+
+    class CollatedTarget(MemoryTarget):
+        async def fetch_one(self, query, params=None):
+            if "COLLATION_NAME" in query:
+                return {
+                    "CHARACTER_SET_NAME": "utf8mb4",
+                    "COLLATION_NAME": "utf8mb4_general_ci",
+                }
+            if "HAVING COUNT(*)>1" in query:
+                assert "COLLATE utf8mb4_general_ci" in query
+                assert params == ("ShareToken", "sharetoken")
+                return {"token": "ShareToken"}
+            return await super().fetch_one(query, params)
+
+    target = tmp_path / "restore-nas"
+    with pytest.raises(backup.IntegrityError, match="token.*collation"):
+        await backup.restore_backup(
+            CollatedTarget(),
+            BundleStore(target),
+            tmp_path / "backup",
+            evidence=backup.RestoreEvidence("stopped", "isolated"),
+        )
+    assert not target.exists()
+    copy.assert_not_called()
+
+
+@pytest.mark.parametrize("collation", ["utf8mb4_bin", "utf8mb4_general_ci"])
+async def test_restore_token_preflight_uses_server_equality(collation):
+    from swe.app.conversation_storage.backup_set import validate_restore_tokens
+    from unittest.mock import AsyncMock
+
+    database = SimpleNamespace(
+        fetch_one=AsyncMock(
+            side_effect=[
+                {"CHARACTER_SET_NAME": "utf8mb4", "COLLATION_NAME": collation},
+                None,
+            ],
+        ),
+    )
+    await validate_restore_tokens(
+        database,
+        {"shares": [{"token": "One"}, {"token": "Two"}]},
+    )
+    query, values = database.fetch_one.await_args.args
+    assert f"COLLATE {collation}" in query
+    assert "GROUP BY token HAVING COUNT(*)>1" in query
+    assert values == ("One", "Two")
+
+
+async def test_restore_token_preflight_bounds_queries_and_checks_cross_batch():
+    from unittest.mock import AsyncMock
+    from swe.app.conversation_storage.backup_set import validate_restore_tokens
+
+    database = SimpleNamespace(
+        fetch_one=AsyncMock(
+            side_effect=[
+                {
+                    "CHARACTER_SET_NAME": "utf8mb4",
+                    "COLLATION_NAME": "utf8mb4_general_ci",
+                },
+                None,
+                None,
+                {"token": "collision"},
+            ],
+        ),
+    )
+    with pytest.raises(backup.IntegrityError, match="token.*collation"):
+        await validate_restore_tokens(
+            database,
+            {"shares": [{"token": str(index)} for index in range(257)]},
+        )
+    queries = database.fetch_one.await_args_list[1:]
+    assert max(len(call.args[1]) for call in queries) <= 512
+    assert len(queries[-1].args[1]) == 257

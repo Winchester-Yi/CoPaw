@@ -264,6 +264,7 @@ class IndexedQuery:
         actual = tuple(
             row[key]
             for key in (
+                "service_unit_key",
                 "tenant_key",
                 "source_key",
                 "agent_key",
@@ -282,7 +283,7 @@ class IndexedQuery:
             "p.session_id AS publication_session_id,p.chat_id AS publication_chat_id,"
             "p.turn_id AS publication_turn_id FROM swe_conversation_turns t "
             "JOIN swe_conversation_publications p ON p.id=t.terminal_publication_id "
-            "WHERE t.id=%s AND p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s",
+            "WHERE t.id=%s AND p.service_unit_key=%s AND p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s",
             (authority.turn_id, *authority.identity.scope.sql_values),
         )
         if turn is None or turn["publication_state"] != "committed":

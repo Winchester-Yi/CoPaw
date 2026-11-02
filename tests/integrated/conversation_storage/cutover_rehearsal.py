@@ -30,7 +30,12 @@ SESSION_ID = "00000000-0000-4000-8000-000000000002"
 
 
 async def post_install_new_data(db, bundles):
-    scope = WorkspaceScope("tenant", "source", "agent")
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     repo = MySQLChatRepository(db, scope, bundles)
     await repo.upsert_chat(
         ChatSpec(
@@ -62,7 +67,15 @@ async def post_install_new_data(db, bundles):
             },
         },
     }
-    execution = ExecutionStore(db, publications=PublicationStore(db, bundles))
+    execution = ExecutionStore(
+        db,
+        publications=PublicationStore(
+            db,
+            bundles,
+            service_unit_id=scope.service_unit_id,
+        ),
+        service_unit_id=scope.service_unit_id,
+    )
     admission = await execution.reserve_admission(
         SessionIdentity(scope, "alice", "console", SESSION_ID),
         CHAT_ID,
@@ -118,7 +131,11 @@ async def post_install_smoke_failure(db, bundles, root, monkeypatch):
         try:
             path.write_bytes(b"injected truncated smoke body")
             with pytest.raises(StorageUnavailable):
-                await ShareStorage(db, bundles).get_snapshot(share.token)
+                await ShareStorage(
+                    db,
+                    bundles,
+                    service_unit_id=scope.service_unit_id,
+                ).get_snapshot(share.token)
         finally:
             path.write_bytes(body)
         assert (
@@ -172,7 +189,12 @@ async def assert_post_write_export(destination, token, state):
 
 
 async def post_install_startup_failure(db, bundles, root, monkeypatch):
-    scope = WorkspaceScope("tenant", "source", "agent")
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     storage = WorkspaceConversationStorage(
         db,
         scope,

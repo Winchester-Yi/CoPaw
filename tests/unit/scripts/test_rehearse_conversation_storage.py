@@ -64,7 +64,14 @@ def test_stage_preview_does_not_execute_and_apply_stops_at_failure(tmp_path):
     ]
     manifest = tmp_path / "stages.json"
     manifest.write_text(
-        json.dumps({"scope": "isolated-copy", "stages": stages}),
+        json.dumps(
+            {
+                "version": 2,
+                "service_unit_id": "schema-test-service",
+                "scope": "isolated-copy",
+                "stages": stages,
+            },
+        ),
     )
     preview = module.rehearse(manifest, tmp_path / "preview", apply=False)
     assert preview["status"] == "preview"
@@ -84,7 +91,16 @@ def test_stages_reject_production_scope_or_missing_drain(tmp_path):
     path.write_text(json.dumps({"scope": "production", "stages": []}))
     with pytest.raises(ValueError):
         module.rehearse(path, tmp_path / "out", apply=True)
-    path.write_text(json.dumps({"scope": "isolated-copy", "stages": []}))
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "service_unit_id": "schema-test-service",
+                "scope": "isolated-copy",
+                "stages": [],
+            },
+        ),
+    )
     with pytest.raises(ValueError):
         module.rehearse(path, tmp_path / "out", apply=True)
 

@@ -24,6 +24,7 @@ def chat_row(key=b"chat", **changes):
         "session_id": 1,
         "external_chat_key": key,
         "registry_order": 1,
+        "service_unit_key": b"schema-test-service",
         "tenant_key": b"t",
         "source_key": b"s",
         "agent_key": b"a",
@@ -49,7 +50,7 @@ def chat_row(key=b"chat", **changes):
 async def test_draft_final_read_rejects_concurrent_deletion(tmp_path):
     repo = MySQLChatRepository(
         ReadDatabase([]),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
     )
     repo._session_for = AsyncMock(return_value={"id": 1})
@@ -126,7 +127,7 @@ async def test_direct_chat_writes_check_backup_fence_before_session_locks(
 def repository(db, tmp_path):
     return MySQLChatRepository(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
     )
 
@@ -138,7 +139,7 @@ async def test_get_uses_exact_trusted_scope_and_preserves_empty_user(tmp_path):
     assert chat.user_id == ""
     assert chat.created_at.tzinfo == timezone.utc
     query, params = db.queries[0]
-    assert params == (b"t", b"s", b"a", b"chat")
+    assert params == (b"schema-test-service", b"t", b"s", b"a", b"chat")
     assert "deleted_at IS NULL" in query
     assert "LIMIT 1" in query
 
@@ -149,7 +150,15 @@ async def test_get_by_session_uses_all_identity_parts_and_registry_order(
     db = ReadDatabase([chat_row()])
     await repository(db, tmp_path).get_chat_by_id("session", "", "console")
     query, params = db.queries[0]
-    assert params == (b"t", b"s", b"a", b"", b"console", b"session")
+    assert params == (
+        b"schema-test-service",
+        b"t",
+        b"s",
+        b"a",
+        b"",
+        b"console",
+        b"session",
+    )
     assert "ORDER BY c.registry_order ASC" in query
 
 
@@ -166,7 +175,14 @@ async def test_filter_pushes_empty_user_and_channel_into_sql(tmp_path):
     )
     query, params = db.queries[0]
     assert "c.user_key=%s" in query and "c.channel_key=%s" in query
-    assert params == (b"t", b"s", b"a", b"", b"console")
+    assert params == (
+        b"schema-test-service",
+        b"t",
+        b"s",
+        b"a",
+        b"",
+        b"console",
+    )
 
 
 @pytest.mark.parametrize(

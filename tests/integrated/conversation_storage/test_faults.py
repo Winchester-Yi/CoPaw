@@ -28,7 +28,11 @@ async def test_fsync_failure_never_installs_sql_root(
     db = conversation_test_database
     request = await active_request(db)
     bundles = BundleStore(tmp_path)
-    store = PublicationStore(db, bundles)
+    store = PublicationStore(
+        db,
+        bundles,
+        service_unit_id="schema-test-service",
+    )
     await store.reserve(request, CommitPlan(recovery_block="root"))
     bundles.prepare_directory(request.operation_key)
     original = os.fsync
@@ -74,7 +78,11 @@ async def test_invalid_body_cannot_commit_metadata(
 ):
     db = conversation_test_database
     request = await active_request(db)
-    store = PublicationStore(db, BundleStore(tmp_path))
+    store = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     await store.reserve(request, CommitPlan(recovery_block="root"))
     index = await store.write_bundle(
         request.operation_key,

@@ -85,7 +85,11 @@ class MySQLArchiveStore:
     def __init__(self, database, scope, bundles, session_adapter):
         self.db, self.scope, self.bundles = database, scope, bundles
         self.session_adapter = session_adapter
-        self.publications = PublicationStore(database, bundles)
+        self.publications = PublicationStore(
+            database,
+            bundles,
+            service_unit_id=scope.service_unit_id,
+        )
         self.reader = ArchiveReader(database, scope, bundles)
         self.retentions = RetentionStore(database, scope)
 
@@ -162,14 +166,19 @@ class MySQLArchiveStore:
             )
         chat = await self.reader.chat(chat_id)
         session = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_sessions WHERE id=%s",
-            (chat["session_id"],),
+            "SELECT * FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s",
+            (chat["session_id"], self.scope.sql_values[0]),
         )
         if (
             session is None
             or tuple(
                 session[key]
-                for key in ("tenant_key", "source_key", "agent_key")
+                for key in (
+                    "service_unit_key",
+                    "tenant_key",
+                    "source_key",
+                    "agent_key",
+                )
             )
             != self.scope.sql_values
         ):

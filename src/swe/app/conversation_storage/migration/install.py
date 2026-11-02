@@ -56,7 +56,12 @@ def check_verification(report, inventory):
     ]
     expected += [item["position"] for item in inventory["shares"]]
     expected += [
-        "source-artifact:" + str(item["workspace"]) + "/" + item["path"]
+        "service:"
+        + inventory["workspaces"][item["workspace"]]["scope"][0]
+        + "/source-artifact:"
+        + str(item["workspace"])
+        + "/"
+        + item["path"]
         for item in inventory["files"]
     ]
     if sorted(report.get("checked", [])) != sorted(expected):
@@ -124,7 +129,13 @@ def _encoding_matches(row, expected):
     )
 
 
-async def _check_definitions(database, staging, application):
+async def _check_definitions(
+    database,
+    staging,
+    application,
+    *,
+    finalized=True,
+):
     for table, expected in COLUMNS.items():
         rows = await _columns(database, staging, table)
         actual = {
@@ -191,12 +202,30 @@ async def _check_definitions(database, staging, application):
     if extra != {
         key: ("bigint unsigned", "YES", None, "", "", None, None)
         for key in ("publication_id", "byte_offset", "byte_length")
+    } | {
+        "service_unit_key": (
+            "varbinary(256)",
+            "NO" if finalized else "YES",
+            None,
+            "",
+            "",
+            None,
+            None,
+        ),
     }:
         raise ValueError("staging share locator columns differ from contract")
     old_indexes = await _indexes(database, application, SHARE)
     if await _indexes(database, staging, SHARE) != {
         **old_indexes,
         "ix_swe_chat_shares_publication": (1, ("publication_id",)),
+        "ix_swe_chat_shares_service_chat": (
+            1,
+            ("service_unit_key", "chat_id"),
+        ),
+        "ix_swe_chat_shares_service_creator": (
+            1,
+            ("service_unit_key", "creator_id"),
+        ),
     }:
         raise ValueError("staging share changed original indexes")
 
@@ -383,7 +412,7 @@ class ConversationInstaller:
 
         binding = {
             "schema": self.target.schema,
-            "nas_root": self.manifest.data["offline"]["nas_root"],
+            "nas_roots": self.manifest.data["offline"]["nas_roots"],
             "migration_id": self.manifest.migration_id,
         }
         names = await _names(self.db, self.target.schema)
@@ -450,6 +479,11 @@ class ConversationInstaller:
                 self.db,
                 self.target.schema,
                 self.target.application_schema,
+                finalized=any(
+                    row["COLUMN_NAME"] == "service_unit_key"
+                    and row["IS_NULLABLE"] == "NO"
+                    for row in columns
+                ),
             )
         finally:
             await staging.close()
@@ -517,6 +551,15 @@ class ConversationInstaller:
             raise ValueError(
                 "install receipt already exists; inspect table states before retry",
             )
+        columns = await _columns(staging, self.target.schema, SHARE)
+        service = next(
+            row for row in columns if row["COLUMN_NAME"] == "service_unit_key"
+        )
+        if service["IS_NULLABLE"] == "YES":
+            await _apply_script(
+                staging,
+                SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+            )
         # Expected SQL failure in the probe discards its connection. Run it
         # before pinning the named-lock connection used by the real cutover.
         probe = await probe_atomic_rename(self.db)
@@ -530,7 +573,7 @@ class ConversationInstaller:
                     "atomic capability probe ran on a different server",
                 )
             receipt = {
-                "version": 1,
+                "version": 2,
                 "migration_id": self.manifest.migration_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "phase": "rename_pending",

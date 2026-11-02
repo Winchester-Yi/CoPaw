@@ -85,7 +85,7 @@ async def test_request_binding_prunes_memory_only_after_confirmed_publication(
     )
     facade = MySQLArchiveStore(
         SimpleNamespace(),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
         SimpleNamespace(),
     )
@@ -133,7 +133,7 @@ async def test_reset_binding_publishes_clear_root_before_memory_changes(
     )
     facade = MySQLArchiveStore(
         SimpleNamespace(),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
         SimpleNamespace(),
     )
@@ -270,7 +270,7 @@ async def test_candidate_compact_root_contains_new_checkpoint_projection(
     memory.content = [(message, [])]
     store = MySQLArchiveStore(
         SimpleNamespace(),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
         SimpleNamespace(),
     )
@@ -354,7 +354,7 @@ async def test_memory_mutation_waits_for_request_publication_lock(
     )
     store = MySQLArchiveStore(
         SimpleNamespace(),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
         SimpleNamespace(),
     )
@@ -405,7 +405,7 @@ async def test_unknown_publication_blocks_memory_and_archive_side_effects(
     )
     store = MySQLArchiveStore(
         SimpleNamespace(),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         BundleStore(tmp_path),
         SimpleNamespace(),
     )

@@ -28,6 +28,7 @@ class AuthorityDatabase:
         self.retention = RetentionDatabase()
         self.in_transaction = False
         self.session = {
+            "service_unit_key": b"schema-test-service",
             "id": 1,
             "tenant_key": b"tenant",
             "source_key": b"source",
@@ -42,6 +43,7 @@ class AuthorityDatabase:
             "state_revision": 4,
         }
         self.chat = {
+            "service_unit_key": b"schema-test-service",
             "id": 2,
             "session_id": 1,
             "deleted_at": None,
@@ -50,6 +52,7 @@ class AuthorityDatabase:
             "agent_key": b"agent",
         }
         self.turn = {
+            "service_unit_key": b"schema-test-service",
             "id": 3,
             "session_id": 1,
             "chat_id": 2,
@@ -81,6 +84,7 @@ class AuthorityDatabase:
             self.in_transaction = False
 
     async def fetch_one(self, query, params=None):
+        assert query.count("%s") == len(params)
         self.queries.append((query, params))
         if "swe_conversation_retentions" in query:
             return await self.retention.fetch_one(query, params)
@@ -91,10 +95,12 @@ class AuthorityDatabase:
         return deepcopy(self.turn)
 
     async def fetch_all(self, query, params=None):
+        assert query.count("%s") == len(params)
         self.queries.append((query, params))
         return await self.retention.fetch_all(query, params)
 
     async def insert(self, query, params=None):
+        assert query.count("%s") == len(params)
         self.queries.append((query, params))
         if "swe_conversation_retentions" in query:
             return await self.retention.insert(query, params)
@@ -104,6 +110,7 @@ class AuthorityDatabase:
         return 3
 
     async def execute(self, query, params=None):
+        assert query.count("%s") == len(params)
         self.queries.append((query, params))
         if "SET state=%s" in query:
             self.turn["state"] = params[0]
@@ -120,6 +127,8 @@ class AuthorityDatabase:
 
 
 class PublicationDouble:
+    service_unit_key = b"schema-test-service"
+
     def __init__(self, db):
         self.db = db
 
@@ -155,7 +164,12 @@ class PublicationDouble:
 def authority():
     return ExecutionAuthority(
         SessionIdentity(
-            WorkspaceScope("tenant", "source", "agent"),
+            WorkspaceScope(
+                "tenant",
+                "source",
+                "agent",
+                service_unit_id="schema-test-service",
+            ),
             "",
             "console",
             "same_session",
@@ -177,7 +191,11 @@ async def test_execution_writes_check_scope_fence_before_session_locks(
     method,
 ):
     db = AuthorityDatabase()
-    service = ExecutionStore(db, publications=PublicationDouble(db))
+    service = ExecutionStore(
+        db,
+        publications=PublicationDouble(db),
+        service_unit_id="schema-test-service",
+    )
     gate = AsyncMock(side_effect=ConflictError("backup fence"))
     monkeypatch.setattr(RetentionStore, "assert_writes_allowed", gate)
     arguments = {
@@ -206,7 +224,11 @@ async def test_execution_writes_check_scope_fence_before_session_locks(
 
 async def test_start_and_renew_validate_database_time_lease_and_exact_authority():
     db = AuthorityDatabase()
-    store = ExecutionStore(db, owner_key="owner")
+    store = ExecutionStore(
+        db,
+        owner_key="owner",
+        service_unit_id="schema-test-service",
+    )
     result = await store.start(authority())
     assert result["state"] == "running"
     await store.renew(authority())
@@ -235,7 +257,11 @@ async def test_start_and_renew_validate_database_time_lease_and_exact_authority(
 async def test_old_or_expired_owner_cannot_start_or_renew(field, value):
     db = AuthorityDatabase()
     db.session[field] = value
-    store = ExecutionStore(db, owner_key="owner")
+    store = ExecutionStore(
+        db,
+        owner_key="owner",
+        service_unit_id="schema-test-service",
+    )
     with pytest.raises(ConflictError, match="authority"):
         await store.start(authority())
     with pytest.raises(ConflictError, match="authority"):
@@ -245,7 +271,11 @@ async def test_old_or_expired_owner_cannot_start_or_renew(field, value):
 
 async def test_stop_is_persisted_before_return_and_terminal_is_not_overwritten():
     db = AuthorityDatabase()
-    store = ExecutionStore(db, owner_key="owner")
+    store = ExecutionStore(
+        db,
+        owner_key="owner",
+        service_unit_id="schema-test-service",
+    )
     first = await store.request_stop(authority().identity, "question")
     assert first["state"] == "stopping"
     assert not db.in_transaction
@@ -257,7 +287,11 @@ async def test_stop_is_persisted_before_return_and_terminal_is_not_overwritten()
 
 async def test_stop_rejects_another_question_and_scope_mismatch():
     db = AuthorityDatabase()
-    store = ExecutionStore(db, owner_key="owner")
+    store = ExecutionStore(
+        db,
+        owner_key="owner",
+        service_unit_id="schema-test-service",
+    )
     with pytest.raises(ConflictError, match="question"):
         await store.request_stop(authority().identity, "other")
     db.session["user_key"] = b"other"
@@ -271,6 +305,7 @@ async def test_same_question_returns_original_admission_without_execution_replay
         db,
         owner_key="new-owner",
         publications=PublicationDouble(db),
+        service_unit_id="schema-test-service",
     )
     result = await store.reserve_admission(
         authority().identity,
@@ -296,6 +331,7 @@ async def test_different_question_is_busy_even_if_original_owner_lease_expired(
         db,
         owner_key="new-owner",
         publications=PublicationDouble(db),
+        service_unit_id="schema-test-service",
     )
     with pytest.raises(ConflictError, match="busy"):
         await store.reserve_admission(
@@ -316,6 +352,7 @@ async def test_new_admission_reserves_turn_slot_and_original_publication_atomica
         db,
         owner_key="new-owner",
         publications=PublicationDouble(db),
+        service_unit_id="schema-test-service",
     )
     result = await store.reserve_admission(
         authority().identity,
@@ -341,7 +378,12 @@ async def test_new_admission_reserves_turn_slot_and_original_publication_atomica
 async def test_terminal_publication_does_not_release_slot_before_confirmed_commit():
     db = AuthorityDatabase()
     publications = PublicationDouble(db)
-    store = ExecutionStore(db, owner_key="owner", publications=publications)
+    store = ExecutionStore(
+        db,
+        owner_key="owner",
+        publications=publications,
+        service_unit_id="schema-test-service",
+    )
     result = await store.finish(
         authority(),
         "completed",
@@ -365,7 +407,12 @@ async def test_natural_completion_after_stop_is_rejected_before_nas_write():
     db = AuthorityDatabase()
     db.turn["state"] = "stopping"
     publications = PublicationDouble(db)
-    store = ExecutionStore(db, owner_key="owner", publications=publications)
+    store = ExecutionStore(
+        db,
+        owner_key="owner",
+        publications=publications,
+        service_unit_id="schema-test-service",
+    )
     with pytest.raises(ConflictError, match="Stop"):
         await store.finish(
             authority(),
@@ -375,3 +422,20 @@ async def test_natural_completion_after_stop_is_rejected_before_nas_write():
         )
     assert not db.reserved
     assert not hasattr(publications, "blocks")
+
+
+async def test_foreign_service_execution_is_rejected_before_transaction_mutation():
+    db = AuthorityDatabase()
+    service = ExecutionStore(db, service_unit_id="other-service")
+    with pytest.raises(IntegrityError, match="service"):
+        await service.request_stop(authority().identity, "question")
+    assert not db.queries
+
+
+def test_execution_rejects_foreign_publication_store():
+    with pytest.raises(IntegrityError, match="service"):
+        ExecutionStore(
+            AuthorityDatabase(),
+            publications=PublicationDouble(None),
+            service_unit_id="other-service",
+        )

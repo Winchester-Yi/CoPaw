@@ -7,6 +7,7 @@ import pytest
 
 from swe.app.conversation_storage.migration.importer import (
     ConversationImporter,
+    bundle_stores,
 )
 from swe.app.conversation_storage.migration.install import TABLES
 from swe.app.conversation_storage.migration.manifest import MigrationManifest
@@ -50,12 +51,11 @@ async def resume_committed_import(
         (assignment["target_id"],),
     )
     assert original["state"] == "committed"
-    before_bytes = (
-        importer.bundles.root / assignment["relative_path"]
-    ).read_bytes()
+    store = importer.bundle_stores[original["service_unit_key"].decode()]
+    before_bytes = (store.root / assignment["relative_path"]).read_bytes()
     resumed = ConversationImporter(
         importer.db,
-        importer.bundles,
+        importer.bundle_stores,
         manifest,
         importer.target,
         batch_size=importer.batch_size,
@@ -70,11 +70,11 @@ async def resume_committed_import(
         == original
     )
     assert (
-        importer.bundles.root / assignment["relative_path"]
+        store.root / assignment["relative_path"]
     ).read_bytes() == before_bytes
     checked = await verify_import(
         importer.db,
-        importer.bundles,
+        importer.bundle_stores,
         manifest,
         report,
         importer.target,
@@ -85,10 +85,12 @@ async def resume_committed_import(
 
 async def reject_missing_body(installer, staging, bundles, report):
     publication = await staging.fetch_one(
-        "SELECT relative_path FROM swe_conversation_publications "
+        "SELECT relative_path,service_unit_key FROM swe_conversation_publications "
         "WHERE state='committed' ORDER BY id LIMIT 1",
     )
-    path = bundles.root / publication["relative_path"].decode()
+    stores = bundle_stores(bundles, installer.manifest)
+    store = stores[publication["service_unit_key"].decode()]
+    path = store.root / publication["relative_path"].decode()
     original = path.read_bytes()
     path.unlink()
     try:

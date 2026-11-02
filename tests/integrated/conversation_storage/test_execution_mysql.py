@@ -30,7 +30,12 @@ from tests.integrated.conversation_storage.test_schema import (
 
 def identity(user="alice", channel="console"):
     return SessionIdentity(
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         user,
         channel,
         "session",
@@ -38,12 +43,17 @@ def identity(user="alice", channel="console"):
 
 
 def store(db, root, owner):
-    publications = PublicationStore(db, BundleStore(root))
+    publications = PublicationStore(
+        db,
+        BundleStore(root),
+        service_unit_id="schema-test-service",
+    )
     return ExecutionStore(
         db,
         owner_key=owner,
         lease_seconds=60,
         publications=publications,
+        service_unit_id="schema-test-service",
     )
 
 

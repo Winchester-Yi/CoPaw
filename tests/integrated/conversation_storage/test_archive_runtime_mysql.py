@@ -28,7 +28,12 @@ async def setup(db, root):
         epoch=1,
     )
     bundles = BundleStore(root)
-    scope = WorkspaceScope("tenant", "source", "agent")
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     adapter = MySQLSessionAdapter(db, scope, bundles, channel="console")
     store = MySQLArchiveStore(db, scope, bundles, adapter)
     return session, chat, second, store

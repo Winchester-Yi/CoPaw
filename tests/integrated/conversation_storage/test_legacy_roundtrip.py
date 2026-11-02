@@ -80,9 +80,9 @@ async def reject_tampered_reentry(importer, report, db, manifest):
     ]["nested"][0] = 99
     with pytest.raises(IntegrityError, match="content differs"):
         await importer.run(changed)
-    sid = manifest.data["assignments"]["session"]["workspace:0/session:0"][
-        "target_id"
-    ]
+    sid = manifest.data["assignments"]["session"][
+        "service:schema-test-service/workspace:0/session:0"
+    ]["target_id"]
     await db.execute(
         "UPDATE swe_conversation_sessions SET external_session_key=%s WHERE id=%s",
         (b"tampered", sid),
@@ -166,6 +166,7 @@ async def test_complete_legacy_import_reentry_and_semantics(
             "token": "permanent",
             "chat_id": "deleted-original",
             "creator_id": "alice",
+            "service_unit_id": "schema-test-service",
             "tenant_id": "tenant",
             "snapshot_key": "original.json",
             "created_at": "2026-10-30T00:00:00Z",
@@ -183,7 +184,12 @@ async def test_complete_legacy_import_reentry_and_semantics(
     for path in source.rglob("*"):
         path.chmod(0o555 if path.is_dir() else 0o444)
     source.chmod(0o555)
-    scope = WorkspaceScope("tenant", "source", "agent")
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     boundary = SourceBoundary(
         "snapshot",
         "2026-10-30T00:00:00Z",
@@ -203,6 +209,7 @@ async def test_complete_legacy_import_reentry_and_semantics(
         [
             {
                 "root": str(source),
+                "service_unit_id": "schema-test-service",
                 "tenant_id": "tenant",
                 "source_id": "source",
                 "agent_id": "agent",
@@ -298,7 +305,11 @@ async def test_complete_legacy_import_reentry_and_semantics(
         m.metadata.get("original_id", m.id) for m in history.messages
     }
     assert (
-        await ShareStorage(db, bundles).get_snapshot("permanent")
+        await ShareStorage(
+            db,
+            bundles,
+            service_unit_id="schema-test-service",
+        ).get_snapshot("permanent")
         == report["shares"][0]["snapshot"]
     )
     assert (
@@ -312,3 +323,143 @@ async def test_complete_legacy_import_reentry_and_semantics(
         for p in source.rglob("*")
         if p.is_file()
     }
+
+
+async def test_coordinated_two_service_import_keeps_same_identity_nas_separate(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    await ChatShareStore(db).ensure_schema()
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_publication_extension.sql",
+    )
+    boundary = SourceBoundary(
+        "two-service-snapshot",
+        "2026-10-30T00:00:00Z",
+        "old@sha256:" + "a" * 64,
+        ("stopped-all-services", "frozen-sources"),
+    )
+    mappings, workspaces, bundles = [], [], {}
+    chat = ChatSpec(
+        id="00000000-0000-4000-8000-000000000001",
+        session_id="same-session",
+        user_id="user",
+        channel="console",
+    )
+    for service in ("service-one", "service-two"):
+        source = tmp_path / (service + "-source")
+        source.mkdir()
+        (source / "sessions").mkdir()
+        (source / "chats.json").write_text(
+            ChatsFile(chats=[chat]).model_dump_json(),
+        )
+        question = Msg("user", service + " question", "user")
+        question.id = "same-question"
+        answer = Msg("assistant", service + " answer", "assistant")
+        answer.id = "same-answer"
+        archive = ConversationArchiveStore(
+            source / "dialog",
+            cursor_secret=b"two-service-test",
+        )
+        await archive.commit(
+            chat.id,
+            [Msg("assistant", service + " archive", "assistant")],
+        )
+        (source / "sessions" / "user_same-session.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "agent": {
+                        "memory": {
+                            "content": [question.to_dict(), answer.to_dict()],
+                        },
+                    },
+                    "turn_states": {
+                        "same-question": {
+                            "chat_id": chat.id,
+                            "status": "completed",
+                            "message": question.to_dict(),
+                        },
+                    },
+                    "future_module": {"service": service},
+                },
+            ),
+        )
+        for path in source.rglob("*"):
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        source.chmod(0o555)
+        scope = WorkspaceScope(
+            "same-tenant",
+            "same-source",
+            "same-agent",
+            service_unit_id=service,
+        )
+        mappings.append(WorkspaceMapping(scope, source))
+        workspaces.append(
+            {
+                "service_unit_id": service,
+                "tenant_id": "same-tenant",
+                "source_id": "same-source",
+                "agent_id": "same-agent",
+                "root": str(source),
+            },
+        )
+        nas = tmp_path / (service + "-nas")
+        nas.mkdir()
+        bundles[service] = BundleStore(nas)
+    report = inventory(mappings, boundary)
+    assert report["ready"], report["blockers"]
+    manifest = MigrationManifest.create(
+        tmp_path / "migration.json",
+        boundary,
+        workspaces,
+    )
+    target = OfflineTarget(
+        db.config.database,
+        "business",
+        manifest.migration_id,
+    )
+    await ConversationImporter(db, bundles, manifest, target).run(report)
+    verified = await verify_import(db, bundles, manifest, report, target)
+    assert verified["passed"], verified["blockers"]
+    rows = await db.fetch_all(
+        "SELECT id,service_unit_key FROM swe_conversation_sessions ORDER BY id",
+    )
+    assert len(rows) == 2
+    assert {row["service_unit_key"] for row in rows} == {
+        b"service-one",
+        b"service-two",
+    }
+    for table in ("turns", "messages"):
+        counts = await db.fetch_all(
+            "SELECT service_unit_key,COUNT(*) AS n FROM swe_conversation_"
+            + table
+            + " GROUP BY service_unit_key",
+        )
+        assert {row["service_unit_key"] for row in counts} == {
+            b"service-one",
+            b"service-two",
+        }
+        assert all(row["n"] > 0 for row in counts)
+    for mapping in mappings:
+        adapter = MySQLSessionAdapter(
+            db,
+            mapping.scope,
+            bundles[mapping.scope.service_unit_id],
+            channel="console",
+        )
+        state = await adapter.get_session_state_dict(
+            "same-session",
+            "user",
+            False,
+        )
+        assert state["turn_states"]["same-question"]["status"] == "completed"
+        assert (
+            state["agent"]["memory"]["content"][1]["content"]
+            == mapping.scope.service_unit_id + " answer"
+        )
+        assert state["future_module"] == {
+            "service": mapping.scope.service_unit_id,
+        }

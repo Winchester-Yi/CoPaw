@@ -22,9 +22,13 @@ async def test_runtime_readiness_accepts_formal_schema_and_rejects_missing_index
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"stable",
     )
@@ -47,10 +51,14 @@ async def test_runtime_readiness_rejects_nontransactional_engine(
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
     await db.execute("ALTER TABLE swe_conversation_turns ENGINE=MyISAM")
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"stable",
     )

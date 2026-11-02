@@ -19,7 +19,12 @@ from swe.app.runner.models import ChatHistory, ChatSpec, ChatArchivePage
 def history(tmp_path):
     return HistoryStore(
         None,
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         BundleStore(tmp_path),
         cursor_secret=b"test-secret",
     )
@@ -29,7 +34,7 @@ def test_archive_cursor_binds_scope_chat_epoch_and_high(tmp_path):
     store = history(tmp_path)
     token = store._encode_cursor("chat", epoch=3, high=10, before=7)
     assert store._decode_cursor(token, "chat") == {
-        "v": 1,
+        "v": 2,
         "chat": "chat",
         "epoch": 3,
         "high": 10,
@@ -41,7 +46,12 @@ def test_archive_cursor_binds_scope_chat_epoch_and_high(tmp_path):
         store._decode_cursor(token + "x", "chat")
     other = HistoryStore(
         None,
-        WorkspaceScope("tenant", "other", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "other",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         BundleStore(tmp_path),
         cursor_secret=b"test-secret",
     )

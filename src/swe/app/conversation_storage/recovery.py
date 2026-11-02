@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """Settle persisted publications after verified owner exit, never resume Agent IO."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 
 from .bundle import new_operation_key
 from .errors import ConflictError, IntegrityError
 from .execution import ExecutionAuthority, TERMINAL_STATES
-from .identity import SessionIdentity, identity_bytes
+from .identity import SessionIdentity, identity_bytes, service_unit_bytes
 from .publications import PublicationStore, _request
 
 
@@ -27,8 +27,10 @@ class OwnerExitProof:
     operator: str
     owner_stopped: bool
     io_drained: bool
+    service_unit_id: str = field(kw_only=True)
 
     def __post_init__(self):
+        service_unit_bytes(self.service_unit_id)
         identity_bytes(self.owner_key, 128)
         for value in (self.owner_key, self.evidence_ref, self.operator):
             identity_bytes(value, 1024)
@@ -47,7 +49,9 @@ class EndedOwnerRecovery:
 
     async def _verify(self, proof):
         if not isinstance(proof, OwnerExitProof) or (
-            proof.owner_stopped is not True or proof.io_drained is not True
+            proof.owner_stopped is not True
+            or proof.io_drained is not True
+            or proof.service_unit_id != self.storage.scope.service_unit_id
         ):
             raise ConflictError(
                 "ended owner and drained IO evidence is required",
@@ -71,8 +75,11 @@ class EndedOwnerRecovery:
             raise ValueError("recovery Turn identity must be positive")
         authority, turn = await self._fence(identity, turn_id, proof)
         operations = await self.storage.db.fetch_all(
-            "SELECT * FROM swe_conversation_publications WHERE turn_id=%s ORDER BY id",
-            (turn_id,),
+            "SELECT * FROM swe_conversation_publications WHERE service_unit_key=%s AND turn_id=%s ORDER BY id",
+            (
+                self.storage.scope.sql_values[0],
+                turn_id,
+            ),
         )
         if not operations or not any(
             row["kind"] == "admission" for row in operations
@@ -86,8 +93,11 @@ class EndedOwnerRecovery:
             if row["state"] == "prepared":
                 await self._settle_operation(authority, row)
         turn = await self.storage.db.fetch_one(
-            "SELECT * FROM swe_conversation_turns WHERE id=%s",
-            (turn_id,),
+            "SELECT * FROM swe_conversation_turns WHERE service_unit_key=%s AND id=%s",
+            (
+                self.storage.scope.sql_values[0],
+                turn_id,
+            ),
         )
         if turn["state"] not in TERMINAL_STATES:
             admission = next(
@@ -116,10 +126,14 @@ class EndedOwnerRecovery:
                     owner_stopped=True,
                 )
         turn = await self.storage.db.fetch_one(
-            "SELECT state,history_status FROM swe_conversation_turns WHERE id=%s",
-            (turn_id,),
+            "SELECT state,history_status FROM swe_conversation_turns WHERE service_unit_key=%s AND id=%s",
+            (
+                self.storage.scope.sql_values[0],
+                turn_id,
+            ),
         )
         return {
+            "service_unit_id": self.storage.scope.service_unit_id,
             "turn_id": turn_id,
             "state": turn["state"],
             "history_status": turn["history_status"],
@@ -135,8 +149,11 @@ class EndedOwnerRecovery:
             await service._assert_writes_allowed(identity)
             session = await service._session(identity)
             candidate = await self.storage.db.fetch_one(
-                "SELECT chat_id FROM swe_conversation_turns WHERE id=%s",
-                (turn_id,),
+                "SELECT chat_id FROM swe_conversation_turns WHERE service_unit_key=%s AND id=%s",
+                (
+                    self.storage.scope.sql_values[0],
+                    turn_id,
+                ),
             )
             if candidate is None:
                 raise KeyError(turn_id)
@@ -147,8 +164,11 @@ class EndedOwnerRecovery:
             )
             session, chat, turn = associations
             admission = await self.storage.db.fetch_one(
-                "SELECT * FROM swe_conversation_publications WHERE turn_id=%s AND kind='admission' ORDER BY id LIMIT 1 FOR UPDATE",
-                (turn_id,),
+                "SELECT * FROM swe_conversation_publications WHERE service_unit_key=%s AND turn_id=%s AND kind='admission' ORDER BY id LIMIT 1 FOR UPDATE",
+                (
+                    self.storage.scope.sql_values[0],
+                    turn_id,
+                ),
             )
             if admission is None or (
                 turn["generation"],
@@ -178,8 +198,11 @@ class EndedOwnerRecovery:
                     session["generation"],
                 )
                 await self.storage.db.execute(
-                    "UPDATE swe_conversation_sessions SET generation=generation+1,owner_key=NULL,lease_until=NULL WHERE id=%s",
-                    (session["id"],),
+                    "UPDATE swe_conversation_sessions SET generation=generation+1,owner_key=NULL,lease_until=NULL WHERE service_unit_key=%s AND id=%s",
+                    (
+                        self.storage.scope.sql_values[0],
+                        session["id"],
+                    ),
                 )
             return authority, turn
 

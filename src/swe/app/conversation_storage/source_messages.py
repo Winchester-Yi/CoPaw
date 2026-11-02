@@ -9,6 +9,7 @@ from .identity import identity_bytes
 from .retention import RetentionStore
 
 SOURCE_FIELDS = (
+    "service_unit_key",
     "id",
     "session_id",
     "origin_chat_id",
@@ -63,8 +64,8 @@ class SourceMessages:
             await self.projection_references.revalidate(db)
         for identity, expected in sorted(self.rows.items()):
             row = await db.fetch_one(
-                "SELECT * FROM swe_conversation_messages WHERE id=%s FOR SHARE",
-                (identity,),
+                "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s FOR SHARE",
+                (identity, expected["service_unit_key"]),
             )
             if row is None or any(
                 row[key] != expected[key] for key in SOURCE_FIELDS
@@ -103,9 +104,16 @@ class SourceMessages:
         expected.update(self.dependency_publications)
         for identity in sorted({*self.publication_ids, current["id"]}):
             row = await service.db.fetch_one(
-                "SELECT * FROM swe_conversation_publications WHERE id=%s FOR UPDATE",
-                (identity,),
+                "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                (identity, service.service_unit_key),
             )
+            if (
+                row is not None
+                and row["service_unit_key"] != service.service_unit_key
+            ):
+                raise IntegrityError(
+                    "archive source publication service unit mismatch",
+                )
             if identity == current["id"]:
                 result = row
             elif (
@@ -125,6 +133,7 @@ class SourceMessages:
                 for key in (
                     "session_id",
                     "scope_kind",
+                    "service_unit_key",
                     "tenant_key",
                     "source_key",
                     "agent_key",
@@ -139,6 +148,11 @@ class SourceMessages:
 
 
 def _validate_row(row, message, request):
+    if (
+        row is not None
+        and row["service_unit_key"] != request.scope.sql_values[0]
+    ):
+        raise IntegrityError("archive source service unit mismatch")
     if row is None or (
         row["session_id"] != request.session_id
         or row["layer"] == "archive"
@@ -192,8 +206,8 @@ async def snapshot_sources(service, request, plan):
         async with service.db.transaction():
             for message in messages:
                 row = await service.db.fetch_one(
-                    "SELECT * FROM swe_conversation_messages WHERE id=%s",
-                    (message.source_message_id,),
+                    "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s",
+                    (message.source_message_id, request.scope.sql_values[0]),
                 )
                 _validate_row(row, message, request)
                 snapshot.rows[row["id"]] = row

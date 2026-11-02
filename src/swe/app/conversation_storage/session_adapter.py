@@ -173,7 +173,11 @@ class MySQLSessionAdapter:
         self.scope = scope
         self.channel = channel
         self.bundles = bundles
-        self.publications = PublicationStore(database, bundles)
+        self.publications = PublicationStore(
+            database,
+            bundles,
+            service_unit_id=scope.service_unit_id,
+        )
         self.retentions = RetentionStore(database, scope)
         self.owner_key = new_operation_key()
 
@@ -315,7 +319,7 @@ class MySQLSessionAdapter:
 
     async def _ensure_session(self, identity):
         await self.db.insert(
-            "INSERT INTO swe_conversation_sessions (tenant_key,source_key,agent_key,user_key,channel_key,external_session_key,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
+            "INSERT INTO swe_conversation_sessions (service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,external_session_key,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
             identity.sql_values,
         )
         return await self._row(identity, lock=True)
@@ -615,8 +619,8 @@ class MySQLSessionAdapter:
 
     async def _turn_chat(self, turn, session):
         chat = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_chats WHERE id=%s",
-            (turn["chat_id"],),
+            "SELECT * FROM swe_conversation_chats WHERE id=%s AND service_unit_key=%s",
+            (turn["chat_id"], self.scope.sql_values[0]),
         )
         if chat is None or chat["deleted_at"] is not None:
             raise ConflictError("Turn Chat was deleted")
@@ -627,7 +631,13 @@ class MySQLSessionAdapter:
             raise IntegrityError("Turn Chat Session identity mismatch")
         if (
             tuple(
-                chat[key] for key in ("tenant_key", "source_key", "agent_key")
+                chat[key]
+                for key in (
+                    "service_unit_key",
+                    "tenant_key",
+                    "source_key",
+                    "agent_key",
+                )
             )
             != self.scope.sql_values
         ):
@@ -637,10 +647,11 @@ class MySQLSessionAdapter:
     async def _revalidate_turn(self, identity, turn, chat):
         session = await self._row(identity)
         current = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_turns WHERE id=%s",
-            (turn["id"],),
+            "SELECT * FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s",
+            (turn["id"], self.scope.sql_values[0]),
         )
         fields = (
+            "service_unit_key",
             "session_id",
             "chat_id",
             "question_msg_key",
@@ -678,7 +689,7 @@ class MySQLSessionAdapter:
         params = [session["id"]]
         where = "session_id=%s AND admission_publication_id IS NOT NULL"
         if chat_id is not None:
-            where += " AND chat_id=(SELECT id FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s)"
+            where += " AND chat_id=(SELECT id FROM swe_conversation_chats WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s)"
             params.extend((*self.scope.sql_values, chat_id.encode("utf-8")))
         turns = await self.db.fetch_all(
             f"SELECT question_msg_key FROM swe_conversation_turns WHERE {where} ORDER BY id",

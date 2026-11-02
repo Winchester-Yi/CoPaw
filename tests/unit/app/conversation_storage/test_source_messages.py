@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from swe.app.conversation_storage.identity import WorkspaceScope
+
 from swe.app.conversation_storage.message_installs import (
     MessageInstall,
     _message_values,
@@ -19,10 +21,27 @@ def test_archive_source_locator_retains_original_publication_and_extent():
         archive_chat_id=2,
         source_message_id=11,
     )
-    sources = {11: {"publication_id": 4, "byte_offset": 50, "byte_length": 27}}
+    sources = {
+        11: {
+            "service_unit_key": b"schema-test-service",
+            "publication_id": 4,
+            "byte_offset": 50,
+            "byte_length": 27,
+        },
+    }
     values = _message_values(
         message,
-        SimpleNamespace(session_id=1, chat_id=2, turn_id=None),
+        SimpleNamespace(
+            scope=WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
+            session_id=1,
+            chat_id=2,
+            turn_id=None,
+        ),
         {"id": 8},
         BundleIndex("new", 100, {}, {}),
         9,
@@ -46,6 +65,7 @@ def test_source_occurrence_identity_cannot_be_forged():
     from swe.app.conversation_storage.errors import IntegrityError
 
     row = {
+        "service_unit_key": b"schema-test-service",
         "session_id": 1,
         "layer": "memory",
         "deleted_at": None,
@@ -69,18 +89,46 @@ def test_source_occurrence_identity_cannot_be_forged():
         source_message_id=11,
     )
     row["message_timestamp"] = None
-    _validate_row(row, message, SimpleNamespace(session_id=1))
+    _validate_row(
+        row,
+        message,
+        SimpleNamespace(
+            scope=WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
+            session_id=1,
+        ),
+    )
     with pytest.raises(IntegrityError, match="visible"):
         _validate_row(
             {**row, "current_visible": 0},
             message,
-            SimpleNamespace(session_id=1),
+            SimpleNamespace(
+                scope=WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                session_id=1,
+            ),
         )
     with pytest.raises(IntegrityError, match="identity"):
         _validate_row(
             {**row, "source_msg_key": b"other"},
             message,
-            SimpleNamespace(session_id=1),
+            SimpleNamespace(
+                scope=WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                session_id=1,
+            ),
         )
 
 
@@ -110,6 +158,7 @@ async def test_source_publications_lock_older_then_current_in_integer_order():
     async def fetch(query, params):
         calls.append(params[0])
         return {
+            "service_unit_key": b"schema-test-service",
             "id": params[0],
             "state": "prepared" if params[0] == 9 else "committed",
             "gc_state": "live",
@@ -118,6 +167,9 @@ async def test_source_publications_lock_older_then_current_in_integer_order():
     sources = SourceMessages(
         rows={11: {"publication_id": 2}, 12: {"publication_id": 1}},
     )
-    service = SimpleNamespace(db=SimpleNamespace(fetch_one=fetch))
+    service = SimpleNamespace(
+        service_unit_key=b"schema-test-service",
+        db=SimpleNamespace(fetch_one=fetch),
+    )
     assert (await sources.lock_publications(service, {"id": 9}))["id"] == 9
     assert calls == [1, 2, 9]

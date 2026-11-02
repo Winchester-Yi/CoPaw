@@ -24,7 +24,12 @@ from tests.integrated.conversation_storage.test_publications_mysql import (
 def repository(db, tmp_path, source="source"):
     return MySQLChatRepository(
         db,
-        WorkspaceScope("tenant", source, "agent"),
+        WorkspaceScope(
+            "tenant",
+            source,
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         BundleStore(tmp_path),
     )
 
@@ -350,7 +355,11 @@ async def test_lost_chat_creation_commit_retries_without_duplicate(
             return result
 
     fault = LostFinalCommit(db)
-    repo.publications = PublicationStore(fault, repo.bundles)
+    repo.publications = PublicationStore(
+        fault,
+        repo.bundles,
+        service_unit_id="schema-test-service",
+    )
     spec = ChatSpec(
         id="unknown-create",
         session_id="unknown-session",
@@ -362,7 +371,11 @@ async def test_lost_chat_creation_commit_retries_without_duplicate(
         await repo.upsert_chat(spec)
     original = failure.value.operation_key
     assert (await repo.publications.get(original))["state"] == "committed"
-    repo.publications = PublicationStore(db, repo.bundles)
+    repo.publications = PublicationStore(
+        db,
+        repo.bundles,
+        service_unit_id="schema-test-service",
+    )
     await repo.upsert_chat(spec)
     assert (await repo.get_chat(spec.id)).meta == spec.meta
     assert (
@@ -390,7 +403,11 @@ async def test_draft_commit_uses_ordinary_chat_created_after_preflight(
             await proceed.wait()
             return await super().commit(operation_key)
 
-    repo.publications = PausedPublication(db, repo.bundles)
+    repo.publications = PausedPublication(
+        db,
+        repo.bundles,
+        service_unit_id="schema-test-service",
+    )
     draft = ChatSpec(
         id="draft-loser",
         session_id="shared",
@@ -514,7 +531,11 @@ async def test_conflicting_metadata_abort_does_not_fence_active_execution(
             )
             return await super().commit(operation_key)
 
-    repo.publications = CompetingMetadata(db, repo.bundles)
+    repo.publications = CompetingMetadata(
+        db,
+        repo.bundles,
+        service_unit_id="schema-test-service",
+    )
     changed = (await repo.get_chat(spec.id)).model_copy(
         update={"meta": {"private": "new"}},
     )

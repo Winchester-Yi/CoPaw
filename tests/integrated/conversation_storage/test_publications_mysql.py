@@ -96,6 +96,7 @@ async def active_request(db):
         db,
         "swe_conversation_turns",
         {
+            "service_unit_key": b"schema-test-service",
             "chat_id": chat,
             "session_id": session,
             "question_msg_key": b"question",
@@ -111,7 +112,12 @@ async def active_request(db):
     )
     return PublicationRequest(
         new_operation_key(),
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         "state",
         "owner",
         1,
@@ -126,7 +132,11 @@ async def active_request(db):
 
 async def prepared_root(db, root):
     operation = await active_request(db)
-    store = PublicationStore(db, BundleStore(root))
+    store = PublicationStore(
+        db,
+        BundleStore(root),
+        service_unit_id="schema-test-service",
+    )
     await store.reserve(operation, CommitPlan(recovery_block="root"))
     index = await store.write_bundle(
         operation.operation_key,
@@ -144,7 +154,11 @@ async def test_lost_mysql_commit_response_keeps_one_original_operation(
     db = conversation_test_database
     operation = await active_request(db)
     fault = LostCommitDatabase(db)
-    store = PublicationStore(fault, BundleStore(tmp_path))
+    store = PublicationStore(
+        fault,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     if phase == "reserve":
         fault.lose_next_commit = True
         with pytest.raises(UnknownCommit):
@@ -191,6 +205,7 @@ async def test_mysql_failed_install_rolls_back_root_and_publication(
     faulty = PublicationStore(
         InstallFailureDatabase(db),
         BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
     )
     with pytest.raises(UnknownCommit):
         await faulty.commit(operation.operation_key)
@@ -200,7 +215,11 @@ async def test_mysql_failed_install_rolls_back_root_and_publication(
     )
     assert session["state_revision"] == 0
     assert session["recovery_publication_id"] is None
-    good = PublicationStore(db, BundleStore(tmp_path))
+    good = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     assert (await good.get(operation.operation_key))["state"] == "prepared"
     assert (await good.commit(operation.operation_key))["state"] == "committed"
 
@@ -212,14 +231,27 @@ async def test_mysql_missing_reservation_waits_for_original_insert_arbitration(
     db = conversation_test_database
     operation = PublicationRequest(
         new_operation_key(),
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         "state",
         "stopped-owner",
         0,
     )
     original = PausedInsertDatabase(db)
-    writer = PublicationStore(original, BundleStore(tmp_path))
-    reconciler = PublicationStore(db, BundleStore(tmp_path))
+    writer = PublicationStore(
+        original,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    reconciler = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     reservation = asyncio.create_task(writer.reserve(operation, CommitPlan()))
     rejection = None
     try:
@@ -263,8 +295,16 @@ async def test_mysql_writer_abort_serialize_on_same_lock_order(
         else "generation=generation+1"
     )
     paused = PausedExecuteDatabase(db, marker)
-    leader = PublicationStore(paused, BundleStore(tmp_path))
-    follower = PublicationStore(db, BundleStore(tmp_path))
+    leader = PublicationStore(
+        paused,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    follower = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     first = asyncio.create_task(
         (
             leader.commit(operation.operation_key)

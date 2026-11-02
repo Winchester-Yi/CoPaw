@@ -260,11 +260,12 @@ async def _prune(db, request, prune_ids, *, context_epoch=None):
     prune_ids = tuple(sorted(set(prune_ids)))
     placeholders = ",".join(["%s"] * len(prune_ids))
     rows = await db.fetch_all(
-        f"SELECT id,session_id,layer,context_epoch FROM swe_conversation_messages WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE",
-        tuple(sorted(set(prune_ids))),
+        f"SELECT id,service_unit_key,session_id,layer,context_epoch FROM swe_conversation_messages WHERE id IN ({placeholders}) AND service_unit_key=%s ORDER BY id FOR UPDATE",
+        (*prune_ids, request.scope.sql_values[0]),
     )
     if len(rows) != len(set(prune_ids)) or any(
-        row["session_id"] != request.session_id
+        row["service_unit_key"] != request.scope.sql_values[0]
+        or row["session_id"] != request.session_id
         or row["layer"] == "archive"
         or (
             context_epoch is not None and row["context_epoch"] != context_epoch
@@ -275,8 +276,8 @@ async def _prune(db, request, prune_ids, *, context_epoch=None):
             "pruned occurrence does not belong to current Session",
         )
     await db.execute(
-        f"UPDATE swe_conversation_messages SET in_context=0,current_visible=0 WHERE id IN ({placeholders})",
-        tuple(sorted(set(prune_ids))),
+        f"UPDATE swe_conversation_messages SET in_context=0,current_visible=0 WHERE id IN ({placeholders}) AND service_unit_key=%s",
+        (*prune_ids, request.scope.sql_values[0]),
     )
 
 

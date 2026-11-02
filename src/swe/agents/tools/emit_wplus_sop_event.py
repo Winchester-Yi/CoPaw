@@ -109,14 +109,14 @@ async def emit_wplus_sop_event(
         record.projection.ownership,
     )
     from ...app.conversation_storage.runtime import workspace_storage
-    from ...app.conversation_storage.identity import WorkspaceScope
     from ...app.runner.manager import ChatManager
 
     storage = workspace_storage(
         SimpleNamespace(
             workspace_dir=workspace_dir,
             agent_id=agent_id,
-            conversation_scope=WorkspaceScope(tenant_id, source_id, agent_id),
+            tenant_id=tenant_id,
+            source_id=source_id,
         ),
     )
     chats_path = Path(workspace_dir) / "chats.json"

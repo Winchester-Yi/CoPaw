@@ -13,6 +13,7 @@ class ChatShareRecord(BaseModel):
     creator_id: str
     snapshot_key: str
     tenant_id: str = "default"
+    service_unit_id: str | None = None
     created_at: datetime
     access_count: int = 0
     last_access_at: datetime | None = None

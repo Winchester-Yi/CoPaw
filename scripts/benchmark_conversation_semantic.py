@@ -69,7 +69,12 @@ PAYLOAD_BYTES = 2048
 EVENT_INTERVAL_SECONDS = 0.005
 MIDPOINT_IDLE_SECONDS = 2.05
 SAMPLE_INTERVAL_SECONDS = 0.01
-SCOPE = WorkspaceScope("tenant", "semantic-benchmark", "agent")
+SCOPE = WorkspaceScope(
+    "tenant",
+    "semantic-benchmark",
+    "agent",
+    service_unit_id="semantic-benchmark",
+)
 
 
 def latency_summary(values):

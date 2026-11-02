@@ -5,7 +5,7 @@ from ..chat_repository import MySQLChatRepository
 from ..chat_mutations import load_metadata_json
 from ..identity import WorkspaceScope
 from ..session_adapter import MySQLSessionAdapter
-from .importer import validate_inventory
+from .importer import validate_inventory, bundle_stores
 from .install_records import OfflineImportStore
 from ..shares import ShareStorage
 from ..errors import StorageError
@@ -26,11 +26,16 @@ VERIFY_ERRORS = (
 )
 
 
-async def _payload(database, bundles, row, offset, length):
+async def _payload(database, bundles, row, offset, length, *, service_unit_id):
+    service = service_unit_id.encode("utf-8")
+    if row["service_unit_key"] != service:
+        raise ValueError("referencing row service ownership differs")
     publication = await database.fetch_one(
         "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
         (row["publication_id"],),
     )
+    if publication is not None and publication["service_unit_key"] != service:
+        raise ValueError("referenced publication service ownership differs")
     if publication is None:
         raise ValueError("referenced publication is not committed/live")
     value = bundles.read_extent(
@@ -44,7 +49,7 @@ async def _payload(database, bundles, row, offset, length):
 
 async def verify_import(database, bundles, manifest, inventory, target):
     report = {
-        "version": 1,
+        "version": 2,
         "migration_id": manifest.migration_id,
         "checked": [],
         "blockers": [],
@@ -54,9 +59,12 @@ async def verify_import(database, bundles, manifest, inventory, target):
         validate_inventory(inventory)
         from pathlib import Path
 
+        stores = bundle_stores(bundles, manifest)
         binding = {
             "schema": target.schema,
-            "nas_root": str(bundles.root.resolve()),
+            "nas_roots": {
+                key: str(store.root.resolve()) for key, store in stores.items()
+            },
             "migration_id": manifest.migration_id,
         }
         if manifest.data.get("target") != binding or manifest.data[
@@ -67,6 +75,7 @@ async def verify_import(database, bundles, manifest, inventory, target):
             )
         expected = [
             (
+                item["service_unit_id"],
                 item["tenant_id"],
                 item["source_id"],
                 item["agent_id"],
@@ -81,7 +90,12 @@ async def verify_import(database, bundles, manifest, inventory, target):
             raise ValueError(
                 "verification workspace mapping differs from manifest",
             )
-        await OfflineImportStore(database, bundles, target).validate_target()
+        await OfflineImportStore(
+            database,
+            next(iter(stores.values())),
+            target,
+            service_unit_id=next(iter(stores)),
+        ).validate_target()
         database = ReadOnlyDatabase(
             database,
             SourceBoundary(**manifest.data["source_boundary"]),
@@ -92,6 +106,7 @@ async def verify_import(database, bundles, manifest, inventory, target):
         )
         return report
     for workspace in inventory["workspaces"]:
+        bundles = stores[workspace["scope"][0]]
         for session in workspace["sessions"]:
             await _checked(
                 report,
@@ -114,16 +129,27 @@ async def verify_import(database, bundles, manifest, inventory, target):
         await _checked(
             report,
             share["position"],
-            _verify_share(database, bundles, share),
+            _verify_share(database, stores[share["service_unit_id"]], share),
         )
     for item in inventory.get("files", []):
         position = (
-            "source-artifact:" + str(item["workspace"]) + "/" + item["path"]
+            "service:"
+            + inventory["workspaces"][item["workspace"]]["scope"][0]
+            + "/source-artifact:"
+            + str(item["workspace"])
+            + "/"
+            + item["path"]
         )
         await _checked(
             report,
             position,
-            _verify_artifact(database, bundles, manifest, inventory, item),
+            _verify_artifact(
+                database,
+                stores[inventory["workspaces"][item["workspace"]]["scope"][0]],
+                manifest,
+                inventory,
+                item,
+            ),
         )
     report["passed"] = not report["blockers"]
     if report["passed"]:
@@ -136,7 +162,14 @@ async def verify_import(database, bundles, manifest, inventory, target):
 async def _verify_artifact(database, bundles, manifest, inventory, item):
     from pathlib import Path
 
-    position = "source-artifact:" + str(item["workspace"]) + "/" + item["path"]
+    position = (
+        "service:"
+        + inventory["workspaces"][item["workspace"]]["scope"][0]
+        + "/source-artifact:"
+        + str(item["workspace"])
+        + "/"
+        + item["path"]
+    )
     assignment = manifest.data["assignments"]["publication"][position]
     publication = await database.fetch_one(
         "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
@@ -144,6 +177,10 @@ async def _verify_artifact(database, bundles, manifest, inventory, item):
     )
     if (
         publication is None
+        or publication["service_unit_key"]
+        != inventory["workspaces"][item["workspace"]]["scope"][0].encode(
+            "utf-8",
+        )
         or publication["operation_key"].decode() != assignment["operation_key"]
     ):
         raise ValueError(
@@ -151,7 +188,7 @@ async def _verify_artifact(database, bundles, manifest, inventory, item):
         )
     workspace = inventory["workspaces"][item["workspace"]]
     expected = {
-        "version": 1,
+        "version": 2,
         "workspace": item["workspace"],
         "scope": workspace["scope"],
         "relative_path": item["path"],
@@ -189,18 +226,18 @@ async def _checked(report, position, check):
 
 
 async def _verify_session(database, bundles, manifest, workspace, session):
-    scope = WorkspaceScope(*workspace["scope"])
+    scope = WorkspaceScope.from_values(workspace["scope"])
     identity = session["identity"]
     adapter = MySQLSessionAdapter(
         database,
         scope,
         bundles,
-        channel=identity[4],
+        channel=identity[5],
     )
     read_only_adapter(adapter)
     actual = await adapter.get_session_state_dict(
-        identity[5],
-        identity[3],
+        identity[6],
+        identity[4],
         False,
     )
     expected = session["legacy"]["state"]
@@ -217,8 +254,8 @@ async def _verify_turns(adapter, identity, expected):
     for key, value in expected.get("turn_states", {}).items():
         if value.get("chat_id") is not None:
             actual_turn = await adapter.get_turn_state(
-                identity[5],
-                identity[3],
+                identity[6],
+                identity[4],
                 {},
                 key,
             )
@@ -242,9 +279,9 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
     session_chats = [
         item
         for item in workspace["chats"]
-        if item["spec"]["session_id"] == identity[5]
-        and item["spec"]["user_id"] == identity[3]
-        and item["spec"]["channel"] == identity[4]
+        if item["spec"]["session_id"] == identity[6]
+        and item["spec"]["user_id"] == identity[4]
+        and item["spec"]["channel"] == identity[5]
     ]
     if any(
         item["spec"]["meta"].get("session_kind") == "task"
@@ -261,6 +298,7 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
             row,
             "byte_offset",
             "byte_length",
+            service_unit_id=workspace["scope"][0],
         )
         if (
             body != message_body(message)
@@ -271,7 +309,7 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
 
 
 async def _verify_chat(database, bundles, manifest, workspace, chat):
-    scope = WorkspaceScope(*workspace["scope"])
+    scope = WorkspaceScope.from_values(workspace["scope"])
     actual = await read_only_adapter(
         MySQLChatRepository(database, scope, bundles),
     ).get_chat(
@@ -285,13 +323,13 @@ async def _verify_chat(database, bundles, manifest, workspace, chat):
         "status": "idle",
     }:
         raise ValueError("Chat metadata/binding/identity/time differs")
-    await _verify_archive_rows(database, bundles, manifest, chat)
-    await _verify_epochs(database, bundles, manifest, chat)
+    await _verify_archive_rows(database, bundles, manifest, chat, scope)
+    await _verify_epochs(database, bundles, manifest, chat, scope)
     if not chat["archive"]["deleted"]:
         await _verify_runtime_chat(database, bundles, scope, chat, workspace)
 
 
-async def _verify_archive_rows(database, bundles, manifest, chat):
+async def _verify_archive_rows(database, bundles, manifest, chat, scope):
     cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
     rows = await database.fetch_all(
         "SELECT * FROM swe_conversation_messages WHERE archive_chat_id=%s ORDER BY archive_order",
@@ -312,13 +350,14 @@ async def _verify_archive_rows(database, bundles, manifest, chat):
                 row,
                 "byte_offset",
                 "byte_length",
+                service_unit_id=scope.service_unit_id,
             )
             != message
         ):
             raise ValueError("archive message order/body differs")
 
 
-async def _verify_epochs(database, bundles, manifest, chat):
+async def _verify_epochs(database, bundles, manifest, chat, scope):
     for epoch in chat["archive"]["epochs"]:
         position = chat["position"] + "/epoch:" + str(epoch["epoch"])
         assignment = manifest.data["assignments"]["publication"][position]
@@ -327,7 +366,10 @@ async def _verify_epochs(database, bundles, manifest, chat):
             (assignment["target_id"],),
         )
         if (
-            publication["checkpoint_revision"] != epoch["record"]["revision"]
+            publication is None
+            or WorkspaceScope.from_row(publication) != scope
+            or publication["checkpoint_revision"]
+            != epoch["record"]["revision"]
             or publication["checkpoint_event_watermark"]
             != epoch["record"]["applied_event_sequence"]
         ):
@@ -353,6 +395,10 @@ async def _verify_share(database, bundles, share):
     if actual is None:
         raise ValueError("permanent share token missing")
     for key, value in share["record"].items():
+        if key == "service_unit_id":
+            if actual["service_unit_key"] != value.encode():
+                raise ValueError("share service ownership differs")
+            continue
         if hasattr(actual[key], "isoformat"):
             from ..chat_mutations import utc_datetime
 
@@ -361,7 +407,14 @@ async def _verify_share(database, bundles, share):
         elif actual[key] != value:
             raise ValueError("share token/ownership/counter differs")
     if (
-        await _payload(database, bundles, actual, "byte_offset", "byte_length")
+        await _payload(
+            database,
+            bundles,
+            actual,
+            "byte_offset",
+            "byte_length",
+            service_unit_id=share["service_unit_id"],
+        )
         != share["snapshot"]
     ):
         raise ValueError("complete share snapshot differs")
@@ -370,6 +423,7 @@ async def _verify_share(database, bundles, share):
             database,
             bundles,
             retention_factory=ReadOnlyRetention,
+            service_unit_id=share["service_unit_id"],
         ).verify_snapshot(
             share["record"]["token"],
         )
@@ -396,7 +450,7 @@ async def _verify_runtime_chat(database, bundles, scope, chat, workspace):
     session = next(
         item
         for item in workspace["sessions"]
-        if item["identity"][3:]
+        if item["identity"][4:]
         == [spec.user_id, spec.channel, spec.session_id]
     )
     expected = await api._build_chat_history(

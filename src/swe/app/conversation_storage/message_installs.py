@@ -146,6 +146,11 @@ class TurnInstall:
 
 def _message_values(message, request, row, index, order, *, sources=None):
     source = (sources or {}).get(message.source_message_id)
+    if (
+        source is not None
+        and source["service_unit_key"] != request.scope.sql_values[0]
+    ):
+        raise IntegrityError("message source service unit mismatch")
     extent = index.blocks.get(message.block_name)
     if source is None and (
         extent is None
@@ -181,6 +186,7 @@ def _message_values(message, request, row, index, order, *, sources=None):
         raise IntegrityError("message Turn association mismatch")
     archive = message.layer == "archive"
     return {
+        "service_unit_key": request.scope.sql_values[0],
         "session_id": request.session_id,
         "origin_chat_id": message.origin_chat_id,
         "archive_chat_id": message.archive_chat_id,

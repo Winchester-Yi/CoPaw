@@ -53,7 +53,7 @@ class ArchiveReader:
 
     async def chat(self, chat_id):
         row = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s AND deleted_at IS NULL",
+            "SELECT * FROM swe_conversation_chats WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s AND deleted_at IS NULL",
             (*self.scope.sql_values, chat_key_bytes(chat_id)),
         )
         if row is None:
@@ -79,8 +79,11 @@ class ArchiveReader:
             watermark = 0
             if chat["active_checkpoint_publication_id"] is not None:
                 checkpoint = await self.db.fetch_one(
-                    "SELECT * FROM swe_conversation_publications WHERE id=%s",
-                    (chat["active_checkpoint_publication_id"],),
+                    "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s",
+                    (
+                        chat["active_checkpoint_publication_id"],
+                        self.scope.sql_values[0],
+                    ),
                 )
                 if checkpoint is None:
                     raise IntegrityError(

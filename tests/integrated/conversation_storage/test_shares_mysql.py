@@ -42,6 +42,10 @@ async def setup(db, root):
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
     session = await insert_session(db)
     chat = await insert_chat(db, session, b"chat")
     turn = await insert_row(
@@ -101,7 +105,13 @@ async def setup(db, root):
     return chat, ShareStorage(
         db,
         BundleStore(root),
-        scope=WorkspaceScope("tenant", "source", "agent"),
+        scope=WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
+        service_unit_id="schema-test-service",
     )
 
 
@@ -127,7 +137,11 @@ async def test_permanent_share_survives_chat_deletion_and_counts_access(
         "UPDATE swe_conversation_chats SET deleted_at=UTC_TIMESTAMP(6) WHERE id=%s",
         (chat,),
     )
-    anonymous = ShareStorage(db, BundleStore(tmp_path))
+    anonymous = ShareStorage(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     assert await anonymous.get_snapshot(record.token) == payload
     assert (await ChatShareStore(db).get(record.token)).access_count == 1
     await ChatShareStore(db).verify_locator_schema()
@@ -166,10 +180,19 @@ async def test_legacy_orphan_preserves_token_key_counts_and_uses_publication_sco
         access_count=7,
         last_access_at="2026-10-30T01:00:00Z",
     )
-    publication = PublicationStore(db, BundleStore(tmp_path))
+    publication = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     request = PublicationRequest(
         operation,
-        WorkspaceScope("other-tenant", "", ""),
+        WorkspaceScope(
+            "other-tenant",
+            "",
+            "",
+            service_unit_id="schema-test-service",
+        ),
         "share_import",
         "offline",
         0,
@@ -190,7 +213,13 @@ async def test_legacy_orphan_preserves_token_key_counts_and_uses_publication_sco
     reader = ShareStorage(
         db,
         BundleStore(tmp_path),
-        scope=WorkspaceScope("wrong-current-request", "wrong", "wrong"),
+        scope=WorkspaceScope(
+            "wrong-current-request",
+            "wrong",
+            "wrong",
+            service_unit_id="schema-test-service",
+        ),
+        service_unit_id="schema-test-service",
     )
     assert (await reader.get_snapshot("original-token"))[
         "chat_name"
@@ -209,7 +238,11 @@ async def test_lost_share_commit_retains_original_bundle_and_one_token(
     db = conversation_test_database
     _, storage = await setup(db, tmp_path)
     fault = LostCommitDatabase(db)
-    publications = PublicationStore(fault, BundleStore(tmp_path))
+    publications = PublicationStore(
+        fault,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     chat = await db.fetch_one("SELECT * FROM swe_conversation_chats")
     operation = new_operation_key()
     plan = ShareInstall(
@@ -341,7 +374,11 @@ async def test_share_commit_rejects_selection_changed_after_snapshot(
         "2026-10-30T00:00:00Z",
         selected_question_keys=("question",),
     )
-    publications = PublicationStore(db, BundleStore(tmp_path))
+    publications = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     await publications.reserve(request, CommitPlan(share=plan))
     await publications.write_bundle(
         operation,

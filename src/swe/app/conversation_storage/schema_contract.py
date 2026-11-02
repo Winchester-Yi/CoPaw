@@ -4,6 +4,7 @@
 COLUMNS = {
     "swe_conversation_sessions": {
         "id": ("bigint unsigned", "NO"),
+        "service_unit_key": ("varbinary(256)", "NO"),
         "tenant_key": ("varbinary(256)", "NO"),
         "source_key": ("varbinary(256)", "NO"),
         "agent_key": ("varbinary(256)", "NO"),
@@ -28,6 +29,7 @@ COLUMNS = {
     },
     "swe_conversation_chats": {
         "id": ("bigint unsigned", "NO"),
+        "service_unit_key": ("varbinary(256)", "NO"),
         "session_id": ("bigint unsigned", "NO"),
         "external_chat_key": ("varbinary(128)", "NO"),
         "registry_order": ("bigint unsigned", "NO"),
@@ -59,6 +61,7 @@ COLUMNS = {
     },
     "swe_conversation_turns": {
         "id": ("bigint unsigned", "NO"),
+        "service_unit_key": ("varbinary(256)", "NO"),
         "chat_id": ("bigint unsigned", "NO"),
         "session_id": ("bigint unsigned", "NO"),
         "question_msg_key": ("varbinary(256)", "NO"),
@@ -76,6 +79,7 @@ COLUMNS = {
     },
     "swe_conversation_publications": {
         "id": ("bigint unsigned", "NO"),
+        "service_unit_key": ("varbinary(256)", "NO"),
         "operation_key": ("varbinary(64)", "NO"),
         "scope_kind": ("varchar(16)", "NO"),
         "tenant_key": ("varbinary(256)", "NO"),
@@ -127,6 +131,7 @@ COLUMNS = {
     },
     "swe_conversation_messages": {
         "id": ("bigint unsigned", "NO"),
+        "service_unit_key": ("varbinary(256)", "NO"),
         "session_id": ("bigint unsigned", "NO"),
         "origin_chat_id": ("bigint unsigned", "YES"),
         "archive_chat_id": ("bigint unsigned", "YES"),
@@ -151,6 +156,7 @@ COLUMNS = {
     },
     "swe_conversation_retentions": {
         "id": ("bigint unsigned", "NO"),
+        "service_unit_key": ("varbinary(256)", "NO"),
         "retention_key": ("varbinary(128)", "NO"),
         "member_key": ("bigint unsigned", "NO"),
         "kind": ("varchar(24)", "NO"),
@@ -173,6 +179,7 @@ INDEXES = {
         "uq_conv_session_identity": (
             0,
             (
+                "service_unit_key",
                 "tenant_key",
                 "source_key",
                 "agent_key",
@@ -181,10 +188,14 @@ INDEXES = {
                 "external_session_key",
             ),
         ),
-        "ix_conv_session_lease": (1, ("lease_until", "active_turn_id")),
+        "ix_conv_session_lease": (
+            1,
+            ("service_unit_key", "lease_until", "active_turn_id"),
+        ),
         "ix_conv_session_lookup": (
             1,
             (
+                "service_unit_key",
                 "tenant_key",
                 "source_key",
                 "agent_key",
@@ -199,11 +210,18 @@ INDEXES = {
         "PRIMARY": (0, ("id",)),
         "uq_conv_chat_external": (
             0,
-            ("tenant_key", "source_key", "agent_key", "external_chat_key"),
+            (
+                "service_unit_key",
+                "tenant_key",
+                "source_key",
+                "agent_key",
+                "external_chat_key",
+            ),
         ),
         "ix_conv_chat_recent": (
             1,
             (
+                "service_unit_key",
                 "tenant_key",
                 "source_key",
                 "agent_key",
@@ -216,6 +234,7 @@ INDEXES = {
         "ix_conv_chat_channel_recent": (
             1,
             (
+                "service_unit_key",
                 "tenant_key",
                 "source_key",
                 "agent_key",
@@ -237,25 +256,37 @@ INDEXES = {
         "PRIMARY": (0, ("id",)),
         "uq_conv_turn_question": (0, ("session_id", "question_msg_key")),
         "uq_conv_turn_order": (0, ("chat_id", "turn_order")),
-        "uq_conv_turn_runtime": (0, ("runtime_turn_key",)),
+        "uq_conv_turn_runtime": (0, ("service_unit_key", "runtime_turn_key")),
         "ix_conv_turn_session_state": (1, ("session_id", "state", "id")),
         "ix_conv_turn_admission": (1, ("admission_publication_id",)),
         "ix_conv_turn_terminal": (1, ("terminal_publication_id",)),
     },
     "swe_conversation_publications": {
         "PRIMARY": (0, ("id",)),
-        "uq_conv_publication_operation": (0, ("operation_key",)),
-        "uq_conv_publication_path": (0, ("relative_path",)),
+        "uq_conv_publication_operation": (
+            0,
+            ("service_unit_key", "operation_key"),
+        ),
+        "uq_conv_publication_path": (0, ("service_unit_key", "relative_path")),
         "uq_conv_archive_boundary": (0, ("chat_id", "boundary_key")),
         "uq_conv_archive_order": (0, ("chat_id", "boundary_order")),
         "uq_conv_checkpoint_revision": (
             0,
             ("chat_id", "epoch", "checkpoint_revision"),
         ),
-        "ix_conv_publication_pending": (1, ("state", "created_at", "id")),
+        "ix_conv_publication_pending": (
+            1,
+            ("service_unit_key", "state", "created_at", "id"),
+        ),
         "ix_conv_publication_gc": (
             1,
-            ("gc_state", "state", "retained_history", "id"),
+            (
+                "service_unit_key",
+                "gc_state",
+                "state",
+                "retained_history",
+                "id",
+            ),
         ),
         "ix_conv_publication_events": (
             1,
@@ -309,10 +340,14 @@ INDEXES = {
     },
     "swe_conversation_retentions": {
         "PRIMARY": (0, ("id",)),
-        "uq_conv_retention_member": (0, ("retention_key", "member_key")),
+        "uq_conv_retention_member": (
+            0,
+            ("service_unit_key", "retention_key", "member_key"),
+        ),
         "uq_conv_retention_scope_guard": (
             0,
             (
+                "service_unit_key",
                 "scope_kind",
                 "tenant_key",
                 "source_key",
@@ -324,6 +359,7 @@ INDEXES = {
         "ix_conv_retention_scope": (
             1,
             (
+                "service_unit_key",
                 "scope_kind",
                 "tenant_key",
                 "source_key",

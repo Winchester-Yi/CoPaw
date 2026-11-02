@@ -506,6 +506,7 @@ async def test_new_process_recovers_persisted_turn_without_original_runtime(
         "test-operator",
         True,
         True,
+        service_unit_id="schema-test-service",
     )
     await execution.__aexit__(None, None, None)
     del execution, query
@@ -593,6 +594,7 @@ async def test_restart_recovery_rejects_wrong_incarnation_and_preserves_unreadab
         "ops",
         True,
         True,
+        service_unit_id="schema-test-service",
     )
     before = await db.fetch_one(
         "SELECT generation,owner_key,active_turn_id FROM swe_conversation_sessions",
@@ -612,6 +614,7 @@ async def test_restart_recovery_rejects_wrong_incarnation_and_preserves_unreadab
         "ops",
         True,
         True,
+        service_unit_id="schema-test-service",
     )
     path = storage.bundles.root / storage.bundles.path_for(operation)
     path.write_bytes(b"truncated")
@@ -649,6 +652,10 @@ async def test_recovery_cli_uses_existing_roots_and_records_audited_result(
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
     monkeypatch.setattr(
         "swe.database.config.get_database_config",
         lambda: db.config,
@@ -657,11 +664,13 @@ async def test_recovery_cli_uses_existing_roots_and_records_audited_result(
     evidence.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
+                "service_unit_id": "schema-test-service",
                 "schema": db.config.database,
                 "workspace_root": str(tmp_path),
                 "nas_root": str(tmp_path),
                 "scope": {
+                    "service_unit_id": "schema-test-service",
                     "tenant_id": "tenant",
                     "source_id": "source",
                     "agent_id": "agent",
@@ -742,6 +751,10 @@ async def test_restore_stop_survives_late_prepared_completed_result(
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
     backup = tmp_path / "backup"
     await ConversationBackup(db, storage.bundles, identity().scope).capture(
         backup,
@@ -811,6 +824,7 @@ async def test_restore_stop_survives_late_prepared_completed_result(
             "operator",
             True,
             True,
+            service_unit_id="schema-test-service",
         )
         result = await EndedOwnerRecovery(
             restored,

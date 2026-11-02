@@ -14,7 +14,12 @@ def test_factory_uses_existing_workspace_mount_and_exact_scope(tmp_path):
         WorkspaceConversationStorage,
     )
 
-    scope = WorkspaceScope("Tenant", "Source", "Agent")
+    scope = WorkspaceScope(
+        "Tenant",
+        "Source",
+        "Agent",
+        service_unit_id="schema-test-service",
+    )
     database = object()
     storage = WorkspaceConversationStorage(
         database,
@@ -30,6 +35,7 @@ def test_factory_uses_existing_workspace_mount_and_exact_scope(tmp_path):
     assert console is storage.session_for("console")
     assert console is not storage.session_for("cron")
     assert console.identity("session", "").sql_values == (
+        b"schema-test-service",
         b"Tenant",
         b"Source",
         b"Agent",
@@ -52,7 +58,12 @@ def test_factory_refuses_missing_or_symlink_workspace_without_creating_it(
     with pytest.raises(ValueError, match="existing"):
         WorkspaceConversationStorage(
             object(),
-            WorkspaceScope("t", "s", "a"),
+            WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
             missing,
             cursor_secret=b"secret",
         )
@@ -62,7 +73,12 @@ def test_factory_refuses_missing_or_symlink_workspace_without_creating_it(
     with pytest.raises(ValueError, match="symlink"):
         WorkspaceConversationStorage(
             object(),
-            WorkspaceScope("t", "s", "a"),
+            WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
             link,
             cursor_secret=b"secret",
         )
@@ -76,7 +92,7 @@ async def test_readiness_is_read_only_and_missing_table_is_an_error(tmp_path):
     db = SimpleNamespace(fetch_all=AsyncMock(return_value=[]))
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"secret",
     )
@@ -176,7 +192,7 @@ async def test_readiness_refuses_same_size_but_incompatible_schema(
     )
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"secret",
     )
@@ -198,7 +214,7 @@ async def test_readiness_accepts_exact_columns_and_indexes_without_ddl(
     )
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"secret",
     )
@@ -231,7 +247,7 @@ async def test_readiness_refuses_ascii_text_that_cannot_store_chinese(
     )
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"secret",
     )
@@ -265,7 +281,7 @@ async def test_readiness_requires_transactional_base_tables(
     )
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"secret",
     )
@@ -283,7 +299,7 @@ async def test_bind_existing_workspace_reuses_services_without_legacy_files(
 
     storage = WorkspaceConversationStorage(
         object(),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         tmp_path,
         cursor_secret=b"secret",
     )
@@ -356,18 +372,28 @@ def test_runtime_maps_original_workspace_to_shared_existing_nas(tmp_path):
     runtime = ConversationRuntime(
         object(),
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "nas_root": str(nas),
             "workspaces": [
-                {"root": str(workspace_root), "scope": ["t", "s", "a"]},
+                {
+                    "root": str(workspace_root),
+                    "scope": ["schema-test-service", "t", "s", "a"],
+                },
             ],
         },
         b"secret",
+        service_unit_id="schema-test-service",
     )
     workspace = SimpleNamespace(
         workspace_dir=workspace_root,
         agent_id="a",
-        conversation_scope=WorkspaceScope("t", "s", "a"),
+        conversation_scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
     )
     storage = runtime.for_workspace(workspace)
     assert runtime.for_workspace(workspace) is storage
@@ -387,16 +413,28 @@ def test_runtime_rejects_other_tenant_config_pointing_at_installed_root(
     runtime = ConversationRuntime(
         object(),
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "nas_root": str(tmp_path),
-            "workspaces": [{"root": str(tmp_path), "scope": ["t", "s", "a"]}],
+            "workspaces": [
+                {
+                    "root": str(tmp_path),
+                    "scope": ["schema-test-service", "t", "s", "a"],
+                },
+            ],
         },
         b"secret",
+        service_unit_id="schema-test-service",
     )
     workspace = SimpleNamespace(
         workspace_dir=tmp_path,
         agent_id="a",
-        conversation_scope=WorkspaceScope("other", "s", "a"),
+        conversation_scope=WorkspaceScope(
+            "other",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
     )
     with pytest.raises(ValueError, match="scope"):
         runtime.for_workspace(workspace)
@@ -414,11 +452,18 @@ def test_runtime_binds_normally_provisioned_new_scope_without_new_tree(
     runtime = ConversationRuntime(
         object(),
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "nas_root": str(tmp_path),
-            "workspaces": [{"root": str(old), "scope": ["t", "s", "a"]}],
+            "workspaces": [
+                {
+                    "root": str(old),
+                    "scope": ["schema-test-service", "t", "s", "a"],
+                },
+            ],
         },
         b"secret",
+        service_unit_id="schema-test-service",
     )
     workspace = SimpleNamespace(
         workspace_dir=new,
@@ -427,7 +472,12 @@ def test_runtime_binds_normally_provisioned_new_scope_without_new_tree(
         source_id="source",
     )
     storage = runtime.for_workspace(workspace)
-    assert storage.scope == WorkspaceScope("new-tenant", "source", "a")
+    assert storage.scope == WorkspaceScope(
+        "new-tenant",
+        "source",
+        "a",
+        service_unit_id="schema-test-service",
+    )
     assert storage.workspace_root == new
     assert not list(new.iterdir())
 
@@ -442,18 +492,30 @@ def test_runtime_cannot_silently_adopt_unmapped_legacy_conversation(tmp_path):
     runtime = ConversationRuntime(
         object(),
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "nas_root": str(tmp_path),
-            "workspaces": [{"root": str(old), "scope": ["t", "s", "a"]}],
+            "workspaces": [
+                {
+                    "root": str(old),
+                    "scope": ["schema-test-service", "t", "s", "a"],
+                },
+            ],
         },
         b"secret",
+        service_unit_id="schema-test-service",
     )
     with pytest.raises(ValueError, match="migration"):
         runtime.for_workspace(
             SimpleNamespace(
                 workspace_dir=missing,
                 agent_id="b",
-                conversation_scope=WorkspaceScope("t", "s", "b"),
+                conversation_scope=WorkspaceScope(
+                    "t",
+                    "s",
+                    "b",
+                    service_unit_id="schema-test-service",
+                ),
             ),
         )
 
@@ -464,13 +526,23 @@ def test_runtime_default_single_user_uses_installed_default_identity(tmp_path):
     runtime = ConversationRuntime(
         object(),
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "nas_root": str(tmp_path),
             "workspaces": [
-                {"root": str(tmp_path), "scope": ["default", "console", "a"]},
+                {
+                    "root": str(tmp_path),
+                    "scope": [
+                        "schema-test-service",
+                        "default",
+                        "console",
+                        "a",
+                    ],
+                },
             ],
         },
         b"secret",
+        service_unit_id="schema-test-service",
     )
     storage = runtime.for_workspace(
         SimpleNamespace(
@@ -480,7 +552,12 @@ def test_runtime_default_single_user_uses_installed_default_identity(tmp_path):
             source_id=None,
         ),
     )
-    assert storage.scope == WorkspaceScope("default", "console", "a")
+    assert storage.scope == WorkspaceScope(
+        "default",
+        "console",
+        "a",
+        service_unit_id="schema-test-service",
+    )
 
 
 async def test_mysql_runtime_refuses_unready_database_and_missing_mapping(
@@ -561,7 +638,12 @@ async def test_share_creation_uses_trusted_workspace_storage(
     storage = SimpleNamespace(
         shares=shares,
         workspace_root=tmp_path,
-        scope=WorkspaceScope("t", "s", "a"),
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
     )
     chat = SimpleNamespace(id="chat", name="Demo")
     workspace = SimpleNamespace(

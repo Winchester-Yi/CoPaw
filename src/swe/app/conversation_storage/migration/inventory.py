@@ -9,7 +9,12 @@ from swe.app.runner.models import ChatsFile
 from swe.app.runner.session import sanitize_filename
 from swe.app.chat_sharing.models import ChatShareRecord, ChatShareSnapshot
 from ..chat_mutations import load_metadata_json
-from ..identity import SessionIdentity, WorkspaceScope, chat_key_bytes
+from ..identity import (
+    SessionIdentity,
+    WorkspaceScope,
+    chat_key_bytes,
+    service_unit_bytes,
+)
 from ..bundle import MAX_READ_BYTES
 from .legacy import read_archive, read_session, safe_files
 from .manifest import SourceBoundary
@@ -101,6 +106,7 @@ def _sessions(mapping, chats, report, position):
         record = {
             "position": position + "/session:" + str(len(result)),
             "identity": [
+                mapping.scope.service_unit_id,
                 mapping.scope.tenant_id,
                 mapping.scope.source_id,
                 mapping.scope.agent_id,
@@ -174,7 +180,9 @@ def _archive_records(mapping, chats, report, position):
 
 
 def _workspace(mapping, report, index):
-    position = "workspace:" + str(index)
+    position = (
+        "service:" + mapping.scope.service_unit_id + "/workspace:" + str(index)
+    )
     root = Path(mapping.root).resolve(strict=True)
     files = _source_files(mapping)
     report["files"].extend(
@@ -216,6 +224,7 @@ def _workspace(mapping, report, index):
             "position": position,
             "root": str(root),
             "scope": [
+                mapping.scope.service_unit_id,
                 mapping.scope.tenant_id,
                 mapping.scope.source_id,
                 mapping.scope.agent_id,
@@ -233,6 +242,7 @@ def _workspace(mapping, report, index):
         "position": position,
         "root": str(root),
         "scope": [
+            mapping.scope.service_unit_id,
             mapping.scope.tenant_id,
             mapping.scope.source_id,
             mapping.scope.agent_id,
@@ -287,7 +297,12 @@ def _shares(mappings, shares, report):
                 raise ValueError(
                     "share snapshot requires explicit workspace mapping",
                 )
+            service_unit_bytes(source["service_unit_id"])
             mapping = mappings[workspace_index]
+            if mapping.scope.service_unit_id != source["service_unit_id"]:
+                raise ValueError(
+                    "share service differs from snapshot workspace",
+                )
             snapshot = load_metadata_json(
                 mapping.path(source["snapshot_path"]).read_text(
                     encoding="utf-8",
@@ -298,8 +313,9 @@ def _shares(mappings, shares, report):
                 for workspace in report["workspaces"]
                 for item in workspace["chats"]
                 if item["spec"]["id"] == source["chat_id"]
+                and workspace["scope"][0] == source["service_unit_id"]
                 and mappings[
-                    int(workspace["position"].split(":")[1])
+                    int(workspace["position"].rsplit(":", 1)[1])
                 ].scope.tenant_id
                 == source["tenant_id"]
             ]
@@ -309,6 +325,7 @@ def _shares(mappings, shares, report):
                 if key not in ("snapshot_path", "snapshot_workspace_index")
             }
             required = {
+                "service_unit_id",
                 "token",
                 "chat_id",
                 "creator_id",
@@ -333,7 +350,11 @@ def _shares(mappings, shares, report):
                 raise ValueError("share has ambiguous workspace ownership")
             report["shares"].append(
                 {
-                    "position": "share:" + str(index),
+                    "position": "service:"
+                    + source["service_unit_id"]
+                    + "/share:"
+                    + str(index),
+                    "service_unit_id": source["service_unit_id"],
                     "scope_kind": "workspace" if matches else "legacy_share",
                     "chat_position": (
                         matches[0]["position"] if matches else None
@@ -354,7 +375,7 @@ def inventory(mappings, boundary, *, shares=()):
     if len(set(roots)) != len(roots):
         raise ValueError("duplicate workspace source roots")
     report = {
-        "version": 1,
+        "version": 2,
         "source_boundary": {
             **asdict(boundary),
             "evidence_refs": list(boundary.evidence_refs),

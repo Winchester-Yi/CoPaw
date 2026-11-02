@@ -25,6 +25,7 @@ def test_manifest_allocates_and_persists_identity_before_return(tmp_path):
         boundary(),
         [
             {
+                "service_unit_id": "schema-test-service",
                 "tenant_id": "T",
                 "source_id": "S",
                 "agent_id": "A",
@@ -32,17 +33,35 @@ def test_manifest_allocates_and_persists_identity_before_return(tmp_path):
             },
         ],
     )
-    first = manifest.allocate("session", "workspace:0/session:0")
+    first = manifest.allocate(
+        "session",
+        "service:schema-test-service/workspace:0/session:0",
+    )
     persisted = json.loads(path.read_text())
     assert (
-        persisted["assignments"]["session"]["workspace:0/session:0"] == first
+        persisted["assignments"]["session"][
+            "service:schema-test-service/workspace:0/session:0"
+        ]
+        == first
     )
     assert first["target_id"] == 1
     assert first["relative_path"].endswith(first["operation_key"] + ".bundle")
     again = MigrationManifest.load(path)
     assert again.migration_id == manifest.migration_id
-    assert again.allocate("session", "workspace:0/session:0") == first
-    assert again.allocate("session", "workspace:0/session:1")["target_id"] == 2
+    assert (
+        again.allocate(
+            "session",
+            "service:schema-test-service/workspace:0/session:0",
+        )
+        == first
+    )
+    assert (
+        again.allocate(
+            "session",
+            "service:schema-test-service/workspace:0/session:1",
+        )["target_id"]
+        == 2
+    )
     assert (
         "checksum" not in path.read_text()
         and "fingerprint" not in path.read_text()
@@ -99,10 +118,18 @@ def test_manifest_rejects_changed_workspace_mapping_on_reentry(tmp_path):
     manifest = MigrationManifest.create(
         tmp_path / "migration.json",
         boundary(),
-        [{"root": "/original"}],
+        [
+            {
+                "root": "/original",
+                "service_unit_id": "schema-test-service",
+                "tenant_id": "T",
+                "source_id": "S",
+                "agent_id": "A",
+            },
+        ],
     )
     value = json.loads(manifest.path.read_text())
-    value["workspaces"] = [{"root": "/different"}]
+    value["workspaces"][0]["root"] = "/different"
     manifest.path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="mapping"):
         manifest.allocate("session", "s")

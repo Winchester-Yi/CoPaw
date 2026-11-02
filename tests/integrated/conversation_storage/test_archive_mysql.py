@@ -64,7 +64,16 @@ async def seed(db, root):
         registry_order=2,
         epoch=1,
     )
-    return session, first, second, PublicationStore(db, BundleStore(root))
+    return (
+        session,
+        first,
+        second,
+        PublicationStore(
+            db,
+            BundleStore(root),
+            service_unit_id="schema-test-service",
+        ),
+    )
 
 
 async def operation(db, session, chat, kind="state"):
@@ -78,7 +87,12 @@ async def operation(db, session, chat, kind="state"):
     )
     return PublicationRequest(
         new_operation_key(),
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         kind,
         "owner",
         s["generation"],
@@ -320,7 +334,11 @@ async def test_failed_archive_install_rolls_back_all_metadata_and_visibility(
     request = await operation(db, session, first, "compact")
     await service.reserve(request, compact_plan(first, ids))
     await service.write_bundle(request.operation_key, compact_blocks())
-    fault = PublicationStore(InstallFailureDatabase(db), BundleStore(tmp_path))
+    fault = PublicationStore(
+        InstallFailureDatabase(db),
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     with pytest.raises(UnknownCommit):
         await fault.commit(request.operation_key)
     chat = await db.fetch_one(

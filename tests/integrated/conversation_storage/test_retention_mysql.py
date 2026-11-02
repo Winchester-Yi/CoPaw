@@ -14,7 +14,15 @@ from tests.integrated.conversation_storage.test_schema import (
 
 
 def retention(db):
-    return RetentionStore(db, WorkspaceScope("tenant", "source", "agent"))
+    return RetentionStore(
+        db,
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
+    )
 
 
 async def test_first_scope_guard_creation_race_has_one_identity(
@@ -164,7 +172,7 @@ async def test_backup_fence_blocks_direct_chat_and_execution_writes(
         await repo.update_title("chat", "new title", expected_revision=0)
     with pytest.raises(ConflictError, match="backup fence"):
         await repo.delete_chats(["chat"])
-    execution = ExecutionStore(db)
+    execution = ExecutionStore(db, service_unit_id="schema-test-service")
     identity = SessionIdentity(service.scope, "alice", "console", "session")
     with pytest.raises(ConflictError, match="backup fence"):
         await execution.request_stop(identity, "question")

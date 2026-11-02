@@ -27,7 +27,7 @@ def manifest_for(tmp_path):
     )
     manifest.data["offline"] = {
         "application_schema": "app",
-        "nas_root": str(tmp_path),
+        "nas_roots": {"schema-test-service": str(tmp_path)},
     }
     manifest._persist()
     return manifest
@@ -245,6 +245,7 @@ async def test_live_seven_table_install_and_rollback_boundary(
     manifest.data["workspaces"] = [
         {
             "root": str(source),
+            "service_unit_id": "schema-test-service",
             "tenant_id": "tenant",
             "source_id": "source",
             "agent_id": "agent",
@@ -278,7 +279,12 @@ async def test_live_seven_table_install_and_rollback_boundary(
         report = inventory(
             [
                 WorkspaceMapping(
-                    WorkspaceScope("tenant", "source", "agent"),
+                    WorkspaceScope(
+                        "tenant",
+                        "source",
+                        "agent",
+                        service_unit_id="schema-test-service",
+                    ),
                     source,
                 ),
             ],
@@ -288,6 +294,7 @@ async def test_live_seven_table_install_and_rollback_boundary(
                     "token": "permanent",
                     "chat_id": "deleted-chat",
                     "creator_id": "user",
+                    "service_unit_id": "schema-test-service",
                     "tenant_id": "tenant",
                     "snapshot_key": "share.json",
                     "created_at": "2026-10-30T00:00:00Z",
@@ -501,6 +508,11 @@ async def test_lost_rename_reply_leaves_pending_receipt_and_blocks_retry(
     monkeypatch.setattr(installer, "preflight", preflight)
     monkeypatch.setattr(install, "probe_atomic_rename", probe)
     monkeypatch.setattr(install, "_check_mdl", mdl)
+
+    async def finalized(*args):
+        return [{"COLUMN_NAME": "service_unit_key", "IS_NULLABLE": "NO"}]
+
+    monkeypatch.setattr(install, "_columns", finalized)
     inventory = {"workspaces": [], "shares": [], "files": []}
     with pytest.raises(RuntimeError, match="outcome is unknown"):
         await installer.install(None, None, inventory)
@@ -529,6 +541,7 @@ async def test_offline_readonly_retention_never_writes_and_checks_scope():
                 {
                     "id": 1,
                     "scope_kind": "workspace",
+                    "service_unit_key": b"schema-test-service",
                     "tenant_key": b"tenant",
                     "source_key": b"source",
                     "agent_key": b"agent",
@@ -553,7 +566,12 @@ async def test_offline_readonly_retention_never_writes_and_checks_scope():
     db = ReadOnlyDatabase(Database(), boundary)
     retention = ReadOnlyRetention(
         db,
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
     )
     batch = await retention.pin([1], kind="reader")
     assert [row["id"] for row in batch.publications] == [1]
@@ -565,7 +583,12 @@ async def test_offline_readonly_retention_never_writes_and_checks_scope():
     with pytest.raises(IntegrityError, match="scope"):
         await ReadOnlyRetention(
             db,
-            WorkspaceScope("wrong", "source", "agent"),
+            WorkspaceScope(
+                "wrong",
+                "source",
+                "agent",
+                service_unit_id="schema-test-service",
+            ),
         ).pin([1], kind="reader")
 
 
@@ -650,6 +673,7 @@ async def test_readonly_recovery_hydrates_direct_messages_and_cold_turn_without_
         owner_key="owner",
         lease_seconds=60,
         publications=store.publications,
+        service_unit_id="schema-test-service",
     )
     admission = await execution.reserve_admission(
         identity,
@@ -777,6 +801,19 @@ def install_catalog(monkeypatch, *, change=None):
             field
         ] = value
 
+    catalog[install.SHARE].append(
+        {
+            "COLUMN_NAME": "service_unit_key",
+            "COLUMN_TYPE": "varbinary(256)",
+            "IS_NULLABLE": "NO",
+            "COLUMN_DEFAULT": None,
+            "EXTRA": "",
+            "GENERATION_EXPRESSION": "",
+            "CHARACTER_SET_NAME": None,
+            "COLLATION_NAME": None,
+        },
+    )
+
     async def columns(_database, schema, table):
         if table == install.SHARE and schema == "application":
             return deepcopy(original_share)
@@ -788,7 +825,17 @@ def install_catalog(monkeypatch, *, change=None):
         return (
             {}
             if schema == "application"
-            else {"ix_swe_chat_shares_publication": (1, ("publication_id",))}
+            else {
+                "ix_swe_chat_shares_publication": (1, ("publication_id",)),
+                "ix_swe_chat_shares_service_chat": (
+                    1,
+                    ("service_unit_key", "chat_id"),
+                ),
+                "ix_swe_chat_shares_service_creator": (
+                    1,
+                    ("service_unit_key", "creator_id"),
+                ),
+            }
         )
 
     monkeypatch.setattr(install, "_columns", columns)

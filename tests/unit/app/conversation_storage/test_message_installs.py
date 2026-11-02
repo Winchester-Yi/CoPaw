@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import pytest
 
+from swe.app.conversation_storage.identity import WorkspaceScope
+
 from swe.app.conversation_storage.message_installs import (
     MessageInstall,
     TurnInstall,
@@ -67,7 +69,17 @@ async def test_message_occurrences_allocate_stable_orders_without_deduplicating_
         insert=AsyncMock(return_value=1),
         execute=AsyncMock(return_value=1),
     )
-    request = SimpleNamespace(session_id=1, chat_id=2, turn_id=3)
+    request = SimpleNamespace(
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
+        session_id=1,
+        chat_id=2,
+        turn_id=3,
+    )
     index = BundleIndex(
         "bundle",
         100,
@@ -96,14 +108,24 @@ async def test_message_occurrences_allocate_stable_orders_without_deduplicating_
         ({"history_high": 8}, {"history_high": 2}, None),
     )
     assert db.insert.await_count == 2
-    assert db.insert.await_args_list[0].args[1][4] == 9
-    assert db.insert.await_args_list[1].args[1][4] == 10
+    assert db.insert.await_args_list[0].args[1][5] == 9
+    assert db.insert.await_args_list[1].args[1][5] == 10
     assert db.execute.await_args_list[0].args[1] == (10, 1)
 
 
 async def test_message_unknown_extent_prevents_any_reference_write():
     db = SimpleNamespace(insert=AsyncMock(), execute=AsyncMock())
-    request = SimpleNamespace(session_id=1, chat_id=2, turn_id=None)
+    request = SimpleNamespace(
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
+        session_id=1,
+        chat_id=2,
+        turn_id=None,
+    )
     with pytest.raises(IntegrityError, match="block"):
         await install_messages(
             db,
@@ -118,7 +140,17 @@ async def test_message_unknown_extent_prevents_any_reference_write():
 
 async def test_terminal_stop_prevents_natural_completion_without_clearing_slot():
     db = SimpleNamespace(execute=AsyncMock())
-    request = SimpleNamespace(session_id=1, chat_id=2, turn_id=3)
+    request = SimpleNamespace(
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
+        session_id=1,
+        chat_id=2,
+        turn_id=3,
+    )
     with pytest.raises(ConflictError, match="Stop"):
         await install_turn(
             db,
@@ -132,7 +164,17 @@ async def test_terminal_stop_prevents_natural_completion_without_clearing_slot()
 
 async def test_online_message_cannot_install_into_another_context_epoch():
     db = SimpleNamespace(insert=AsyncMock(), execute=AsyncMock())
-    request = SimpleNamespace(session_id=1, chat_id=2, turn_id=None)
+    request = SimpleNamespace(
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
+        session_id=1,
+        chat_id=2,
+        turn_id=None,
+    )
     message = MessageInstall("m", "memory", "assistant", context_epoch=1)
     index = BundleIndex(
         "bundle",
@@ -181,13 +223,23 @@ async def test_archive_preserves_a_historical_turn_from_shared_session():
     )
     await install_messages(
         db,
-        SimpleNamespace(session_id=1, chat_id=2, turn_id=None),
+        SimpleNamespace(
+            scope=WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
+            session_id=1,
+            chat_id=2,
+            turn_id=None,
+        ),
         (message,),
         {"id": 4},
         BundleIndex("bundle", 100, {}, {"m": BlockExtent("archive", 50, 10)}),
         ({"history_high": 1}, {"history_high": 0}, None),
     )
-    assert db.insert.await_args.args[1][6] == 7
+    assert db.insert.await_args.args[1][7] == 7
 
 
 async def test_online_occurrence_cannot_claim_another_turn():
@@ -195,7 +247,17 @@ async def test_online_occurrence_cannot_claim_another_turn():
     with pytest.raises(IntegrityError, match="Turn"):
         await install_messages(
             db,
-            SimpleNamespace(session_id=1, chat_id=2, turn_id=3),
+            SimpleNamespace(
+                scope=WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                session_id=1,
+                chat_id=2,
+                turn_id=3,
+            ),
             (MessageInstall("m", "memory", "user", turn_id=7),),
             {"id": 4},
             BundleIndex(
@@ -221,10 +283,20 @@ async def test_archived_occurrence_preserves_original_chat_of_historical_turn():
     )
     await install_messages(
         db,
-        SimpleNamespace(session_id=1, chat_id=2, turn_id=None),
+        SimpleNamespace(
+            scope=WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
+            session_id=1,
+            chat_id=2,
+            turn_id=None,
+        ),
         (message,),
         {"id": 4},
         BundleIndex("bundle", 100, {}, {"m": BlockExtent("archive", 50, 10)}),
         ({"history_high": 1}, {"history_high": 0}, None),
     )
-    assert db.insert.await_args.args[1][1] == 5
+    assert db.insert.await_args.args[1][2] == 5

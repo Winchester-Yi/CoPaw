@@ -42,9 +42,19 @@ async def setup(db, root, *, state="committed", scope_kind="workspace"):
         metadata={"operation_key": operation},
     )
     scope = (
-        WorkspaceScope("tenant", "source", "agent")
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        )
         if scope_kind == "workspace"
-        else WorkspaceScope("tenant", "", "")
+        else WorkspaceScope(
+            "tenant",
+            "",
+            "",
+            service_unit_id="schema-test-service",
+        )
     )
     session = await insert_session(db) if scope_kind == "workspace" else None
     chat = await insert_chat(db, session) if session else None
@@ -53,8 +63,8 @@ async def setup(db, root, *, state="committed", scope_kind="workspace"):
         operation.encode(),
         state=state,
         scope_kind=scope_kind,
-        source_key=scope.sql_values[1],
-        agent_key=scope.sql_values[2],
+        source_key=scope.sql_values[2],
+        agent_key=scope.sql_values[3],
         session_id=session,
         chat_id=chat,
         relative_path=index.relative_path.encode(),
@@ -250,6 +260,7 @@ async def test_prepared_and_unverified_aborted_writers_never_reclaim(
         "ops:incarnation-drained",
         True,
         True,
+        service_unit_id="schema-test-service",
     )
     gc.verify_stopped = lambda value: value.evidence_ref == proof.evidence_ref
     with pytest.raises(ConflictError):
@@ -365,7 +376,12 @@ async def test_legacy_share_namespace_is_explicit_and_permanent_share_remains_pr
     with pytest.raises(IntegrityError, match="scope"):
         await GarbageCollector(
             db,
-            WorkspaceScope("tenant", "source", "agent"),
+            WorkspaceScope(
+                "tenant",
+                "source",
+                "agent",
+                service_unit_id="schema-test-service",
+            ),
             gc.bundles,
             physical_enabled=True,
         ).mark(publication)
@@ -422,6 +438,7 @@ async def test_aborted_tombstone_rescans_exact_late_file(
         "ops:stopped",
         True,
         True,
+        service_unit_id="schema-test-service",
     )
     gc.verify_stopped = lambda value: value == proof
     await gc.mark(publication, proof=proof)

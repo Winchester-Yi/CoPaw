@@ -2,6 +2,7 @@
 """Validate scope backups as one restore set before touching an empty target."""
 
 from pathlib import Path
+import re
 from operator import itemgetter
 
 from .bundle import BundleStore, CHUNK_BYTES
@@ -71,7 +72,7 @@ def load_restore_set(backup_path):
             ]
             for name in ("publications", "shares")
         }
-        tenant = document["scope"][0]
+        tenant = tuple(document["scope"][:2])
         if tenant in shared and shared[tenant] != tenant_shared:
             raise IntegrityError("restore set tenant share snapshots differ")
         shared[tenant] = tenant_shared
@@ -112,3 +113,45 @@ def load_restore_set(backup_path):
     snapshot_publication_ids(snapshot)
     _validate_associations(snapshot)
     return documents, snapshot, sources
+
+
+async def validate_restore_tokens(database, snapshot):
+    """Use the target token column's equality rules before any NAS mutation."""
+    tokens = [row["token"] for row in snapshot["shares"]]
+    if len(tokens) < 2:
+        return
+    column = await database.fetch_one(
+        "SELECT CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='swe_chat_shares' AND COLUMN_NAME='token'",
+    )
+    if column is None or any(
+        not isinstance(column.get(key), str)
+        or not re.fullmatch(r"[A-Za-z0-9_]+", column[key])
+        for key in ("CHARACTER_SET_NAME", "COLLATION_NAME")
+    ):
+        raise IntegrityError("restore target token collation is unavailable")
+    # Identifiers are server metadata, validated above; token values stay bound.
+    expression = (
+        "SELECT CONVERT(%s USING "
+        + column["CHARACTER_SET_NAME"]
+        + ") COLLATE "
+        + column["COLLATION_NAME"]
+        + " AS token"
+    )
+    batches = [
+        tokens[start : start + 256] for start in range(0, len(tokens), 256)
+    ]
+    # Include cross-batch pairs so equivalent tokens cannot straddle batches.
+    for index, batch in enumerate(batches):
+        for other in [[], *batches[:index]]:
+            values = (*batch, *other)
+            collision = await database.fetch_one(
+                "SELECT token FROM ("
+                + " UNION ALL ".join([expression] * len(values))
+                + ") AS restore_tokens GROUP BY token HAVING COUNT(*)>1 LIMIT 1",
+                values,
+            )
+            if collision is not None:
+                raise IntegrityError(
+                    "restore set token collision under target collation",
+                )

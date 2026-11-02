@@ -19,8 +19,8 @@ class PublicationAssociations:
             if session_rows is None:
                 session = await self.db.fetch_one(
                     "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
-                    "FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
-                    (request.session_id,),
+                    "FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                    (request.session_id, request.scope.sql_values[0]),
                 )
             else:
                 session = session_rows.get(request.session_id)
@@ -32,8 +32,8 @@ class PublicationAssociations:
             chat_ids.add(request.chat_id)
         for identity in sorted(chat_ids):
             current = await self.db.fetch_one(
-                "SELECT * FROM swe_conversation_chats WHERE id=%s FOR UPDATE",
-                (identity,),
+                "SELECT * FROM swe_conversation_chats WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                (identity, request.scope.sql_values[0]),
             )
             if identity == request.chat_id:
                 chat = current
@@ -44,16 +44,26 @@ class PublicationAssociations:
             turn_ids.add(request.turn_id)
         for identity in sorted(turn_ids):
             current = await self.db.fetch_one(
-                "SELECT * FROM swe_conversation_turns WHERE id=%s FOR UPDATE",
-                (identity,),
+                "SELECT * FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                (identity, request.scope.sql_values[0]),
             )
+            if (
+                current is not None
+                and current["service_unit_key"] != request.scope.sql_values[0]
+            ):
+                raise IntegrityError("publication Turn service unit mismatch")
             if identity == request.turn_id:
                 turn = current
             if identity in archive_turns and (
                 current is None
                 or any(
                     current[key] != archive_turns[identity][key]
-                    for key in ("id", "session_id", "chat_id")
+                    for key in (
+                        "id",
+                        "service_unit_key",
+                        "session_id",
+                        "chat_id",
+                    )
                 )
             ):
                 raise IntegrityError("archived Turn association changed")
@@ -61,12 +71,16 @@ class PublicationAssociations:
 
     @staticmethod
     def _validate_archive_chat(request, chat):
-        if chat is not None and chat["session_id"] != request.session_id:
-            raise IntegrityError("archived Turn Chat Session changed")
         if (
             chat is None
             or tuple(
-                chat[key] for key in ("tenant_key", "source_key", "agent_key")
+                chat[key]
+                for key in (
+                    "service_unit_key",
+                    "tenant_key",
+                    "source_key",
+                    "agent_key",
+                )
             )
             != request.scope.sql_values
         ):
@@ -82,10 +96,14 @@ class PublicationAssociations:
             },
         ):
             turn = await self.db.fetch_one(
-                "SELECT id,session_id,chat_id FROM swe_conversation_turns WHERE id=%s",
-                (identity,),
+                "SELECT id,service_unit_key,session_id,chat_id FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s",
+                (identity, request.scope.sql_values[0]),
             )
-            if turn is None or turn["session_id"] != request.session_id:
+            if (
+                turn is None
+                or turn["service_unit_key"] != request.scope.sql_values[0]
+                or turn["session_id"] != request.session_id
+            ):
                 raise IntegrityError(
                     "archived Turn does not belong to Session",
                 )

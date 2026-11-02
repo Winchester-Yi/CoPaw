@@ -16,10 +16,12 @@ from ..publications import (
     _request as PublicationRequestFrom,
 )
 from ..retention import RetentionStore
+from ..publication_associations import PublicationAssociations
 
 COLUMNS = {
     "sessions": {
         "id",
+        "service_unit_key",
         "tenant_key",
         "source_key",
         "agent_key",
@@ -43,6 +45,7 @@ COLUMNS = {
         "session_id",
         "external_chat_key",
         "registry_order",
+        "service_unit_key",
         "tenant_key",
         "source_key",
         "agent_key",
@@ -71,6 +74,7 @@ COLUMNS = {
     },
     "turns": {
         "id",
+        "service_unit_key",
         "chat_id",
         "session_id",
         "question_msg_key",
@@ -88,6 +92,7 @@ COLUMNS = {
     },
     "messages": {
         "id",
+        "service_unit_key",
         "session_id",
         "origin_chat_id",
         "archive_chat_id",
@@ -111,6 +116,7 @@ COLUMNS = {
         "deleted_at",
     },
     "shares": {
+        "service_unit_key",
         "token",
         "chat_id",
         "creator_id",
@@ -172,6 +178,7 @@ TIME = {
 IMMUTABLE = {
     "sessions": {
         "id",
+        "service_unit_key",
         "tenant_key",
         "source_key",
         "agent_key",
@@ -185,6 +192,7 @@ IMMUTABLE = {
         "session_id",
         "external_chat_key",
         "registry_order",
+        "service_unit_key",
         "tenant_key",
         "source_key",
         "agent_key",
@@ -194,6 +202,7 @@ IMMUTABLE = {
     },
     "turns": {
         "id",
+        "service_unit_key",
         "session_id",
         "chat_id",
         "question_msg_key",
@@ -281,10 +290,22 @@ def _sql_value(key, value):
 
 
 class OfflineImportStore(PublicationStore):
-    def __init__(self, database, bundles, target):
-        super().__init__(database, bundles)
+    def __init__(self, database, bundles, target, *, service_unit_id):
+        super().__init__(database, bundles, service_unit_id=service_unit_id)
         self.target = target
         self._reservation_ids = {}
+
+    async def _validate_reference_ownership(self, request, plan):
+        # Import rows may be created by this batch. The typed import plan is
+        # loaded only at commit; existing request parents are checked before IO.
+        if _PLAN.get() is not None:
+            return await super()._validate_reference_ownership(request, plan)
+        self._validate_service(request)
+        associations = await PublicationAssociations._lock_associations(
+            self,
+            request,
+        )
+        PublicationStore._validate_associations(request, *associations)
 
     async def validate_target(self):
         row = await self.db.fetch_one("SELECT DATABASE() AS schema_name")
@@ -496,6 +517,10 @@ class OfflineImportStore(PublicationStore):
             raise ConflictError(
                 "offline publication requires a durable original bundle",
             )
+        await self._validate_reference_ownership(
+            PublicationRequestFrom(initial),
+            CommitPlan.parse(initial["result_metadata_text"]),
+        )
         plan = await self._load_plan(initial)
         token = _PLAN.set(plan)
         locked_token = _LOCKED.set(
@@ -706,11 +731,17 @@ class OfflineImportStore(PublicationStore):
         return row
 
     def _validate_relation(self, table, values, publication):
-        scope = ("tenant_key", "source_key", "agent_key")
+        scope = ("service_unit_key", "tenant_key", "source_key", "agent_key")
         if table in ("sessions", "chats") and any(
             values.get(key) != publication[key] for key in scope
         ):
             raise IntegrityError("offline record scope mismatch")
+        if (
+            table in ("turns", "messages")
+            and values.get("service_unit_key")
+            != publication["service_unit_key"]
+        ):
+            raise IntegrityError("offline record service scope mismatch")
         if table in ("chats", "turns", "messages"):
             self._validate_record_relations(values, publication)
         if table == "publications":
@@ -729,7 +760,7 @@ class OfflineImportStore(PublicationStore):
             )
 
     def _validate_record_relations(self, values, publication):
-        scope = ("tenant_key", "source_key", "agent_key")
+        scope = ("service_unit_key", "tenant_key", "source_key", "agent_key")
         session = self._related("sessions", values["session_id"])
         if any(session[key] != publication[key] for key in scope):
             raise IntegrityError("offline related Session scope mismatch")
@@ -745,8 +776,10 @@ class OfflineImportStore(PublicationStore):
         if values.get("turn_id") is not None:
             turn = self._related("turns", values["turn_id"])
             origin = values.get("origin_chat_id")
-            if turn["session_id"] != session["id"] or (
-                origin is not None and origin != turn["chat_id"]
+            if (
+                turn["service_unit_key"] != publication["service_unit_key"]
+                or turn["session_id"] != session["id"]
+                or (origin is not None and origin != turn["chat_id"])
             ):
                 raise IntegrityError("offline Message Turn relation mismatch")
 

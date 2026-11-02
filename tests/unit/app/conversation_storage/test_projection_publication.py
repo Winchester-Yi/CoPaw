@@ -23,7 +23,11 @@ async def test_recovery_write_projects_message_bodies_into_delta_blocks(
     db = PublicationDatabase()
     db.session["recovery_publication_id"] = None
     db.fetch_all = __import__("unittest.mock").mock.AsyncMock(return_value=[])
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     await service.reserve(operation, CommitPlan(recovery_block="root"))
     raw = {
@@ -76,7 +80,11 @@ async def test_effective_projection_cannot_change_prepared_identity_or_smuggle_i
     db = PublicationDatabase()
     db.session["recovery_publication_id"] = None
     db.fetch_all = __import__("unittest.mock").mock.AsyncMock(return_value=[])
-    service = PublicationStore(db, BundleStore(tmp_path))
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
     operation = request()
     plan = CommitPlan(recovery_block="root")
     await service.reserve(operation, plan)

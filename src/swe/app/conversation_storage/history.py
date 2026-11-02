@@ -72,7 +72,7 @@ class HistoryStore:
     def _encode_cursor(self, chat, *, epoch, high, before):
         raw = json.dumps(
             {
-                "v": 1,
+                "v": 2,
                 "chat": chat,
                 "epoch": epoch,
                 "high": high,
@@ -101,7 +101,7 @@ class HistoryStore:
             body = _load_json(raw)
             if (
                 set(body) != {"v", "chat", "epoch", "high", "before"}
-                or body["v"] != 1
+                or body["v"] != 2
                 or body["chat"] != chat
             ):
                 raise ValueError("invalid identity")
@@ -205,6 +205,12 @@ class HistoryStore:
         return row
 
     async def _pins(self, chat, rows, boundaries):
+        service = self.scope.sql_values[0]
+        if any(
+            row["service_unit_key"] != service
+            for row in [chat, *rows, *boundaries]
+        ):
+            raise IntegrityError("history service association mismatch")
         ids = {row["publication_id"] for row in rows}
         ids.update(row["id"] for row in boundaries)
         if chat["content_meta_publication_id"] is not None:
@@ -307,12 +313,13 @@ class HistoryStore:
         actual = await self.db.fetch_all(
             "SELECT * FROM swe_conversation_messages WHERE id IN ("
             + markers
-            + ")"
+            + ") AND service_unit_key=%s"
             + (" FOR SHARE" if current_read else ""),
-            tuple(ids),
+            (*ids, self.scope.sql_values[0]),
         )
         by_id = {row["id"]: row for row in actual}
         fields = (
+            "service_unit_key",
             "session_id",
             "origin_chat_id",
             "archive_chat_id",
@@ -334,10 +341,11 @@ class HistoryStore:
 
     async def _validate_chat_row(self, chat):
         current = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_chats WHERE id=%s",
-            (chat["id"],),
+            "SELECT * FROM swe_conversation_chats WHERE id=%s AND service_unit_key=%s",
+            (chat["id"], self.scope.sql_values[0]),
         )
         chat_fields = (
+            "service_unit_key",
             "session_id",
             "user_key",
             "channel_key",

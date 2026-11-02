@@ -41,9 +41,24 @@ async def test_all_scopes_restore_together_with_shared_orphan(
 ):
     db = conversation_test_database
     scopes = [
-        WorkspaceScope("tenant", "source", "agent"),
-        WorkspaceScope("tenant", "other", "agent"),
-        WorkspaceScope("other-tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
+        WorkspaceScope(
+            "tenant",
+            "other",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
+        WorkspaceScope(
+            "other-tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
     ]
     seeded = [
         await seed_new_data(
@@ -55,12 +70,21 @@ async def test_all_scopes_restore_together_with_shared_orphan(
         for index, scope in enumerate(scopes)
     ]
     bundles = seeded[0][1]
-    service = PublicationStore(db, bundles)
+    service = PublicationStore(
+        db,
+        bundles,
+        service_unit_id="schema-test-service",
+    )
     operation = new_operation_key()
     await service.reserve(
         PublicationRequest(
             operation,
-            WorkspaceScope("tenant", "", ""),
+            WorkspaceScope(
+                "tenant",
+                "",
+                "",
+                service_unit_id="schema-test-service",
+            ),
             "share_import",
             "offline",
             0,
@@ -150,9 +174,7 @@ async def test_all_scopes_restore_together_with_shared_orphan(
             ),
         )
         assert report["passed"] and report["restore_ready"]
-        assert report["scopes"] == [
-            [s.tenant_id, s.source_id, s.agent_id] for s in scopes
-        ]
+        assert report["scopes"] == [list(s.values) for s in scopes]
         for name in (
             "sessions",
             "chats",
@@ -185,7 +207,211 @@ async def test_all_scopes_restore_together_with_shared_orphan(
             and orphan.snapshot_key == "old-original-key"
         )
         assert (
-            await ShareStorage(clone, restored_bundles).verify_snapshot(
+            await ShareStorage(
+                clone,
+                restored_bundles,
+                service_unit_id="schema-test-service",
+            ).verify_snapshot(
                 orphan.token,
             )
         )["future"] == {"keep": True}
+
+
+async def test_multi_service_restore_routes_identical_bundle_paths_to_own_nas(
+    conversation_test_database,
+    tmp_path,
+):
+    from tests.integrated.conversation_storage.conftest import (
+        SQL_ROOT,
+        apply_sql_script,
+    )
+
+    db = conversation_test_database
+    await ChatShareStore(db).ensure_schema()
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_publication_extension.sql",
+    )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
+    operation = new_operation_key()
+    paths = []
+    originals = {}
+    for service in ("service-A", "service-B"):
+        scope = WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id=service,
+        )
+        original_root = tmp_path / ("original-" + service)
+        original_root.mkdir()
+        bundles = BundleStore(original_root)
+        store = PublicationStore(db, bundles, service_unit_id=service)
+        await store.reserve(
+            PublicationRequest(
+                operation,
+                WorkspaceScope("tenant", "", "", service_unit_id=service),
+                "share_import",
+                "offline",
+                0,
+                scope_kind="legacy_share",
+            ),
+            CommitPlan(
+                share=ShareInstall(
+                    "token-" + service,
+                    "deleted-chat",
+                    "owner",
+                    "tenant",
+                    "old-key",
+                    "2026-11-02T00:00:00Z",
+                ),
+            ),
+        )
+        payload = {
+            "chat_name": service,
+            "messages": [],
+            "service_payload": service,
+        }
+        await store.write_bundle(
+            operation,
+            [BundleBlock("share", "share", json.dumps(payload).encode())],
+        )
+        await store.commit(operation)
+        originals[service] = (
+            bundles.root / bundles.path_for(operation)
+        ).read_bytes()
+        path = tmp_path / ("backup-" + service)
+        await ConversationBackup(db, bundles, scope).capture(path)
+        paths.append(path)
+    assert originals["service-A"] != originals["service-B"]
+    async with empty_clone(db) as clone:
+        stores = {
+            service: BundleStore(tmp_path / ("restored-" + service))
+            for service in originals
+        }
+        with pytest.raises(IntegrityError, match="NAS mapping"):
+            await restore_backup(
+                clone,
+                stores["service-A"],
+                paths,
+                evidence=RestoreEvidence("all-services-stopped", "isolated"),
+            )
+        assert not stores["service-A"].root.exists()
+        report = await restore_backup(
+            clone,
+            stores,
+            paths,
+            evidence=RestoreEvidence("all-services-stopped", "isolated"),
+        )
+        assert report["passed"] and report["restore_ready"]
+        for service, store in stores.items():
+            assert (
+                store.root / store.path_for(operation)
+            ).read_bytes() == originals[service]
+            payload = await ShareStorage(
+                clone,
+                store,
+                service_unit_id=service,
+            ).verify_snapshot("token-" + service)
+            assert payload["service_payload"] == service
+            with pytest.raises(KeyError):
+                await ShareStorage(
+                    clone,
+                    store,
+                    service_unit_id=service,
+                ).verify_snapshot(
+                    "token-"
+                    + ("service-B" if service == "service-A" else "service-A"),
+                )
+
+
+async def test_restore_rejects_source_tokens_equivalent_in_target_collation(
+    conversation_test_database,
+    tmp_path,
+):
+    from tests.integrated.conversation_storage.conftest import (
+        SQL_ROOT,
+        apply_sql_script,
+    )
+
+    db = conversation_test_database
+    await ChatShareStore(db).ensure_schema()
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_publication_extension.sql",
+    )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
+    # A valid stopped source can use stricter equality than the restore target.
+    await db.execute(
+        "ALTER TABLE swe_chat_shares MODIFY token VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL",
+    )
+    paths = []
+    for service, token in (("A", "ShareToken"), ("B", "sharetoken")):
+        scope = WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id=service,
+        )
+        root = tmp_path / ("source-" + service)
+        root.mkdir()
+        bundles = BundleStore(root)
+        store = PublicationStore(db, bundles, service_unit_id=service)
+        operation = new_operation_key()
+        await store.reserve(
+            PublicationRequest(
+                operation,
+                WorkspaceScope("tenant", "", "", service_unit_id=service),
+                "share_import",
+                "offline",
+                0,
+                scope_kind="legacy_share",
+            ),
+            CommitPlan(
+                share=ShareInstall(
+                    token,
+                    "deleted-chat",
+                    "owner",
+                    "tenant",
+                    "old-key",
+                    "2026-11-02T00:00:00Z",
+                ),
+            ),
+        )
+        await store.write_bundle(
+            operation,
+            [
+                BundleBlock(
+                    "share",
+                    "share",
+                    b'{"chat_name":"kept","messages":[]}',
+                ),
+            ],
+        )
+        await store.commit(operation)
+        path = tmp_path / ("backup-" + service)
+        await ConversationBackup(db, bundles, scope).capture(path)
+        paths.append(path)
+    async with empty_clone(db) as clone:
+        stores = {
+            service: BundleStore(tmp_path / ("target-" + service))
+            for service in ("A", "B")
+        }
+        with pytest.raises(IntegrityError, match="token.*collation"):
+            await restore_backup(
+                clone,
+                stores,
+                paths,
+                evidence=RestoreEvidence("all-stopped", "isolated"),
+            )
+        assert all(not store.root.exists() for store in stores.values())
+        for table in TABLES.values():
+            assert (
+                await clone.fetch_one("SELECT COUNT(*) AS n FROM " + table)
+            )["n"] == 0

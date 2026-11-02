@@ -15,9 +15,25 @@ def test_recovery_requires_complete_stopped_incarnation_proof():
     from swe.app.conversation_storage.recovery import OwnerExitProof
 
     with pytest.raises(ValueError, match="stop evidence"):
-        OwnerExitProof("owner", 1, "", "operator", True, True)
+        OwnerExitProof(
+            "owner",
+            1,
+            "",
+            "operator",
+            True,
+            True,
+            service_unit_id="schema-test-service",
+        )
     with pytest.raises(ValueError, match="positive"):
-        OwnerExitProof("owner", 0, "pod/uid-exited", "operator", True, True)
+        OwnerExitProof(
+            "owner",
+            0,
+            "pod/uid-exited",
+            "operator",
+            True,
+            True,
+            service_unit_id="schema-test-service",
+        )
 
 
 @pytest.mark.asyncio
@@ -29,7 +45,12 @@ async def test_recovery_never_infers_death_from_lease_or_unverified_boolean():
     )
 
     storage = AsyncMock()
-    storage.scope = WorkspaceScope("tenant", "source", "agent")
+    storage.scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     proof = OwnerExitProof(
         "owner",
         1,
@@ -37,6 +58,7 @@ async def test_recovery_never_infers_death_from_lease_or_unverified_boolean():
         "operator",
         True,
         True,
+        service_unit_id="schema-test-service",
     )
     service = EndedOwnerRecovery(
         storage,
@@ -70,7 +92,11 @@ async def test_reconcile_rejects_invalid_generation_before_normal_commit(
     from swe.app.conversation_storage.errors import ConflictError
     from swe.app.conversation_storage.publications import PublicationStore
 
-    store = PublicationStore(AsyncMock(), AsyncMock())
+    store = PublicationStore(
+        AsyncMock(),
+        AsyncMock(),
+        service_unit_id="schema-test-service",
+    )
     store.commit = AsyncMock()
     with pytest.raises(ConflictError, match="generation"):
         await store.reconcile(
@@ -79,3 +105,32 @@ async def test_reconcile_rejects_invalid_generation_before_normal_commit(
             expected_generation=generation,
         )
     store.commit.assert_not_awaited()
+
+
+async def test_foreign_owner_proof_rejected_before_database_or_verifier():
+    from swe.app.conversation_storage.recovery import (
+        EndedOwnerRecovery,
+        OwnerExitProof,
+    )
+    from swe.app.conversation_storage.errors import ConflictError
+
+    storage = AsyncMock()
+    storage.scope = WorkspaceScope("t", "s", "a", service_unit_id="A")
+    verifier = AsyncMock(return_value=True)
+    proof = OwnerExitProof(
+        "owner",
+        1,
+        "stopped",
+        "operator",
+        True,
+        True,
+        service_unit_id="B",
+    )
+    with pytest.raises(ConflictError):
+        await EndedOwnerRecovery(storage, verify_stopped=verifier).recover(
+            SessionIdentity(storage.scope, "u", "c", "session"),
+            1,
+            proof,
+        )
+    verifier.assert_not_awaited()
+    storage.db.fetch_one.assert_not_awaited()

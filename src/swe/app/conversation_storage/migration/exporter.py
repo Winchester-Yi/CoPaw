@@ -68,14 +68,36 @@ def _stamp(value):
 
 
 class ConversationExporter:
-    def __init__(self, backup_path, target):
+    def __init__(
+        self,
+        backup_path,
+        target,
+        *,
+        service_unit_id=None,
+        bundles=None,
+    ):
         if not isinstance(target, OldFormatTarget):
             raise TypeError("export requires an explicit old image target")
         self.root = Path(backup_path)
         self.target = target
         self.document = load_backup(backup_path)
         self.snapshot = self.document["snapshot"]
-        self.bundles = BundleStore(self.root / "nas")
+        from ..identity import WorkspaceScope
+
+        scope = WorkspaceScope.from_values(self.document["scope"])
+        self.service_unit_id = scope.service_unit_id
+        if (
+            service_unit_id is not None
+            and service_unit_id != self.service_unit_id
+        ):
+            raise ValueError(
+                "export backup service differs from explicit binding",
+            )
+        if isinstance(bundles, dict):
+            if self.service_unit_id not in bundles:
+                raise ValueError("export service has no NAS binding")
+            bundles = bundles[self.service_unit_id]
+        self.bundles = bundles or BundleStore(self.root / "nas")
         self.publications = {
             row["id"]: row for row in self.snapshot["publications"]
         }
@@ -124,6 +146,9 @@ class ConversationExporter:
         self._archives(destination)
         report = self._verify(destination, expected)
         report.update(
+            version=2,
+            service_unit_id=self.service_unit_id,
+            nas_root=str(self.bundles.root.resolve()),
             image_digest=self.target.image_digest,
             backup_id=self.document["backup_id"],
         )
@@ -167,7 +192,7 @@ class ConversationExporter:
             )
             relative = Path(metadata["relative_path"])
             if (
-                metadata.get("version") != 1
+                metadata.get("version") != 2
                 or metadata.get("scope") != scope
                 or relative.is_absolute()
                 or ".." in relative.parts

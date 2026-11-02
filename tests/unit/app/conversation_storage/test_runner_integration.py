@@ -21,7 +21,12 @@ from swe.app.conversation_storage.session_adapter import (
 
 
 def setup_runtime():
-    scope = WorkspaceScope("t", "s", "a")
+    scope = WorkspaceScope(
+        "t",
+        "s",
+        "a",
+        service_unit_id="schema-test-service",
+    )
     identity = SessionIdentity(scope, "", "console", "s")
     authority = ExecutionAuthority(identity, 1, 2, 3, 1, "owner")
     events = []
@@ -152,6 +157,7 @@ async def test_unknown_terminal_confirmed_committed_releases_closed_execution(
             return_value={
                 "id": 8,
                 "state": "committed",
+                "service_unit_key": b"schema-test-service",
                 "tenant_key": b"t",
                 "source_key": b"s",
                 "agent_key": b"a",

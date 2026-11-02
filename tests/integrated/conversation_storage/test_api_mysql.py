@@ -60,9 +60,18 @@ async def api_stack(conversation_test_database, tmp_path, monkeypatch):
         db,
         SQL_ROOT / "conversation_share_publication_extension.sql",
     )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_service_unit_finalize.sql",
+    )
     storage = WorkspaceConversationStorage(
         db,
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         tmp_path,
         cursor_secret=b"api-contract-secret",
     )
@@ -877,7 +886,12 @@ async def test_http_legacy_orphan_token_uses_publication_scope_and_preserves_cou
     await stack.storage.publications.reserve(
         PublicationRequest(
             operation,
-            WorkspaceScope("legacy-tenant", "", ""),
+            WorkspaceScope(
+                "legacy-tenant",
+                "",
+                "",
+                service_unit_id="schema-test-service",
+            ),
             "share_import",
             "offline",
             0,
@@ -1015,13 +1029,23 @@ async def test_wplus_event_tool_projects_sql_chat_without_chats_json(
     installed = runtime.ConversationRuntime(
         stack.db,
         {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": "schema-test-service",
             "nas_root": str(root),
             "workspaces": [
-                {"root": str(root), "scope": ["tenant", "source", "agent"]},
+                {
+                    "root": str(root),
+                    "scope": [
+                        "schema-test-service",
+                        "tenant",
+                        "source",
+                        "agent",
+                    ],
+                },
             ],
         },
         b"installed-secret",
+        service_unit_id="schema-test-service",
     )
     monkeypatch.setenv(runtime.AUTHORITY_ENV, "mysql")
     monkeypatch.setattr(runtime, "_runtime", installed)
@@ -1222,7 +1246,12 @@ async def test_agent_scoped_route_and_header_select_sql_workspace(
     other_root.mkdir()
     other_storage = WorkspaceConversationStorage(
         stack.db,
-        WorkspaceScope("tenant", "source", "other"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "other",
+            service_unit_id="schema-test-service",
+        ),
         other_root,
         cursor_secret=b"other-secret",
     )

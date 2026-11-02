@@ -65,9 +65,14 @@ class WorkspaceConversationStorage:
         self.bundles = BundleStore(
             root if nas_root is None else existing_root(nas_root),
         )
-        self.publications = PublicationStore(database, self.bundles)
+        self.publications = PublicationStore(
+            database,
+            self.bundles,
+            service_unit_id=scope.service_unit_id,
+        )
         self.executions = ExecutionStore(
             database,
+            service_unit_id=scope.service_unit_id,
             publications=self.publications,
         )
         self.chats = MySQLChatRepository(database, scope, self.bundles)

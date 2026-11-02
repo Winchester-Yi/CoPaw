@@ -232,6 +232,13 @@ def _stage(stage, output):
 def rehearse(manifest, output, *, apply=False):
     """Run a reviewed isolated-copy manifest; halt on first failed stage."""
     plan = json.loads(Path(manifest).read_text())
+    from swe.app.conversation_storage.identity import service_unit_bytes
+
+    if plan.get("version") != 2:
+        raise ValueError(
+            "rehearsal requires version 2 with explicit service ownership",
+        )
+    service_unit_bytes(plan.get("service_unit_id"))
     if plan.get("scope") != "isolated-copy":
         raise ValueError(
             "only explicitly isolated-copy rehearsals are supported",
@@ -252,7 +259,13 @@ def rehearse(manifest, output, *, apply=False):
             raise ValueError(
                 "each stage requires a nonempty argv string array",
             )
-    report = {"scope": plan["scope"], "status": "preview", "stages": stages}
+    report = {
+        "version": 2,
+        "service_unit_id": plan["service_unit_id"],
+        "scope": plan["scope"],
+        "status": "preview",
+        "stages": stages,
+    }
     if not apply:
         return report
     output = Path(output)

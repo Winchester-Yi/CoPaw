@@ -27,7 +27,12 @@ class EmptyDatabase:
 def adapter():
     return MySQLSessionAdapter(
         EmptyDatabase(),
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         None,
         channel="console",
     )
@@ -36,6 +41,7 @@ def adapter():
 async def test_adapter_preserves_full_identity_and_never_sanitizes_session():
     session = adapter()
     assert session.identity("same__session", "").sql_values == (
+        b"schema-test-service",
         b"tenant",
         b"source",
         b"agent",

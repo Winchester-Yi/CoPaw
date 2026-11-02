@@ -7,7 +7,7 @@ from pathlib import Path
 from .bundle import BundleStore
 from .chat_mutations import load_metadata_json
 from .factory import WorkspaceConversationStorage, existing_root
-from .identity import WorkspaceScope
+from .identity import WorkspaceScope, service_unit_bytes, service_unit_from_env
 from .shares import ShareStorage
 
 AUTHORITY_ENV = "SWE_CONVERSATION_STORAGE_AUTHORITY"
@@ -16,23 +16,27 @@ CURSOR_ENV = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
 _runtime = None
 
 
-def resolved_scope(workspace, installed=None):
+def resolved_scope(workspace, installed=None, *, service_unit_id):
     """Use the trusted runtime identity, never filesystem directory encodings."""
     from ...config.context import canonicalize_scope_id, decode_scope_id
+
+    service_unit_bytes(service_unit_id)
 
     explicit = getattr(workspace, "conversation_scope", None)
     if explicit is not None:
         if (
             not isinstance(explicit, WorkspaceScope)
             or explicit.agent_id != workspace.agent_id
+            or explicit.service_unit_id != service_unit_id
         ):
-            raise ValueError("workspace conversation scope is invalid")
+            raise ValueError("workspace conversation service scope is invalid")
         return explicit
     tenant = getattr(workspace, "tenant_id", None)
     source = getattr(workspace, "source_id", None)
     if tenant is None:
         if (
             installed is not None
+            and installed.service_unit_id == service_unit_id
             and installed.tenant_id == "default"
             and installed.agent_id == workspace.agent_id
             and source in (None, installed.source_id)
@@ -57,7 +61,12 @@ def resolved_scope(workspace, installed=None):
             ) from None
     if source is not None and source != decoded_source:
         raise ValueError("workspace conversation source scope mismatch")
-    return WorkspaceScope(logical, decoded_source, workspace.agent_id)
+    return WorkspaceScope(
+        logical,
+        decoded_source,
+        workspace.agent_id,
+        service_unit_id=service_unit_id,
+    )
 
 
 def require_empty_conversation(root):
@@ -97,13 +106,18 @@ def mysql_authority():
 class ConversationRuntime:
     """One database and NAS root, mapped to existing workspace identities."""
 
-    def __init__(self, database, document, cursor_secret):
-        if document.get("version") != 1 or set(document) != {
+    def __init__(self, database, document, cursor_secret, *, service_unit_id):
+        service_unit_bytes(service_unit_id)
+        if document.get("version") != 2 or set(document) != {
             "version",
+            "service_unit_id",
             "nas_root",
             "workspaces",
         }:
             raise ValueError("invalid installed conversation scope manifest")
+        if document["service_unit_id"] != service_unit_id:
+            raise ValueError("conversation manifest service unit mismatch")
+        self.service_unit_id = service_unit_id
         self.database = database
         self.nas_root = existing_root(document["nas_root"])
         self.cursor_secret = cursor_secret
@@ -111,22 +125,32 @@ class ConversationRuntime:
         self._workspaces = {}
         scopes = set()
         for item in document["workspaces"]:
-            if set(item) != {"root", "scope"} or len(item["scope"]) != 3:
+            if set(item) != {"root", "scope"}:
                 raise ValueError("invalid installed workspace mapping")
             root = existing_root(item["root"])
-            scope = WorkspaceScope(*item["scope"])
+            scope = WorkspaceScope.from_values(item["scope"])
+            if scope.service_unit_id != service_unit_id:
+                raise ValueError("workspace manifest service unit mismatch")
             if root in self.mappings or scope in scopes:
                 raise ValueError("duplicate installed workspace identity")
             self.mappings[root] = scope
             scopes.add(scope)
         if not self.mappings:
             raise ValueError("conversation scope manifest has no workspaces")
-        self.shares = ShareStorage(database, BundleStore(self.nas_root))
+        self.shares = ShareStorage(
+            database,
+            BundleStore(self.nas_root),
+            service_unit_id=service_unit_id,
+        )
 
     def for_workspace(self, workspace):
         root = existing_root(workspace.workspace_dir)
         scope = self.mappings.get(root)
-        resolved = resolved_scope(workspace, scope)
+        resolved = resolved_scope(
+            workspace,
+            scope,
+            service_unit_id=self.service_unit_id,
+        )
         if scope is None:
             require_empty_conversation(root)
             if resolved in self.mappings.values():
@@ -174,7 +198,12 @@ async def configure_runtime(database):
             "conversation storage requires installed scopes and cursor secret",
         )
     document = load_metadata_json(Path(path).read_bytes())
-    candidate = ConversationRuntime(database, document, secret.encode())
+    candidate = ConversationRuntime(
+        database,
+        document,
+        secret.encode(),
+        service_unit_id=service_unit_from_env(),
+    )
     await candidate.verify()
     _runtime = candidate
 

@@ -54,7 +54,12 @@ async def dataset(db, tmp_path):
         second,
         HistoryStore(
             db,
-            WorkspaceScope("tenant", "source", "agent"),
+            WorkspaceScope(
+                "tenant",
+                "source",
+                "agent",
+                service_unit_id="schema-test-service",
+            ),
             bundles,
             cursor_secret=b"shared-test-secret",
         ),

@@ -89,7 +89,12 @@ def test_share_plan_is_exclusive_with_every_installation_family(field):
 def share_request(**changes):
     values = {
         "operation_key": new_operation_key(),
-        "scope": WorkspaceScope("tenant", "source", "agent"),
+        "scope": WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         "kind": "share",
         "owner_key": "share-owner",
         "generation": 0,
@@ -105,9 +110,21 @@ def share_request(**changes):
         {"kind": "state"},
         {"turn_id": 3},
         {"session_id": None, "chat_id": None},
-        {"scope": WorkspaceScope("other", "source", "agent")},
         {
-            "scope": WorkspaceScope("tenant", "", ""),
+            "scope": WorkspaceScope(
+                "other",
+                "source",
+                "agent",
+                service_unit_id="schema-test-service",
+            ),
+        },
+        {
+            "scope": WorkspaceScope(
+                "tenant",
+                "",
+                "",
+                service_unit_id="schema-test-service",
+            ),
             "scope_kind": "legacy_share",
             "session_id": None,
             "chat_id": None,
@@ -233,6 +250,7 @@ def test_share_commit_revalidates_live_chat_creator_and_scope(changes, error):
     request = share_request()
     session = {
         "id": 1,
+        "service_unit_key": b"schema-test-service",
         "tenant_key": b"tenant",
         "source_key": b"source",
         "agent_key": b"agent",
@@ -264,16 +282,26 @@ async def test_share_install_is_parameterized_same_transaction_and_locator_exact
     )
     db = SimpleNamespace(execute=AsyncMock(return_value=1))
     request = SimpleNamespace(
-        scope=WorkspaceScope("tenant", "source", "agent"),
+        scope=WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         scope_kind="workspace",
         session_id=1,
         chat_id=2,
     )
-    publication = {"id": 3}
+    publication = {"id": 3, "service_unit_key": b"schema-test-service"}
     await install_share(db, request, mutation(), publication, index)
     query, params = db.execute.call_args.args
     assert "INSERT INTO swe_chat_shares" in query
-    assert params[-3:] == (3, index.blocks["share"].offset, 2)
+    assert params[-4:] == (
+        3,
+        index.blocks["share"].offset,
+        2,
+        b"schema-test-service",
+    )
     assert params[:5] == (
         "token",
         "chat",

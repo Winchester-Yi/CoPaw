@@ -33,11 +33,11 @@ from .bundle import BundleBlock, new_operation_key
 from .publications import CommitPlan, PublicationRequest, PublicationStore
 
 TABLE = "swe_conversation_chats"
-SCOPE_WHERE = "c.tenant_key=%s AND c.source_key=%s AND c.agent_key=%s"
+SCOPE_WHERE = "c.service_unit_key=%s AND c.tenant_key=%s AND c.source_key=%s AND c.agent_key=%s"
 CHAT_FROM = (
     "FROM swe_conversation_chats c "
     "JOIN swe_conversation_sessions s ON s.id=c.session_id "
-    "AND s.tenant_key=c.tenant_key AND s.source_key=c.source_key "
+    "AND s.service_unit_key=c.service_unit_key AND s.tenant_key=c.tenant_key AND s.source_key=c.source_key "
     "AND s.agent_key=c.agent_key AND s.user_key=c.user_key "
     "AND s.channel_key=c.channel_key "
 )
@@ -91,7 +91,11 @@ class MySQLChatRepository(BaseChatRepository):
         self.bundles = bundles
         self.retentions = RetentionStore(database, scope)
         self.path = "<mysql-conversation>"
-        self.publications = PublicationStore(database, bundles)
+        self.publications = PublicationStore(
+            database,
+            bundles,
+            service_unit_id=scope.service_unit_id,
+        )
         self.owner_key = secrets.token_hex(32)
 
     def _where(self, *, user_id=None, channel=None):
@@ -375,9 +379,11 @@ class MySQLChatRepository(BaseChatRepository):
         if row is None:
             raise KeyError(chat_id)
         session = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
-            (row["session_id"],),
+            "SELECT * FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+            (row["session_id"], self.scope.sql_values[0]),
         )
+        if session is None or WorkspaceScope.from_row(session) != self.scope:
+            raise IntegrityError("Chat Session service scope mismatch")
         locked = await self.db.fetch_one(
             f"SELECT * FROM {TABLE} c WHERE "
             + SCOPE_WHERE
@@ -427,7 +433,7 @@ class MySQLChatRepository(BaseChatRepository):
             await self.db.execute(
                 "UPDATE swe_conversation_chats SET "
                 "expert_id=%s,expert_binding_revision=%s,"
-                "updated_at=UTC_TIMESTAMP(6) WHERE id=%s "
+                "updated_at=UTC_TIMESTAMP(6) WHERE id=%s AND service_unit_key=%s "
                 "AND deleted_at IS NULL",
                 (
                     (
@@ -437,6 +443,7 @@ class MySQLChatRepository(BaseChatRepository):
                     ),
                     updated.revision,
                     row["id"],
+                    self.scope.sql_values[0],
                 ),
             )
             return updated
@@ -464,9 +471,14 @@ class MySQLChatRepository(BaseChatRepository):
             changed = await self.db.execute(
                 "UPDATE swe_conversation_chats SET "
                 "title=%s,metadata_revision=metadata_revision+1,"
-                "updated_at=UTC_TIMESTAMP(6) WHERE id=%s "
+                "updated_at=UTC_TIMESTAMP(6) WHERE id=%s AND service_unit_key=%s "
                 "AND deleted_at IS NULL AND metadata_revision=%s",
-                (title, row["id"], expected_revision),
+                (
+                    title,
+                    row["id"],
+                    self.scope.sql_values[0],
+                    expected_revision,
+                ),
             )
             return bool(changed)
 
@@ -526,16 +538,16 @@ class MySQLChatRepository(BaseChatRepository):
             await self.retentions.assert_writes_allowed()
             await self.db.insert(
                 "INSERT INTO swe_conversation_sessions "
-                "(tenant_key,source_key,agent_key,user_key,channel_key,"
+                "(service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,"
                 "external_session_key,created_at,updated_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,"
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,"
                 "UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) "
                 "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
                 identity.sql_values,
             )
             return await self.db.fetch_one(
                 "SELECT * FROM swe_conversation_sessions WHERE "
-                "tenant_key=%s AND source_key=%s AND agent_key=%s AND "
+                "service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s AND "
                 "user_key=%s AND channel_key=%s AND external_session_key=%s",
                 identity.sql_values,
             )
@@ -625,7 +637,7 @@ class MySQLChatRepository(BaseChatRepository):
     async def _ensure_no_pending_metadata(self, session_id):
         rows = await self.db.fetch_all(
             "SELECT operation_key FROM swe_conversation_publications "
-            "WHERE session_id=%s AND tenant_key=%s AND source_key=%s "
+            "WHERE session_id=%s AND service_unit_key=%s AND tenant_key=%s AND source_key=%s "
             "AND agent_key=%s AND kind='chat_metadata' "
             "AND state='prepared' ORDER BY id LIMIT 1",
             (session_id, *self.scope.sql_values),
@@ -715,21 +727,26 @@ class MySQLChatRepository(BaseChatRepository):
             await self.retentions.assert_writes_allowed()
             session = await self.db.fetch_one(
                 "SELECT * FROM swe_conversation_sessions "
-                "WHERE id=%s FOR UPDATE",
-                (session_id,),
+                "WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                (session_id, self.scope.sql_values[0]),
             )
             if (
                 tuple(
                     session[key]
-                    for key in ("tenant_key", "source_key", "agent_key")
+                    for key in (
+                        "service_unit_key",
+                        "tenant_key",
+                        "source_key",
+                        "agent_key",
+                    )
                 )
                 != self.scope.sql_values
             ):
                 raise IntegrityError("draft Session scope mismatch")
             if session["draft_chat_id"] is not None:
                 row = await self.db.fetch_one(
-                    f"SELECT * FROM {TABLE} WHERE id=%s FOR UPDATE",
-                    (session["draft_chat_id"],),
+                    f"SELECT * FROM {TABLE} WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                    (session["draft_chat_id"], self.scope.sql_values[0]),
                 )
                 if (
                     row is None
@@ -742,6 +759,7 @@ class MySQLChatRepository(BaseChatRepository):
                 if tuple(
                     row[key]
                     for key in (
+                        "service_unit_key",
                         "tenant_key",
                         "source_key",
                         "agent_key",
@@ -766,6 +784,7 @@ class MySQLChatRepository(BaseChatRepository):
             if tuple(
                 row[key]
                 for key in (
+                    "service_unit_key",
                     "tenant_key",
                     "source_key",
                     "agent_key",

@@ -29,9 +29,15 @@ def test_identity_rejects_byte_overflow_and_missing_values():
 
 
 def test_session_identity_is_exact_and_immutable():
-    scope = WorkspaceScope("Tenant", "source", "agent")
+    scope = WorkspaceScope(
+        "Tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     identity = SessionIdentity(scope, "", "console", "s_a_b")
     assert identity.sql_values == (
+        b"schema-test-service",
         b"Tenant",
         b"source",
         b"agent",
@@ -40,7 +46,12 @@ def test_session_identity_is_exact_and_immutable():
         b"s_a_b",
     )
     assert identity != SessionIdentity(
-        WorkspaceScope("tenant", "source", "agent"),
+        WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         "",
         "console",
         "s_a_b",
@@ -59,7 +70,12 @@ def test_session_identity_is_exact_and_immutable():
 )
 def test_session_identity_enforces_schema_limits(field, value):
     values = {
-        "scope": WorkspaceScope("", "", ""),
+        "scope": WorkspaceScope(
+            "",
+            "",
+            "",
+            service_unit_id="schema-test-service",
+        ),
         "user_id": "",
         "channel": "",
         "session_id": "",

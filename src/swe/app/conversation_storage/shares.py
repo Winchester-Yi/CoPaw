@@ -11,7 +11,12 @@ from ..chat_sharing.store import ChatShareStore
 from .bundle import BundleBlock, new_operation_key
 from .chat_mutations import load_metadata_json, utc_datetime
 from .errors import ConflictError, IntegrityError, StorageUnavailable
-from .identity import WorkspaceScope, identity_bytes, chat_key_bytes
+from .identity import (
+    WorkspaceScope,
+    identity_bytes,
+    chat_key_bytes,
+    service_unit_bytes,
+)
 from .retention import RetentionStore
 
 
@@ -174,8 +179,9 @@ async def _lock_selection_proof(db, request, proof):
         "SELECT s.id AS session_id,c.id AS chat_id,s.state_revision,c.history_revision,"
         "s.history_high AS session_history_high,c.history_high AS archive_history_high,c.epoch "
         "FROM swe_conversation_sessions s JOIN swe_conversation_chats c ON c.session_id=s.id "
-        "WHERE s.id=%s AND c.id=%s AND c.deleted_at IS NULL FOR UPDATE",
-        (request.session_id, request.chat_id),
+        "WHERE s.id=%s AND c.id=%s AND s.service_unit_key=%s "
+        "AND c.service_unit_key=s.service_unit_key AND c.deleted_at IS NULL FOR UPDATE",
+        (request.session_id, request.chat_id, request.scope.sql_values[0]),
     )
     if current != snapshot:
         raise ConflictError("share selection history changed")
@@ -184,10 +190,11 @@ async def _lock_selection_proof(db, request, proof):
 async def _lock_proven_occurrence(db, request, key, proof, turn):
     item = proof["questions"][key.decode("utf-8")]
     row = await db.fetch_one(
-        "SELECT * FROM swe_conversation_messages WHERE id=%s FOR UPDATE",
-        (item["message_id"],),
+        "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+        (item["message_id"], request.scope.sql_values[0]),
     )
     expected = {
+        "service_unit_key": request.scope.sql_values[0],
         "session_id": request.session_id,
         "source_msg_key": key,
         "role_key": b"user",
@@ -299,6 +306,8 @@ async def validate_share_payload(service, request, plan, index):
 
 
 async def install_share(db, request, plan, publication, index):
+    if publication["service_unit_key"] != request.scope.sql_values[0]:
+        raise IntegrityError("share publication service mismatch")
     if plan.tenant_id != request.scope.tenant_id:
         raise IntegrityError("share tenant differs from publication scope")
     if request.scope_kind == "workspace" and (
@@ -317,6 +326,7 @@ async def install_share(db, request, plan, publication, index):
         chat_id=plan.chat_id,
         creator_id=plan.creator_id,
         tenant_id=plan.tenant_id,
+        service_unit_id=request.scope.service_unit_id,
         snapshot_key=plan.snapshot_key,
         created_at=utc_datetime(plan.created_at),
         access_count=plan.access_count,
@@ -327,7 +337,10 @@ async def install_share(db, request, plan, publication, index):
         byte_offset=extent.offset,
         byte_length=extent.length,
     )
-    await ChatShareStore(db).create(record)
+    await ChatShareStore(
+        db,
+        service_unit_id=request.scope.service_unit_id,
+    ).create(record)
 
 
 class ShareStorage:
@@ -339,13 +352,23 @@ class ShareStorage:
         bundles,
         *,
         scope=None,
+        service_unit_id=None,
         retention_factory=RetentionStore,
     ):
         self.db = database
         self.bundles = bundles
         self.scope = scope
+        if scope is not None:
+            if (
+                service_unit_id is not None
+                and service_unit_id != scope.service_unit_id
+            ):
+                raise ValueError("share service scope mismatch")
+            service_unit_id = scope.service_unit_id
+        self.service_unit_key = service_unit_bytes(service_unit_id)
+        self.service_unit_id = service_unit_id
         self.retention_factory = retention_factory
-        self.store = ChatShareStore(database)
+        self.store = ChatShareStore(database, service_unit_id=service_unit_id)
         self.owner_key = new_operation_key()
 
     @staticmethod
@@ -380,7 +403,7 @@ class ShareStorage:
             "SELECT s.id AS session_id,c.id AS chat_id,s.state_revision,c.history_revision,"
             "s.history_high AS session_history_high,c.history_high AS archive_history_high,c.epoch "
             "FROM swe_conversation_sessions s JOIN swe_conversation_chats c ON c.session_id=s.id "
-            "WHERE c.tenant_key=%s AND c.source_key=%s AND c.agent_key=%s "
+            "WHERE c.service_unit_key=%s AND c.tenant_key=%s AND c.source_key=%s AND c.agent_key=%s "
             "AND c.external_chat_key=%s AND c.deleted_at IS NULL",
             (*self.scope.sql_values, chat_key_bytes(chat_id)),
         )
@@ -527,7 +550,7 @@ class ShareStorage:
             mode="json",
         )
         chat = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s AND deleted_at IS NULL",
+            "SELECT * FROM swe_conversation_chats WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s AND deleted_at IS NULL",
             (*self.scope.sql_values, chat_key_bytes(chat_id)),
         )
         if chat is None:
@@ -566,7 +589,11 @@ class ShareStorage:
                 else None
             ),
         )
-        publications = PublicationStore(self.db, self.bundles)
+        publications = PublicationStore(
+            self.db,
+            self.bundles,
+            service_unit_id=self.service_unit_id,
+        )
         await publications.reserve(request, CommitPlan(share=plan))
         await publications.write_bundle(
             operation,
@@ -606,21 +633,17 @@ class ShareStorage:
                 ):
                     raise IntegrityError("share locator is not migrated")
                 publication = await self.db.fetch_one(
-                    "SELECT * FROM swe_conversation_publications WHERE id=%s",
-                    (record.publication_id,),
+                    "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s",
+                    (record.publication_id, self.service_unit_key),
                 )
                 if publication is None:
                     raise IntegrityError("share publication is missing")
-                scope = WorkspaceScope(
-                    *(
-                        value.decode("utf-8")
-                        for value in (
-                            publication["tenant_key"],
-                            publication["source_key"],
-                            publication["agent_key"],
-                        )
-                    ),
-                )
+                scope = WorkspaceScope.from_row(publication)
+                if (
+                    scope.service_unit_id != self.service_unit_id
+                    or record.service_unit_id != self.service_unit_id
+                ):
+                    raise IntegrityError("share publication service mismatch")
                 if scope.tenant_id != record.tenant_id:
                     raise IntegrityError("share publication tenant mismatch")
                 retentions = self.retention_factory(
@@ -701,6 +724,7 @@ class ShareStorage:
                 await retentions.assert_writes_allowed()
             current = await self.store.get(token, lock=True)
             stable = (
+                "service_unit_id",
                 "publication_id",
                 "byte_offset",
                 "byte_length",

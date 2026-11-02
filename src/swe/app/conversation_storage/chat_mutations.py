@@ -231,13 +231,14 @@ async def _create_chat(db, request, plan, locator, session, *, existing=None):
             return existing["id"]
     high = await db.fetch_one(
         "SELECT COALESCE(MAX(registry_order),0) AS high FROM swe_conversation_chats "
-        "WHERE tenant_key=%s AND source_key=%s AND agent_key=%s",
+        "WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s",
         request.scope.sql_values,
     )
     columns = (
         "session_id",
         "external_chat_key",
         "registry_order",
+        "service_unit_key",
         "tenant_key",
         "source_key",
         "agent_key",

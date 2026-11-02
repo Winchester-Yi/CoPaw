@@ -16,6 +16,7 @@ class RetentionDatabase:
         self.pins = []
         self.objects = {
             value: {
+                "service_unit_key": b"schema-test-service",
                 "id": value,
                 "tenant_key": b"t",
                 "source_key": b"s",
@@ -38,12 +39,18 @@ class RetentionDatabase:
             raise
 
     async def insert(self, query, params):
+        assert query.count("%s") == len(params)
         self.queries.append(query)
         fields = query.split("(", 1)[1].split(")", 1)[0].split(",")
         row = dict(zip((field.strip() for field in fields), params))
         if row.get("guard_marker") == 1:
             existing = next(
-                (item for item in self.pins if item.get("guard_marker") == 1),
+                (
+                    item
+                    for item in self.pins
+                    if item.get("guard_marker") == 1
+                    and item["service_unit_key"] == row["service_unit_key"]
+                ),
                 None,
             )
         else:
@@ -51,8 +58,16 @@ class RetentionDatabase:
                 (
                     item
                     for item in self.pins
-                    if (item["retention_key"], item["member_key"])
-                    == (row["retention_key"], row["member_key"])
+                    if (
+                        item["service_unit_key"],
+                        item["retention_key"],
+                        item["member_key"],
+                    )
+                    == (
+                        row["service_unit_key"],
+                        row["retention_key"],
+                        row["member_key"],
+                    )
                 ),
                 None,
             )
@@ -63,10 +78,16 @@ class RetentionDatabase:
         return row["id"]
 
     async def fetch_one(self, query, params):
+        assert query.count("%s") == len(params)
         self.queries.append(query)
         if "guard_marker=1" in query:
             return next(
-                (row for row in self.pins if row.get("guard_marker") == 1),
+                (
+                    row
+                    for row in self.pins
+                    if row.get("guard_marker") == 1
+                    and row["service_unit_key"] == params[1]
+                ),
                 None,
             )
         if "retention_key=%s" in query:
@@ -75,34 +96,41 @@ class RetentionDatabase:
                     deepcopy(row)
                     for row in self.pins
                     if row["retention_key"] == params[0]
+                    and row["service_unit_key"] == params[1]
                 ),
                 None,
             )
         return None
 
     async def fetch_all(self, query, params):
+        assert query.count("%s") == len(params)
         self.queries.append(query)
         if "swe_conversation_publications" in query:
             return [
                 deepcopy(self.objects[value])
-                for value in sorted(set(params))
+                for value in sorted(set(params[:-1]))
                 if value in self.objects
+                and self.objects[value]["service_unit_key"] == params[-1]
             ]
         if "retention_key=%s" in query:
             return [
                 deepcopy(row)
                 for row in self.pins
                 if row["retention_key"] == params[0]
+                and row["service_unit_key"] == params[1]
             ]
         if "kind='backup_fence'" in query:
             return [
                 deepcopy(row)
                 for row in self.pins
-                if row["kind"] == "backup_fence" and row["state"] == "active"
+                if row["kind"] == "backup_fence"
+                and row["state"] == "active"
+                and row["service_unit_key"] == params[1]
             ]
         return [deepcopy(row) for row in self.pins if row["state"] == "active"]
 
     async def execute(self, query, params):
+        assert query.count("%s") == len(params)
         self.queries.append(query)
         count = 0
         for row in self.pins:
@@ -111,14 +139,21 @@ class RetentionDatabase:
                 "backup",
             ):
                 continue
-            if row["retention_key"] == params[0] and row["kind"] != "gc_guard":
+            if (
+                row["retention_key"] == params[0]
+                and row["kind"] != "gc_guard"
+                and row["service_unit_key"] == params[2]
+            ):
                 row["state"] = "released"
                 count += 1
         return count
 
 
 def store(database):
-    return RetentionStore(database, WorkspaceScope("t", "s", "a"))
+    return RetentionStore(
+        database,
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
+    )
 
 
 async def test_guard_initialization_is_unique_and_has_no_publication():
@@ -214,12 +249,25 @@ async def test_dependency_must_point_to_older_committed_publication():
 
 def test_legacy_share_scope_is_distinct_and_cannot_guess_workspace():
     db = RetentionDatabase()
-    RetentionStore(db, WorkspaceScope("t", "", ""), scope_kind="workspace")
-    RetentionStore(db, WorkspaceScope("t", "", ""), scope_kind="legacy_share")
+    RetentionStore(
+        db,
+        WorkspaceScope("t", "", "", service_unit_id="schema-test-service"),
+        scope_kind="workspace",
+    )
+    RetentionStore(
+        db,
+        WorkspaceScope("t", "", "", service_unit_id="schema-test-service"),
+        scope_kind="legacy_share",
+    )
     with pytest.raises(ValueError):
         RetentionStore(
             db,
-            WorkspaceScope("t", "s", ""),
+            WorkspaceScope(
+                "t",
+                "s",
+                "",
+                service_unit_id="schema-test-service",
+            ),
             scope_kind="legacy_share",
         )
 
@@ -357,3 +405,55 @@ async def test_backup_fence_rejects_other_job_and_changed_snapshot():
         next(row for row in db.pins if row["kind"] == "backup_fence")["state"]
         == "active"
     )
+
+
+async def test_foreign_service_cannot_be_pinned_or_used_as_dependency():
+    db = RetentionDatabase()
+    db.objects[1]["service_unit_key"] = b"foreign-service"
+    service = store(db)
+    with pytest.raises(IntegrityError):
+        await service.pin([1], kind="reader")
+    with pytest.raises(IntegrityError):
+        await service.add_dependencies(3, [1])
+    assert not db.pins
+
+
+async def test_retention_release_uses_full_service_scope():
+    from unittest.mock import AsyncMock
+
+    db = AsyncMock()
+    service = store(db)
+    await service.release(b"same-key")
+    query, params = db.execute.call_args.args
+    assert "service_unit_key=%s" in query
+    assert params == (
+        b"same-key",
+        "workspace",
+        b"schema-test-service",
+        b"t",
+        b"s",
+        b"a",
+    )
+
+
+async def test_guard_and_same_pin_key_are_independent_between_services():
+    db = RetentionDatabase()
+    other = RetentionStore(
+        db,
+        WorkspaceScope("t", "s", "a", service_unit_id="other-service"),
+    )
+    local = store(db)
+    assert (await local.ensure_guard())["id"] != (await other.ensure_guard())[
+        "id"
+    ]
+    db.objects[2]["service_unit_key"] = b"other-service"
+    first = await local.pin([1], kind="reader", retention_key="same-key")
+    second = await other.pin([2], kind="reader", retention_key="same-key")
+    await local.release(first.retention_key)
+    pins = [row for row in db.pins if row["kind"] == "reader"]
+    assert [(row["service_unit_key"], row["state"]) for row in pins] == [
+        (b"schema-test-service", "released"),
+        (b"other-service", "active"),
+    ]
+    await other.release(second.retention_key)
+    assert all(row["state"] == "released" for row in pins)

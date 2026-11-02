@@ -280,3 +280,23 @@ Publication/不完整 extent 的收紧拒绝，以及成功收紧后的 NOT NULL
 ALTER 前拒绝路径、迁移/恢复边界及新增测试，并独立读取 XML 确认 16 项、零失败、零错误、
 零跳过。检视未重新连接 MySQL 或运行数据库测试，未访问业务 NAS、未修改文件。
 该结论仅针对本次设计和目标 SQL，不扩展为尚未实现的运行时隔离验收。
+
+## 13. 运行时与离线工具接入
+
+2026-11-02 后续实现把服务身份接入七表 schema 契约、运行时、Session/Chat/Turn/Message、
+Publication、Retention、历史/cursor、分享、GC、备份恢复与结束 owner 的结算。MySQL
+authority 启动只读取一次 `CMB_CAAS_SERVICEUNITID`，与 v2 runtime manifest 全量比对；
+缺失环境变量、旧三维 scope 或跨服务映射均拒绝。W+ 工具沿用可信运行时绑定。
+
+迁移采用 v2 source inventory/manifest 和精确的 `nas_roots` 映射，在共享 staging schema
+中统一分配全局整数 ID。Turn/Message 明确写入不可变服务列，分享回填后执行收紧 SQL。
+整组恢复仍将七表放在一个事务中安装，不同服务按显式映射复制到隔离目标 NAS。
+
+独立运行时、迁移与维护检视发现的缺口均增加回归：发布前检查全部显式父行和 Message/
+Publication 引用；离线正文/artifact/archive/epoch 读取前核验服务；备份关联保留原 Turn
+Session；外服务备份 release 先拒绝再验证正文；分享 token 用目标排序规则在复制前检查。
+同服务 Chat 当前 Session 重绑仍允许访问合法历史，长期 Session 分批 pin/依赖机制保留。
+
+实现与测试命令、XML 结果和环境边界见
+[实施验收记录](../reports/2026-11-02-conversation-service-unit-implementation.md)。
+本地临时目录仅模拟独立 NAS；真实 Kubernetes 挂载、网关对应关系和生产停机边界仍需现场验收。

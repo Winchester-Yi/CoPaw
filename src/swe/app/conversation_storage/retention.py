@@ -16,9 +16,7 @@ from .errors import ConflictError, IntegrityError
 from .identity import WorkspaceScope, identity_bytes
 
 TABLE = "swe_conversation_retentions"
-SCOPE_WHERE = (
-    "scope_kind=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
-)
+SCOPE_WHERE = "scope_kind=%s AND service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
 MAX_PIN_BATCH = 4096
 
 
@@ -140,7 +138,13 @@ class RetentionStore:
     def _validate_scope(self, row):
         values = tuple(
             row[key]
-            for key in ("scope_kind", "tenant_key", "source_key", "agent_key")
+            for key in (
+                "scope_kind",
+                "service_unit_key",
+                "tenant_key",
+                "source_key",
+                "agent_key",
+            )
         )
         if values != self.scope_values:
             raise IntegrityError("retention publication scope mismatch")
@@ -159,9 +163,7 @@ class RetentionStore:
             "member_key": publication_id or 0,
             "kind": kind,
             "scope_kind": self.scope_kind,
-            "tenant_key": self.scope.sql_values[0],
-            "source_key": self.scope.sql_values[1],
-            "agent_key": self.scope.sql_values[2],
+            **self.scope.fields,
             "publication_id": publication_id,
             "guard_marker": 1 if guard else None,
         }
@@ -237,9 +239,9 @@ class RetentionStore:
 
     async def _backup_fence(self, key, snapshot):
         row = await self.db.fetch_one(
-            f"SELECT * FROM {TABLE} WHERE retention_key=%s "
+            f"SELECT * FROM {TABLE} WHERE retention_key=%s AND service_unit_key=%s "
             "AND member_key=0 FOR UPDATE",
-            (key,),
+            (key, self.scope.sql_values[0]),
         )
         if row is None:
             raise ConflictError("backup fence identity is missing")
@@ -303,8 +305,8 @@ class RetentionStore:
             return []
         placeholders = ",".join(["%s"] * len(ids))
         rows = await self.db.fetch_all(
-            f"SELECT * FROM swe_conversation_publications WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE",
-            tuple(ids),
+            f"SELECT * FROM swe_conversation_publications WHERE id IN ({placeholders}) AND service_unit_key=%s ORDER BY id FOR UPDATE",
+            (*ids, self.scope.sql_values[0]),
         )
         if [row["id"] for row in rows] != ids:
             raise IntegrityError("retention target publication is missing")
@@ -338,8 +340,8 @@ class RetentionStore:
 
     async def _validate_members(self, key, publication_ids, kind):
         members = await self.db.fetch_all(
-            f"SELECT * FROM {TABLE} WHERE retention_key=%s ORDER BY member_key FOR UPDATE",
-            (key,),
+            f"SELECT * FROM {TABLE} WHERE retention_key=%s AND service_unit_key=%s ORDER BY member_key FOR UPDATE",
+            (key, self.scope.sql_values[0]),
         )
         if len(members) != len(publication_ids):
             raise ConflictError(

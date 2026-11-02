@@ -6,7 +6,7 @@
 
 使用审核过的源码 checkout（安装器读取该 checkout 的 `scripts/sql/`）；普通 wheel 不包含这些离线 DDL。运行账号需要目标实例的 schema/global CREATE、ALTER、DROP、INSERT、SELECT、UPDATE、DELETE，以及 information_schema / performance_schema 可见权限。仅通过 role 获得的权限保守拒绝，须另行审核。
 
-先使用 `MigrationManifest.create(path, SourceBoundary(...), workspaces)` 创建持久化清单。`SourceBoundary` 必须包含最终只读快照身份、带时区时间、`old-image@sha256:<64 hex>` 和停 writer / 只读挂载证据引用。每个 workspace 显式记录源快照 `root`、`tenant_id`、`source_id`、`agent_id`；可选 registry/sessions/dialog 相对路径及 `session_paths: [{user_id, channel, session_id, path}]`。不得根据散列/文件名猜测身份。
+先使用 `MigrationManifest.create(path, SourceBoundary(...), workspaces)` 创建 v2 持久化清单。`SourceBoundary` 必须包含最终只读快照身份、带时区时间、`old-image@sha256:<64 hex>` 和停 writer / 只读挂载证据引用。每个 workspace 显式记录源快照 `root`、`service_unit_id`、`tenant_id`、`source_id`、`agent_id`；可选 registry/sessions/dialog 相对路径及 `session_paths: [{user_id, channel, session_id, path}]`。不得根据散列/文件名或当前机器环境变量猜测旧数据的服务归属。
 
 清单增加以下 `offline` 配置；路径示例须替换为已有挂载和审计目录：
 
@@ -14,11 +14,22 @@
 {
   "offline": {
     "application_schema": "shared_business_schema",
-    "nas_root": "/existing/original/nas/root",
+    "nas_roots": {
+      "LQ13.03@a_prd": "/existing/service-a/nas",
+      "LQ13.03@b_prd": "/existing/service-b/nas"
+    },
     "shares": [],
     "export": {
-      "backup_path": "/audit/consistent-conversation-backup",
-      "destination": "/audit/new-empty-export",
+      "services": {
+        "LQ13.03@a_prd": {
+          "backup_path": "/audit/service-a-backup",
+          "destination": "/audit/service-a-empty-export"
+        },
+        "LQ13.03@b_prd": {
+          "backup_path": "/audit/service-b-backup",
+          "destination": "/audit/service-b-empty-export"
+        }
+      },
       "session_version": 3,
       "checkpoint_version": 2
     }
@@ -26,7 +37,11 @@
 }
 ```
 
-`shares` 是在同一最终边界导出的完整旧分享八字段，另加 `snapshot_workspace_index` 和 `snapshot_path`。没有分享时才使用空列表。不得漏掉已删除 Chat 的永久分享。安装器会把原分享表八字段全部行与 staging 对比，包含 token、访问计数和时间。
+`shares` 是在同一最终边界导出的完整旧分享八字段，另加 `snapshot_workspace_index` 和 `snapshot_path`；服务归属来自明确指定的 workspace。没有分享时才使用空列表。不得漏掉已删除 Chat 的永久分享。安装器会把原分享表八字段全部行与 staging 对比，包含 token、访问计数和时间。
+
+全部服务必须在一个协调作业中分配全局整数 ID 并安装共享七表；`nas_roots` 必须精确覆盖源服务，且原 NAS 根彼此隔离。导入回填分享归属后执行 `scripts/sql/conversation_share_service_unit_finalize.sql`，再通过最终 schema 检查。旧 v1 清单和三项 scope 不会自动补服务。
+
+MySQL authority 启动必须设置稳定的 `CMB_CAAS_SERVICEUNITID`。同服务全部副本使用同一个原 NAS；运行时 scope manifest 为 v2，包含顶层 `service_unit_id`、`nas_root` 和 `workspaces`，其中 `scope` 顺序为 `[service_unit_id, tenant_id, source_id, agent_id]`。部署环境、顶层服务和每个 workspace 的服务必须一致。服务在启动时读取并绑定，运行中不随环境变量变化。
 
 staging 名称固定为 `conversation_staging_<migration_id 去掉连字符>`，旧 share 名称固定为 `swe_chat_shares_old_<同一后缀>`。不能任填 staging 或 SQL 表名。导入器把 schema/NAS/migration 绑定持久化到 manifest。目标 NAS 必须为原来的、已存在的根目录；冻结源应为独立只读快照挂载，不能把它用作目标 NAS。新 bundle 只占用生成路径，不删除旧目录或旧文件。
 
@@ -65,7 +80,7 @@ swe conversation-storage inspect --manifest /audit/manifest.json
 
 **安装后、任何新版启动动作之前：** 必须有连续停 writer 的审计证据，而且确实没有任何新进程初始化、冒烟、分享读取或管理员写入。先保持入口关闭并再次检查没有 writer/MDL，审核 receipt 的精确实际名称。仅此窗口可执行 receipt 中 `reverse_sql_before_any_startup_or_write`，一条原子 RENAME 把七表移回 staging、原 share 移回业务原名；旧 NAS 本来就未改。核对原 share 八字段/所有 token、六张新表均不在业务 schema、原快照文件不变后，以固定旧镜像启动。receipt 的 phase 只记录安装时状态，**不能证明此后没有写入**；无法证明从未启动则走下一分支。CLI 不提供盲目自动逆向。
 
-**任何新版启动、初始化、冒烟、分享访问或新写之后：** 禁止执行逆向 RENAME、恢复旧 NAS 快照或恢复整个共享业务库。这会丢新会话和计数。重新停入口、排空并停全部 writer，使用 conversation 一致性备份能力记录全部 scope 的当前七表和所引用 NAS bundle；每个 scope 使用非空即拒绝的独立导出目录执行 export。清单 `offline.export.backup_path` 必须指向一致性 backup；导出的 `rollback_ready` 默认 false。必须在固定旧镜像隔离实例上验证全部原生格式可读且能继续写，形成每个 scope 的旧镜像验收证据，再由审核过的定向导入恢复原 workspace 和分享索引。任何源格式/完整性不支持则保持新数据和停机，不能部分恢复。
+**任何新版启动、初始化、冒烟、分享访问或新写之后：** 禁止执行逆向 RENAME、恢复旧 NAS 快照或恢复整个共享业务库。这会丢新会话和计数。重新停入口、排空并停全部 writer，使用 conversation 一致性备份能力记录全部 scope 的当前七表和所引用 NAS bundle；每个 scope 使用非空即拒绝的独立导出目录执行 export。清单 `offline.export.services` 必须精确覆盖全部服务，每项 `backup_path` 指向该服务的一致性 backup；导出的 `rollback_ready` 默认 false。必须在固定旧镜像隔离实例上验证全部原生格式可读且能继续写，形成每个 scope 的旧镜像验收证据，再由审核过的定向导入恢复原 workspace 和分享索引。任何源格式/完整性不支持则保持新数据和停机，不能部分恢复。
 
 ```bash
 swe conversation-storage export --manifest /audit/manifest.json
@@ -96,11 +111,12 @@ swe conversation-storage export --manifest /audit/manifest.json --apply
 建立经过人工核对的 JSON 证据；owner_key、generation、turn_id 来自原准入 publication 和 Turn，不使用当前 Session generation 猜测；scope/Session 必须为原始逻辑身份。原 NAS 和 workspace 必须已经存在。
 
     {
-      "version": 1,
+      "version": 2,
+      "service_unit_id": "LQ13.03@a_prd",
       "schema": "shared_business_schema",
       "workspace_root": "/existing/workspace",
       "nas_root": "/existing/original/nas/root",
-      "scope": {"tenant_id": "tenant", "source_id": "source", "agent_id": "agent"},
+      "scope": {"service_unit_id": "LQ13.03@a_prd", "tenant_id": "tenant", "source_id": "source", "agent_id": "agent"},
       "session": {"user_id": "alice", "channel": "console", "session_id": "original-session"},
       "turn_id": 123,
       "owner": {
@@ -131,12 +147,14 @@ schema，七表和目标 NAS 目录均为空；不直接覆盖共享业务库，
 保存同一源库、完整 scope 清单和停止边界证据。代码验证源 schema 相同、scope 无重复及
 每份备份完整性；它不能从给定路径自行推断是否漏掉某个业务 scope。
 
-恢复先合并并校验全部元数据与引用。同 tenant 的 legacy_share publication、分享记录及
+恢复先合并并校验全部元数据与引用。同 `(service_unit_id, tenant)` 的 legacy_share publication、分享记录及
 正文必须一致，重复共享记录只写一次；不同 scope 的非共享 ID 冲突直接拒绝。共享 reader/
 backup_fence 的 active→released 差异仅按已停源证据结算，其余字段不得漂移。
 任何冲突在目标目录创建和 SQL 安装前阻断。七表随后在一个事务中安装，完整比对并逐 scope
 核验真实 reader。多 scope 报告使用 `backup_ids`、`snapshot_refs`、`scopes` 和聚合计数，
 不要把单份备份的验证报告当成全部 scope 的恢复证据。
+
+跨服务恢复必须传 `service_unit_id → BundleStore` 的显式映射；各目标根必须为空且互不重叠（不存在时只创建隔离恢复目标根），不能把不同服务复制进同一 NAS。完整集合的 scope、服务归属、全局 ID/token 和引用先校验，再复制和单事务安装。单个 BundleStore 只接受单服务集合。
 
 长期 Session 的恢复引用和发布前历史读取按每批最多 4096 个 publication pin；整个引用集
 仍在同一事务快照内授权，NAS IO 排空后释放全部批次。提交阶段的依赖锁定也按 ID 顺序分批，

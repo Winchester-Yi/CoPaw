@@ -68,7 +68,12 @@ async def seed_new_data(db, root, scope=None, *, initialize_schema=True):
             db,
             SQL_ROOT / "conversation_share_publication_extension.sql",
         )
-    scope = scope or WorkspaceScope("tenant", "source", "agent")
+    scope = scope or WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     bundles = BundleStore(root)
     repo = MySQLChatRepository(db, scope, bundles)
     chat = str(uuid4())
@@ -84,7 +89,15 @@ async def seed_new_data(db, root, scope=None, *, initialize_schema=True):
         ),
     )
     identity = SessionIdentity(scope, "alice", "console", "full_session")
-    execution = ExecutionStore(db, publications=PublicationStore(db, bundles))
+    execution = ExecutionStore(
+        db,
+        publications=PublicationStore(
+            db,
+            bundles,
+            service_unit_id=scope.service_unit_id,
+        ),
+        service_unit_id=scope.service_unit_id,
+    )
     admission = await execution.reserve_admission(
         identity,
         chat,
@@ -126,7 +139,11 @@ async def seed_new_data(db, root, scope=None, *, initialize_schema=True):
         payload={"chat_name": "new-share", "messages": [question]},
         selected_question_keys=("new-question",),
     )
-    await ShareStorage(db, bundles).get_snapshot(share.token)
+    await ShareStorage(
+        db,
+        bundles,
+        service_unit_id=scope.service_unit_id,
+    ).get_snapshot(share.token)
     return scope, bundles, repo, chat, share, state
 
 
@@ -171,6 +188,7 @@ async def test_new_backup_restore_and_old_reader_roundtrip(
             await ShareStorage(
                 clone,
                 BundleStore(tmp_path / "restored"),
+                service_unit_id="schema-test-service",
             ).get_snapshot(share.token)
         )["chat_name"] == "new-share"
         record = await ChatShareStore(clone).get(share.token)
@@ -270,7 +288,15 @@ async def test_new_compact_and_stop_export_preserve_old_archive_and_complete_roo
         recovery_state=state,
         authority=None,
     )
-    execution = ExecutionStore(db, publications=PublicationStore(db, bundles))
+    execution = ExecutionStore(
+        db,
+        publications=PublicationStore(
+            db,
+            bundles,
+            service_unit_id="schema-test-service",
+        ),
+        service_unit_id="schema-test-service",
+    )
     identity = SessionIdentity(scope, "alice", "console", "full_session")
     admission = await execution.reserve_admission(
         identity,
@@ -336,7 +362,15 @@ async def test_active_backup_restore_requires_original_turn_reconciliation(
         db,
         tmp_path / "source",
     )
-    execution = ExecutionStore(db, publications=PublicationStore(db, bundles))
+    execution = ExecutionStore(
+        db,
+        publications=PublicationStore(
+            db,
+            bundles,
+            service_unit_id="schema-test-service",
+        ),
+        service_unit_id="schema-test-service",
+    )
     identity = SessionIdentity(scope, "alice", "console", "full_session")
     admitted = await execution.reserve_admission(
         identity,
@@ -412,11 +446,20 @@ async def test_backup_includes_legacy_orphan_and_rejects_nonempty_restore(
 
     db = conversation_test_database
     scope, bundles, _, _, _, _ = await seed_new_data(db, tmp_path / "source")
-    publications = PublicationStore(db, bundles)
+    publications = PublicationStore(
+        db,
+        bundles,
+        service_unit_id="schema-test-service",
+    )
     operation = new_operation_key()
     request = PublicationRequest(
         operation,
-        WorkspaceScope("tenant", "", ""),
+        WorkspaceScope(
+            "tenant",
+            "",
+            "",
+            service_unit_id="schema-test-service",
+        ),
         "share_import",
         "offline",
         0,
@@ -461,6 +504,7 @@ async def test_backup_includes_legacy_orphan_and_rejects_nonempty_restore(
             await ShareStorage(
                 clone,
                 BundleStore(tmp_path / "restored"),
+                service_unit_id="schema-test-service",
             ).get_snapshot(record.token)
         )["chat_name"] == "orphan"
         with pytest.raises(ConflictError, match="empty metadata"):
@@ -606,7 +650,15 @@ async def publish_post_import_question_and_compact(db, bundles, scope, chat):
     from swe.app.conversation_storage.archive_runtime import MySQLArchiveStore
 
     adapter = MySQLSessionAdapter(db, scope, bundles, channel="console")
-    execution = ExecutionStore(db, publications=PublicationStore(db, bundles))
+    execution = ExecutionStore(
+        db,
+        publications=PublicationStore(
+            db,
+            bundles,
+            service_unit_id="schema-test-service",
+        ),
+        service_unit_id="schema-test-service",
+    )
     identity = SessionIdentity(scope, "alice", "console", "session")
     admission = await execution.reserve_admission(
         identity,
@@ -687,7 +739,12 @@ async def test_retained_v3_ledger_new_write_exports_and_old_reader_continues(
     source, chat, session_path, original, ledger_bytes = (
         await retained_v3_source(tmp_path)
     )
-    scope = WorkspaceScope("tenant", "source", "agent")
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     boundary = SourceBoundary(
         "immutable-source",
         "2026-10-30T00:00:00Z",
@@ -799,7 +856,11 @@ async def test_backup_waits_for_original_prepared_commit_before_scope_fence(
 
     db = conversation_test_database
     scope, bundles, _, _, _, _ = await seed_new_data(db, tmp_path / "source")
-    publications = PublicationStore(db, bundles)
+    publications = PublicationStore(
+        db,
+        bundles,
+        service_unit_id="schema-test-service",
+    )
     operation = new_operation_key()
     request = PublicationRequest(operation, scope, "backup_probe", "writer", 0)
     await publications.reserve(request, CommitPlan())
@@ -862,7 +923,11 @@ async def test_backup_prepared_timeout_leaves_no_fence_and_original_can_commit(
 
     db = conversation_test_database
     scope, bundles, _, _, _, _ = await seed_new_data(db, tmp_path / "source")
-    publications = PublicationStore(db, bundles)
+    publications = PublicationStore(
+        db,
+        bundles,
+        service_unit_id="schema-test-service",
+    )
     operation = new_operation_key()
     await publications.reserve(
         PublicationRequest(operation, scope, "backup_probe", "writer", 0),
@@ -1111,7 +1176,11 @@ async def test_gc_tombstones_backup_restore_preserve_effective_data_without_miss
         ).get_session_state_dict("full_session", "alice")
         assert restored_state["future_module"] == state["future_module"]
         assert (
-            await ShareStorage(clone, restored_bundles).get_snapshot(
+            await ShareStorage(
+                clone,
+                restored_bundles,
+                service_unit_id="schema-test-service",
+            ).get_snapshot(
                 share.token,
             )
         )["chat_name"] == "new-share"

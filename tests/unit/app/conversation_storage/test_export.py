@@ -245,8 +245,8 @@ def test_export_keeps_only_deleted_marker_for_legally_reclaimed_archive(
     chat_id = str(uuid4())
     operation = new_operation_key()
     metadata = {
-        "version": 1,
-        "scope": ["tenant", "source", "agent"],
+        "version": 2,
+        "scope": ["schema-test-service", "tenant", "source", "agent"],
         "relative_path": "dialog/" + chat_id + "/manifest.json",
         "bytes": 8,
     }
@@ -289,7 +289,9 @@ def test_export_keeps_only_deleted_marker_for_legally_reclaimed_archive(
         ],
     }
     exporter.target = OldFormatTarget("old@sha256:" + "a" * 64, 2, 1)
-    exporter.document = {"scope": [b"tenant", b"source", b"agent"]}
+    exporter.document = {
+        "scope": [b"schema-test-service", b"tenant", b"source", b"agent"],
+    }
     exporter.publications = {
         row["id"]: row for row in exporter.snapshot["publications"]
     }

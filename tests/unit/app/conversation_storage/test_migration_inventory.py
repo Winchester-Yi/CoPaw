@@ -57,7 +57,17 @@ def test_inventory_blocks_oversized_native_artifact_before_import(tmp_path):
         stream.truncate(MAX_READ_BYTES + 1)
     make_readonly(root)
     report = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert not report["ready"]
@@ -71,12 +81,23 @@ def test_inventory_uses_trusted_mapping_and_forward_filename_only(tmp_path):
     root, chat = source(tmp_path)
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("Tenant", "Source", "Agent"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "Tenant",
+                    "Source",
+                    "Agent",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert not result["blockers"]
     workspace = result["workspaces"][0]
     assert workspace["sessions"][0]["identity"] == [
+        "schema-test-service",
         "Tenant",
         "Source",
         "Agent",
@@ -95,13 +116,33 @@ def test_inventory_refuses_writable_snapshot_and_unmapped_sessions(tmp_path):
     root, _ = source(tmp_path)
     with pytest.raises(ValueError, match="read.only"):
         inventory(
-            [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+            [
+                WorkspaceMapping(
+                    WorkspaceScope(
+                        "t",
+                        "s",
+                        "a",
+                        service_unit_id="schema-test-service",
+                    ),
+                    root,
+                ),
+            ],
             boundary(),
         )
     (root / "sessions" / "orphan_with_underscores.json").write_text("{}")
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert any(
@@ -123,7 +164,17 @@ def test_inventory_reports_unknown_schema_and_filename_collisions(tmp_path):
     )
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert any(
@@ -138,7 +189,17 @@ def test_inventory_reports_unknown_schema_and_filename_collisions(tmp_path):
     path.write_text('{"schema_version":99}')
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert any(
@@ -155,6 +216,7 @@ def test_inventory_rejects_symlink_and_records_orphan_share(tmp_path):
         "token": "token",
         "chat_id": "deleted",
         "creator_id": "u",
+        "service_unit_id": "schema-test-service",
         "tenant_id": "t",
         "snapshot_key": "old.json",
         "created_at": "2026-10-30T00:00:00Z",
@@ -165,7 +227,17 @@ def test_inventory_rejects_symlink_and_records_orphan_share(tmp_path):
     }
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
         shares=[share],
     )
@@ -176,7 +248,17 @@ def test_inventory_rejects_symlink_and_records_orphan_share(tmp_path):
     (root / "escape").symlink_to(tmp_path)
     with pytest.raises(ValueError, match="symlink"):
         inventory(
-            [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+            [
+                WorkspaceMapping(
+                    WorkspaceScope(
+                        "t",
+                        "s",
+                        "a",
+                        service_unit_id="schema-test-service",
+                    ),
+                    root,
+                ),
+            ],
             boundary(),
         )
 
@@ -194,7 +276,7 @@ def test_explicit_paths_disambiguate_full_session_identity(tmp_path):
     )
     make_readonly(root)
     mapping = WorkspaceMapping(
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         root,
         session_paths={
             (
@@ -219,7 +301,17 @@ def test_inventory_refuses_unowned_ledger_generation_and_quarantine(tmp_path):
     (root / "dialog" / "journal-v2-quarantine.json").write_text("{}")
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert {"unmapped_ledger_generation", "source_quarantined"} <= {
@@ -234,6 +326,7 @@ def test_share_invalid_snapshot_and_duplicate_token_are_blockers(tmp_path):
         "token": "token",
         "chat_id": "deleted",
         "creator_id": "u",
+        "service_unit_id": "schema-test-service",
         "tenant_id": "t",
         "snapshot_key": "old.json",
         "created_at": "2026-10-30T00:00:00Z",
@@ -243,7 +336,10 @@ def test_share_invalid_snapshot_and_duplicate_token_are_blockers(tmp_path):
         "snapshot_workspace_index": 0,
     }
     make_readonly(root)
-    mapping = WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)
+    mapping = WorkspaceMapping(
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
+        root,
+    )
     assert not inventory([mapping], boundary(), shares=[share])["ready"]
     (root / "share.json").chmod(0o644)
     (root / "share.json").write_text(json.dumps({"messages": []}))
@@ -262,7 +358,7 @@ def test_explicit_session_mapping_can_close_unregistered_session_identity(
     )
     make_readonly(root)
     mapping = WorkspaceMapping(
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
         root,
         session_paths={
             (
@@ -277,7 +373,7 @@ def test_explicit_session_mapping_can_close_unregistered_session_identity(
     extra = next(
         item
         for item in result["workspaces"][0]["sessions"]
-        if item["identity"][3] == "other_user"
+        if item["identity"][4] == "other_user"
     )
     assert extra["chat_positions"] == []
     assert extra["legacy"]["state"]["module"] == {"retained": True}
@@ -297,7 +393,17 @@ def test_retired_generation_without_committed_root_blocks_import(tmp_path):
     )
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert any(
@@ -323,7 +429,17 @@ def test_ledger_paths_without_generation_metadata_are_blockers(
     path.write_text("{}")
     make_readonly(root)
     result = inventory(
-        [WorkspaceMapping(WorkspaceScope("t", "s", "a"), root)],
+        [
+            WorkspaceMapping(
+                WorkspaceScope(
+                    "t",
+                    "s",
+                    "a",
+                    service_unit_id="schema-test-service",
+                ),
+                root,
+            ),
+        ],
         boundary(),
     )
     assert not result["ready"]

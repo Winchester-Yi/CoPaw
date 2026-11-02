@@ -41,23 +41,36 @@ class OfflineJob:
             self.application_schema,
             self.manifest.migration_id,
         )
-        root = Path(options.get("nas_root", ""))
-        if (
-            not root.is_absolute()
-            or root.is_symlink()
-            or not root.is_dir()
-            or str(root.resolve()) != str(root)
-        ):
+        roots = options.get("nas_roots")
+        if not isinstance(roots, dict) or not roots:
             raise ValueError(
-                "offline.nas_root must be an existing original NAS root",
+                "offline.nas_roots requires explicit per-service NAS roots",
             )
-        self.nas_root = root
-        binding = self.manifest.data.get("target")
-        if binding is not None and binding != {
+        self.nas_roots = {}
+        for service, value in roots.items():
+            root = Path(value)
+            if (
+                not root.is_absolute()
+                or root.is_symlink()
+                or not root.is_dir()
+                or str(root.resolve()) != str(root)
+            ):
+                raise ValueError(
+                    "offline.nas_roots must contain existing original NAS roots",
+                )
+            self.nas_roots[service] = root
+        binding = {
             "schema": self.staging_schema,
-            "nas_root": str(root),
+            "nas_roots": {
+                key: str(root) for key, root in self.nas_roots.items()
+            },
             "migration_id": self.manifest.migration_id,
-        }:
+        }
+        self.manifest._validate_target(binding)
+        if (
+            self.manifest.data.get("target") is not None
+            and self.manifest.data["target"] != binding
+        ):
             raise ValueError(
                 "manifest target differs from generated staging/NAS binding",
             )
@@ -76,8 +89,11 @@ class OfflineJob:
         mappings = []
         for item in self.manifest.data["workspaces"]:
             source_root = Path(item["root"]).resolve(strict=True)
-            if self.nas_root == source_root or self.nas_root.is_relative_to(
-                source_root,
+            if any(
+                root == source_root
+                or root.is_relative_to(source_root)
+                or source_root.is_relative_to(root)
+                for root in self.nas_roots.values()
             ):
                 raise ValueError(
                     "target NAS cannot overlap the frozen source snapshot",
@@ -96,6 +112,7 @@ class OfflineJob:
                         item["tenant_id"],
                         item["source_id"],
                         item["agent_id"],
+                        service_unit_id=item["service_unit_id"],
                     ),
                     Path(item["root"]),
                     registry_path=item.get("registry_path", "chats.json"),
@@ -119,13 +136,15 @@ class OfflineJob:
 
         installer = ConversationInstaller(None, self.manifest, self.target)
         report = {
-            "version": 1,
+            "version": 2,
             "migration_id": self.manifest.migration_id,
             "operation": operation,
             "preview": True,
             "staging_schema": self.staging_schema,
             "application_schema": self.application_schema,
-            "nas_root": str(self.nas_root),
+            "nas_roots": {
+                key: str(root) for key, root in self.nas_roots.items()
+            },
             "tables": list(TABLES),
             "rename_sql": installer.rename_sql(),
             "source_boundary": self.manifest.data["source_boundary"],
@@ -161,26 +180,82 @@ class OfflineJob:
         )
 
         options = self.options.get("export", {})
-        destination = Path(options.get("destination", ""))
-        if (
-            not destination.is_absolute()
-            or destination.is_symlink()
-            or (
-                destination.exists()
-                and (not destination.is_dir() or any(destination.iterdir()))
-            )
+        entries = options.get("services")
+        if entries is None and len(self.nas_roots) == 1:
+            entries = {next(iter(self.nas_roots)): options}
+        if not isinstance(entries, dict) or set(entries) != set(
+            self.nas_roots,
         ):
             raise ValueError(
-                "export destination must be an explicit empty directory",
+                "export.services must explicitly cover every migration service",
             )
+        prepared = []
+        destinations = []
+        for service, entry in entries.items():
+            destination = Path(entry.get("destination", ""))
+            if (
+                not destination.is_absolute()
+                or destination.is_symlink()
+                or (
+                    destination.exists()
+                    and (
+                        not destination.is_dir() or any(destination.iterdir())
+                    )
+                )
+            ):
+                raise ValueError(
+                    "export destination must be an explicit empty directory",
+                )
+            destination = destination.resolve()
+            if any(
+                destination == other
+                or destination.is_relative_to(other)
+                or other.is_relative_to(destination)
+                for other in destinations
+            ):
+                raise ValueError(
+                    "export service destinations must be isolated",
+                )
+            if any(
+                destination == root
+                or destination.is_relative_to(root)
+                or root.is_relative_to(destination)
+                for root in self.nas_roots.values()
+            ):
+                raise ValueError(
+                    "export destination overlaps a service NAS root",
+                )
+            destinations.append(destination)
+            prepared.append((service, destination, entry))
         target = OldFormatTarget(
             self.manifest.data["source_boundary"]["old_image_digest"],
             options.get("session_version"),
             options.get("checkpoint_version"),
         )
-        return ConversationExporter(options["backup_path"], target).export(
-            destination,
-        )
+        # Load and validate all service ownership before creating any output.
+        exporters = [
+            (
+                service,
+                destination,
+                ConversationExporter(
+                    entry["backup_path"],
+                    target,
+                    service_unit_id=service,
+                ),
+            )
+            for service, destination, entry in prepared
+        ]
+        reports = {
+            service: exporter.export(destination)
+            for service, destination, exporter in exporters
+        }
+        if len(reports) == 1:
+            return next(iter(reports.values()))
+        return {
+            "version": 2,
+            "services": reports,
+            "passed": all(report["passed"] for report in reports.values()),
+        }
 
     async def execute(self, operation, inventory):
         from swe.app.conversation_storage.bundle import BundleStore
@@ -219,7 +294,9 @@ class OfflineJob:
                 ),
             )
             await staging.connect()
-            bundles = BundleStore(self.nas_root)
+            bundles = {
+                key: BundleStore(root) for key, root in self.nas_roots.items()
+            }
             if operation == "import":
                 return await ConversationImporter(
                     staging,

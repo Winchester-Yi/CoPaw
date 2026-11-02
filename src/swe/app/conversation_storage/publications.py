@@ -11,7 +11,12 @@ from dataclasses import dataclass
 
 from .bundle import BundleBlock, BundleStore
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
-from .identity import WorkspaceScope, identity_bytes, chat_key_bytes
+from .identity import (
+    WorkspaceScope,
+    identity_bytes,
+    chat_key_bytes,
+    service_unit_bytes,
+)
 from .chat_mutations import install_chat_metadata, load_metadata_json
 from .retention import RetentionStore
 from .message_installs import install_messages, install_turn
@@ -122,10 +127,11 @@ class PublicationRequest:
             raise ValueError("Turn publication requires its Chat")
 
     def fields(self):
-        tenant, source, agent = self.scope.sql_values
+        service, tenant, source, agent = self.scope.sql_values
         return {
             "operation_key": self.operation_key.encode("ascii"),
             "scope_kind": self.scope_kind,
+            "service_unit_key": service,
             "tenant_key": tenant,
             "source_key": source,
             "agent_key": agent,
@@ -148,12 +154,7 @@ class PublicationRequest:
 def _request(row):
     return PublicationRequest(
         operation_key=_text(row["operation_key"]),
-        scope=WorkspaceScope(
-            *(
-                _text(row[field])
-                for field in ("tenant_key", "source_key", "agent_key")
-            ),
-        ),
+        scope=WorkspaceScope.from_row(row),
         kind=row["kind"],
         owner_key=_text(row["owner_key"]),
         generation=row["generation"],
@@ -170,11 +171,18 @@ def _request(row):
 class PublicationStore(PublicationAssociations):
     """Short SQL state transitions; immutable IO is outside transactions."""
 
-    def __init__(self, database, bundles: BundleStore):
+    def __init__(self, database, bundles: BundleStore, *, service_unit_id):
+        self.service_unit_key = service_unit_bytes(service_unit_id)
+        self.service_unit_id = service_unit_id
         self.db = database
         self.bundles = bundles
 
+    def _validate_service(self, request):
+        if request.scope.sql_values[0] != self.service_unit_key:
+            raise IntegrityError("publication service unit mismatch")
+
     async def _assert_writes_allowed(self, request):
+        self._validate_service(request)
         await RetentionStore(
             self.db,
             request.scope,
@@ -205,9 +213,9 @@ class PublicationStore(PublicationAssociations):
     async def get(self, operation_key, *, lock=False):
         BundleStore.path_for(operation_key)
         return await self.db.fetch_one(
-            f"SELECT * FROM {TABLE} WHERE operation_key=%s"
+            f"SELECT * FROM {TABLE} WHERE service_unit_key=%s AND operation_key=%s"
             + (" FOR UPDATE" if lock else ""),
-            (operation_key.encode("ascii"),),
+            (self.service_unit_key, operation_key.encode("ascii")),
         )
 
     async def _insert(self, request, plan_text, state):
@@ -248,13 +256,121 @@ class PublicationStore(PublicationAssociations):
         if plan_text is not None and row["result_metadata_text"] != plan_text:
             raise ConflictError("operation commit plan changed")
 
+    async def _validate_reference_ownership(self, request, plan):
+        """Lock references before publication locks; historical Chat rebinds are valid."""
+        self._validate_service(request)
+        if plan.chat_metadata is not None:
+            associations, _ = await self._lock_metadata_associations(
+                request,
+                plan.chat_metadata,
+            )
+        else:
+            associations = await self._lock_associations(
+                request,
+                archive_turns=await self._archive_turns(request, plan),
+                archive_chat_ids={
+                    item.origin_chat_id
+                    for item in plan.messages
+                    if item.layer == "archive"
+                    and item.origin_chat_id is not None
+                },
+            )
+        session, chat, turn = associations
+        for row, identity in (
+            (session, request.session_id),
+            (chat, request.chat_id),
+        ):
+            if identity is not None and (row is None or row["id"] != identity):
+                raise IntegrityError("publication association is missing")
+            if (
+                row is not None
+                and WorkspaceScope.from_row(row) != request.scope
+            ):
+                raise IntegrityError("publication scope association mismatch")
+        if request.turn_id is not None and (
+            turn is None
+            or (
+                turn["id"],
+                turn["service_unit_key"],
+                turn["session_id"],
+                turn["chat_id"],
+            )
+            != (
+                request.turn_id,
+                request.scope.sql_values[0],
+                request.session_id,
+                request.chat_id,
+            )
+        ):
+            raise IntegrityError("publication Turn association mismatch")
+        await self._validate_plan_reference_ownership(request, plan)
+
+    async def _validate_plan_reference_ownership(self, request, plan):
+        messages = {
+            item.source_message_id
+            for item in plan.messages
+            if item.source_message_id is not None
+        } | set(plan.prune_ids)
+        publications = set()
+        if plan.share is not None and plan.share.selection_proof is not None:
+            proof = plan.share.selection_proof
+            if (
+                proof["snapshot"]["session_id"],
+                proof["snapshot"]["chat_id"],
+            ) != (request.session_id, request.chat_id):
+                raise IntegrityError("share proof association mismatch")
+            for item in proof["questions"].values():
+                messages.add(item["message_id"])
+                publications.add(item["publication_id"])
+        for identity in sorted(messages):
+            row = await self.db.fetch_one(
+                "SELECT service_unit_key,session_id,publication_id FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s",
+                (identity, request.scope.sql_values[0]),
+            )
+            if (
+                row is None
+                or row["service_unit_key"] != request.scope.sql_values[0]
+                or row["session_id"] != request.session_id
+            ):
+                raise IntegrityError(
+                    "Message reference service or Session mismatch",
+                )
+            publications.add(row["publication_id"])
+        for identity in sorted(publications):
+            row = await self.db.fetch_one(
+                "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s",
+                (identity, request.scope.sql_values[0]),
+            )
+            if (
+                row is None
+                or WorkspaceScope.from_row(row) != request.scope
+                or row["session_id"] != request.session_id
+            ):
+                raise IntegrityError(
+                    "Publication reference service or Session mismatch",
+                )
+
+    async def _validate_prepared_references(self, row):
+        request = _request(row)
+        plan = CommitPlan.parse(row["result_metadata_text"])
+        validate_share_request(request, plan.share)
+        validate_request_plan(request, plan)
+        async with self.db.transaction():
+            await self._assert_writes_allowed(request)
+            await self._validate_reference_ownership(request, plan)
+            current = await self.get(request.operation_key, lock=True)
+            self._matches(current, request, row["result_metadata_text"])
+        return plan
+
     async def reserve(self, request: PublicationRequest, plan: CommitPlan):
+        self._validate_service(request)
         validate_share_request(request, plan.share)
         validate_request_plan(request, plan)
         plan_text = plan.serialize()
         try:
             async with self.db.transaction():
                 await self._assert_writes_allowed(request)
+                await self._validate_reference_ownership(request, plan)
                 await self._insert(request, plan_text, "prepared")
                 row = await self.get(request.operation_key, lock=True)
                 self._matches(row, request)
@@ -280,10 +396,11 @@ class PublicationStore(PublicationAssociations):
             raise ConflictError(
                 "publication must be prepared before writing NAS",
             )
+        plan = await self._validate_prepared_references(row)
         blocks = await prepare_recovery_blocks(
             self,
             row,
-            CommitPlan.parse(row["result_metadata_text"]),
+            plan,
             blocks,
         )
         index = await self._nas_io(
@@ -303,6 +420,7 @@ class PublicationStore(PublicationAssociations):
             raise ConflictError(
                 "publication must be prepared before confirmation",
             )
+        await self._validate_prepared_references(row)
         index = await self._nas_io(
             operation_key,
             self.bundles.confirm_durable,
@@ -383,8 +501,8 @@ class PublicationStore(PublicationAssociations):
         for identity in ids:
             session_rows[identity] = await self.db.fetch_one(
                 "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
-                "FROM swe_conversation_sessions WHERE id=%s FOR UPDATE",
-                (identity,),
+                "FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+                (identity, request.scope.sql_values[0]),
             )
         target = (
             session_rows.get(plan.target_session_id)
@@ -396,7 +514,12 @@ class PublicationStore(PublicationAssociations):
                 target is None
                 or tuple(
                     target[key]
-                    for key in ("tenant_key", "source_key", "agent_key")
+                    for key in (
+                        "service_unit_key",
+                        "tenant_key",
+                        "source_key",
+                        "agent_key",
+                    )
                 )
                 != request.scope.sql_values
             ):
@@ -409,15 +532,20 @@ class PublicationStore(PublicationAssociations):
         )
         if request.chat_id is None and plan.create_if_absent:
             winner = await self.db.fetch_one(
-                "SELECT * FROM swe_conversation_chats WHERE session_id=%s "
+                "SELECT * FROM swe_conversation_chats WHERE session_id=%s AND service_unit_key=%s "
                 "AND deleted_at IS NULL ORDER BY registry_order,id LIMIT 1 FOR UPDATE",
-                (request.session_id,),
+                (request.session_id, request.scope.sql_values[0]),
             )
             if (
                 winner is not None
                 and tuple(
                     winner[key]
-                    for key in ("tenant_key", "source_key", "agent_key")
+                    for key in (
+                        "service_unit_key",
+                        "tenant_key",
+                        "source_key",
+                        "agent_key",
+                    )
                 )
                 != request.scope.sql_values
             ):
@@ -438,7 +566,12 @@ class PublicationStore(PublicationAssociations):
             if (
                 tuple(
                     row[key]
-                    for key in ("tenant_key", "source_key", "agent_key")
+                    for key in (
+                        "service_unit_key",
+                        "tenant_key",
+                        "source_key",
+                        "agent_key",
+                    )
                 )
                 != request.scope.sql_values
             ):
@@ -449,7 +582,8 @@ class PublicationStore(PublicationAssociations):
             if turn is None or turn["id"] != request.turn_id:
                 raise IntegrityError("publication Turn association is missing")
             if (
-                turn["session_id"] != request.session_id
+                turn["service_unit_key"] != request.scope.sql_values[0]
+                or turn["session_id"] != request.session_id
                 or turn["chat_id"] != request.chat_id
             ):
                 raise IntegrityError("publication Turn association mismatch")
@@ -717,9 +851,7 @@ class PublicationStore(PublicationAssociations):
                     "publication has no confirmed durable NAS body",
                 )
             request = _request(initial)
-            plan = CommitPlan.parse(initial["result_metadata_text"])
-            validate_share_request(request, plan.share)
-            validate_request_plan(request, plan)
+            plan = await self._validate_prepared_references(initial)
             index = await self._nas_io(
                 operation_key,
                 self.bundles.inspect,
@@ -898,6 +1030,7 @@ class PublicationStore(PublicationAssociations):
 
     async def abort(self, request: PublicationRequest, *, owner_stopped: bool):
         """Fence a positively stopped writer; retain the unique tombstone forever."""
+        self._validate_service(request)
         if not owner_stopped:
             raise ConflictError("original owner must be confirmed stopped")
         try:

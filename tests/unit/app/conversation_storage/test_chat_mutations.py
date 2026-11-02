@@ -100,7 +100,12 @@ async def test_create_plan_rejects_target_session_override_before_database_write
         session_id=1,
         chat_id=None,
         turn_id=None,
-        scope=WorkspaceScope("t", "s", "a"),
+        scope=WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
     )
     source = {"id": 1, "user_key": b"original", "channel_key": b"console"}
     target = {"id": 2, "user_key": b"other", "channel_key": b"console"}

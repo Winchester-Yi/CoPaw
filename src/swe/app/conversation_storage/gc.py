@@ -8,17 +8,17 @@ No age-based expiry, automatic pin release, directory scan, or tombstone delete.
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field as keyword_field
 import inspect
 import logging
 
 from .errors import ConflictError, IntegrityError
-from .identity import identity_bytes
+from .identity import identity_bytes, service_unit_bytes
 from .retention import RetentionStore
 
 logger = logging.getLogger(__name__)
 TABLE = "swe_conversation_publications"
-SCOPE = "scope_kind=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
+SCOPE = "scope_kind=%s AND service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
 
 
 @dataclass(frozen=True)
@@ -29,8 +29,10 @@ class StopProof:
     evidence_ref: str
     owner_stopped: bool
     io_drained: bool
+    service_unit_id: str = keyword_field(kw_only=True)
 
     def __post_init__(self):
+        service_unit_bytes(self.service_unit_id)
         for value in (self.operation_key, self.owner_key, self.evidence_ref):
             identity_bytes(value, 1024)
             if not value:
@@ -94,6 +96,7 @@ class GarbageCollector:
                 row[key]
                 for key in (
                     "scope_kind",
+                    "service_unit_key",
                     "tenant_key",
                     "source_key",
                     "agent_key",
@@ -111,9 +114,12 @@ class GarbageCollector:
     async def _row(self, publication_id, *, lock=False):
         _identity(publication_id)
         row = await self.db.fetch_one(
-            f"SELECT * FROM {TABLE} WHERE id=%s"
+            f"SELECT * FROM {TABLE} WHERE service_unit_key=%s AND id=%s"
             + (" FOR UPDATE" if lock else ""),
-            (publication_id,),
+            (
+                self.scope.sql_values[0],
+                publication_id,
+            ),
         )
         if row is None:
             raise KeyError(publication_id)
@@ -121,6 +127,11 @@ class GarbageCollector:
         return row
 
     async def _proof(self, row, proof):
+        if proof is not None and (
+            not isinstance(proof, StopProof)
+            or proof.service_unit_id != self.scope.service_unit_id
+        ):
+            raise ConflictError("GC proof service differs")
         if row["state"] != "aborted":
             return
         expected = (
@@ -129,7 +140,7 @@ class GarbageCollector:
             row["generation"],
         )
         if (
-            not isinstance(proof, StopProof)
+            proof is None
             or (proof.operation_key, proof.owner_key, proof.generation)
             != expected
             or proof.owner_stopped is not True
@@ -188,12 +199,12 @@ class GarbageCollector:
         queries = (
             (
                 "message",
-                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_chats c ON c.id=m.archive_chat_id WHERE m.publication_id=%s AND m.deleted_at IS NULL AND ((m.layer<>'archive' AND m.current_visible=1) OR (m.layer='archive' AND (c.id IS NULL OR c.deleted_at IS NULL))) LIMIT 1",
+                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_chats c ON c.id=m.archive_chat_id AND c.service_unit_key=m.service_unit_key WHERE m.publication_id=%s AND m.deleted_at IS NULL AND ((m.layer<>'archive' AND m.current_visible=1) OR (m.layer='archive' AND (c.id IS NULL OR c.deleted_at IS NULL))) LIMIT 1",
                 (identity,),
             ),
             (
                 "archive_boundary",
-                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_chats c ON c.id=m.archive_chat_id WHERE m.archive_publication_id=%s AND m.layer='archive' AND m.deleted_at IS NULL AND (c.id IS NULL OR c.deleted_at IS NULL) LIMIT 1",
+                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_chats c ON c.id=m.archive_chat_id AND c.service_unit_key=m.service_unit_key WHERE m.archive_publication_id=%s AND m.layer='archive' AND m.deleted_at IS NULL AND (c.id IS NULL OR c.deleted_at IS NULL) LIMIT 1",
                 (identity,),
             ),
             (
@@ -233,6 +244,13 @@ class GarbageCollector:
             ),
         )
         for reason, query, params in queries:
+            alias = "m." if "SELECT m.id" in query else ""
+            query = query.replace(
+                " WHERE ",
+                " WHERE " + alias + "service_unit_key=%s AND ",
+                1,
+            )
+            params = (self.scope.sql_values[0], *params)
             if await self.db.fetch_one(query, params) is not None:
                 reasons.append(reason)
         if await self._anomaly(row):
@@ -249,8 +267,11 @@ class GarbageCollector:
             if row[field] is None:
                 continue
             association = await self.db.fetch_one(
-                f"SELECT * FROM swe_conversation_{table} WHERE id=%s",
-                (row[field],),
+                f"SELECT * FROM swe_conversation_{table} WHERE service_unit_key=%s AND id=%s",
+                (
+                    values[0],
+                    row[field],
+                ),
             )
             if association is None:
                 return True
@@ -258,13 +279,18 @@ class GarbageCollector:
                 table != "turns"
                 and tuple(
                     association[key]
-                    for key in ("tenant_key", "source_key", "agent_key")
+                    for key in (
+                        "service_unit_key",
+                        "tenant_key",
+                        "source_key",
+                        "agent_key",
+                    )
                 )
                 != values
             ):
                 return True
             if (
-                table != "sessions"
+                table == "turns"
                 and association["session_id"] != row["session_id"]
             ):
                 return True
@@ -272,12 +298,12 @@ class GarbageCollector:
                 return True
         queries = (
             (
-                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_sessions s ON s.id=m.session_id WHERE (m.publication_id=%s OR m.archive_publication_id=%s) AND (s.id IS NULL OR s.tenant_key<>%s OR s.source_key<>%s OR s.agent_key<>%s OR NOT(m.session_id<=>%s)) LIMIT 1",
-                (row["id"], row["id"], *values, row["session_id"]),
+                "SELECT m.id FROM swe_conversation_messages m LEFT JOIN swe_conversation_sessions s ON s.id=m.session_id AND s.service_unit_key=m.service_unit_key WHERE m.service_unit_key=%s AND (m.publication_id=%s OR m.archive_publication_id=%s) AND (s.id IS NULL OR s.service_unit_key<>%s OR s.tenant_key<>%s OR s.source_key<>%s OR s.agent_key<>%s OR NOT(m.session_id<=>%s)) LIMIT 1",
+                (values[0], row["id"], row["id"], *values, row["session_id"]),
             ),
             (
-                "SELECT id FROM swe_conversation_retentions WHERE publication_id=%s AND (scope_kind<>%s OR tenant_key<>%s OR source_key<>%s OR agent_key<>%s) LIMIT 1",
-                (row["id"], *self.retentions.scope_values),
+                "SELECT id FROM swe_conversation_retentions WHERE service_unit_key=%s AND publication_id=%s AND (scope_kind<>%s OR service_unit_key<>%s OR tenant_key<>%s OR source_key<>%s OR agent_key<>%s) LIMIT 1",
+                (values[0], row["id"], *self.retentions.scope_values),
             ),
         )
         for query, params in queries:
@@ -347,8 +373,11 @@ class GarbageCollector:
                     "GC publication is protected: " + ",".join(reasons),
                 )
             changed = await self.db.execute(
-                f"UPDATE {TABLE} SET gc_state='deleting' WHERE id=%s AND gc_state='live'",
-                (publication_id,),
+                f"UPDATE {TABLE} SET gc_state='deleting' WHERE service_unit_key=%s AND id=%s AND gc_state='live'",
+                (
+                    self.scope.sql_values[0],
+                    publication_id,
+                ),
             )
             if changed != 1:
                 raise ConflictError("GC deleting transition was not confirmed")
@@ -395,8 +424,11 @@ class GarbageCollector:
                     "GC publication state changed after unlink",
                 )
             await self.db.execute(
-                f"UPDATE {TABLE} SET gc_state='reclaimed',reclaimed_at=COALESCE(reclaimed_at,UTC_TIMESTAMP(6)) WHERE id=%s AND gc_state='deleting'",
-                (publication_id,),
+                f"UPDATE {TABLE} SET gc_state='reclaimed',reclaimed_at=COALESCE(reclaimed_at,UTC_TIMESTAMP(6)) WHERE service_unit_key=%s AND id=%s AND gc_state='deleting'",
+                (
+                    self.scope.sql_values[0],
+                    publication_id,
+                ),
             )
             await self.retentions.release_dependencies(publication_id)
         logger.info(

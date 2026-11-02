@@ -15,6 +15,34 @@ from swe.app.conversation_storage.backup import (
 from swe.app.conversation_storage.errors import IntegrityError
 
 
+def test_publication_turn_must_keep_original_session_after_chat_rebind():
+    from swe.app.conversation_storage.backup import (
+        _validate_publication_associations,
+    )
+
+    fields = {
+        "service_unit_key": b"A",
+        "tenant_key": b"t",
+        "source_key": b"s",
+        "agent_key": b"a",
+    }
+    publication = {
+        "id": 7,
+        **fields,
+        "scope_kind": "workspace",
+        "session_id": 1,
+        "chat_id": 3,
+        "turn_id": 4,
+    }
+    with pytest.raises(IntegrityError, match="Turn"):
+        _validate_publication_associations(
+            {7: publication},
+            {1: {"id": 1, **fields}},
+            {3: {"id": 3, "session_id": 2, **fields}},
+            {4: {"id": 4, "session_id": 2, "chat_id": 3}},
+        )
+
+
 def snapshot():
     return {
         "sessions": [{"recovery_publication_id": 2}],
@@ -69,7 +97,7 @@ def test_backup_fences_use_fixed_namespace_order(tmp_path):
     service = ConversationBackup(
         object(),
         BundleStore(tmp_path),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
     )
     assert [store.scope_kind for store in service.stores] == [
         "legacy_share",
@@ -181,7 +209,12 @@ async def test_copy_failure_retains_backup_pins_after_fence_release(
     from swe.app.conversation_storage.identity import WorkspaceScope
 
     events = []
-    scope = WorkspaceScope("t", "s", "a")
+    scope = WorkspaceScope(
+        "t",
+        "s",
+        "a",
+        service_unit_id="schema-test-service",
+    )
     service = ConversationBackup(
         SimpleNamespace(execute=AsyncMock(return_value=1)),
         BundleStore(tmp_path / "nas"),
@@ -194,6 +227,7 @@ async def test_copy_failure_retains_backup_pins_after_fence_release(
             "state": "committed",
             "gc_state": "live",
             "scope_kind": "workspace",
+            "service_unit_key": b"schema-test-service",
             "tenant_key": b"t",
             "source_key": b"s",
             "agent_key": b"a",
@@ -225,7 +259,7 @@ async def test_copy_failure_retains_backup_pins_after_fence_release(
 
     service.stores = (
         store(("workspace", *scope.sql_values)),
-        store(("legacy_share", b"t", b"", b"")),
+        store(("legacy_share", b"schema-test-service", b"t", b"", b"")),
     )
 
     async def install_fences(keys, snapshot_ref):
@@ -258,7 +292,12 @@ async def test_capture_cannot_mark_unsettled_restore_ready(tmp_path):
     from swe.app.conversation_storage.bundle import BundleStore
     from swe.app.conversation_storage.identity import WorkspaceScope
 
-    scope = WorkspaceScope("t", "s", "a")
+    scope = WorkspaceScope(
+        "t",
+        "s",
+        "a",
+        service_unit_id="schema-test-service",
+    )
     service = ConversationBackup(
         SimpleNamespace(),
         BundleStore(tmp_path),
@@ -274,7 +313,7 @@ async def test_capture_cannot_mark_unsettled_restore_ready(tmp_path):
             scope_values=values,
         )
         for values in (
-            ("legacy_share", b"t", b"", b""),
+            ("legacy_share", b"schema-test-service", b"t", b"", b""),
             ("workspace", *scope.sql_values),
         )
     )
@@ -334,7 +373,12 @@ async def test_snapshot_rejects_read_committed_isolation(tmp_path):
         await ConversationBackup(
             db,
             BundleStore(tmp_path),
-            WorkspaceScope("t", "s", "a"),
+            WorkspaceScope(
+                "t",
+                "s",
+                "a",
+                service_unit_id="schema-test-service",
+            ),
         )._snapshot()
     db.fetch_all.assert_not_awaited()
 
@@ -379,6 +423,7 @@ def test_imported_scope_batch_content_metadata_has_no_single_session(kind):
     from swe.app.conversation_storage.backup import _validate_associations
 
     identity = {
+        "service_unit_key": b"schema-test-service",
         "tenant_key": b"t",
         "source_key": b"s",
         "agent_key": b"a",
@@ -386,6 +431,7 @@ def test_imported_scope_batch_content_metadata_has_no_single_session(kind):
         "channel_key": b"console",
     }
     data = {
+        "shares": [],
         "sessions": [{"id": 1, **identity, "recovery_publication_id": None}],
         "chats": [
             {
@@ -441,7 +487,7 @@ async def test_backup_drains_prepared_operations_before_atomically_fencing(
     service = ConversationBackup(
         SimpleNamespace(transaction=transaction, fetch_all=pending),
         BundleStore(tmp_path),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
     )
 
     def retention(name):
@@ -491,7 +537,7 @@ async def test_backup_settle_timeout_does_not_install_a_blocking_fence(
             fetch_all=AsyncMock(return_value=[{"id": 1}]),
         ),
         BundleStore(tmp_path),
-        WorkspaceScope("t", "s", "a"),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
     )
     service.stores = tuple(
         SimpleNamespace(
@@ -615,6 +661,7 @@ def test_inactive_reclaimed_locator_still_rejects_cross_scope_association():
     from swe.app.conversation_storage.backup import validate_backup
 
     identity = {
+        "service_unit_key": b"schema-test-service",
         "tenant_key": b"tenant",
         "source_key": b"source",
         "agent_key": b"agent",
@@ -637,6 +684,7 @@ def test_inactive_reclaimed_locator_still_rejects_cross_scope_association():
     data["messages"] = [
         {
             "id": 2,
+            "service_unit_key": b"schema-test-service",
             "session_id": 1,
             "publication_id": 3,
             "deleted_at": datetime(2026, 10, 30),
@@ -721,3 +769,156 @@ def test_restore_preserves_stop_intent_for_terminal_cas():
         RestoreEvidence("stopped", "isolated"),
     )
     assert restored["turns"][0]["state"] == "stopping"
+
+
+def test_backup_preserves_same_service_historical_session_after_chat_rebind():
+    from swe.app.conversation_storage.backup import _validate_associations
+
+    fields = {
+        "service_unit_key": b"service-A",
+        "tenant_key": b"t",
+        "source_key": b"s",
+        "agent_key": b"a",
+        "user_key": b"u",
+        "channel_key": b"console",
+    }
+    data = {
+        name: []
+        for name in (
+            "sessions",
+            "chats",
+            "turns",
+            "messages",
+            "publications",
+            "shares",
+            "retentions",
+        )
+    }
+    data["sessions"] = [
+        {"id": identity, **fields, "recovery_publication_id": None}
+        for identity in (1, 2)
+    ]
+    data["chats"] = [
+        {
+            "id": 3,
+            **fields,
+            "session_id": 2,
+            "content_meta_publication_id": None,
+            "active_checkpoint_publication_id": None,
+        },
+    ]
+    data["turns"] = [
+        {
+            "id": 4,
+            "service_unit_key": b"service-A",
+            "session_id": 1,
+            "chat_id": 3,
+            "admission_publication_id": 5,
+            "terminal_publication_id": None,
+        },
+    ]
+    data["publications"] = [
+        {
+            "id": 5,
+            **fields,
+            "scope_kind": "workspace",
+            "kind": "admission",
+            "session_id": 1,
+            "chat_id": 3,
+            "turn_id": 4,
+        },
+    ]
+    data["messages"] = [
+        {
+            "id": 6,
+            "service_unit_key": b"service-A",
+            "session_id": 1,
+            "origin_chat_id": 3,
+            "archive_chat_id": 3,
+            "turn_id": 4,
+            "publication_id": 5,
+            "archive_publication_id": 5,
+        },
+    ]
+    data["publications"].append(
+        {
+            "id": 7,
+            **fields,
+            "scope_kind": "workspace",
+            "kind": "chat_meta",
+            "session_id": 1,
+            "chat_id": 3,
+            "turn_id": None,
+        },
+    )
+    data["chats"][0]["content_meta_publication_id"] = 7
+    _validate_associations(data)
+    data["publications"][0]["service_unit_key"] = b"service-B"
+    with pytest.raises(IntegrityError, match="service mismatch"):
+        _validate_associations(data)
+
+
+async def test_backup_rejects_share_linked_to_foreign_service_publication(
+    tmp_path,
+):
+    from contextlib import asynccontextmanager
+    from swe.app.conversation_storage.backup import ConversationBackup
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.identity import WorkspaceScope
+
+    class ForeignShareDatabase:
+        @asynccontextmanager
+        async def transaction(self):
+            yield self
+
+        async def fetch_all(self, query, params):
+            return []
+
+        async def fetch_one(self, query, params=None):
+            if "transaction_isolation" in query:
+                return {"level": "REPEATABLE-READ"}
+            if "p.service_unit_key<>r.service_unit_key" in query:
+                return {"token": "foreign-reference"}
+            return None
+
+    service = ConversationBackup(
+        ForeignShareDatabase(),
+        BundleStore(tmp_path),
+        WorkspaceScope("t", "s", "a", service_unit_id="service-A"),
+    )
+    with pytest.raises(IntegrityError, match="publication locator"):
+        await service._snapshot()
+
+
+async def test_foreign_backup_release_rejects_before_bundle_inspection(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import backup
+    from swe.app.conversation_storage.bundle import BundleStore
+    from swe.app.conversation_storage.identity import WorkspaceScope
+
+    path = tmp_path / "foreign"
+    path.mkdir()
+    backup._atomic_json(
+        path / "metadata.json",
+        {
+            "version": 2,
+            "service_unit_id": "B",
+            "backup_id": "job",
+            "scope": [b"B", b"t", b"s", b"a"],
+            "snapshot": {name: [] for name in backup.TABLES},
+            "pin_keys": [],
+        },
+    )
+    inspect_backup = Mock(side_effect=AssertionError("foreign NAS inspected"))
+    monkeypatch.setattr(backup, "validate_backup", inspect_backup)
+    service = backup.ConversationBackup(
+        SimpleNamespace(),
+        BundleStore(tmp_path / "nas"),
+        WorkspaceScope("t", "s", "a", service_unit_id="A"),
+    )
+    with pytest.raises(IntegrityError, match="scope differs"):
+        await service.release(path)
+    inspect_backup.assert_not_called()

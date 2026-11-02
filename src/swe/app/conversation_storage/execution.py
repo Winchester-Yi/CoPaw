@@ -11,6 +11,7 @@ from .bundle import BundleBlock, BundleStore
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
 from .identity import (
     SessionIdentity,
+    service_unit_bytes,
     chat_key_bytes,
     identity_bytes,
     question_msg_key_bytes,
@@ -21,7 +22,7 @@ from .publications import CommitPlan, PublicationRequest, PublicationStore
 from .retention import RetentionStore
 
 IDENTITY_WHERE = (
-    "tenant_key=%s AND source_key=%s AND agent_key=%s AND "
+    "service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s AND "
     "user_key=%s AND channel_key=%s AND external_session_key=%s"
 )
 LIVE_STATES = frozenset(
@@ -85,12 +86,20 @@ class ExecutionStore:
         self,
         database,
         *,
+        service_unit_id,
         owner_key=None,
         lease_seconds=30,
         publications=None,
     ):
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise ValueError("lease seconds must be a positive integer")
+        self.service_unit_key = service_unit_bytes(service_unit_id)
+        self.service_unit_id = service_unit_id
+        if (
+            publications is not None
+            and publications.service_unit_key != self.service_unit_key
+        ):
+            raise IntegrityError("execution publication service unit mismatch")
         self.db = database
         self.owner_key = owner_key or secrets.token_hex(32)
         identity_bytes(self.owner_key, 128)
@@ -98,6 +107,7 @@ class ExecutionStore:
         self.publications = publications
 
     async def _assert_writes_allowed(self, identity):
+        self._validate_service(identity)
         await RetentionStore(
             self.db,
             identity.scope,
@@ -164,21 +174,36 @@ class ExecutionStore:
 
     async def _chat_for_admission(self, session, identity, chat_key):
         chat = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_chats WHERE tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s FOR UPDATE",
+            "SELECT * FROM swe_conversation_chats WHERE service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s AND external_chat_key=%s FOR UPDATE",
             (*identity.scope.sql_values, chat_key_bytes(chat_key)),
         )
         if chat is None or chat["deleted_at"] is not None:
             raise KeyError(chat_key)
-        if chat["session_id"] != session["id"]:
+        if (
+            tuple(
+                chat[key]
+                for key in (
+                    "service_unit_key",
+                    "tenant_key",
+                    "source_key",
+                    "agent_key",
+                )
+            )
+            != identity.scope.sql_values
+            or chat["session_id"] != session["id"]
+        ):
             raise IntegrityError("admission Chat Session identity mismatch")
         return chat
 
     async def _existing_admission(self, session, turn):
-        if turn["session_id"] != session["id"]:
+        if (
+            turn["service_unit_key"] != self.service_unit_key
+            or turn["session_id"] != session["id"]
+        ):
             raise IntegrityError("admission Turn Session identity mismatch")
         publication = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_publications WHERE turn_id=%s AND kind='admission' ORDER BY id LIMIT 1 FOR UPDATE",
-            (turn["id"],),
+            "SELECT * FROM swe_conversation_publications WHERE turn_id=%s AND service_unit_key=%s AND kind='admission' ORDER BY id LIMIT 1 FOR UPDATE",
+            (turn["id"], self.service_unit_key),
         )
         # Even the same owner must not execute twice after a lost response.
         return AdmissionResult(False, turn, publication)
@@ -195,6 +220,7 @@ class ExecutionStore:
     ):
         generation = session["generation"] + 1
         values = {
+            "service_unit_key": self.service_unit_key,
             "session_id": session["id"],
             "chat_id": chat["id"],
             "question_msg_key": question_msg_key_bytes(question_key),
@@ -276,6 +302,7 @@ class ExecutionStore:
             raise ConflictError(
                 "original admission may only be observed, never replayed",
             )
+        self._validate_service(admission.authority.identity)
         if question.get("role") != "user" or question.get(
             "id",
         ) != admission.turn["question_msg_key"].decode("utf-8"):
@@ -487,7 +514,12 @@ class ExecutionStore:
                 (authority.session_id,),
             )
 
+    def _validate_service(self, identity):
+        if identity.scope.sql_values[0] != self.service_unit_key:
+            raise IntegrityError("execution service unit mismatch")
+
     async def _session(self, identity):
+        self._validate_service(identity)
         if not isinstance(identity, SessionIdentity):
             raise TypeError("execution requires a full Session identity")
         row = await self.db.fetch_one(
@@ -500,6 +532,7 @@ class ExecutionStore:
         actual = tuple(
             row[key]
             for key in (
+                "service_unit_key",
                 "tenant_key",
                 "source_key",
                 "agent_key",
@@ -526,13 +559,20 @@ class ExecutionStore:
             raise IntegrityError("execution Chat association mismatch")
         if (
             tuple(
-                chat[key] for key in ("tenant_key", "source_key", "agent_key")
+                chat[key]
+                for key in (
+                    "service_unit_key",
+                    "tenant_key",
+                    "source_key",
+                    "agent_key",
+                )
             )
             != identity.scope.sql_values
         ):
             raise IntegrityError("execution Chat scope mismatch")
         if (
             turn is None
+            or turn["service_unit_key"] != self.service_unit_key
             or turn["session_id"] != session["id"]
             or turn["chat_id"] != chat_id
         ):

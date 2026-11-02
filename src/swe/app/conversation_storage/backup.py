@@ -14,7 +14,7 @@ import re
 from .bundle import BundleStore, new_operation_key
 from .chat_mutations import load_metadata_json
 from .errors import ConflictError, IntegrityError
-from .identity import WorkspaceScope
+from .identity import WorkspaceScope, SCOPE_COLUMNS, service_unit_bytes
 from .retention import MAX_PIN_BATCH, RetentionStore
 
 BACKUP_SETTLE_SECONDS = 30
@@ -230,6 +230,7 @@ def _copy_bundle(source, target_root, row):
 def _scope_key(row):
     return (
         row["scope_kind"],
+        row["service_unit_key"],
         row["tenant_key"],
         row["source_key"],
         row["agent_key"],
@@ -237,9 +238,9 @@ def _scope_key(row):
 
 
 def _pin_members(document):
-    scope = WorkspaceScope(*(value.decode() for value in document["scope"]))
+    scope = WorkspaceScope.from_values(document["scope"])
     namespaces = (
-        ("legacy_share", scope.sql_values[0], b"", b""),
+        ("legacy_share", *scope.sql_values[:2], b"", b""),
         ("workspace", *scope.sql_values),
     )
     live = set(snapshot_publication_ids(document["snapshot"]))
@@ -259,14 +260,39 @@ def _pin_members(document):
 
 
 def _validate_associations(snapshot):
+    publications = {row["id"]: row for row in snapshot["publications"]}
+    for table, fields in REFERENCE_FIELDS.items():
+        for row in snapshot[table]:
+            for key in fields:
+                if row.get(key) is not None and publications[row[key]].get(
+                    "service_unit_key",
+                ) != row.get("service_unit_key"):
+                    raise IntegrityError("backup publication service mismatch")
     sessions = {row["id"]: row for row in snapshot["sessions"]}
     chats = {row["id"]: row for row in snapshot["chats"]}
     turns = {row["id"]: row for row in snapshot["turns"]}
+    for table, rows in (
+        ("chats", chats.values()),
+        ("turns", turns.values()),
+        ("messages", snapshot["messages"]),
+    ):
+        for row in rows:
+            parent = sessions.get(row["session_id"])
+            if parent is not None and row.get(
+                "service_unit_key",
+            ) != parent.get("service_unit_key"):
+                raise IntegrityError("backup parent service mismatch")
+    for row in snapshot.get("retentions", []):
+        if row.get("publication_id") is not None and row.get(
+            "service_unit_key",
+        ) != publications[row["publication_id"]].get("service_unit_key"):
+            raise IntegrityError("backup retention service mismatch")
     for chat in chats.values():
         session = sessions.get(chat["session_id"])
         if session is None:
             raise IntegrityError("backup Chat Session identity mismatch")
         identity_fields = (
+            "service_unit_key",
             "tenant_key",
             "source_key",
             "agent_key",
@@ -277,7 +303,14 @@ def _validate_associations(snapshot):
             raise IntegrityError("backup Chat Session identity mismatch")
     for turn in turns.values():
         chat = chats.get(turn["chat_id"])
-        if chat is None or chat["session_id"] != turn["session_id"]:
+        if (
+            chat is None
+            or turn["session_id"] not in sessions
+            or any(
+                chat[key] != sessions[turn["session_id"]][key]
+                for key in SCOPE_COLUMNS
+            )
+        ):
             raise IntegrityError("backup Turn association mismatch")
     publications = {row["id"]: row for row in snapshot["publications"]}
     _validate_publication_associations(publications, sessions, chats, turns)
@@ -304,12 +337,23 @@ def _validate_associations(snapshot):
                     session = sessions[session_id]
                     if (
                         table == "chats"
+                        and publication["chat_id"] == row["id"]
+                        and publication["session_id"] in sessions
+                        and all(
+                            publication[field] == row[field]
+                            for field in SCOPE_COLUMNS
+                        )
+                    ):
+                        continue
+                    if (
+                        table == "chats"
                         and key == "content_meta_publication_id"
                         and publication["kind"] == "offline_import"
                         and publication["session_id"] is None
                         and _scope_key(publication)
                         == (
                             "workspace",
+                            session["service_unit_key"],
                             session["tenant_key"],
                             session["source_key"],
                             session["agent_key"],
@@ -335,7 +379,11 @@ def _validate_message_associations(
             identity = message[key]
             if identity is not None and (
                 identity not in chats
-                or chats[identity]["session_id"] != message["session_id"]
+                or any(
+                    chats[identity][key]
+                    != sessions[message["session_id"]][key]
+                    for key in SCOPE_COLUMNS
+                )
             ):
                 raise IntegrityError(
                     "backup Message Chat association mismatch",
@@ -368,15 +416,16 @@ def _validate_publication_associations(publications, sessions, chats, turns):
         if row["session_id"] is not None:
             session = sessions.get(row["session_id"])
             if session is None or _scope_key(row)[1:] != tuple(
-                session[key]
-                for key in ("tenant_key", "source_key", "agent_key")
+                session[key] for key in SCOPE_COLUMNS
             ):
                 raise IntegrityError(
                     "backup publication Session scope mismatch",
                 )
         if row["chat_id"] is not None and (
             row["chat_id"] not in chats
-            or chats[row["chat_id"]]["session_id"] != row["session_id"]
+            or any(
+                chats[row["chat_id"]][key] != row[key] for key in SCOPE_COLUMNS
+            )
         ):
             raise IntegrityError(
                 "backup publication Chat association mismatch",
@@ -384,6 +433,7 @@ def _validate_publication_associations(publications, sessions, chats, turns):
         if row["turn_id"] is not None and (
             row["turn_id"] not in turns
             or turns[row["turn_id"]]["chat_id"] != row["chat_id"]
+            or turns[row["turn_id"]]["session_id"] != row["session_id"]
         ):
             raise IntegrityError(
                 "backup publication Turn association mismatch",
@@ -425,9 +475,14 @@ def validate_backup(snapshot, bundles):
 
 
 def _validate_snapshot_scopes(snapshot, scope):
+    for rows in snapshot.values():
+        if any(
+            row.get("service_unit_key") != scope.sql_values[0] for row in rows
+        ):
+            raise IntegrityError("backup contains a different service")
     allowed = {
         ("workspace", *scope.sql_values),
-        ("legacy_share", scope.sql_values[0], b"", b""),
+        ("legacy_share", *scope.sql_values[:2], b"", b""),
     }
     for table in ("publications", "retentions"):
         if any(_scope_key(row) not in allowed for row in snapshot[table]):
@@ -436,10 +491,7 @@ def _validate_snapshot_scopes(snapshot, scope):
             )
     for table in ("sessions", "chats"):
         if any(
-            tuple(
-                row[key] for key in ("tenant_key", "source_key", "agent_key")
-            )
-            != scope.sql_values
+            tuple(row[key] for key in SCOPE_COLUMNS) != scope.sql_values
             for row in snapshot[table]
         ):
             raise IntegrityError("backup contains a different workspace scope")
@@ -706,7 +758,12 @@ class ConversationBackup:
         self.stores = (
             RetentionStore(
                 database,
-                WorkspaceScope(scope.tenant_id, "", ""),
+                WorkspaceScope(
+                    scope.tenant_id,
+                    "",
+                    "",
+                    service_unit_id=scope.service_unit_id,
+                ),
                 scope_kind="legacy_share",
             ),
             RetentionStore(database, scope),
@@ -720,12 +777,12 @@ class ConversationBackup:
                     await store.lock_guard()
                 pending = await self.db.fetch_all(
                     "SELECT id FROM swe_conversation_publications WHERE state='prepared' AND "
-                    "((scope_kind='workspace' AND tenant_key=%s AND source_key=%s AND agent_key=%s) "
-                    "OR (scope_kind='legacy_share' AND tenant_key=%s AND source_key=%s AND agent_key=%s)) "
+                    "((scope_kind='workspace' AND service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s) "
+                    "OR (scope_kind='legacy_share' AND service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s)) "
                     "ORDER BY id FOR UPDATE",
                     (
                         *self.scope.sql_values,
-                        self.scope.sql_values[0],
+                        *self.scope.sql_values[:2],
                         b"",
                         b"",
                     ),
@@ -755,15 +812,15 @@ class ConversationBackup:
             values = self.scope.sql_values
             snapshot = {}
             for name in ("sessions", "chats", "publications", "retentions"):
-                where = "tenant_key=%s AND source_key=%s AND agent_key=%s"
+                where = "service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
                 params = values
                 if name in ("publications", "retentions"):
                     where = (
                         "("
                         + where
-                        + " AND scope_kind='workspace') OR (tenant_key=%s AND scope_kind='legacy_share' AND source_key=%s AND agent_key=%s)"
+                        + " AND scope_kind='workspace') OR (service_unit_key=%s AND tenant_key=%s AND scope_kind='legacy_share' AND source_key=%s AND agent_key=%s)"
                     )
-                    params = (*values, values[0], b"", b"")
+                    params = (*values, *values[:2], b"", b"")
                 snapshot[name] = await self.db.fetch_all(
                     "SELECT * FROM "
                     + TABLES[name]
@@ -776,17 +833,20 @@ class ConversationBackup:
                 snapshot[name] = await self.db.fetch_all(
                     "SELECT r.* FROM "
                     + TABLES[name]
-                    + " r JOIN swe_conversation_sessions s ON s.id=r.session_id WHERE s.tenant_key=%s AND s.source_key=%s AND s.agent_key=%s ORDER BY r.id",
+                    + " r JOIN swe_conversation_sessions s ON s.id=r.session_id WHERE r.service_unit_key=s.service_unit_key AND s.service_unit_key=%s AND s.tenant_key=%s AND s.source_key=%s AND s.agent_key=%s ORDER BY r.id",
                     values,
                 )
             snapshot["shares"] = await self.db.fetch_all(
-                "SELECT r.* FROM swe_chat_shares r JOIN swe_conversation_publications p ON p.id=r.publication_id WHERE (p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s AND p.scope_kind=%s) OR (p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s AND p.scope_kind=%s) ORDER BY r.token",
-                (*values, "workspace", values[0], b"", b"", "legacy_share"),
+                "SELECT r.* FROM swe_chat_shares r JOIN swe_conversation_publications p ON p.id=r.publication_id WHERE r.service_unit_key=p.service_unit_key AND ((p.service_unit_key=%s AND p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s AND p.scope_kind=%s) OR (p.service_unit_key=%s AND p.tenant_key=%s AND p.source_key=%s AND p.agent_key=%s AND p.scope_kind=%s)) ORDER BY r.token",
+                (*values, "workspace", *values[:2], b"", b"", "legacy_share"),
             )
             if await self.db.fetch_one(
                 "SELECT token FROM swe_chat_shares r LEFT JOIN swe_conversation_publications p ON p.id=r.publication_id "
-                "WHERE r.tenant_id=%s AND p.id IS NULL LIMIT 1",
-                (self.scope.tenant_id,),
+                "WHERE r.service_unit_key=%s AND r.tenant_id=%s AND (p.id IS NULL OR p.service_unit_key<>r.service_unit_key) LIMIT 1",
+                (
+                    self.scope.sql_values[0],
+                    self.scope.tenant_id,
+                ),
             ):
                 raise IntegrityError(
                     "tenant share has a missing publication locator",
@@ -825,9 +885,10 @@ class ConversationBackup:
                     retention_key=pin_key,
                 )
                 changed = await self.db.execute(
-                    "UPDATE swe_conversation_retentions SET snapshot_ref=%s WHERE retention_key=%s AND kind=%s AND state=%s",
+                    "UPDATE swe_conversation_retentions SET snapshot_ref=%s WHERE service_unit_key=%s AND retention_key=%s AND kind=%s AND state=%s",
                     (
                         snapshot_ref.encode(),
+                        self.scope.sql_values[0],
                         pin_key.encode(),
                         "backup",
                         "active",
@@ -839,7 +900,8 @@ class ConversationBackup:
                     )
                 pin_keys.append(pin_key)
         document = {
-            "version": 1,
+            "version": 2,
+            "service_unit_id": self.scope.service_unit_id,
             "backup_id": backup_id,
             "scope": list(self.scope.sql_values),
             "snapshot": snapshot,
@@ -873,6 +935,8 @@ class ConversationBackup:
             BundleStore(target),
         )
         report.update(
+            version=2,
+            service_unit_id=self.scope.service_unit_id,
             backup_id=backup_id,
             state="captured",
             pin_keys=pin_keys,
@@ -884,6 +948,8 @@ class ConversationBackup:
         if restore_verifier is not None:
             evidence = await restore_verifier(destination, backup_id)
             expected_evidence = {
+                "version": 2,
+                "service_unit_id": self.scope.service_unit_id,
                 "passed": True,
                 "complete_metadata_and_readers": True,
                 "restore_ready": True,
@@ -934,7 +1000,11 @@ class ConversationBackup:
         return report
 
     async def release(self, backup_path):
-        document = await asyncio.to_thread(load_backup, backup_path)
+        document = await asyncio.to_thread(
+            load_backup,
+            backup_path,
+            expected_scope=self.scope,
+        )
         if tuple(document["scope"]) != self.scope.sql_values:
             raise IntegrityError("backup release scope differs")
         expected = _pin_members(document)
@@ -943,8 +1013,11 @@ class ConversationBackup:
                 await store.lock_guard()
             for key, (namespace, ids) in expected.items():
                 rows = await self.db.fetch_all(
-                    "SELECT * FROM swe_conversation_retentions WHERE retention_key=%s ORDER BY member_key FOR UPDATE",
-                    (key.encode(),),
+                    "SELECT * FROM swe_conversation_retentions WHERE service_unit_key=%s AND retention_key=%s ORDER BY member_key FOR UPDATE",
+                    (
+                        self.scope.sql_values[0],
+                        key.encode(),
+                    ),
                 )
                 if [row["member_key"] for row in rows] != ids or any(
                     row["kind"] != "backup"
@@ -967,12 +1040,16 @@ class ConversationBackup:
                 await store.release(key.encode())
 
 
-def load_backup(path):
+def load_backup(path, *, expected_scope=None):
     root = Path(path).resolve(strict=True)
     document = decode_metadata((root / "metadata.json").read_text())
-    if document.get("version") != 1 or not document.get("backup_id"):
+    if document.get("version") != 2 or not document.get("backup_id"):
         raise IntegrityError("unsupported backup metadata")
-    scope = WorkspaceScope(*(value.decode() for value in document["scope"]))
+    scope = WorkspaceScope.from_values(document["scope"])
+    if expected_scope is not None and scope != expected_scope:
+        raise IntegrityError("backup release scope differs")
+    if document.get("service_unit_id") != scope.service_unit_id:
+        raise IntegrityError("backup service differs from scope")
     _validate_snapshot_scopes(document["snapshot"], scope)
     if set(document["pin_keys"]) != set(_pin_members(document)) or len(
         document["pin_keys"],
@@ -1056,6 +1133,8 @@ def _settlement_report(document, snapshot, database, bundles):
     publications = {row["id"]: row for row in snapshot["publications"]}
     pending = []
     for turn in snapshot["turns"]:
+        if turn["session_id"] not in original_sessions:
+            continue
         if (
             turn["state"] not in ("reserved", "stopping", "settling")
             or sessions[turn["session_id"]]["active_turn_id"] != turn["id"]
@@ -1097,9 +1176,66 @@ def _settlement_report(document, snapshot, database, bundles):
     }
 
 
+def _restore_stores(bundles, documents, backup_path):
+    services = {
+        WorkspaceScope.from_values(doc["scope"]).service_unit_id
+        for doc in documents
+    }
+    if isinstance(bundles, BundleStore):
+        if len(services) != 1:
+            raise IntegrityError(
+                "mixed-service restore requires explicit NAS mapping",
+            )
+        stores = {next(iter(services)): bundles}
+    elif isinstance(bundles, dict):
+        stores = bundles
+        if set(stores) != services or any(
+            not isinstance(store, BundleStore) for store in stores.values()
+        ):
+            raise IntegrityError(
+                "restore NAS mapping must exactly match services",
+            )
+    else:
+        raise TypeError("restore requires BundleStore or service NAS mapping")
+    if any(
+        Path(store.root).is_symlink()
+        or Path(store.root).absolute() != Path(store.root).resolve()
+        for store in stores.values()
+    ):
+        raise IntegrityError("restore NAS roots must be nonsymlink roots")
+    roots = [Path(store.root).resolve() for store in stores.values()]
+    paths = (
+        list(backup_path)
+        if isinstance(backup_path, (list, tuple))
+        else [backup_path]
+    )
+    sources = [Path(path).resolve() for path in paths]
+    for index, root in enumerate(roots):
+        if any(
+            root == other or root in other.parents or other in root.parents
+            for other in roots[index + 1 :] + sources
+        ):
+            raise IntegrityError(
+                "restore NAS roots must be isolated and disjoint",
+            )
+        if root.exists() and (
+            root.is_symlink() or not root.is_dir() or any(root.iterdir())
+        ):
+            raise ValueError("restore destination must be an empty directory")
+    return stores
+
+
+def _service_snapshot(snapshot, service):
+    key = service_unit_bytes(service)
+    return {
+        name: [row for row in rows if row["service_unit_key"] == key]
+        for name, rows in snapshot.items()
+    }
+
+
 async def restore_backup(database, bundles, backup_path, *, evidence):
     """Atomically restore one path or a complete list of scope backup paths."""
-    from .backup_set import load_restore_set
+    from .backup_set import load_restore_set, validate_restore_tokens
 
     if not isinstance(evidence, RestoreEvidence):
         raise ValueError("restore requires explicit evidence")
@@ -1107,6 +1243,7 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
         load_restore_set,
         backup_path,
     )
+    stores = _restore_stores(bundles, documents, backup_path)
     document = {**documents[0], "snapshot": captured}
     _restore_target(database, document.get("source_schema"))
     current_schema = await database.fetch_one("SELECT DATABASE() AS name")
@@ -1114,12 +1251,16 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
         raise IntegrityError(
             "restore connection schema differs from isolated target",
         )
-    target = _new_directory(bundles.root)
     for table in TABLES.values():
         if (await database.fetch_one("SELECT COUNT(*) AS n FROM " + table))[
             "n"
         ]:
             raise ConflictError("restore requires an empty metadata target")
+    await validate_restore_tokens(database, captured)
+    targets = {
+        service: _new_directory(store.root)
+        for service, store in stores.items()
+    }
     snapshot, report = _restored_rows(captured, evidence)
     ids = snapshot_publication_ids(snapshot)
     by_id = {row["id"]: row for row in snapshot["publications"]}
@@ -1127,7 +1268,7 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
         await asyncio.to_thread(
             _copy_bundle,
             sources[identity],
-            target,
+            targets[by_id[identity]["service_unit_key"].decode()],
             by_id[identity],
         )
     async with database.transaction():
@@ -1165,6 +1306,67 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
                     + ")",
                     tuple(row.values()),
                 )
+    await _verify_restored_metadata(database, snapshot, stores)
+    for member in documents:
+        service = WorkspaceScope.from_values(member["scope"]).service_unit_id
+        await _verify_restored_readers(database, stores[service], member)
+    report.update(
+        version=2,
+        service_unit_id=WorkspaceScope.from_values(
+            document["scope"],
+        ).service_unit_id,
+        passed=True,
+        backup_id=document["backup_id"],
+        state="restored",
+        complete_metadata_and_readers=True,
+        snapshot_ref=document["snapshot_ref"],
+        reader_counts={
+            name: len(snapshot[name])
+            for name in ("sessions", "chats", "turns", "shares")
+        },
+    )
+    member_reports = [
+        _settlement_report(
+            member,
+            _service_snapshot(
+                snapshot,
+                WorkspaceScope.from_values(member["scope"]).service_unit_id,
+            ),
+            database,
+            stores[
+                WorkspaceScope.from_values(member["scope"]).service_unit_id
+            ],
+        )
+        for member in documents
+    ]
+    report.update(member_reports[0])
+    report["needs_settlement"] = [
+        row for member in member_reports for row in member["needs_settlement"]
+    ]
+    report["restore_ready"] = not report["needs_settlement"]
+    if len(stores) > 1:
+        report.pop("service_unit_id", None)
+        report["service_unit_ids"] = sorted(stores)
+        report.pop("target_nas_root", None)
+        report["target_nas_roots"] = {
+            service: str(Path(store.root).resolve())
+            for service, store in stores.items()
+        }
+    if len(documents) > 1:
+        for key in ("backup_id", "snapshot_ref", "scope"):
+            report.pop(key)
+        report.update(
+            backup_ids=[member["backup_id"] for member in documents],
+            snapshot_refs=[member["snapshot_ref"] for member in documents],
+            scopes=[
+                [value.decode() for value in member["scope"]]
+                for member in documents
+            ],
+        )
+    return report
+
+
+async def _verify_restored_metadata(database, snapshot, stores):
     actual = {}
     for name, table in TABLES.items():
         key = "token" if name == "shares" else "id"
@@ -1188,33 +1390,8 @@ async def restore_backup(database, bundles, backup_path, *, evidence):
                 + " fields: "
                 + ",".join(fields),
             )
-    validate_backup(actual, bundles)
-    for member in documents:
-        await _verify_restored_readers(database, bundles, member)
-    report.update(
-        passed=True,
-        backup_id=document["backup_id"],
-        state="restored",
-        complete_metadata_and_readers=True,
-        snapshot_ref=document["snapshot_ref"],
-        reader_counts={
-            name: len(snapshot[name])
-            for name in ("sessions", "chats", "turns", "shares")
-        },
-    )
-    report.update(_settlement_report(document, snapshot, database, bundles))
-    if len(documents) > 1:
-        for key in ("backup_id", "snapshot_ref", "scope"):
-            report.pop(key)
-        report.update(
-            backup_ids=[member["backup_id"] for member in documents],
-            snapshot_refs=[member["snapshot_ref"] for member in documents],
-            scopes=[
-                [value.decode() for value in member["scope"]]
-                for member in documents
-            ],
-        )
-    return report
+    for service, store in stores.items():
+        validate_backup(_service_snapshot(actual, service), store)
 
 
 async def _verify_restored_readers(database, bundles, document):
@@ -1224,7 +1401,7 @@ async def _verify_restored_readers(database, bundles, document):
     from .history import HistoryStore
     from .archive_reader import ArchiveReader
 
-    scope = WorkspaceScope(*(value.decode() for value in document["scope"]))
+    scope = WorkspaceScope.from_values(document["scope"])
     snapshot = document["snapshot"]
     sessions = {row["id"]: row for row in snapshot["sessions"]}
     for row in document["snapshot"]["sessions"]:
@@ -1311,6 +1488,10 @@ async def _verify_restored_readers(database, bundles, document):
         )
         if actual != expected:
             raise IntegrityError("restored complete Turn reader differs")
-    storage = ShareStorage(database, bundles)
+    storage = ShareStorage(
+        database,
+        bundles,
+        service_unit_id=scope.service_unit_id,
+    )
     for row in document["snapshot"]["shares"]:
         await storage.verify_snapshot(row["token"])
