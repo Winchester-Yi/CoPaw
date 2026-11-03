@@ -24,7 +24,7 @@ import pytest
 
 from swe.config.context import encode_scope_id, tenant_context
 from swe.config.config import Config
-from swe.config.utils import save_config
+from swe.config.utils import load_config, save_config
 from swe.envs.store import save_envs
 from swe.agents.tool_failure import ToolExecutionError
 from swe.agents.tools.shell import (
@@ -114,15 +114,13 @@ def _write_process_limit_config(
         process_limits["shell_acquire_timeout_seconds"] = (
             shell_acquire_timeout_seconds
         )
-    tenant_dir = base_dir / tenant_id
-    tenant_dir.mkdir(parents=True, exist_ok=True)
     save_config(
         Config.model_validate(
             {
                 "security": {"process_limits": process_limits},
             },
         ),
-        tenant_dir / "config.json",
+        base_dir / "config.json",
     )
 
 
@@ -1135,6 +1133,16 @@ class TestResolveCwd:
 class TestExecuteShellCommand:
     """Integration tests for execute_shell_command with tenant boundary."""
 
+    @pytest.fixture(autouse=True)
+    def _inject_test_process_limits(self, mock_working_dir, monkeypatch):
+        # Exercise alternate limit scenarios without changing production defaults.
+        monkeypatch.setattr(
+            "swe.security.process_limits.ProcessLimitsConfig",
+            lambda: load_config(
+                mock_working_dir / "config.json",
+            ).security.process_limits,
+        )
+
     def test_prepare_shell_command_reuses_shell_boundary_context(
         self,
         mock_working_dir: Path,
@@ -1484,11 +1492,11 @@ class TestExecuteShellCommand:
         assert captured["preexec_fn"] is None
 
     @pytest.mark.asyncio
-    async def test_shell_process_limit_lookup_is_tenant_scoped(
+    async def test_shell_process_limit_lookup_is_global(
         self,
         mock_working_dir: Path,
     ):
-        """Shell launch injects the current tenant's process-limit preexec_fn."""
+        """Shell launch uses the same process-limit policy for both tenants."""
         from swe.agents.tools.shell import execute_shell_command
 
         _write_process_limit_config(
@@ -1498,14 +1506,6 @@ class TestExecuteShellCommand:
             shell=True,
             cpu_time_limit_seconds=2,
         )
-        _write_process_limit_config(
-            mock_working_dir,
-            "tenant-b",
-            enabled=True,
-            shell=False,
-            cpu_time_limit_seconds=2,
-        )
-
         captured = {}
 
         class _FakeProcess:
@@ -1529,7 +1529,7 @@ class TestExecuteShellCommand:
             with tenant_context(tenant_id="tenant-b"):
                 await execute_shell_command("echo tenant")
 
-        assert captured["preexec_fn"] is None
+        assert captured["preexec_fn"] is not None
 
     @pytest.mark.asyncio
     async def test_shell_macos_policy_skips_memory_rlimit_in_preexec(

@@ -6,7 +6,20 @@ import {
   fetchDistributeTargets,
 } from "./distributeTargets";
 
-vi.mock("../../api/request", () => ({ request: vi.fn() }));
+vi.mock("../../api/request", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api/request")>();
+  return { ...actual, request: vi.fn(actual.request) };
+});
+vi.mock("../../api/config", () => ({
+  getApiUrl: (path: string) => `/api${path}`,
+  clearAuthToken: vi.fn(),
+}));
+vi.mock("../../api/authHeaders", () => ({
+  buildAuthHeaders: () => ({ "X-Source-Id": "RCZT" }),
+}));
+vi.mock("../../api/externalToken", () => ({
+  isExternalTokenEnabled: () => false,
+}));
 const mockRequest =
   vi.fn<(path: string, options?: RequestInit) => Promise<unknown>>();
 
@@ -14,9 +27,8 @@ beforeEach(() => {
   mockRequest.mockReset();
   vi.stubGlobal(
     "fetch",
-    vi.fn(
-      async (path: string, options?: RequestInit) =>
-        new Response(JSON.stringify(await mockRequest(path, options))),
+    vi.fn(async (path: string, options?: RequestInit) =>
+      Response.json(await mockRequest(path, options)),
     ),
   );
   vi.mocked(request).mockClear();
@@ -34,7 +46,7 @@ afterEach(() => {
 });
 
 describe("机构岗位人员分发目标", () => {
-  it("支行直连网关路径，读取 data 数组并使用默认同源 Cookie", async () => {
+  it("支行通过统一 request，读取 data 数组并附加统一鉴权", async () => {
     useIframeStore.getState().setContext({ sysId: "retail" });
     const branches = [
       { mOrgCode: "102", mOrgName: "某支行", mOrgLvl: 50, leaf: false },
@@ -46,13 +58,55 @@ describe("机构岗位人员分发目标", () => {
       success: true,
     });
     expect(await fetchDistributeBranches()).toEqual(branches);
-    expect(fetch).toHaveBeenCalledWith("/zt/wealth/wmadm/branchTreeInfo", {
+    expect(fetch).toHaveBeenCalledWith("/api/zt/wealth/wmadm/branchTreeInfo", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: expect.any(Headers),
       body: JSON.stringify({ mmOrgCode: "755", mmOrgLvl: 70, sysId: "retail" }),
       signal: expect.any(AbortSignal),
     });
-    expect(request).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalled();
+    expect(
+      new Headers(vi.mocked(fetch).mock.calls[0][1]?.headers).get(
+        "X-Source-Id",
+      ),
+    ).toBe("RCZT");
+  });
+
+  it.each([
+    undefined,
+    { mOrgCode: "102", mOrgName: "父支行", mOrgLvl: 50, leaf: false },
+  ])("各层支行过滤名称包含指定关键词的机构（%j）", async (parent) => {
+    useIframeStore.getState().setContext({ sysId: "retail" });
+    const names = [
+      "正常支行",
+      "停用支行",
+      "某支行（停用）",
+      "某私人银行中心",
+      "某分行信贷部",
+      "另一个正常支行",
+    ];
+    const branches = names.map((mOrgName, index) => ({
+      mOrgCode: String(index),
+      mOrgName,
+      mOrgLvl: 70,
+      leaf: true,
+    }));
+    mockRequest.mockResolvedValueOnce({ code: "200", data: branches });
+    expect(await fetchDistributeBranches(parent)).toEqual([
+      branches[0],
+      branches[5],
+    ]);
+  });
+
+  it("机构全部命中过滤关键词时返回空列表", async () => {
+    useIframeStore.getState().setContext({ sysId: "retail" });
+    mockRequest.mockResolvedValueOnce({
+      code: "200",
+      data: [
+        { mOrgCode: "102", mOrgName: "停用支行", mOrgLvl: 70, leaf: true },
+      ],
+    });
+    expect(await fetchDistributeBranches()).toEqual([]);
   });
 
   it("支行缺少上下文时不查询，子层上下文无效仍返回 null", async () => {
@@ -107,7 +161,8 @@ describe("机构岗位人员分发目标", () => {
           userID: "00080008",
           sapID: "00000000",
           userName: "邓XX",
-          branchID: "100",
+          branchID: "00100",
+          subBranchID: "001001",
           branchName: "XXX全行",
           subBranchName: null,
           postionId: "RB0101",
@@ -115,6 +170,8 @@ describe("机构岗位人员分发目标", () => {
         {
           sapID: "00000001",
           userName: "李XX",
+          branchID: "00200",
+          subBranchID: "002002",
           branchName: "XXX全行",
           subBranchName: "某支行",
           postionId: "RB1101",
@@ -122,15 +179,27 @@ describe("机构岗位人员分发目标", () => {
       ],
     });
     expect(await fetchDistributeTargets()).toEqual([
-      { sapId: "00000000", name: "邓XX", orgName: "XXX全行" },
-      { sapId: "00000001", name: "李XX", orgName: "某支行" },
+      {
+        sapId: "00000000",
+        name: "邓XX",
+        orgName: "XXX全行",
+        bbkId: "00100",
+        bbkOrgId: "001001",
+      },
+      {
+        sapId: "00000001",
+        name: "李XX",
+        orgName: "某支行",
+        bbkId: "00200",
+        bbkOrgId: "002002",
+      },
     ]);
-    expect(request).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalled();
     expect(mockRequest).toHaveBeenCalledWith(
-      "/zt/wealth/wmadm/getUserPostionByBrn",
+      "/api/zt/wealth/wmadm/getUserPostionByBrn",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: expect.any(Headers),
         signal: expect.any(AbortSignal),
         body: JSON.stringify({
           bbkOrgId: "755",

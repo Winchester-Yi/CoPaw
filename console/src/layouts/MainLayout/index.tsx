@@ -94,6 +94,7 @@ const pathToKey: Record<string, string> = {
   "/monitor/tasks": "monitor-task-center",
   "/monitor/cron-batch-dispatch": "monitor-cron-batch-dispatch",
   "/monitor/cron-batch-dispatch-new": "monitor-cron-batch-dispatch-new",
+  "/monitor/cron-task-tracking": "monitor-cron-task-tracking",
   "/instance/overview": "instance-overview",
   "/instance/instances": "instance-instances",
   "/instance/allocations": "instance-allocations",
@@ -132,7 +133,7 @@ export default function MainLayout() {
     (state) => state.loadEffectiveConfig,
   );
   const hideGlobalShell = hideMenu || showContentOnly;
-  const hideHeader = hideGlobalShell || activeSourceId === "ruice";
+  const hideHeader = hideGlobalShell || activeSourceId === "ruice" || activeSourceId === "pfmind";
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);

@@ -19,6 +19,8 @@ from .settlement import ExecutionSettlement
 from .run_accounting import occupied_run_sql
 from .async_batch_delete import AsyncBatchDelete
 from .daily_retry_service import DailyFailureRetry
+from .auto_retry import AutoBatchRetry
+from .pause_group import PauseGroupService
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,8 @@ class ManagedRecoveryWorker:
         self.auto_pause = AutoPauseController(db, platform, limit=limit)
         self.settlement = ExecutionSettlement(db, limit=limit)
         self.daily_retry = DailyFailureRetry(db, page_size=min(limit, 100))
+        self.auto_retry = AutoBatchRetry(db, limit=limit)
+        self.pause_groups = PauseGroupService(db, platform)
 
     async def tick(self):
         """执行一次恢复巡检，分开报告各类已有工作的处理数量。"""
@@ -58,8 +62,10 @@ class ManagedRecoveryWorker:
             await asyncio.gather(
                 self._isolated("auto_pause", self.auto_pause.tick),
                 self._isolated("settled", self.settlement.tick),
+                self._isolated("retried", self.auto_retry.tick),
                 self._isolated("broadcasts", self._broadcasts),
                 self._isolated("deletions", self._deletions),
+                self._isolated("pauses", self._pauses),
                 self._isolated("modes", self._modes),
                 self._isolated("cleanup", self._cleanup),
                 self._isolated("dispatched", self._dispatch),
@@ -111,6 +117,16 @@ class ManagedRecoveryWorker:
         )
         for row in rows:
             await self.modes.process(row["operation_id"])
+        return len(rows)
+
+    async def _pauses(self):
+        rows = await self.db.fetch_all(
+            f"SELECT operation_id FROM {JOURNAL} WHERE action='pause_group' AND status IN ('pending','running') "
+            "AND (lease_until IS NULL OR lease_until<=%s) ORDER BY created_at,operation_id LIMIT %s",
+            (utc_now().isoformat(" "), self.limit),
+        )
+        for row in rows:
+            await self.pause_groups.process(row["operation_id"])
         return len(rows)
 
     async def _cleanup(self):
@@ -184,8 +200,10 @@ class ManagedRecoveryWorker:
         lanes = (
             self.auto_pause.tick,
             self.settlement.tick,
+            self.auto_retry.tick,
             self._broadcasts,
             self._deletions,
+            self._pauses,
             self._modes,
             self._cleanup,
             self._dispatch,

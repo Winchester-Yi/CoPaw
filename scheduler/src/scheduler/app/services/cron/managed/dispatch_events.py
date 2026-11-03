@@ -24,6 +24,7 @@ EVENT_TYPES = frozenset(
         "retry_request",
         "retry_accepted",
         "retry_skipped",
+        "auto_retry_scheduled",
     },
 )
 STATUSES = frozenset(
@@ -64,11 +65,14 @@ DETAIL_FIELDS = frozenset(
         "business_attempt",
         "previous_execution_id",
         "reason",
+        "dispatch_lane",
     },
 )
 
 
 def failure_type(run):
+    if run.get("settled_error_code") == "cron_async_subtasks_timeout":
+        return "subtask_timeout"
     if run.get("settled_error_code") == "cron_async_subtasks_failed":
         return "subtask_failed"
     try:
@@ -102,6 +106,8 @@ def _safe_detail(name, value):
             if isinstance(value, str) and value in FAILURE_TYPES
             else "other"
         )
+    if name == "dispatch_lane":
+        return value if value in {"normal", "urgent"} else "unknown"
     if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
         return value
     return "cron_detail_redacted"
@@ -128,6 +134,7 @@ def event_values(run, kind, details=None):
             "definition_version",
             "settled_status",
             "settled_error_code",
+            "dispatch_lane",
         )
     }
     selected.update(

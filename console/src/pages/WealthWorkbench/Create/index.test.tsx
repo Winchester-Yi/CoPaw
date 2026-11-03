@@ -57,6 +57,26 @@ describe("StepIndicator", () => {
 });
 
 describe("ScheduleEditor", () => {
+  it.each(["daily", "weekly"] as const)(
+    "%s 名单推送未设置时间时显示08:00",
+    (type) => {
+      const item: PlanItem = {
+        id: "default-time",
+        sceneName: "默认时间场景",
+        categoryLabel: "理财",
+        categoryCode: "finance",
+        mcpRelations: [],
+        direction: "方向",
+        cycle: "本月",
+        schedule: { type },
+      };
+      render(<ScheduleEditor item={item} sceneName={item.sceneName} />);
+      expect(
+        screen.getByRole("button", { name: "默认时间场景名单推送时间" }),
+      ).toHaveTextContent("08:00");
+    },
+  );
+
   it.each([
     ["daily", "0 9 * * *"],
     ["weekly", "0 9 * * mon"],
@@ -78,7 +98,7 @@ describe("ScheduleEditor", () => {
     );
     const repeatRule = screen.getByLabelText("紧凑排程场景自定义重复规则");
     const time = screen.getByRole("button", {
-      name: "紧凑排程场景自定义执行时刻",
+      name: "紧凑排程场景自定义名单推送时间",
     });
     expect(repeatRule).toHaveValue(mode);
     expect(repeatRule.closest(`.${styles.customScheduleRow}`)).toContainElement(
@@ -260,29 +280,18 @@ describe("Create", () => {
     );
     const header = screen.getByText("经营场景 / 经营方向").parentElement!;
     expect(Array.from(header.children).map((node) => node.textContent)).toEqual(
-      [
-        "经营场景 / 经营方向",
-        "执行周期",
-        "督办策略",
-        "推送客户数（选填）",
-        "操作",
-      ],
+      ["经营场景 / 经营方向", "执行周期", "推送客户数（选填）", "操作"],
     );
     expect(
       screen.queryByText("经营方向", { exact: true }),
     ).not.toBeInTheDocument();
     const row = header.nextElementSibling!;
-    expect(row.children).toHaveLength(5);
+    expect(row.children).toHaveLength(4);
     expect(
       Array.from(row.children[1].children).map((node) =>
         node.getAttribute("data-label"),
       ),
     ).toEqual(["任务周期", "执行频率"]);
-    expect(
-      Array.from(row.children[2].children).map((node) =>
-        node.getAttribute("data-label"),
-      ),
-    ).toEqual(["监控周期", "监控时间", "预期完成率"]);
     expect(
       screen.queryByRole("button", { name: /^上移|^下移/ }),
     ).not.toBeInTheDocument();
@@ -318,7 +327,7 @@ describe("Create", () => {
       target: { value: "weekly" },
     });
     expect(useWealthStore.getState().draft.items[0].schedule.rawCron).toBe(
-      "0 9 * * mon",
+      "0 8 * * mon",
     );
     fireEvent.change(input, { target: { value: "500" } });
     expect(useWealthStore.getState().draft.items[0].custNum).toBe(500);

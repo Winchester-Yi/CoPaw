@@ -21,7 +21,8 @@ from ...config.context import (
 )
 from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ...tracing.models import TraceStatus
-from ...tracing.agent_trace_sdk import global_tracer
+from ...tracing.agent_trace_capture import mark_turn_cancelled
+from ...tracing.agent_trace_sdk import OperationName, start_child_span
 from ..agent_context import set_current_agent_id
 from .query_contracts import (
     QueryPersistenceResult,
@@ -510,8 +511,9 @@ async def _stream_retry_attempt(
     ):
         yield item
     try:
-        async with global_tracer.start_as_current_span(
+        async with start_child_span(
             "agent.attempt",
+            operation_name=OperationName.INVOKE_AGENT,
         ) as span:
             span.set_attribute("retry.index", retry_attempt)
             async for item in owner._stream_single_query_attempt(
@@ -522,6 +524,7 @@ async def _stream_retry_attempt(
             ):
                 yield item
     except asyncio.CancelledError as exc:
+        mark_turn_cancelled()
         settle_stopped_turn = getattr(owner, "_settle_stopped_turn", None)
         if callable(settle_stopped_turn):
             await settle_stopped_turn(

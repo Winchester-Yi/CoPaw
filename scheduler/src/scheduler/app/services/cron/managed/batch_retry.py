@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""只在显式人工请求中增加业务尝试，运输恢复仍复用原执行身份。"""
+"""批成员业务重试共用入队，运输恢复仍复用原执行身份。"""
 
 import json
 import logging
@@ -33,11 +33,14 @@ logger = logging.getLogger(__name__)
 class BatchRetryGrant:
     """授权只来自已锁定批成员，不制造目标用户的管理员身份。"""
 
-    def __init__(self, key):
+    def __init__(self, key, *, require_manager=True):
         self.key = key
+        self.require_manager = require_manager
 
     async def authorize(self, db, caller, job_id):
-        if not caller.is_manager or caller.job_key(job_id) != self.key:
+        if (self.require_manager and not caller.is_manager) or caller.job_key(
+            job_id,
+        ) != self.key:
             raise PermissionError("cron_batch_retry_forbidden")
         where = " AND ".join(
             f"d.{name}=%s AND d.{name} COLLATE utf8mb4_bin=%s"
@@ -163,6 +166,9 @@ class BatchRetryService:
             )
 
     async def _apply(self, tx, caller, batch_id, command, rows, digest):
+        from .retry_priority import lane_for_batch
+
+        retry_lane = await lane_for_batch(tx, batch_id)
         results = []
         audit = {
             "batch_id": batch_id,
@@ -192,7 +198,7 @@ class BatchRetryService:
                 new_run = await self._enqueue(
                     tx,
                     caller,
-                    row,
+                    {**row, "retry_dispatch_lane": retry_lane},
                     batch_id,
                     digest,
                 )
@@ -253,24 +259,42 @@ class BatchRetryService:
         return None
 
     @staticmethod
-    async def _enqueue(tx, caller, row, batch_id, digest):
+    async def _enqueue(
+        tx,
+        caller,
+        row,
+        batch_id,
+        digest,
+        *,
+        grant=None,
+        retry_at=None,
+    ):
         key = tuple(row[name] for name in IDENTITY_FIELDS)
         target = replace(
             caller,
             tenant_id=row["tenant_id"],
             agent_id=row["agent_id"],
         )
-        store = ExecutionStore(tx, grant=BatchRetryGrant(key))
+        store = ExecutionStore(tx, grant=grant or BatchRetryGrant(key))
         current = await store.grant.authorize(tx, target, row["job_id"])
         from .executions import _ready
 
+        original_meta = json.loads(row.get("dispatch_meta_json") or "{}")
         command = ExecutionRequest(
             "batch",
             request_hash([digest, row["member_id"]]),
             scheduled_at=_utc(row["scheduled_fire_at"]),
             expected_definition_version=row["current_definition_version"],
-            not_before_at=datetime.now(timezone.utc),
+            not_before_at=retry_at or datetime.now(timezone.utc),
             dispatch_meta={
+                **{
+                    name: original_meta[name]
+                    for name in ("batch_created_at", "batch_queue_order")
+                    if name in original_meta
+                },
+                "dispatch_lane": row.get("retry_dispatch_lane")
+                or row.get("dispatch_lane")
+                or "normal",
                 "batch_id": batch_id,
                 "batch_member_id": row["member_id"],
                 "business_attempt": row["business_attempt"] + 1,

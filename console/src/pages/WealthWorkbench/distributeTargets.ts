@@ -1,13 +1,14 @@
 /**
  * 智能财富工作台 —— 分发目标用户池
  *
- * 行长/中台发布规划前选择分发对象，通过同源 Nginx 查询机构岗位人员。
+ * 行长/中台发布规划前选择分发对象，通过统一 request 查询机构岗位人员。
  * 机构参数取自 iframeStore 中由 cookie 初始化的 bbk/orgCode/orgLvl。
  *
  * 机构参数缺失或接口查询失败时返回空列表，
  * 由页面展示无数据态，不做假数据兜底。
  */
-import { useIframeStore } from "../../stores/iframeStore";
+import { getWorkbenchContext } from "./operations";
+import { request } from "../../api/request";
 import type { DistributeTarget } from "./types";
 
 export interface DistributeBranch {
@@ -19,6 +20,7 @@ export interface DistributeBranch {
 
 const USER_POSITION_PATH = "/zt/wealth/wmadm/getUserPostionByBrn";
 const BRANCH_TREE_PATH = "/zt/wealth/wmadm/branchTreeInfo";
+const EXCLUDED_BRANCH_NAME_KEYWORDS = ["停用", "私人银行", "信贷部"];
 
 interface DistributionResponse<T> {
   code: string;
@@ -26,7 +28,7 @@ interface DistributionResponse<T> {
   data: T[];
 }
 
-/** 网关凭证由 Nginx 附加，浏览器沿用默认同源 Cookie。 */
+/** 复用统一鉴权和 URL 规则，保留分发查询的 60 秒超时。 */
 async function fetchDistributionData<T>(
   path: string,
   body: Record<string, string | number>,
@@ -34,16 +36,11 @@ async function fetchDistributionData<T>(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
-    const response = await fetch(path, {
+    const result = await request<DistributionResponse<T>>(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!response.ok) {
-      throw new Error(`分发查询失败：HTTP ${response.status}`);
-    }
-    const result = (await response.json()) as DistributionResponse<T>;
     if (result.code !== "200") {
       throw new Error(result.message || "分发查询失败");
     }
@@ -60,18 +57,27 @@ async function fetchDistributionData<T>(
 export async function fetchDistributeBranches(
   branch?: DistributeBranch,
 ): Promise<DistributeBranch[] | null> {
-  const { bbk, sysId, orgLvl } = useIframeStore.getState();
+  const { bbk, sysId, orgLvl } = getWorkbenchContext();
   const mOrgCode = branch?.mOrgCode ?? bbk;
   const level = branch ? String(branch.mOrgLvl) : orgLvl;
   if (!mOrgCode || !sysId || !level?.trim()) return branch ? null : [];
   const mOrgLvl = Number(level);
   if (!Number.isInteger(mOrgLvl) || mOrgLvl < 0) return branch ? null : [];
   try {
-    return await fetchDistributionData<DistributeBranch>(BRANCH_TREE_PATH, {
-      mmOrgCode: mOrgCode,
-      mmOrgLvl: mOrgLvl,
-      sysId,
-    });
+    const branches = await fetchDistributionData<DistributeBranch>(
+      BRANCH_TREE_PATH,
+      {
+        mmOrgCode: mOrgCode,
+        mmOrgLvl: mOrgLvl,
+        sysId,
+      },
+    );
+    return branches.filter(
+      (item) =>
+        !EXCLUDED_BRANCH_NAME_KEYWORDS.some((keyword) =>
+          item.mOrgName.includes(keyword),
+        ),
+    );
   } catch (error) {
     console.warn("[Wealth] 分发支行查询失败", error);
     return null;
@@ -81,6 +87,8 @@ export async function fetchDistributeBranches(
 interface UserPosition {
   sapID: string;
   userName: string;
+  branchID?: string | null;
+  subBranchID?: string | null;
   branchName: string | null;
   subBranchName: string | null;
 }
@@ -92,7 +100,7 @@ interface UserPosition {
 export async function fetchDistributeTargets(
   branch?: DistributeBranch,
 ): Promise<DistributeTarget[]> {
-  const { bbk, orgCode, orgLvl } = useIframeStore.getState();
+  const { bbk, orgCode, orgLvl } = getWorkbenchContext();
   const mOrgCode = branch?.mOrgCode ?? orgCode;
   const level = branch ? String(branch.mOrgLvl) : orgLvl;
   if (!bbk || !mOrgCode || !level?.trim()) {
@@ -115,6 +123,8 @@ export async function fetchDistributeTargets(
         sapId: user.sapID,
         name: user.userName || user.sapID,
         orgName: user.subBranchName || user.branchName || "",
+        ...(user.branchID != null ? { bbkId: user.branchID } : {}),
+        ...(user.subBranchID != null ? { bbkOrgId: user.subBranchID } : {}),
       }));
   } catch (error) {
     console.warn("[Wealth] 分发目标用户池查询失败，按无数据处理", error);

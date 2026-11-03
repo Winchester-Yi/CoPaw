@@ -25,6 +25,12 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## 移除财富规划时提示 plan not found
+
+- 规划已被删除但看板仍保留旧数据时，删除请求可能返回 HTTP 404 与 `detail: "plan not found"`，或业务响应 `code: 404, message: "plan not found"`。
+- 前端 `console/src/pages/WealthWorkbench/api.ts` 的 `removePlan()` 仅按错误文案精确匹配 `plan not found`，不限制 HTTP 状态码或业务码，并翻译为「该规划已被删除，请刷新页面后重试」，看板显示「移除失败：该规划已被删除，请刷新页面后重试」。其他错误保留原文，不自动刷新或移除本地规划。
+- 回归入口：`console/src/pages/WealthWorkbench/api.http-errors.test.ts`；后端接口无需调整。
+
 ## SSE 客户端断连后订阅未释放
 
 - 症状：协商式 SSE 响应返回后，`TaskTracker._runs[chat_id].queues`
@@ -37,6 +43,14 @@
 - 回归入口：`tests/unit/routers/test_console_stream_replay.py` 的断连测试必须
   同时覆盖阻塞 body send 和锁竞争，并断言释放订阅后 producer 继续运行；
   `tests/unit/routers/test_sse_response.py` 覆盖 callback 抛错时关闭 source。
+
+## 聊天在 360 Chromium 108 中能滚动但不显示滚动条
+
+- **原因**：聊天 Layout 与 Runtime Chat 样式对 `::-webkit-scrollbar` 设置了 `display: none`。`Chat/index.module.less` 原先只给外层 `.chatMessagesArea` 设置滚动条，实际滚动的是内部 `.swe-bubble-list-scroll`。Chromium 108 不支持 `scrollbar-width`、`scrollbar-color`（Chrome 121 起支持），因此不能依赖现代浏览器的标准属性覆盖效果。兼容说明见 [Chrome 官方文档](https://developer.chrome.com/docs/css-ui/scrollbar-styling)。
+- **处理**：页面内使用 `.chatMessagesArea .swe-chat-anywhere-message-list .swe-bubble-list-scroll`，以高于 Runtime 隐藏规则的选择器优先级显式设置 `display: block`，并复用已有宽度、滑块颜色和悬停样式。不要只设置 `width`，也不要依赖动态样式注入顺序。
+- **侧栏同类问题**：“历史记录／我的任务”展开时共用 `.chat-sidebar-content-record-list`，收起后的弹出列表实际滚动容器为 `.expandable-panel-content`。WebKit 伪元素样式不会从外层继承；这两个实际容器必须同时具有 4px WebKit 样式与标准 `thin` 样式，不能只给 `.chat-sidebar-content`、`.expandable-panel` 设置。
+- **财富工作台复用**：聊天页面和工作台通过 `console/src/styles/scrollbar.less` 的 `.thin-scrollbar()` 复用浅灰圆角滚动条。工作台在 `.root` 及其后代应用，覆盖页面、表格、筛选列表和原生 dialog 内部的实际滚动容器；横向与纵向 WebKit 滚动条均为 4px。iframe 内部文档与挂载到工作台子树之外的第三方弹层需各自处理。
+- **验证**：在实际溢出的消息容器上检查 `getComputedStyle(element, '::-webkit-scrollbar').display` 和宽度，覆盖样式延迟注入、长消息滚动与键盘翻页。当前 Chrome 的标准属性禁用实验只能验证 WebKit 回退分支，不能替代真实 360 / Chromium 108 验收。
 
 ## 财富规划看板在旧内核浏览器点击刷新不发请求
 
@@ -859,3 +873,25 @@
 - 本进程请求已结束且 source、续约任务和 NAS worker 已收敛时，Runner 用原 operation 对账：durable prepared 复用完整提交校验；已提交 admission/语义边界从完整恢复根提交 interrupted；未发布准入用原 key 的 aborted tombstone 拒绝并清理 reserved 槽。
 - 预留行缺失时，仅当保留原 `PublicationRequest` 元数据或原准入参数，才参与同 key 的唯一键竞争。缺少原身份/CAS 基线、主库不可达、正文损坏或跨进程 owner 退出证据不足时保持 unavailable/busy，不猜 revision/epoch、不重跑模型或工具。
 - 排查入口：`conversation_storage/runner_integration.py:IndexedQuery`、`execution.py`、`publications.py:reconcile`；回归入口：`tests/integrated/conversation_storage/test_runner_integration_mysql.py`。恢复根必须保留未知顶层模块与 managed cron receipts。
+
+## 客户名单调整列顺序后，右侧固定列互相遮挡
+
+- **现象**：表头和数据顺序已调整，但横向滚动时“最近接触时间”遮住“经营方案”，或经营方案按钮与执行按钮重叠。
+- **原因**：Tasks 表格的右侧列使用 `position: sticky`，DOM 顺序变化后仍保留旧的 `right` 偏移。
+- **处理**：当前非已完成名单右侧依次为最近接触时间、经营方案、执行。执行列 `right: 0`；经营方案列 `right: var(--execution-width)`，固定宽度为 `--scheme-width: 120px`；最近接触时间列的偏移为两个操作列宽度之和。表头与单元格同步移动，已完成名单的触达方式列不随经营方案移动。
+- **验证**：检查今日任务经营/客户视角和待触达名单的表头、数据、按钮对应关系；在1920、1440、1280px下将表格横向滚动到两端，确认固定列边界不重叠，方案弹窗仍能打开。
+
+## 客户指标取消百分比列宽后，指标挤成单列
+
+- **原因**：`customerMetrics` 曾使用 `contain: inline-size`，阻止指标内容参与表格的自动列宽计算；单独把26%改为auto会让多指标和单指标使用相同的最小尺寸提示。
+- **处理**：客户指标列使用auto列宽，保留84px的最低可读宽度；取消区域的inline-size隔离，内部改为可换行Flex，指标块保持125px，区域上限395px。内容数量参与表格的固有尺寸计算，长文字仍在指标块内省略并通过Tooltip显示。
+- **验证**：检查空指标、1项、6项、超过6项、超长标签与数值；覆盖今日、待触达、已完成及1920/1440/1280宽度，确认展开收起可用、指标不超出单元格、经营方案与执行操作不重叠。
+
+
+## 财富工作台洞察 / 电访没有文件地址时，点击上报返回 422
+
+- **来源**：点击接口最初为 HTML 文件预览设计，历史版本要求 `file_url` 非空；工作台按钮没有关联文件。
+- **当前契约**：`HtmlPreviewClickEventCreate.file_url` 可省略，默认 `""`；数据库仍保存非 NULL 的空字符串，不需要表结构迁移。不接受 JSON null，不应使用空格或虚构页面地址绕过校验。名单快照仍要求真实的非空文件地址。
+- **统计边界**：无 `file_url` 且无 `list_key` 的点击保留在事件明细、按钮汇总和客户点击统计中；名单点击汇总和名单客户并集排除该类事件。已有 URL 或显式 `list_key` 的事件沿用原分组规则。
+- **前端**：工作台只上报洞察 `insight`、电访 `phone`，不传 `file_url`；客户 ID 使用 `custUid`，来源为 `WP_AGENT_WORKSPACE_TASK_LIST` / `WP`，运行时 API 补齐操作者与机构信息。
+- **回归入口**：`tests/unit/app/test_html_preview_clicks.py`、`console/src/pages/WealthWorkbench/Tasks/groupTables.test.tsx`、`console/src/api/modules/htmlPreviewEvents.test.ts`。先部署允许省略字段的后端，再部署工作台前端。
