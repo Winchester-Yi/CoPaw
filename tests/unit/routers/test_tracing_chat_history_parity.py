@@ -1,16 +1,27 @@
 # -*- coding: utf-8 -*-
 """Analytics reads the same durable history and archives as Chat."""
 
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from agentscope.message import Msg
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from mysql.connector.errors import Error as MySQLError
 
 from swe.agents.memory.conversation_archive import ConversationArchiveStore
+from swe.app.conversation_storage.bundle import BundleStore
+from swe.app.conversation_storage.errors import (
+    ConflictError,
+    StorageUnavailable,
+)
+from swe.app.conversation_storage.history import HistoryStore
+from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.runner import api
 from swe.app.routers import tracing
 from swe.app.runner.models import ChatArchivePage, ChatHistory, ChatSpec
@@ -44,7 +55,12 @@ async def history_client(tmp_path, monkeypatch):
     app.dependency_overrides[api.get_workspace] = lambda: workspace
     app.dependency_overrides[api.get_chat_manager] = lambda: manager
     app.dependency_overrides[api.get_session] = lambda: session
-    return TestClient(app), session, chat, workspace
+    return (
+        TestClient(app, raise_server_exceptions=False),
+        session,
+        chat,
+        workspace,
+    )
 
 
 @pytest.mark.asyncio
@@ -216,18 +232,23 @@ async def test_empty_archive_and_missing_target(history_client):
 
 
 @pytest.mark.asyncio
-async def test_indexed_tracing_uses_target_view_and_archive(history_client):
+async def test_indexed_tracing_uses_target_current_and_archive(history_client):
     client, _, chat, workspace = history_client
 
-    async def tracing_view(chat_id, *, authorize):
+    async def current(chat_id, *, authorize):
         assert chat_id == chat.id
         authorize(chat)
-        return ChatHistory(messages=[], status="running")
+        return ChatHistory(chat=chat, messages=[], status="running")
+
+    async def archive_page(chat_id, *, before, limit, authorize):
+        assert (chat_id, before, limit) == (chat.id, None, 2)
+        authorize(chat)
+        return ChatArchivePage()
 
     indexed = SimpleNamespace(
-        tracing_view=AsyncMock(side_effect=tracing_view),
-        current=AsyncMock(side_effect=AssertionError("operator history")),
-        archive_page=AsyncMock(return_value=ChatArchivePage()),
+        tracing_view=AsyncMock(side_effect=AssertionError("obsolete view")),
+        current=AsyncMock(side_effect=current),
+        archive_page=AsyncMock(side_effect=archive_page),
     )
     workspace.conversation_storage = SimpleNamespace(history=indexed)
     response = client.get(
@@ -236,30 +257,242 @@ async def test_indexed_tracing_uses_target_view_and_archive(history_client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "running"
-    indexed.tracing_view.assert_awaited_once()
-    indexed.current.assert_not_awaited()
+    assert response.json()["chat"]["id"] == chat.id
+    indexed.current.assert_awaited_once()
+    indexed.tracing_view.assert_not_awaited()
     response = client.get(
         f"/tracing/chats/{chat.id}/history",
         params={"user_id": "target", "limit": 2},
     )
     assert response.status_code == 200
-    indexed.archive_page.assert_awaited_once_with(
-        chat.id,
-        before=None,
-        limit=2,
-    )
+    indexed.archive_page.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_indexed_tracing_storage_failure_is_unavailable(history_client):
+@pytest.mark.parametrize("suffix", ["", "/history"])
+@pytest.mark.parametrize("field", ["id", "user_id", "source_id", "agent_id"])
+@pytest.mark.parametrize("phase", ["lookup", "reader"])
+async def test_indexed_target_checks_at_each_read(
+    history_client,
+    suffix,
+    field,
+    phase,
+):
     client, _, chat, workspace = history_client
-    workspace.conversation_storage = SimpleNamespace(
-        history=SimpleNamespace(
-            tracing_view=AsyncMock(side_effect=RuntimeError("unavailable")),
-        ),
+    changed = chat.model_copy(deep=True)
+    if field in ("id", "user_id"):
+        setattr(changed, field, "foreign")
+    else:
+        changed.meta[field] = "foreign"
+    if phase == "lookup":
+        workspace.chat_manager.get_chat.return_value = changed
+
+    async def read(*args, authorize, **kwargs):
+        authorize(changed if phase == "reader" else chat)
+        return ChatArchivePage() if suffix else ChatHistory(chat=chat)
+
+    indexed = SimpleNamespace(
+        current=AsyncMock(side_effect=read),
+        tracing_view=AsyncMock(side_effect=read),
+        archive_page=AsyncMock(side_effect=read),
     )
+    workspace.conversation_storage = SimpleNamespace(history=indexed)
+    response = client.get(
+        f"/tracing/chats/{chat.id}{suffix}",
+        params={"user_id": "target"},
+        headers={"X-Source-Id": "source", "X-Agent-Id": "agent"},
+    )
+    assert response.status_code == 404
+    if phase == "lookup":
+        indexed.current.assert_not_awaited()
+        indexed.archive_page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", "/history"])
+@pytest.mark.parametrize("phase", ["lookup", "reader"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        StorageUnavailable("NAS unavailable"),
+        ConflictError("revision changed"),
+        OSError("read failed"),
+        RuntimeError("unavailable"),
+        MySQLError("database unavailable"),
+    ],
+)
+async def test_indexed_tracing_storage_failure_is_unavailable(
+    history_client,
+    suffix,
+    phase,
+    error,
+):
+    client, _, chat, workspace = history_client
+    indexed = SimpleNamespace(
+        current=AsyncMock(side_effect=error),
+        tracing_view=AsyncMock(side_effect=error),
+        archive_page=AsyncMock(side_effect=error),
+    )
+    workspace.conversation_storage = SimpleNamespace(history=indexed)
+    if phase == "lookup":
+        workspace.chat_manager.get_chat.side_effect = error
+    response = client.get(
+        f"/tracing/chats/{chat.id}{suffix}",
+        params={"user_id": "target"},
+    )
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [None, "owner", "nas", "revision", "cancel"],
+)
+async def test_indexed_tracing_real_reader_keeps_current_history(
+    history_client,
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    client, _, chat, workspace = history_client
+    question = Msg(
+        "user",
+        "question + secret",
+        "user",
+        metadata={
+            "console_hidden_context_v1": {
+                "visible_text": "question",
+                "suffix": " + secret",
+            },
+        },
+    )
+    question.id = "question"
+    answer = Msg("assistant", "answer", "assistant")
+    answer.id = "answer"
+    rows = [
+        {
+            "layer": layer,
+            "source_msg_key": key.encode(),
+            "source_occurrence_no": i,
+            "task_run_key": None,
+        }
+        for i, (layer, key) in enumerate(
+            [
+                ("anchor", "question"),
+                ("memory", "answer"),
+                ("task", "task"),
+                ("error", "failure"),
+            ],
+        )
+    ]
+
+    class Database:
+        @asynccontextmanager
+        async def transaction(self):
+            yield self
+
+        async def fetch_one(self, sql, params):
+            return {"history_high": 4}
+
+        async def fetch_all(self, sql, params):
+            if sql.startswith("SELECT source_msg_key"):
+                return []
+            assert sql.startswith("SELECT m.*")
+            layers = params[3:]
+            return [r for r in rows if not layers or r["layer"] in layers]
+
+    store = HistoryStore(
+        Database(),
+        WorkspaceScope("tenant", "source", "agent", service_unit_id="test"),
+        BundleStore(tmp_path / "bundles"),
+        cursor_secret=b"test",
+    )
+    store._chat = AsyncMock(return_value={"id": 1, "session_id": 2})
+    store._pins = AsyncMock(return_value=[])
+    store._boundaries = AsyncMock(
+        return_value=[
+            {
+                "boundary_key": b"compacted",
+                "archive_display_count": 2,
+                "archive_first_source_msg_key": b"old-q",
+                "archive_last_source_msg_key": b"old-a",
+                "committed_at": datetime.now(timezone.utc),
+                "archive_first_timestamp": None,
+                "archive_last_timestamp": None,
+            },
+        ],
+    )
+    store._revalidate_rows = AsyncMock()
+    store._validate_chat_row = AsyncMock()
+    store._finish = AsyncMock()
+    store.chats._hydrate = AsyncMock(
+        return_value=[
+            (
+                chat.model_copy(update={"user_id": "foreign"})
+                if failure == "owner"
+                else chat
+            ),
+        ],
+    )
+    if failure == "revision":
+        store._revalidate_rows.side_effect = [None, ConflictError("changed")]
+    payloads = {
+        "anchor": question.to_dict(),
+        "memory": answer.to_dict(),
+        "task": {"id": "task", "role": "assistant", "content": "task"},
+        "error": {
+            "id": "failure",
+            "role": "assistant",
+            "code": "model_call_failed",
+            "message": "failed",
+            "content": [],
+        },
+    }
+
+    async def load(snapshot):
+        if failure == "nas":
+            raise OSError("NAS unavailable")
+        if failure == "cancel":
+            raise asyncio.CancelledError()
+        return [payloads[row["layer"]] for row in snapshot.rows]
+
+    monkeypatch.setattr(store, "_payloads", load)
+    monkeypatch.setattr(
+        api,
+        "_annotate_approval_action_statuses",
+        AsyncMock(side_effect=lambda messages: messages),
+    )
+    workspace.conversation_storage = SimpleNamespace(history=store)
+    if failure == "cancel":
+        request = Request({"type": "http", "headers": []})
+        with pytest.raises(asyncio.CancelledError):
+            await tracing.get_user_chat(request, chat.id, user_id="target")
+        store._finish.assert_awaited_once()
+        return
     response = client.get(
         f"/tracing/chats/{chat.id}",
         params={"user_id": "target"},
     )
-    assert response.status_code == 503
+    if failure:
+        assert response.status_code == (404 if failure == "owner" else 503)
+        store._finish.assert_awaited_once()
+        return
+    assert response.status_code == 200
+    body = response.json()
+    assert {
+        api._message_original_id(api.ChatMessage.model_validate(m))
+        for m in body["messages"]
+    } == {
+        "question",
+        "answer",
+        "task",
+        "failure",
+    }
+    assert body["chat"]["id"] == chat.id
+    assert body["archive"]["has_more"] is True
+    assert len(body["archive"]["boundaries"]) == 1
+    assert "secret" not in response.text
+    normal = client.get(f"/chats/{chat.id}")
+    assert normal.status_code == 200
+    assert normal.json() == body
+    assert store._finish.await_count == 2

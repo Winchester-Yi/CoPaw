@@ -59,7 +59,10 @@ vi.mock("@/components/agentscope-chat", () => ({
     ),
   },
 }));
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.resetAllMocks();
+});
 
 it("joins an archived tool call and retained result using the unchanged Chat converters", async () => {
   const result = {
@@ -76,6 +79,7 @@ it("joins an archived tool call and retained result using the unchanged Chat con
     created_at: "2026-10-30T00:00:00Z",
   };
   api.getUserChat.mockResolvedValue({
+    chat: { id: "chat", user_id: "target", name: "目标会话", meta: {} },
     messages: [result],
     archive: { has_more: true, boundaries: [boundary] },
   });
@@ -119,4 +123,42 @@ it("joins an archived tool call and retained result using the unchanged Chat con
       responses[0].data.output.map((message: { id: string }) => message.id),
     ).toEqual(["call", "conversation-compaction-boundary", "result"]);
   });
+});
+
+it("uses the target Chat name and metadata when converting task history", async () => {
+  api.getUserChat.mockResolvedValue({
+    chat: {
+      id: "chat",
+      user_id: "target",
+      name: "目标用户的日报任务",
+      meta: { session_kind: "task" },
+    },
+    status: "idle",
+    messages: [
+      {
+        id: "task-result",
+        role: "assistant",
+        type: "message",
+        content: [{ type: "text", text: "任务结果" }],
+        metadata: { cron_task: true },
+      },
+    ],
+    archive: { has_more: false, boundaries: [] },
+  });
+  render(
+    <ReadOnlySessionChat
+      selectedSessionId="s"
+      chatIdBySessionId={{ s: "chat" }}
+      targetUserId="target"
+    />,
+  );
+  await waitFor(() => {
+    const messages = JSON.parse(screen.getByTestId("messages").textContent!);
+    const card = messages[0].cards[0];
+    expect(card.code).toBe("TaskRunGroupCard");
+    expect(card.data.taskName).toBe("目标用户的日报任务");
+    expect(JSON.stringify(card.data.finalMessages)).toContain("任务结果");
+  });
+  expect(api.getUserChat).toHaveBeenCalledWith("target", "chat");
+  expect(api.getUserChatHistory).not.toHaveBeenCalled();
 });

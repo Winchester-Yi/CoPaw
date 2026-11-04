@@ -895,3 +895,11 @@
 - **统计边界**：无 `file_url` 且无 `list_key` 的点击保留在事件明细、按钮汇总和客户点击统计中；名单点击汇总和名单客户并集排除该类事件。已有 URL 或显式 `list_key` 的事件沿用原分组规则。
 - **前端**：工作台只上报洞察 `insight`、电访 `phone`，不传 `file_url`；客户 ID 使用 `custUid`，来源为 `WP_AGENT_WORKSPACE_TASK_LIST` / `WP`，运行时 API 补齐操作者与机构信息。
 - **回归入口**：`tests/unit/app/test_html_preview_clicks.py`、`console/src/pages/WealthWorkbench/Tasks/groupTables.test.tsx`、`console/src/api/modules/htmlPreviewEvents.test.ts`。先部署允许省略字段的后端，再部署工作台前端。
+
+
+## MySQL/NAS 会话有归档，但运营看板没有加载入口
+
+- **原因**：旧 Tracing SQL 路由调用 `HistoryStore.tracing_view`，只取 memory/task，缺少 error/anchor、Chat metadata 和归档 boundary，导致详情 `archive.has_more=false`。
+- **处理**：SQL 详情改为目标 workspace 的 `current`，归档显式调用 `archive_page`；两者共享 chat/user/source/agent 对象校验回调。首次 metadata hydrate 也经过存储错误包装，故障明确返回 503，不回退文件历史。
+- **排查入口**：`src/swe/app/routers/tracing.py`，先检查详情的 `chat`、`archive.has_more/boundaries`，再检查 history 请求及其 cursor；页级 `has_more` 与详情归档可用性含义不同。
+- **回归入口**：`tests/unit/routers/test_tracing_chat_history_parity.py`、`tests/integrated/conversation_storage/test_api_mysql.py` 和 `ReadOnlySessionChat.archive.test.tsx`。本地替身测试不能替代真实 SQL/NAS 验收，见[修复报告](../../docs/superpowers/reports/2026-11-04-tracing-history-parity-fix.md)。

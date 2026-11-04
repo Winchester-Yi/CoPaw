@@ -124,22 +124,40 @@ async def get_user_chats(
 async def _target_chat(request: Request, user_id: str, chat_id: str):
     """Resolve a target chat; operator access follows the existing gateway policy."""
     workspace = await _get_target_workspace(request, user_id)
-    chat = await workspace.chat_manager.get_chat(chat_id)
-    if not chat or chat.user_id != user_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Chat not found: {chat_id}",
-        )
     expected = {
         "source_id": _request_source_id(request),
         "agent_id": request.headers.get("X-Agent-Id")
         or getattr(workspace, "agent_id", None),
     }
-    for key, value in expected.items():
-        stored = (chat.meta or {}).get(key)
-        if value and isinstance(stored, str) and stored and stored != value:
+
+    def authorize(chat: ChatSpec):
+        if chat.id != chat_id or chat.user_id != user_id:
             raise HTTPException(status_code=404, detail="Chat not found")
-    return workspace, chat
+        for key, value in expected.items():
+            stored = (chat.meta or {}).get(key)
+            if (
+                value
+                and isinstance(stored, str)
+                and stored
+                and stored != value
+            ):
+                raise HTTPException(status_code=404, detail="Chat not found")
+
+    storage = getattr(workspace, "conversation_storage", None)
+    if getattr(storage, "history", None) is not None:
+        chat = await _indexed_history_call(
+            workspace.chat_manager.get_chat,
+            chat_id,
+        )
+    else:
+        chat = await workspace.chat_manager.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    authorize(chat)
+    return workspace, chat, authorize
 
 
 @router.get("/tracing/chats/{chat_id}", response_model=ChatHistory)
@@ -149,17 +167,12 @@ async def get_user_chat(
     user_id: str = Query(..., description="目标用户 ID"),
 ) -> ChatHistory:
     """Read target-user history using the same durable assembly as Chat."""
-    workspace, chat = await _target_chat(request, user_id, chat_id)
+    workspace, chat, authorize = await _target_chat(request, user_id, chat_id)
     storage = getattr(workspace, "conversation_storage", None)
     indexed = getattr(storage, "history", None)
     if indexed is not None:
-
-        def authorize(chat):
-            if chat.user_id != user_id:
-                raise HTTPException(status_code=404, detail="Chat not found")
-
         return await _indexed_history_call(
-            indexed.tracing_view,
+            indexed.current,
             chat_id,
             authorize=authorize,
         )
@@ -181,8 +194,18 @@ async def get_user_chat_history(
     limit: int = Query(50, ge=1, le=50),
 ) -> ChatArchivePage:
     """Page through the target user's compacted history without impersonation."""
-    workspace, chat = await _target_chat(request, user_id, chat_id)
+    workspace, chat, authorize = await _target_chat(request, user_id, chat_id)
+    storage = getattr(workspace, "conversation_storage", None)
+    indexed = getattr(storage, "history", None)
     try:
+        if indexed is not None:
+            return await _indexed_history_call(
+                indexed.archive_page,
+                chat.id,
+                before=before,
+                limit=limit,
+                authorize=authorize,
+            )
         return await _archive_page(workspace, chat.id, before, limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

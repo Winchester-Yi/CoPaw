@@ -714,6 +714,17 @@ async def test_http_tracing_target_scope_permissions_and_approval_overlay(
             ("anchor", source("anchor", "user"), 4),
         ],
     )
+    await add_messages(
+        stack.db,
+        stack.storage.history,
+        session,
+        a,
+        [
+            ("archive", source("old-question", "user"), 1),
+            ("archive", source("old-answer"), 2),
+        ],
+        boundary=True,
+    )
     resolutions = []
 
     class TargetManager:
@@ -757,21 +768,51 @@ async def test_http_tracing_target_scope_permissions_and_approval_overlay(
             params={"user_id": "alice"},
             headers={"X-Agent-Id": "agent", "X-Test-User": "operator"},
         )
+        archived = await stack.client.get(
+            "/tracing/chats/chat-a/history",
+            params={"user_id": "alice", "limit": 1},
+            headers={"X-Agent-Id": "agent", "X-Test-User": "operator"},
+        )
     assert listed.status_code == 200
     assert {item["id"] for item in listed.json()} == {"chat-a", "chat-b"}
     assert all(item["user_id"] == "alice" for item in listed.json())
     assert result.status_code == 200
-    assert message_ids(result.json()) == ["approval", "task"]
-    assert (
-        result.json()["chat"] is None
-        and not result.json()["archive"]["has_more"]
+    assert message_ids(result.json()) == [
+        "approval",
+        "task",
+        "error",
+        "anchor",
+    ]
+    assert result.json()["chat"]["user_id"] == "alice"
+    assert result.json()["archive"]["has_more"] is True
+    assert len(result.json()["archive"]["boundaries"]) == 1
+    assert archived.status_code == 200
+    assert message_ids(archived.json()) == ["old-answer"]
+    assert archived.json()["has_more"] is True
+    earlier = await stack.client.get(
+        "/tracing/chats/chat-a/history",
+        params={
+            "user_id": "alice",
+            "limit": 1,
+            "before": archived.json()["next_cursor"],
+        },
+        headers={"X-Agent-Id": "agent", "X-Test-User": "operator"},
     )
+    assert earlier.status_code == 200
+    assert message_ids(earlier.json()) == ["old-question"]
+    assert earlier.json()["has_more"] is False
+    normal = await stack.client.get(
+        "/chats/chat-a",
+        headers={"X-Agent-Id": "agent"},
+    )
+    assert normal.status_code == 200
+    assert normal.json() == result.json()
     action = result.json()["messages"][0]["metadata"]["metadata"][
         "approval_action"
     ]
     assert action["status"] == "approved"
-    assert overlays == [("tenant", "source", "alice", ["req"])]
-    assert resolutions == [("agent", "tenant")] * 2
+    assert overlays == [("tenant", "source", "alice", ["req"])] * 2
+    assert resolutions == [("agent", "tenant")] * 4
     denied = await stack.client.get(
         "/tracing/chats/chat-a",
         params={"user_id": "bob"},
