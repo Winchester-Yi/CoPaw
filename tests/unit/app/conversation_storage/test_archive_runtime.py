@@ -369,7 +369,7 @@ async def test_memory_mutation_waits_for_request_publication_lock(
     store.reset = AsyncMock(return_value=committed)
     store.write_active_checkpoint = AsyncMock(return_value=committed)
     record = CheckpointRecord.new(chat_id="chat", epoch=1)
-    store.read_checkpoint_state = AsyncMock(
+    store.read_checkpoint_projection = AsyncMock(
         return_value=SimpleNamespace(record=record, events=[]),
     )
     operations = {

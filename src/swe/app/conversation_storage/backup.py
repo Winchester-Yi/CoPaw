@@ -1557,7 +1557,12 @@ async def _verify_restored_readers(database, bundles, document):
             if not page.next_cursor:
                 break
             cursor = page.next_cursor
-        await ArchiveReader(database, scope, bundles).checkpoint(key)
+        async for _page in ArchiveReader(
+            database,
+            scope,
+            bundles,
+        ).iter_checkpoint_pages(key):
+            pass
     live_chats = {
         row["id"] for row in snapshot["chats"] if row["deleted_at"] is None
     }

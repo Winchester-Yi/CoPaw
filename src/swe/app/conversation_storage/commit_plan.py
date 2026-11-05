@@ -98,7 +98,10 @@ class CommitPlan:
                     "pruning requires a complete root and bounded occurrence IDs",
                 )
             value["prune_ids"] = self.prune_ids
-        return json.dumps(value, separators=(",", ":"))
+        text = json.dumps(value, separators=(",", ":"))
+        if len(text.encode("utf-8")) > MAX_PLAN_BYTES:
+            raise ValueError("publication commit plan exceeds byte limit")
+        return text
 
     def _validate_result_ids(self):
         if len(self.result_ids) > 4096 or any(

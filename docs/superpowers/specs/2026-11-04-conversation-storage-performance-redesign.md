@@ -244,7 +244,7 @@ GC report批量查询一批候选的引用关系，仅作为预筛；mark/reclai
 
 待测量决定：SQL批大小、缓存/队列字节、NAS worker数、连接控制预留、文本合批值、read/full预算，以及是否值得改变guard锁协议。默认值最终要由基线与故障测量支撑；代码中的已有默认值不是用户确认的生产SLO。
 
-初稿仅作设计；后续已实施 context-usage、summary、Console 任务来源解耦和轻量运行状态查询四个工作包，验证记录见各自计划。剩余实施必须对照本表逐包评审，避免重新回到逐个旧方法叠加limit/cache。
+初稿仅作设计；后续已实施 context-usage、summary、Console 任务来源解耦、轻量运行状态查询，以及 checkpoint 读取契约/持久化 plan 容量工作包，验证记录见各自计划。剩余实施必须对照本表逐包评审，避免重新回到逐个旧方法叠加limit/cache。
 
 ## 9. 关联资料与历史结论修订
 
@@ -257,3 +257,5 @@ GC report批量查询一批候选的引用关系，仅作为预筛；mark/reclai
 - [发布边界ADR](../../adr/0039-conversation-publication-uses-mysql-commit.md)
 
 本轮明确取代先前“新增共享MySQL列表快照表”的实施方向；不删除旧报告，保留其分析历史。本轮也调整“完整checkpoint一次性pin全部引用”的默认实现方向为按页保护与完整遍历。任何缓存、锁协议调整和持久化省略均不得只凭本文宣称已实现或已验收。
+
+2026-11-05：checkpoint 四契约、逐页引用保护及通用持久化 plan 字节校验已实施，见[实现与验证](../reports/2026-11-05-checkpoint-read-contracts-implementation.md)。完整遍历和调用方已调整，但 effective projection plan/compact 全链路容量、其余阶段 2–5 优化与真实 MySQL/NAS 验收仍未完成。

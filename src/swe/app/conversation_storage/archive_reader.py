@@ -1,17 +1,12 @@
 # -*- coding: utf-8 -*-
 """Bounded indexed checkpoint and evidence reads with explicit reader pins."""
 
-from ...agents.memory.chat_checkpoint import (
-    CheckpointEvent,
-    CheckpointRecord,
-    validate_checkpoint_record,
-)
 from ...agents.memory.conversation_archive import (
-    CheckpointArchiveState,
     ConversationArchiveStore,
 )
 from .chat_mutations import load_metadata_json
-from .errors import ConflictError, IntegrityError
+from .checkpoint_reader import CheckpointReads
+from .errors import IntegrityError
 from .identity import chat_key_bytes
 from .retention import RetentionStore
 
@@ -46,7 +41,7 @@ def text(value):
     )
 
 
-class ArchiveReader:
+class ArchiveReader(CheckpointReads):
     def __init__(self, database, scope, bundles):
         self.db, self.scope, self.bundles = database, scope, bundles
         self.retentions = RetentionStore(database, scope)
@@ -69,114 +64,6 @@ class ArchiveReader:
             expected_length=publication["byte_length"],
         )
         return load_metadata_json(raw)
-
-    async def checkpoint(self, chat_id, limit=4096):
-        batch = None
-        async with self.db.transaction():
-            chat = await self.chat(chat_id)
-            epoch, high = chat["epoch"], chat["event_high"]
-            checkpoint = None
-            watermark = 0
-            if chat["active_checkpoint_publication_id"] is not None:
-                checkpoint = await self.db.fetch_one(
-                    "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s",
-                    (
-                        chat["active_checkpoint_publication_id"],
-                        self.scope.sql_values[0],
-                    ),
-                )
-                if checkpoint is None:
-                    raise IntegrityError(
-                        "active checkpoint publication is missing",
-                    )
-                watermark = checkpoint["checkpoint_event_watermark"]
-            publications = await self.db.fetch_all(
-                "SELECT * FROM swe_conversation_publications WHERE chat_id=%s AND epoch=%s AND state='committed' AND event_last>%s AND event_first<=%s ORDER BY event_first LIMIT 4096",
-                (chat["id"], epoch, watermark, min(high, watermark + limit)),
-            )
-            ids = [item["id"] for item in publications]
-            if checkpoint is not None:
-                ids.append(checkpoint["id"])
-            if ids:
-                batch = await self.retentions.pin(ids, kind="reader")
-        try:
-            record = CheckpointRecord.new(chat_id=chat_id, epoch=epoch)
-            if checkpoint is not None:
-                if (
-                    checkpoint["session_id"] != chat["session_id"]
-                    or checkpoint["chat_id"] != chat["id"]
-                    or checkpoint["epoch"] != epoch
-                ):
-                    raise IntegrityError(
-                        "checkpoint publication association mismatch",
-                    )
-                record = _decode(
-                    CheckpointRecord,
-                    await self.payload(batch, checkpoint, "checkpoint"),
-                )
-                if (
-                    record.chat_id != chat_id
-                    or record.epoch != epoch
-                    or record.revision != chat["checkpoint_revision"]
-                    or not validate_checkpoint_record(record).is_valid
-                ):
-                    raise IntegrityError(
-                        "indexed checkpoint body does not match current metadata",
-                    )
-            events = []
-            expected = watermark + 1
-            for publication in publications:
-                if (
-                    publication["session_id"] != chat["session_id"]
-                    or publication["event_first"] > expected
-                    or publication["event_last"] < expected
-                ):
-                    raise IntegrityError(
-                        "indexed checkpoint event range is discontinuous",
-                    )
-                values = await self.payload(batch, publication, "event")
-                if (
-                    not isinstance(values, list)
-                    or len(values)
-                    != publication["event_last"]
-                    - publication["event_first"]
-                    + 1
-                ):
-                    raise IntegrityError(
-                        "indexed checkpoint event body range differs",
-                    )
-                sequence = publication["event_first"]
-                for value in values:
-                    event = _decode(CheckpointEvent, value)
-                    if event.sequence != sequence or event.epoch != epoch:
-                        raise IntegrityError(
-                            "indexed checkpoint event sequence differs",
-                        )
-                    if watermark < event.sequence <= watermark + limit:
-                        events.append(event)
-                    sequence += 1
-                expected = publication["event_last"] + 1
-            if min(high, watermark + limit) >= expected:
-                raise IntegrityError("checkpoint event prefix is incomplete")
-            if not validate_checkpoint_record(record, events).is_valid:
-                raise IntegrityError("checkpoint event facts are invalid")
-            current = await self.chat(chat_id)
-            if (
-                current["id"],
-                current["session_id"],
-                current["epoch"],
-                current["checkpoint_revision"],
-            ) != (
-                chat["id"],
-                chat["session_id"],
-                epoch,
-                chat["checkpoint_revision"],
-            ):
-                raise ConflictError("checkpoint changed during read")
-            return CheckpointArchiveState(record, tuple(events), epoch)
-        finally:
-            if batch is not None:
-                await self.retentions.finish_reader(batch)
 
     async def evidence(
         self,

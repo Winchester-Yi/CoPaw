@@ -563,19 +563,21 @@ async def _verify_checkpoint(database, bundles, scope, chat_id, chat):
     if not chat["archive"]["epochs"]:
         return
     current = chat["archive"]["epochs"][0]
-    checkpoint = await read_only_adapter(
-        ArchiveReader(database, scope, bundles),
-    ).checkpoint(
-        chat_id,
-    )
-    events = [
+    reader = read_only_adapter(ArchiveReader(database, scope, bundles))
+    events = (
         event
         for event in current["events"]
         if event["epoch"] == current["epoch"]
         and event["sequence"] > current["record"]["applied_event_sequence"]
-    ]
-    if (
-        checkpoint.record.to_dict() != current["record"]
-        or [event.to_dict() for event in checkpoint.events] != events
-    ):
+    )
+    missing = object()
+    observed = False
+    async for page in reader.iter_checkpoint_pages(chat_id):
+        observed = True
+        if page.record.to_dict() != current["record"]:
+            raise ValueError("runtime checkpoint/event state differs")
+        for event in page.events:
+            if event.to_dict() != next(events, missing):
+                raise ValueError("runtime checkpoint/event state differs")
+    if not observed or next(events, missing) is not missing:
         raise ValueError("runtime checkpoint/event state differs")

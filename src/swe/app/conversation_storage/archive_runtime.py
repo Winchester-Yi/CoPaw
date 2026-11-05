@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """SQL-authoritative runtime archive façade over existing immutable NAS storage."""
 
+from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -126,12 +127,36 @@ class MySQLArchiveStore:
         return memory
 
     async def read_checkpoint_state(self, chat_id):
-        return await self.reader.checkpoint(chat_id)
+        return await self.reader.checkpoint_full(chat_id)
 
     async def read_checkpoint_prefix(self, chat_id, limit):
         if type(limit) is not int or not 0 < limit <= 4096:
             raise ValueError("checkpoint prefix must be bounded")
-        return await self.reader.checkpoint(chat_id, limit)
+        return await self.reader.checkpoint_prefix(chat_id, limit)
+
+    async def read_checkpoint_page(self, chat_id, *, cursor=None, limit=4096):
+        return await self.reader.checkpoint_page(
+            chat_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def iter_checkpoint_pages(self, chat_id, *, page_size=4096):
+        return self.reader.iter_checkpoint_pages(chat_id, page_size=page_size)
+
+    async def read_checkpoint_projection(self, chat_id):
+        tail = deque(maxlen=5)
+        state = None
+        async for page in self.iter_checkpoint_pages(chat_id):
+            tail.extend(page.events)
+            state = CheckpointArchiveState(
+                page.record,
+                (),
+                page.current_epoch,
+            )
+        if state is None:
+            raise IntegrityError("checkpoint traversal returned no record")
+        return replace(state, events=tuple(tail))
 
     async def read_checkpoint_head(self, chat_id):
         chat = await self.reader.chat(chat_id)
@@ -140,16 +165,13 @@ class MySQLArchiveStore:
             "epoch": chat["epoch"],
             "last_event_sequence": chat["event_high"],
             "checkpoint_revision": chat["checkpoint_revision"],
+            "active_checkpoint_publication_id": chat[
+                "active_checkpoint_publication_id"
+            ],
         }
 
-    async def read_checkpoint_record(self, chat_id, snapshot):
-        state = await self.read_checkpoint_state(chat_id)
-        if (
-            state.current_epoch != snapshot["epoch"]
-            or state.record.revision != snapshot["checkpoint_revision"]
-        ):
-            raise ConflictError("checkpoint snapshot changed")
-        return state.record
+    async def read_checkpoint_record(self, chat_id, snapshot=None):
+        return await self.reader.checkpoint_record(chat_id, snapshot)
 
     async def recover_evidence(self, *, chat_id, epoch, refs=(), **kwargs):
         return await self.reader.evidence(
@@ -337,7 +359,21 @@ class MySQLArchiveStore:
             raise ValueError("compact requires nonempty source occurrences")
         session, chat = await self._context(chat_id, recovery_state, authority)
         sources = await self._source_rows(session, messages)
-        active = await self.read_checkpoint_state(chat_id)
+        active = await self.read_checkpoint_prefix(chat_id, len(messages))
+        if (
+            active.snapshot.epoch,
+            active.snapshot.revision,
+            active.snapshot.active_publication_id,
+            active.snapshot.high,
+        ) != (
+            chat["epoch"],
+            chat["checkpoint_revision"],
+            chat["active_checkpoint_publication_id"],
+            chat["event_high"],
+        ):
+            raise ConflictError(
+                "checkpoint changed before compact preparation",
+            )
         record = replace(
             active.record,
             revision=active.record.revision + 1,

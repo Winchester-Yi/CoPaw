@@ -173,7 +173,7 @@ def attach_bound_memory(memory, store, chat_id):
                 authority=binding().authority,
             )
             binding().execution.accept_committed_state(result.recovery_state)
-        state = await store.read_checkpoint_state(chat_id)
+        state = await store.read_checkpoint_projection(chat_id)
         memory._compressed_summary = render_checkpoint_projection(
             state.record,
             state.events[-5:],
@@ -195,15 +195,15 @@ def attach_bound_memory(memory, store, chat_id):
         from dataclasses import replace
         from ...agents.memory.chat_checkpoint import EvidenceItem
 
-        state = await store.read_checkpoint_state(chat_id)
+        active = await store.read_checkpoint_record(chat_id)
         refs = tuple(f"message:{message.id}" for message in messages)
         record = replace(
-            state.record,
-            revision=state.record.revision + 1,
-            source_revision=state.record.revision,
+            active,
+            revision=active.revision + 1,
+            source_revision=active.revision,
             confidence="degraded",
             critical_context=(
-                *state.record.critical_context,
+                *active.critical_context,
                 EvidenceItem(
                     "Emergency compaction retained evidence references",
                     refs,

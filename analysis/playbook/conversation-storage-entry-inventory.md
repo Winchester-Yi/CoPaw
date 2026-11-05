@@ -104,3 +104,12 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 
 - 实际入口为 `cronRuntime.loadRuntimeStatuses` → `ChatTaskSourceStore.readRuntime`、`runtime_snapshot.RuntimeSnapshotCache` 与 Scheduler `runtime_query.runtime_statuses`。周期只收集 `visible_in_my_tasks` 和当前打开 Chat 的任务，未请求项保留原引用；切勿恢复为对 full items 全量取 ID，否则 legacy 非本人任务的 unavailable 会反复触发完整来源确认。
 - legacy 缓存不能固化创建者相关的隐式 manual 暂停；应在本次调用者视图中推导。前端长度校验与 Python 一样按 Unicode 字符数，不能用 UTF-16 `.length` 拒绝合法 emoji 摘要。
+
+### 2026-11-05 checkpoint 契约与 plan 可读性修复
+
+- 见[实现与验证](../../docs/superpowers/reports/2026-11-05-checkpoint-read-contracts-implementation.md)与[计划](../../docs/superpowers/plans/2026-11-05-checkpoint-read-contracts-plan.md)。固定 4096 窗口已移除：无 limit 的 checkpoint 为预算内完整读取，record-only 不查事件，prefix/page 显式 has_more/typed cursor，迁移和恢复必须正常穷尽 iterator。
+- 核心入口 `checkpoint_reader.CheckpointReads`；current snapshot 固定 epoch/revision/active/high，查询按 event_last,id 续页并多查一个 locator 防重叠。每页短事务选取并通过 ReaderPins pin，事务外 NAS，取消排空后释放；active 读完即释放，不跨完整遍历持有。
+- 摘要投影保留完整尾部校验，但只存 deque 最后 5 条；compact 用源消息数量的 prefix 并比较准备时 metadata；degraded 使用 record。若错误发生在页尾/耗尽阶段，不得捕获后当成功。
+- full 数组默认 65536 事件与 256 MiB extent 读取字节安全阈值，可显式调整，不是生产 SLO 或堆内存上限；流式完整遍历不受累计数组事件上限。
+- CommitPlan.serialize 已检查最终 UTF-8 JSON <=1 MiB；reserve 在事务/NAS 前调用。effective projection plan、compact 模型前后及 bundle 的容量闭环仍待下一包，不能将此通用 guard 当作已全部修复。
+- 自动化扩大回归 865 passed、16 skipped；新增真实 MySQL 规模/并发/GC 用例因专用库缺失未执行，尚不能验收真实数据库或 NAS。
