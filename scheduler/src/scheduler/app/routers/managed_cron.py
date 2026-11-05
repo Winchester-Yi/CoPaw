@@ -13,6 +13,11 @@ from ..services.cron.managed.contracts import (
 )
 from ..services.cron.managed.identity import CallerIdentity
 from ..services.cron.managed.repository import ManagedCronRepository
+from ..services.cron.managed.runtime_contracts import (
+    RuntimeStatusRequest,
+    RuntimeStatusResponse,
+)
+from ..services.cron.managed.runtime_query import runtime_statuses
 
 router = APIRouter(prefix="/scheduler/cron/jobs", tags=["managed-cron"])
 
@@ -96,6 +101,23 @@ async def list_managed_children(
     try:
         return await repo.page(caller, options, parent_id=job_id)
     except (ManagedCronNotFound, ManagedCronUnavailable, ValueError) as exc:
+        raise query_error(exc) from exc
+
+
+@router.post(
+    "/-/runtime-statuses",
+    response_model=RuntimeStatusResponse,
+    summary="批量查询新版定时任务运行状态",
+)
+async def get_managed_runtime_statuses(
+    body: RuntimeStatusRequest,
+    caller: CallerIdentity = Depends(caller_identity),
+    repo: ManagedCronRepository = Depends(get_managed_repository),
+):
+    """按当前列表权限只读查询 1..200 个 ID，不返回任务定义或修复状态。"""
+    try:
+        return await runtime_statuses(repo, caller, body)
+    except ManagedCronUnavailable as exc:
         raise query_error(exc) from exc
 
 

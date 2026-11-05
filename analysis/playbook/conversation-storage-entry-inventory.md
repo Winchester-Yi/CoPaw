@@ -84,3 +84,23 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - Console 的 `getSessionList/loadMoreSessions` 每次仍并行调用 `listTaskSources`，后者读取旧 Cron 完整清单并遍历新版调度器清单。旧 `/cron/jobs` 还逐项确认绑定、刷新 next_run_at；JSON repository 会加载整份任务文件。因此 summary API 零 NAS 不能等同于整个侧栏请求链零 NAS。优先将任务存在性查询与会话翻页解耦，复用当前身份的任务快照，任务变更/显式刷新时失效；失败保留未知状态，不能当成任务删除。
 - Tracing 为保持原多 Chat 映射语义，会遍历选中 Session 的全部摘要页后取最后一个 Chat。后续应提供可信 scope/user/Session 下的单对象 SQL 映射查询，按原排序的反向顺序取一条，保留相同更新时间的 external_chat_key 决胜规则，避免搬运全部摘要。文件模式继续保留兼容路径。
 - 这两项是后续设计建议，本提交没有实施。继续保持现有 schema/索引/格式；在专用库上确认实际查询计划、扫描行数及请求成本，再决定实现和批量参数，不能把 LIMIT 或查询次数断言当作延迟验收。
+
+### 2026-11-05 任务来源快照实现
+
+- 见[Console 会话分页与任务来源解耦设计](../../docs/superpowers/specs/2026-11-05-chat-task-source-snapshot-design.md)。用户确认外部任务变更可在返回聊天页或手动刷新时感知；本页操作后确认对应来源。本工作包已实施，详见[实现与验证报告](../../docs/superpowers/reports/2026-11-05-chat-task-source-snapshot-implementation.md)，真实浏览器和部署验收尚待完成。
+- 聊天页任务 hook、30 秒轮询与会话分页各有完整任务读取；legacy 的 get_job 签名快照不能消除 list_jobs 的整文件 load。方案让分页只调用 summary，任务生命周期维护一个当前身份的共享快照。
+- 必须分开“失败时保留展示”和“可断言不存在的完整任务集合”。部分页、失败、取消、动作后的旧响应均不能作为删除依据；还须防 A→B→A 和不同来源同 ID。
+- SessionApi 先过滤后保存会丢掉已加载记录；新设计保留原始缓存，只投影视图。mergeConcurrentSessions 的 currentOnly 还可能复活已隐藏任务，须在合并消息/本地状态后最终过滤。任务快照变化仅触发内存重算，不重查 summary 或正文。
+- 运行状态轮询的全量 L+S 成本仍在，后续需单独评估轻量批量状态协议，不能把去除翻页重复查询描述为整个侧栏零 NAS。
+
+- 排查实现从 `chatTaskSourceStore` 的 key/epoch/source revision、`useChatTaskSources` 的生命周期和 `SessionApi.getLoadedSessionView/projectSessionView` 开始。认证清除必须暂停激活，ready 后恢复；创建事件须废弃动作前在途来源请求。Sidebar 合并按身份索引，避免快照发布导致平方级扫描；共享 UI 保留隐藏会话的消息引用，unknown 恢复不重读 NAS。
+
+### 2026-11-05 运行状态查询实现
+
+- 见[聊天任务运行状态轻量查询设计](../../docs/superpowers/specs/2026-11-05-chat-task-runtime-query-design.md)，已实施，详见[实现与验证](../../docs/superpowers/reports/2026-11-05-chat-task-runtime-query-implementation.md)。新增双来源 `jobs/-/runtime-statuses`，原列表、详情、state 和动作接口保留。
+- Scheduler 热路径从 managed repository 的 `_SELECT`/`job_view` 排查：当前 `d.*` 和 `spec_json` 是传输/解析定义的来源；新查询应显式 JOIN 标量，沿用日期和排程推导，不能只凭 state_version 判断无变化。
+- Legacy 的未读、预览、暂停仍以 jobs.json 为准，即时执行状态仍在实例内 _states。新 API 不能循环调用 get_job_state 或把 SQL 镜像当完整权威；热读按已验证文件签名命中紧凑只读投影，文件变化仍整文件重读。
+- 缓存须防读旧内容后标记新签名、atomic replace 同大小同 mtime、可变模型污染和旧请求覆盖新版本；批量状态不生成完整 membership，异常只确认对应来源一次。
+
+- 实际入口为 `cronRuntime.loadRuntimeStatuses` → `ChatTaskSourceStore.readRuntime`、`runtime_snapshot.RuntimeSnapshotCache` 与 Scheduler `runtime_query.runtime_statuses`。周期只收集 `visible_in_my_tasks` 和当前打开 Chat 的任务，未请求项保留原引用；切勿恢复为对 full items 全量取 ID，否则 legacy 非本人任务的 unavailable 会反复触发完整来源确认。
+- legacy 缓存不能固化创建者相关的隐式 manual 暂停；应在本次调用者视图中推导。前端长度校验与 Python 一样按 Unicode 字符数，不能用 UTF-16 `.length` 拒绝合法 emoji 摘要。

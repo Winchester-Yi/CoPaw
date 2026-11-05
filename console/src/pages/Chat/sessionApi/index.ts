@@ -14,7 +14,7 @@ import api, {
   type ChatStatus,
   type Message,
 } from "../../../api";
-import { listTaskSources, taskPresence } from "@/api/modules/cronTaskSources";
+import { chatTaskSourceStore } from "@/stores/chatTaskSourceStore";
 import { currentCronContext, cronAccessKey } from "@/api/cronTaskContext";
 import type {
   ChatApprovalActionCardData,
@@ -1284,7 +1284,10 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     Promise<IAgentScopeRuntimeWebUISession>
   > = new Map();
 
+  private removedSessionIds = new Set<string>();
+
   resetForIdentityChange(): void {
+    this.removedSessionIds.clear();
     this.taskLookupScope = null;
     this.taskLookupGeneration += 1;
     this.sessionList = [];
@@ -1456,7 +1459,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
   patchSessionTitle(payload: unknown): IAgentScopeRuntimeWebUISession[] {
     const titlePatch = getSessionTitlePatchPayload(payload);
     if (!titlePatch) {
-      return [...this.sessionList];
+      return this.projectSessionView(this.sessionList);
     }
 
     this.sessionList = this.sessionList.map((session) => {
@@ -1484,7 +1487,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       } as ExtendedSession;
     });
 
-    return [...this.sessionList];
+    return this.projectSessionView(this.sessionList);
   }
 
   private getPendingSessions(): ExtendedSession[] {
@@ -1670,12 +1673,28 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
   private taskListCurrentSnapshot(): IAgentScopeRuntimeWebUISession[] {
     return this.taskLookupScope === cronAccessKey()
-      ? [...this.sessionList]
+      ? this.projectSessionView(this.sessionList)
       : [];
   }
 
+  projectSessionView<T extends IAgentScopeRuntimeWebUISession>(
+    sessions: T[],
+  ): T[] {
+    const remaining = sessions.filter(
+      (session) =>
+        ![session.id, (session as { realId?: string }).realId].some(
+          (id) => id && this.removedSessionIds.has(id),
+        ),
+    );
+    return filterStaleTaskSessions(remaining, chatTaskSourceStore.presence());
+  }
+
+  getLoadedSessionView(): IAgentScopeRuntimeWebUISession[] {
+    return this.taskListCurrentSnapshot();
+  }
+
   async getSessionList() {
-    const { context, accessKey, generation } = this.taskListScope();
+    const { accessKey, generation } = this.taskListScope();
     if (this.sessionListRequest) return this.sessionListRequest;
 
     this.sessionListRequest = (async () => {
@@ -1690,17 +1709,13 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
           }),
         );
 
-        const [chatPage, jobsResult] = await Promise.all([
-          api.listChatSummaries({
-            page_size: getSessionPageSize(),
-            cursor: null,
-          }),
-          listTaskSources(context),
-        ]);
+        const chatPage = await api.listChatSummaries({
+          page_size: getSessionPageSize(),
+          cursor: null,
+        });
         const chats = chatPage.items;
         if (!this.taskListScopeMatches(accessKey, generation))
           return this.taskListCurrentSnapshot();
-        const activeTaskJobIds = taskPresence(jobsResult);
         const newList = chats
           .filter((c) => c.id && c.id !== "undefined" && c.id !== "null")
           .map((chat) => {
@@ -1716,11 +1731,10 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
                 : { ...previous?.meta, ...summary.meta },
             };
           });
-        const filteredList = filterStaleTaskSessions(newList, activeTaskJobIds);
 
         const resolvedPendingSessionIds = new Set<string>();
         pendingSessions.forEach((pendingSession) => {
-          const matchedIndex = filteredList.findIndex(
+          const matchedIndex = newList.findIndex(
             (session) =>
               (session as ExtendedSession).sessionId ===
               pendingSession.sessionId,
@@ -1729,11 +1743,11 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
             return;
           }
 
-          const matchedBackendSession = filteredList[
+          const matchedBackendSession = newList[
             matchedIndex
           ] as ExtendedSession;
           const realId = matchedBackendSession.id;
-          filteredList[matchedIndex] = mergeResolvedSession(
+          newList[matchedIndex] = mergeResolvedSession(
             matchedBackendSession,
             pendingSession,
             pendingSession.id,
@@ -1764,14 +1778,12 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         }) as ExtendedSession[];
 
         previousResolvedSessions.forEach((localResolvedSession) => {
-          const matchedIndex = filteredList.findIndex(
+          const matchedIndex = newList.findIndex(
             (session) => session.id === localResolvedSession.realId,
           );
           if (matchedIndex > -1) {
-            const backendSession = filteredList[
-              matchedIndex
-            ] as ExtendedSession;
-            filteredList[matchedIndex] = {
+            const backendSession = newList[matchedIndex] as ExtendedSession;
+            newList[matchedIndex] = {
               ...backendSession,
               id: localResolvedSession.id,
               realId: localResolvedSession.realId,
@@ -1800,12 +1812,9 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         });
 
         const pageIdentityKeys = new Set(
-          filteredList.flatMap(getSessionIdentityKeys),
+          newList.flatMap(getSessionIdentityKeys),
         );
-        const preservedOlderSessions = filterStaleTaskSessions(
-          this.sessionList,
-          activeTaskJobIds,
-        ).filter(
+        const preservedOlderSessions = this.sessionList.filter(
           (session) =>
             !isPendingLocalSession(session) &&
             !getSessionIdentityKeys(session).some((key) =>
@@ -1815,7 +1824,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
         // 合并第一页、已加载旧页与本地待落库会话。
         this.sessionList = mergePendingSessions(
-          appendUniqueSessions(filteredList, preservedOlderSessions),
+          appendUniqueSessions(newList, preservedOlderSessions),
           pendingSessions.filter(
             (pendingSession) =>
               !resolvedPendingSessionIds.has(pendingSession.id),
@@ -1831,7 +1840,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         this.hasMoreSessionPages = chatPage.has_more;
         this.nextSessionCursor = chatPage.next_cursor;
 
-        return [...this.sessionList];
+        return this.projectSessionView(this.sessionList);
       } finally {
         if (this.ownsTaskListRequest(accessKey, generation))
           this.sessionListRequest = null;
@@ -1846,10 +1855,10 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
   }
 
   loadMoreSessions(): Promise<IAgentScopeRuntimeWebUISession[]> {
-    const { context, accessKey, generation } = this.taskListScope();
+    const { accessKey, generation } = this.taskListScope();
     if (this.sessionPageRequest) return this.sessionPageRequest;
     if (!this.hasMoreSessionPages) {
-      return Promise.resolve([...this.sessionList]);
+      return Promise.resolve(this.projectSessionView(this.sessionList));
     }
 
     const pageSize = getSessionPageSize();
@@ -1864,59 +1873,52 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     };
     this.sessionPageRequest = (async () => {
       try {
-        const [chatPage, jobsResult] = await Promise.all([
-          api.listChatSummaries(paginationParams),
-          listTaskSources(context),
-        ]);
+        const chatPage = await api.listChatSummaries(paginationParams);
         if (!this.taskListScopeMatches(accessKey, generation))
           return this.taskListCurrentSnapshot();
-        const activeTaskJobIds = taskPresence(jobsResult);
         const pendingSessions = this.getPendingSessions();
-        const nextSessions = filterStaleTaskSessions(
-          chatPage.items
-            .filter(
-              (chat) =>
-                chat.id && chat.id !== "undefined" && chat.id !== "null",
-            )
-            .map(chatSummaryToSession),
-          activeTaskJobIds,
-        ).map((backendSession) => {
-          const pendingSession = pendingSessions.find(
-            (session) => session.sessionId === backendSession.sessionId,
-          );
-          if (pendingSession) {
-            const resolved = mergeResolvedSession(
-              backendSession as ExtendedSession,
-              pendingSession,
-              pendingSession.id,
+        const nextSessions = chatPage.items
+          .filter(
+            (chat) => chat.id && chat.id !== "undefined" && chat.id !== "null",
+          )
+          .map(chatSummaryToSession)
+          .map((backendSession) => {
+            const pendingSession = pendingSessions.find(
+              (session) => session.sessionId === backendSession.sessionId,
             );
-            const realId =
-              (backendSession as ExtendedSession).realId || backendSession.id;
-            rememberResolvedChatId(pendingSession.id, realId);
-            this.notifyResolvedSessionIfActive(
-              pendingSession.id,
-              realId,
-              pendingSession.sessionId,
-            );
-            return resolved;
-          }
-
-          const existingResolved = this.sessionList.find((session) => {
-            const extended = session as ExtendedSession;
-            return extended.realId === backendSession.id;
-          }) as ExtendedSession | undefined;
-          return existingResolved
-            ? mergeResolvedSession(
+            if (pendingSession) {
+              const resolved = mergeResolvedSession(
                 backendSession as ExtendedSession,
-                existingResolved,
-              )
-            : backendSession;
-        });
+                pendingSession,
+                pendingSession.id,
+              );
+              const realId =
+                (backendSession as ExtendedSession).realId || backendSession.id;
+              rememberResolvedChatId(pendingSession.id, realId);
+              this.notifyResolvedSessionIfActive(
+                pendingSession.id,
+                realId,
+                pendingSession.sessionId,
+              );
+              return resolved;
+            }
+
+            const existingResolved = this.sessionList.find((session) => {
+              const extended = session as ExtendedSession;
+              return extended.realId === backendSession.id;
+            }) as ExtendedSession | undefined;
+            return existingResolved
+              ? mergeResolvedSession(
+                  backendSession as ExtendedSession,
+                  existingResolved,
+                )
+              : backendSession;
+          });
 
         this.sessionList = appendUniqueSessions(this.sessionList, nextSessions);
         this.hasMoreSessionPages = chatPage.has_more;
         this.nextSessionCursor = chatPage.next_cursor;
-        return [...this.sessionList];
+        return this.projectSessionView(this.sessionList);
       } finally {
         if (this.ownsTaskListRequest(accessKey, generation))
           this.sessionPageRequest = null;
@@ -2141,7 +2143,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
     if (options?.refreshList === false) {
       this.patchSessionLocally(nextSession);
-      return [...this.sessionList];
+      return this.projectSessionView(this.sessionList);
     }
 
     const index = this.sessionList.findIndex((s) => s.id === nextSession.id);
@@ -2190,7 +2192,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       });
     }
 
-    return [...this.sessionList];
+    return this.projectSessionView(this.sessionList);
   }
 
   async createSession(session: Partial<IAgentScopeRuntimeWebUISession>) {
@@ -2221,13 +2223,14 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.onSessionCreated?.(session.id);
 
     // 返回当前列表（不包含临时会话）
-    return [...this.sessionList];
+    return this.projectSessionView(this.sessionList);
   }
 
   async removeSession(session: Partial<IAgentScopeRuntimeWebUISession>) {
-    if (!session.id) return [...this.sessionList];
+    if (!session.id) return this.projectSessionView(this.sessionList);
 
     const { id: sessionId } = session;
+    const { accessKey, generation } = this.taskListScope();
 
     const existing = this.sessionList.find((s) => s.id === sessionId) as
       | ExtendedSession
@@ -2238,6 +2241,11 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       (isLocalTimestamp(sessionId) ? null : sessionId);
 
     if (deleteId) await api.deleteChat(deleteId);
+    if (!this.taskListScopeMatches(accessKey, generation))
+      return this.taskListCurrentSnapshot();
+    [sessionId, existing?.realId, deleteId].forEach((id) => {
+      if (id) this.removedSessionIds.add(id);
+    });
 
     this.sessionList = this.sessionList.filter((s) => s.id !== sessionId);
 
@@ -2248,8 +2256,14 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     }
     this.onSessionRemoved?.(resolvedId);
 
-    return [...this.sessionList];
+    return this.projectSessionView(this.sessionList);
   }
 }
 
-export default new SessionApi();
+const sessionApi = new SessionApi();
+if (typeof window !== "undefined") {
+  window.addEventListener("swe:auth-cleared", () =>
+    sessionApi.resetForIdentityChange(),
+  );
+}
+export default sessionApi;

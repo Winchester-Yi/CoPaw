@@ -141,6 +141,7 @@ export function setExternalToken(token: string, expiresIn: number): void {
   const expiresAt = Date.now() + effectiveExpiresIn * 1000;
   localStorage.setItem(EXTERNAL_TOKEN_KEY, token);
   localStorage.setItem(EXTERNAL_TOKEN_EXPIRES_KEY, expiresAt.toString());
+  window.dispatchEvent(new Event("swe:auth-ready"));
 }
 
 /**
@@ -149,6 +150,7 @@ export function setExternalToken(token: string, expiresIn: number): void {
 export function clearExternalToken(): void {
   localStorage.removeItem(EXTERNAL_TOKEN_KEY);
   localStorage.removeItem(EXTERNAL_TOKEN_EXPIRES_KEY);
+  window.dispatchEvent(new Event("swe:auth-cleared"));
 }
 
 /**

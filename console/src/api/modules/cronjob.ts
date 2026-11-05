@@ -1,4 +1,6 @@
 import { request } from "../request";
+import { cronContextHeaders } from "../cronTaskContext";
+import type { ManagedCronContext } from "../types/schedulerCron";
 import type {
   CronBroadcastChildRef,
   CronBroadcastChildrenBatchResponse,
@@ -16,6 +18,12 @@ import type {
 
 export const cronJobApi = {
   listCronJobs: () => request<CronJobSpecOutput[]>("/cron/jobs"),
+
+  listCronJobsForContext: (context: ManagedCronContext, signal?: AbortSignal) =>
+    request<CronJobSpecOutput[]>("/cron/jobs", {
+      headers: cronContextHeaders(context),
+      signal,
+    }),
 
   createCronJob: (spec: CronJobSpecInput) =>
     request<CronJobSpecOutput>("/cron/jobs", {

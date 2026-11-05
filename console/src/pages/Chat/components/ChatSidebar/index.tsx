@@ -162,11 +162,13 @@ export default function ChatSidebar(props: ChatSidebarProps) {
       try {
         const sessionList = await sessionApi.getSessionList();
         setSessions(
-          mergeConcurrentSessions(
-            sessionList,
-            getSessions(),
-            false,
-            excludedSessions,
+          sessionApi.projectSessionView(
+            mergeConcurrentSessions(
+              sessionList,
+              getSessions(),
+              false,
+              excludedSessions,
+            ),
           ),
         );
         setLoadMoreHistoryFailed(false);
@@ -183,7 +185,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
     setLoadMoreHistoryFailed(false);
     try {
       const sessionList = await sessionApi.loadMoreSessions();
-      setSessions(mergeConcurrentSessions(sessionList, getSessions(), true));
+      setSessions(
+        sessionApi.projectSessionView(
+          mergeConcurrentSessions(sessionList, getSessions(), true),
+        ),
+      );
     } catch {
       setLoadMoreHistoryFailed(true);
     } finally {

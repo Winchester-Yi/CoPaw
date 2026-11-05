@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { convertArchivedPage, convertMessages, SessionApi } from "./index";
+import sharedSessionApi, {
+  convertArchivedPage,
+  convertMessages,
+  SessionApi,
+} from "./index";
 import { useAgentStore } from "@/stores/agentStore";
 import { currentCronContext } from "@/api/cronTaskContext";
+import { chatTaskSourceStore } from "@/stores/chatTaskSourceStore";
 
 const apiMocks = vi.hoisted(() => ({
   listChats: vi.fn(),
@@ -31,6 +36,7 @@ vi.mock("../../../api", () => ({
 vi.mock("../../../api/modules/cronjob", () => ({
   cronJobApi: {
     listCronJobs: cronJobApiMocks.listCronJobs,
+    listCronJobsForContext: cronJobApiMocks.listCronJobs,
   },
 }));
 
@@ -135,6 +141,7 @@ describe("SessionApi identity mapping", () => {
   });
 
   beforeEach(() => {
+    chatTaskSourceStore.reset();
     useAgentStore.setState({ selectedAgent: "default" });
     schedulerMocks.listAll.mockReset();
     schedulerMocks.listAll.mockResolvedValue([]);
@@ -170,6 +177,80 @@ describe("SessionApi identity mapping", () => {
     runtimeWindow.currentUserId = undefined;
     runtimeWindow.currentChannel = undefined;
     runtimeWindow.__env__ = {};
+  });
+
+  it("任务源永不返回也不阻塞会话首屏及翻页，分页不触发任务查询", async () => {
+    cronJobApiMocks.listCronJobs.mockReturnValue(new Promise(() => {}));
+    schedulerMocks.listAll.mockReturnValue(new Promise(() => {}));
+    apiMocks.listChatSummaries
+      .mockResolvedValueOnce({
+        items: [{ id: "one", display_metadata: {} }],
+        has_more: true,
+        next_cursor: "next",
+      })
+      .mockResolvedValueOnce({
+        items: [{ id: "two", display_metadata: {} }],
+        has_more: false,
+      });
+    const api = new SessionApi();
+    const first = api.getSessionList();
+    await expect(
+      Promise.race([
+        first.then(() => "ready"),
+        new Promise((resolve) => setTimeout(() => resolve("blocked"), 50)),
+      ]),
+    ).resolves.toBe("ready");
+    expect((await api.loadMoreSessions()).map((session) => session.id)).toEqual(
+      ["one", "two"],
+    );
+    expect(cronJobApiMocks.listCronJobs).not.toHaveBeenCalled();
+    expect(schedulerMocks.listAll).not.toHaveBeenCalled();
+  });
+
+  it("任务隐藏和 unknown 恢复只投影视图，不丢失已加载缓存或重读 summary", async () => {
+    chatTaskSourceStore.activate(currentCronContext());
+    await chatTaskSourceStore.refresh();
+    apiMocks.listChats.mockResolvedValue([
+      {
+        id: "task-chat",
+        session_id: "s",
+        meta: {
+          session_kind: "task",
+          task_job_id: "gone",
+          management_owner: "legacy",
+        },
+      },
+    ]);
+    const api = new SessionApi();
+    expect(await api.getSessionList()).toEqual([]);
+    cronJobApiMocks.listCronJobs.mockRejectedValueOnce(new Error("offline"));
+    await chatTaskSourceStore.refresh("legacy");
+    expect(api.getLoadedSessionView().map((session) => session.id)).toEqual([
+      "task-chat",
+    ]);
+    expect(apiMocks.listChatSummaries).toHaveBeenCalledTimes(1);
+    await chatTaskSourceStore.refresh("legacy");
+    expect(api.getLoadedSessionView()).toEqual([]);
+  });
+
+  it("显式删除后，旧 UI 合并和迟到页面都不能恢复会话", async () => {
+    const api = new SessionApi();
+    apiMocks.listChats.mockResolvedValue([
+      { id: "deleted", session_id: "logical", meta: {} },
+    ]);
+    const oldView = await api.getSessionList();
+    apiMocks.deleteChat.mockResolvedValue({ success: true });
+    await api.removeSession({ id: "deleted" });
+    expect(api.projectSessionView(oldView)).toEqual([]);
+    expect(await api.getSessionList()).toEqual([]);
+  });
+
+  it("清除认证后，同一身份旧摘要也不再从共享缓存恢复", async () => {
+    sharedSessionApi.resetForIdentityChange();
+    apiMocks.listChats.mockResolvedValue([{ id: "private", meta: {} }]);
+    await sharedSessionApi.getSessionList();
+    window.dispatchEvent(new Event("swe:auth-cleared"));
+    expect(sharedSessionApi.getLoadedSessionView()).toEqual([]);
   });
 
   it.each([false, true])(
@@ -345,6 +426,8 @@ describe("SessionApi identity mapping", () => {
         },
       },
     ]);
+    chatTaskSourceStore.activate(currentCronContext());
+    await chatTaskSourceStore.refresh();
     const list = await new SessionApi().getSessionList();
     expect(list.map((session) => session.id)).toEqual(["new-chat"]);
   });
@@ -367,6 +450,9 @@ describe("SessionApi identity mapping", () => {
         },
       },
     ]);
+    chatTaskSourceStore.activate(currentCronContext());
+    await chatTaskSourceStore.refresh();
+    expect(chatTaskSourceStore.presence().scheduler).toBeNull();
     expect(
       (await new SessionApi().getSessionList()).map((session) => session.id),
     ).toEqual(["known-new"]);
@@ -1785,6 +1871,8 @@ describe("SessionApi identity mapping", () => {
   it("filters stale task sessions from later pages", async () => {
     const sessionApi = new SessionApi();
     cronJobApiMocks.listCronJobs.mockResolvedValue([]);
+    chatTaskSourceStore.activate(currentCronContext());
+    await chatTaskSourceStore.refresh();
     apiMocks.listChatSummaries
       .mockResolvedValueOnce({
         items: [],

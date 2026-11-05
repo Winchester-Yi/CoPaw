@@ -35,6 +35,18 @@ it("日期修改和整组暂停使用独立新接口与对应版本", async () =
 describe("新版任务请求边界", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("取消完整读取后不能再请求下一 cursor 页", async () => {
+    const controller = new AbortController();
+    vi.mocked(request).mockImplementationOnce(async () => {
+      controller.abort();
+      return { items: [{ id: "partial" }], next_cursor: "next" };
+    });
+    await expect(
+      schedulerCronApi.listAll(context, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it("完整遍历游标分页，不截断为第一页", async () => {
     vi.mocked(request)
       .mockResolvedValueOnce({ items: [{ id: "one" }], next_cursor: "next" })

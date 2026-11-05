@@ -32,6 +32,8 @@ const job = () =>
     currentCronContext(),
   ) as never;
 it("新任务执行只展示真实受理状态，不给列表伪造 running", async () => {
+  const finish = vi.fn().mockResolvedValue(undefined);
+  const begin = vi.fn(() => finish);
   const changed = vi.fn().mockResolvedValue(undefined),
     notify = vi.fn();
   vi.mocked(schedulerCronApi.run).mockResolvedValue({
@@ -39,7 +41,7 @@ it("新任务执行只展示真实受理状态，不给列表伪造 running", as
     reused: false,
   });
   const { result } = renderHook(() =>
-    useManagedTaskActions(cronAccessKey(), changed, notify),
+    useManagedTaskActions(cronAccessKey(), changed, notify, begin),
   );
   let receipt: Awaited<ReturnType<typeof result.current.perform>> = null;
   await act(async () => {
@@ -48,6 +50,8 @@ it("新任务执行只展示真实受理状态，不给列表伪造 running", as
   expect(receipt).toMatchObject({ execution: { status: "queued" } });
   expect(notify).toHaveBeenCalledWith(expect.stringContaining("已受理"), false);
   expect(changed).toHaveBeenCalledOnce();
+  expect(begin).toHaveBeenCalledOnce();
+  expect(finish).toHaveBeenCalledOnce();
 });
 it("网络结果未知时重试使用原 request_id", async () => {
   vi.mocked(schedulerCronApi.run).mockRejectedValue(new Error("timeout"));

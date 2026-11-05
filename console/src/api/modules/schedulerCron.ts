@@ -97,6 +97,7 @@ async function allPages<T>(
   const seen = new Set<string>();
   let cursor: string | null | undefined;
   do {
+    if (signal?.aborted) throw new DOMException("Task read cancelled", "AbortError");
     const url = new URLSearchParams({ limit: "200" });
     if (cursor) url.set("cursor", cursor);
     const page = await call<ManagedPage<T>>(
@@ -104,6 +105,7 @@ async function allPages<T>(
       `${path}${path.includes("?") ? "&" : "?"}${url}`,
       { signal },
     );
+    if (signal?.aborted) throw new DOMException("Task read cancelled", "AbortError");
     items.push(...page.items);
     cursor = page.next_cursor;
     if (cursor && seen.has(cursor))

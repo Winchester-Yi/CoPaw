@@ -47,6 +47,7 @@ export function getApiToken(): string {
  */
 export function setAuthToken(token: string): void {
   localStorage.setItem(AUTH_TOKEN_KEY, token);
+  window.dispatchEvent(new Event("swe:auth-ready"));
 }
 
 /**
@@ -54,4 +55,5 @@ export function setAuthToken(token: string): void {
  */
 export function clearAuthToken(): void {
   localStorage.removeItem(AUTH_TOKEN_KEY);
+  window.dispatchEvent(new Event("swe:auth-cleared"));
 }

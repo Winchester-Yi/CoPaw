@@ -149,6 +149,7 @@ vi.mock("../../sessionApi", () => ({
   default: {
     getSessionList: vi.fn(),
     loadMoreSessions: mocks.loadMoreSessions,
+    projectSessionView: (sessions: unknown[]) => sessions,
     hasMoreSessions: mocks.hasMoreSessions,
     getSessionTotal: mocks.getSessionTotal,
     removeSession: vi.fn(),

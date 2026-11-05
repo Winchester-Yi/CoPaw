@@ -21,15 +21,19 @@ const task = () =>
     currentCronContext(),
   );
 it("已读失败不清理徽标，只报错；同一展示快照不反复发请求", async () => {
+  const finish = vi.fn().mockResolvedValue(undefined);
+  const begin = vi.fn(() => finish);
   vi.mocked(markSourcedTaskRead).mockRejectedValue(new Error("unavailable"));
   const changed = vi.fn(),
     failed = vi.fn(),
     job = task();
   const { rerender } = renderHook(
-    ({ value }) => useTaskReadOnOpen(value, changed, failed),
+    ({ value }) => useTaskReadOnOpen(value, changed, failed, begin),
     { initialProps: { value: job } },
   );
   await waitFor(() => expect(failed).toHaveBeenCalled());
+  await waitFor(() => expect(finish).toHaveBeenCalledOnce());
+  expect(begin).toHaveBeenCalledWith(job);
   rerender({ value: { ...job } });
   expect(markSourcedTaskRead).toHaveBeenCalledTimes(1);
   expect(changed).not.toHaveBeenCalled();

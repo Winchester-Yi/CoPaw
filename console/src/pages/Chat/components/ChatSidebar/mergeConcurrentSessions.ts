@@ -15,14 +15,6 @@ function identityKeys(session: SessionIdentity): string[] {
   );
 }
 
-function sessionsMatch(
-  left: IAgentScopeRuntimeWebUISession,
-  right: IAgentScopeRuntimeWebUISession,
-): boolean {
-  const rightKeys = new Set(identityKeys(right));
-  return identityKeys(left).some((key) => rightKeys.has(key));
-}
-
 function hasExcludedIdentity(
   session: IAgentScopeRuntimeWebUISession,
   excludedIdentityKeys: ReadonlySet<string>,
@@ -37,17 +29,30 @@ export function mergeConcurrentSessions(
   excludedSessions: SessionIdentity[] = [],
 ): IAgentScopeRuntimeWebUISession[] {
   const excludedIdentityKeys = new Set(excludedSessions.flatMap(identityKeys));
+  const incomingKeys = new Set(incoming.flatMap(identityKeys));
+  const currentByKey = new Map<
+    string,
+    { session: SessionWithIdentity; index: number }
+  >();
+  current.forEach((session, index) => {
+    identityKeys(session).forEach((key) => {
+      if (!currentByKey.has(key)) currentByKey.set(key, { session, index });
+    });
+  });
   const currentOnly = current.filter(
     (currentSession) =>
       !hasExcludedIdentity(currentSession, excludedIdentityKeys) &&
-      !incoming.some((incomingSession) =>
-        sessionsMatch(currentSession, incomingSession),
-      ),
+      !identityKeys(currentSession).some((key) => incomingKeys.has(key)),
   );
   const mergedIncoming = incoming.map((incomingSession) => {
-    const currentSession = current.find((candidate) =>
-      sessionsMatch(candidate, incomingSession),
-    );
+    // Multiple aliases can match different rows; retain the first current row.
+    let match: { session: SessionWithIdentity; index: number } | undefined;
+    identityKeys(incomingSession).forEach((key) => {
+      const candidate = currentByKey.get(key);
+      if (candidate && (!match || candidate.index < match.index))
+        match = candidate;
+    });
+    const currentSession = match?.session;
     if (!currentSession) return incomingSession;
 
     const merged = preserveCurrentDetails

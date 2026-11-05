@@ -39,6 +39,13 @@ class JsonJobRepository(BaseJobRepository):
         self._snapshot_signature: _FileSignature | None = None
         self._snapshot: JobsFile | None = None
         self._job_index: dict[str, CronJobSpec] = {}
+        from ..runtime_snapshot import RuntimeSnapshotCache
+
+        self._runtime_snapshot = RuntimeSnapshotCache(self._path)
+
+    async def runtime_snapshot(self):
+        """Read the verified compact projection without mutable spec references."""
+        return await self._runtime_snapshot.get()
 
     @property
     def path(self) -> Path:

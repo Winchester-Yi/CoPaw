@@ -22,6 +22,7 @@ export function useManagedTaskActions(
   scopeKey: string,
   onChanged: () => Promise<void>,
   notify: (message: string, failed: boolean) => void,
+  onStart?: () => () => Promise<void>,
 ) {
   const currentKey = useRef(scopeKey);
   currentKey.current = scopeKey;
@@ -60,6 +61,7 @@ export function useManagedTaskActions(
       const request = requests.current.get(key) ?? new RequestIdentity();
       requests.current.set(key, request);
       locks.current.add(key);
+      const finish = onStart?.();
       try {
         assertTaskWorkspace(task);
         const result = await send(request.for(body));
@@ -77,10 +79,11 @@ export function useManagedTaskActions(
         }
         return isCurrent() && operation ? { operation } : null;
       } finally {
+        await finish?.();
         if (isCurrent()) locks.current.delete(key);
       }
     },
-    [scopeKey, notify, onChanged],
+    [scopeKey, notify, onChanged, onStart],
   );
   const perform = useCallback(
     (task: SourcedManagedTask, action: ManagedTaskAction) =>

@@ -50,6 +50,11 @@ from .broadcast_task_store import (
 )
 from .manager import CronManager
 from .models import CronJobListItem, CronJobSpec, CronJobView
+from .runtime_snapshot import (
+    RuntimeMissingItem,
+    RuntimeStatusesRequest,
+    RuntimeStatusesResponse,
+)
 from .workflow.config_store import WorkflowConfigStore
 from .workflow.models import WorkflowConfig
 
@@ -139,6 +144,7 @@ async def publish_workflow_binding(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 BROADCAST_MODEL_SLOT_WARNING = (
     "model_slot not copied: provider/model unavailable in target tenant"
@@ -2325,6 +2331,82 @@ async def _get_batch_child_job(
         return target_cron_manager, child_job
     except Exception as exc:  # pylint: disable=broad-except
         return _failure_result(item, str(exc))
+
+
+@router.post(
+    "/jobs/-/runtime-statuses",
+    response_model=RuntimeStatusesResponse,
+)
+async def get_runtime_statuses(
+    request: Request,
+    body: RuntimeStatusesRequest,
+) -> RuntimeStatusesResponse:
+    # Resolve the workspace only after body and identity validation, avoiding
+    # workspace initialization for invalid or oversized requests.
+    from .managed_api import _identity
+
+    actor, tenant, source, agent = _identity(request)
+    from ...config.context import encode_scope_id
+
+    allowed_scopes = {
+        None,
+        encode_scope_id(tenant, source),
+        f"scope.v1.{encode_scope_id(tenant, source)}",
+        f"{tenant}-{source}",
+    }
+    identity = {
+        "user_id": actor,
+        "tenant_id": tenant,
+        "source_id": source,
+        "agent_id": agent,
+    }
+    if any(
+        getattr(request.state, key, value) not in (None, value)
+        for key, value in identity.items()
+    ):
+        raise HTTPException(400, "conflicting_cron_identity")
+    mgr = await get_cron_manager(request)
+    manager = request.headers.get("X-User-Role", "").strip().lower() in {
+        "manager",
+        "admin",
+    }
+    try:
+        snapshot = await mgr._repo.runtime_snapshot()
+        items = []
+        for job_id in body.job_ids:
+            job = snapshot.get(job_id)
+            if job is None:
+                items.append(
+                    RuntimeMissingItem(id=job_id, status="unavailable"),
+                )
+                continue
+            if (
+                job.tenant_id not in (None, tenant)
+                or job.source_id not in (None, source)
+                or job.scope_id not in allowed_scopes
+                or (not manager and job.creator_user_id != actor)
+            ):
+                items.append(
+                    RuntimeMissingItem(id=job_id, status="unavailable"),
+                )
+            elif (
+                not dict(job.task)["chat_id"]
+                or not dict(job.task)["session_id"]
+            ):
+                items.append(
+                    RuntimeMissingItem(id=job_id, status="binding_missing"),
+                )
+            else:
+                items.append(
+                    job.runtime_item(
+                        mgr.get_state(job_id),
+                        actor,
+                        mgr._timezone or "UTC",
+                    ),
+                )
+        return RuntimeStatusesResponse(items=items)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, "cron_runtime_unavailable") from exc
 
 
 @router.get("/jobs", response_model=list[CronJobListItem])

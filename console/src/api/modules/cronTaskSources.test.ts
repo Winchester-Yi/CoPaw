@@ -3,6 +3,7 @@ import { cronJobApi } from "./cronjob";
 import { schedulerCronApi } from "./schedulerCron";
 import {
   listTaskSources,
+  loadTaskSource,
   mergeTaskSources,
   taskIdentityKey,
   resolveTaskOrigin,
@@ -11,7 +12,9 @@ import {
 import { request } from "../request";
 import type { ManagedJob } from "../types/schedulerCron";
 
-vi.mock("./cronjob", () => ({ cronJobApi: { listCronJobs: vi.fn() } }));
+vi.mock("./cronjob", () => ({
+  cronJobApi: { listCronJobs: vi.fn(), listCronJobsForContext: vi.fn() },
+}));
 vi.mock("./schedulerCron", () => ({ schedulerCronApi: { listAll: vi.fn() } }));
 vi.mock("../request", () => ({ request: vi.fn() }));
 const context = {
@@ -32,6 +35,26 @@ const managed = {
 beforeEach(() => vi.clearAllMocks());
 
 describe("Chat 任务来源", () => {
+  it("独立 legacy 查询捕获身份与取消信号，不改变旧查询方法", async () => {
+    const controller = new AbortController();
+    vi.mocked(cronJobApi.listCronJobsForContext).mockResolvedValue([legacy]);
+    const jobs = await loadTaskSource(
+      "legacy",
+      context,
+      controller.signal,
+      "captured",
+    );
+    expect(cronJobApi.listCronJobsForContext).toHaveBeenCalledWith(
+      context,
+      controller.signal,
+    );
+    expect(cronJobApi.listCronJobs).not.toHaveBeenCalled();
+    expect(jobs[0].clientTaskOrigin).toEqual({
+      owner: "legacy",
+      context,
+      accessKey: "captured",
+    });
+  });
   it("并行读取两份列表，旧在前新在后，同 ID 不合并", async () => {
     vi.mocked(cronJobApi.listCronJobs).mockResolvedValue([legacy]);
     vi.mocked(schedulerCronApi.listAll).mockResolvedValue([managed]);

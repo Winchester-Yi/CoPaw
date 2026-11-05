@@ -1,100 +1,111 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { CronJobSpecOutput } from "@/api/types";
 import {
-  listTaskSources,
-  mergeTaskSources,
-} from "@/api/modules/cronTaskSources";
+  chatTaskSourceStore,
+  type TaskOwner,
+  type TaskRefreshReason,
+} from "@/stores/chatTaskSourceStore";
+import { currentCronContext, cronAccessKey } from "@/api/cronTaskContext";
 import { useAgentStore } from "@/stores/agentStore";
 import { useIframeStore } from "@/stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "@/constants/identity";
-import { getUserId } from "@/utils/identity";
 
-/** 旧列表在前、新列表在后；失败来源保留，身份变化立即隔离旧展示与写回。 */
-export function useChatTaskSources() {
-  const user = useIframeStore((state) => state.userId);
-  const source = useIframeStore((state) => state.source);
-  const manager = useIframeStore((state) => state.manager);
-  const admin = useIframeStore((state) => state.isSuperManager);
-  const agent = useAgentStore((state) => state.selectedAgent);
-  const actor = user || getUserId();
-  const context = useMemo(
-    () => ({
-      actor_id: actor,
-      tenant_id: actor,
-      source_id: source || DEFAULT_SOURCE_ID,
-      agent_id: agent,
-    }),
-    [actor, source, agent],
+/** Subscribers share one identity-scoped read lifecycle and complete-source facts. */
+export function useChatTaskSources(chatId?: string) {
+  const identity = useIframeStore((state) =>
+    JSON.stringify([
+      state.userId,
+      state.source,
+      state.manager,
+      state.isSuperManager,
+    ]),
   );
-  const scopeKey = JSON.stringify([
-    context.actor_id,
-    context.tenant_id,
-    context.source_id,
-    context.agent_id,
-    Boolean(manager),
-    Boolean(admin),
-  ]);
-  const currentKey = useRef(scopeKey);
-  currentKey.current = scopeKey;
-  const mounted = useRef(false);
-  const serial = useRef(0);
-  const [snapshot, setSnapshot] = useState<{
-    key: string;
-    jobs: CronJobSpecOutput[];
-    error: string | null;
-  }>({ key: scopeKey, jobs: [], error: null });
-  const setJobs: Dispatch<SetStateAction<CronJobSpecOutput[]>> = useCallback(
-    (update) => {
-      if (!mounted.current || currentKey.current !== scopeKey) return;
-      setSnapshot((previous) => {
-        const jobs = previous.key === scopeKey ? previous.jobs : [];
-        return {
-          key: scopeKey,
-          error: previous.key === scopeKey ? previous.error : null,
-          jobs: typeof update === "function" ? update(jobs) : update,
-        };
-      });
-    },
-    [scopeKey],
+  const agent = useAgentStore((state) => state.selectedAgent);
+  const context = useMemo(currentCronContext, [identity, agent]);
+  const scopeKey = cronAccessKey(context);
+  const snapshot = useSyncExternalStore(
+    chatTaskSourceStore.subscribe,
+    chatTaskSourceStore.getSnapshot,
+  );
+  const current = snapshot.key === scopeKey;
+  const epoch = snapshot.epoch;
+  useEffect(() => {
+    chatTaskSourceStore.activate(context, scopeKey);
+  }, [context, scopeKey]);
+  useEffect(
+    () => (current ? chatTaskSourceStore.retain(context, scopeKey) : undefined),
+    [context, scopeKey, current],
+  );
+  useEffect(
+    () =>
+      current
+        ? chatTaskSourceStore.retainOpenChat(chatId, scopeKey, epoch)
+        : undefined,
+    [chatId, scopeKey, epoch, current],
   );
   const refreshJobs = useCallback(
-    async (signal?: AbortSignal) => {
-      if (!mounted.current || currentKey.current !== scopeKey) return;
-      const request = ++serial.current;
-      const sources = await listTaskSources(context, signal);
+    async (options?: { owner?: TaskOwner; reason?: TaskRefreshReason }) => {
       if (
-        !mounted.current ||
-        currentKey.current !== scopeKey ||
-        serial.current !== request ||
-        signal?.aborted
+        chatTaskSourceStore.getSnapshot().key !== scopeKey ||
+        chatTaskSourceStore.getSnapshot().epoch !== epoch
       )
         return;
-      setSnapshot((previous) => ({
-        key: scopeKey,
-        jobs: mergeTaskSources(
-          previous.key === scopeKey ? previous.jobs : [],
-          sources,
-        ),
-        error: sources.errors.length ? sources.errors.join("；") : null,
-      }));
+      await chatTaskSourceStore.refresh(options?.owner, options?.reason);
     },
-    [context, scopeKey],
+    [scopeKey, epoch],
   );
-  useEffect(() => {
-    mounted.current = true;
-    const controller = new AbortController();
-    void refreshJobs(controller.signal);
-    return () => {
-      mounted.current = false;
-      controller.abort();
-    };
-  }, [refreshJobs]);
+  const setJobs: Dispatch<SetStateAction<CronJobSpecOutput[]>> = useCallback(
+    (update) => {
+      chatTaskSourceStore.setJobs(
+        (jobs) => (typeof update === "function" ? update(jobs) : update),
+        scopeKey,
+        epoch,
+      );
+    },
+    [scopeKey, epoch],
+  );
+  const beginTaskMutation = useCallback(
+    (owner: TaskOwner) =>
+      chatTaskSourceStore.beginMutation(owner, scopeKey, epoch),
+    [scopeKey, epoch],
+  );
+  const jobs = useMemo(
+    () =>
+      current
+        ? [snapshot.legacy, snapshot.scheduler].flatMap(
+            (state) => state.optimistic ?? state.items,
+          )
+        : [],
+    [current, snapshot.legacy, snapshot.scheduler],
+  );
+  const presence = useMemo(
+    () => ({
+      legacy: current ? snapshot.legacy.membership : null,
+      scheduler: current ? snapshot.scheduler.membership : null,
+    }),
+    [current, snapshot.legacy.membership, snapshot.scheduler.membership],
+  );
+  const error = current
+    ? [snapshot.legacy.error, snapshot.scheduler.error]
+        .filter(Boolean)
+        .join("；") || null
+    : null;
+  const loaded =
+    current &&
+    [snapshot.legacy, snapshot.scheduler].every(
+      (state) =>
+        !state.loading && (state.membership !== null || state.error !== null),
+    );
   return {
-    jobs: snapshot.key === scopeKey ? snapshot.jobs : [],
-    error: snapshot.key === scopeKey ? snapshot.error : null,
+    jobs,
+    error,
+    loaded,
+    presence,
+    epoch,
+    active: current,
     setJobs,
     refreshJobs,
+    beginTaskMutation,
     context,
     scopeKey,
   };

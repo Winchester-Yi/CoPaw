@@ -244,10 +244,11 @@ GC report批量查询一批候选的引用关系，仅作为预筛；mark/reclai
 
 待测量决定：SQL批大小、缓存/队列字节、NAS worker数、连接控制预留、文本合批值、read/full预算，以及是否值得改变guard锁协议。默认值最终要由基线与故障测量支撑；代码中的已有默认值不是用户确认的生产SLO。
 
-初稿仅作设计；后续已实施 context-usage 和 summary 两个工作包，验证记录见各自计划。剩余实施必须对照本表逐包评审，避免重新回到逐个旧方法叠加limit/cache。
+初稿仅作设计；后续已实施 context-usage、summary、Console 任务来源解耦和轻量运行状态查询四个工作包，验证记录见各自计划。剩余实施必须对照本表逐包评审，避免重新回到逐个旧方法叠加limit/cache。
 
 ## 9. 关联资料与历史结论修订
 
+- [Console 分页与任务来源解耦草案](2026-11-05-chat-task-source-snapshot-design.md)：基于已提交 summary 工作包继续设计，任务快照与会话分页分离；已实施，见对应实现报告。
 - [现有入口索引](../../../analysis/playbook/conversation-storage-entry-inventory.md)
 - [数据库效率审查](../reports/2026-11-04-conversation-database-efficiency-review.md)
 - [长会话重新分析](../reports/2026-11-04-long-conversation-and-list-reanalysis.md)

@@ -11,6 +11,7 @@ export function useTaskReadOnOpen(
   task: CronJobSpecOutput | null,
   onChanged: () => Promise<void> | void,
   onFailure: (message: string) => void,
+  onStart?: (task: CronJobSpecOutput) => () => Promise<void>,
 ) {
   const current = useRef(task);
   current.current = task;
@@ -34,6 +35,7 @@ export function useTaskReadOnOpen(
     requests.current.set(stamp, request);
     pending.current.add(stamp);
     let active = true;
+    const finish = onStart?.(job);
     void markSourcedTaskRead(job, false, request.for(stamp))
       .then(async () => {
         request.reset();
@@ -44,11 +46,12 @@ export function useTaskReadOnOpen(
         if (active && taskOrigin(job)?.accessKey === cronAccessKey())
           onFailure("标记已读失败，未读状态已保留，可重新打开后重试");
       })
-      .finally(() => {
+      .finally(async () => {
+        await finish?.();
         pending.current.delete(stamp);
       });
     return () => {
       active = false;
     };
-  }, [stamp, onChanged, onFailure]);
+  }, [stamp, onChanged, onFailure, onStart]);
 }

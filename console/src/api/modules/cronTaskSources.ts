@@ -74,6 +74,21 @@ function managedTask(
   return tagTask(job, "scheduler", context, accessKey) as SourcedManagedTask;
 }
 
+export async function loadTaskSource(
+  owner: CronTaskOrigin["owner"],
+  context: ManagedCronContext,
+  signal?: AbortSignal,
+  accessKey = cronAccessKey(context),
+): Promise<SourcedCronTask[]> {
+  if (owner === "scheduler") {
+    const jobs = await schedulerCronApi.listAll(context, { signal });
+    return jobs.map((job) => managedTask(job, context, accessKey));
+  }
+  const jobs = await cronJobApi.listCronJobsForContext(context, signal);
+  if (!Array.isArray(jobs)) throw new Error("invalid_legacy_task_list");
+  return jobs.map((job) => tagTask(job, "legacy", context, accessKey));
+}
+
 /** 两个来源各自成功或失败；新列表必须完整遍历，失败不能解释为任务已删除。 */
 export async function listTaskSources(
   context: ManagedCronContext,
