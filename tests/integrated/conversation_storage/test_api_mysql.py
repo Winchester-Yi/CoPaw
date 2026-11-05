@@ -577,6 +577,84 @@ async def test_http_context_missing_invalid_future_is_unavailable_without_nas(
     assert result.status_code == 200 and result.json() == {"available": False}
 
 
+async def test_http_summaries_keep_content_metadata_on_nas_and_scope_pages(
+    api_stack,
+    monkeypatch,
+):
+    stack = api_stack
+    await history_dataset(stack)
+    other = await insert_session(stack.db, user_key=b"bob")
+    await insert_chat(stack.db, other, b"bob", user_key=b"bob")
+    chat = await stack.manager.get_chat("chat-a")
+    chat.meta.update(plan_mode_enabled=True, custom={"must_survive": True})
+    await stack.manager.update_chat(chat)
+    assert (await stack.manager.get_chat("chat-a")).meta["custom"] == {
+        "must_survive": True,
+    }
+    monkeypatch.setattr(
+        stack.storage.bundles,
+        "read_extent",
+        lambda *a, **kw: pytest.fail("summary read NAS"),
+    )
+    monkeypatch.setattr(
+        stack.storage.chats.retentions,
+        "pin",
+        lambda *a, **kw: pytest.fail("summary created pins"),
+    )
+    seen = []
+    cursor = ""
+    while True:
+        response = await stack.client.get(
+            "/chats/-/summaries",
+            params={"page_size": 1, "cursor": cursor},
+        )
+        assert response.status_code == 200
+        page = response.json()
+        assert "total" not in page and "page" not in page
+        seen.extend(item["id"] for item in page["items"])
+        for item in page["items"]:
+            assert (
+                "custom" not in item["display_metadata"] and "meta" not in item
+            )
+        if not page["has_more"]:
+            break
+        assert page["next_cursor"] and page["next_cursor"] != cursor
+        cursor = page["next_cursor"]
+    assert sorted(seen) == ["chat-a", "chat-b"]
+    assert (
+        await stack.client.get("/chats/-/summaries?user_id=bob")
+    ).status_code == 403
+
+
+async def test_http_context_with_content_metadata_does_not_hydrate_nas(
+    api_stack,
+    monkeypatch,
+):
+    stack = api_stack
+    await history_dataset(stack)
+    chat = await stack.manager.get_chat("chat-a")
+    chat.meta.update(
+        source_id="source",
+        agent_id="agent",
+        custom={"must_survive": True},
+    )
+    await stack.manager.update_chat(chat)
+    row = await stack.db.fetch_one(
+        "SELECT content_meta_publication_id FROM swe_conversation_chats "
+        "WHERE external_chat_key=%s",
+        (b"chat-a",),
+    )
+    assert row["content_meta_publication_id"] is not None
+    monkeypatch.setattr(
+        stack.storage.bundles,
+        "read_extent",
+        lambda *args, **kwargs: pytest.fail("numeric usage read NAS metadata"),
+    )
+    result = await stack.client.get("/chats/chat-a/context-usage")
+    assert result.status_code == 200
+    assert result.json() == {"available": False}
+
+
 async def test_http_context_numeric_stale_and_sql_failure_are_distinct(
     api_stack,
     monkeypatch,

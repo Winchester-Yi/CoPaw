@@ -211,10 +211,11 @@ describe("ChatSidebar infinite history scrolling", () => {
     );
   });
 
-  it("shows the backend history total instead of only the loaded row count", () => {
+  it("shows the loaded history count without claiming an exact total", () => {
     const { getAllByText } = render(<ChatSidebar tasks={[]} />);
 
-    expect(getAllByText("历史记录(120)").length).toBeGreaterThan(0);
+    expect(getAllByText("历史记录(已加载1)").length).toBeGreaterThan(0);
+    expect(mocks.getSessionTotal).not.toHaveBeenCalled();
   });
 
   it("restores the sidebar from the collapsed toolbar", () => {
@@ -233,7 +234,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     expect(container.querySelector(".chat-sidebar")).toBeNull();
   });
 
-  it("subtracts visible task count from the history total", () => {
+  it("does not subtract unrelated task rows from loaded history", () => {
     const tasks = [
       { id: "task-1", task: { unread_execution_count: 0 } },
       { id: "task-2", task: { unread_execution_count: 0 } },
@@ -241,7 +242,7 @@ describe("ChatSidebar infinite history scrolling", () => {
 
     const { getAllByText } = render(<ChatSidebar tasks={tasks as never} />);
 
-    expect(getAllByText("历史记录(118)").length).toBeGreaterThan(0);
+    expect(getAllByText("历史记录(已加载1)").length).toBeGreaterThan(0);
   });
 
   it("excludes the deleted session when refreshing after delete", async () => {

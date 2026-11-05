@@ -8,6 +8,7 @@ import {
 // ==================== 组件引入方式变更结束 ====================
 import api, {
   type ChatSpec,
+  type ChatSummary,
   type ChatHistory,
   type ChatCompactionBoundary,
   type ChatStatus,
@@ -98,7 +99,7 @@ function getSessionPageSize(): number {
       : Number.parseInt(String(configured || ""), 10);
 
   return Number.isInteger(pageSize) && pageSize > 0
-    ? pageSize
+    ? Math.min(pageSize, 200)
     : DEFAULT_SESSION_PAGE_SIZE;
 }
 
@@ -996,6 +997,17 @@ const chatSpecToSession = (chat: ChatSpec): ExtendedSession =>
     createdAt: chat.created_at ?? null,
   }) as ExtendedSession;
 
+const chatSummaryToSession = (chat: ChatSummary): ExtendedSession =>
+  chatSpecToSession({
+    ...chat,
+    meta: {
+      ...chat.display_metadata,
+      ...(chat.expert_binding
+        ? { expert_main_binding: chat.expert_binding }
+        : {}),
+    },
+  });
+
 /** Returns true when id is a pure numeric local timestamp (not a backend UUID). */
 const isLocalTimestamp = (id: string): boolean => /^\d+$/.test(id);
 
@@ -1232,10 +1244,8 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
   private taskLookupScope: string | null = null;
   private taskLookupGeneration = 0;
   private sessionList: IAgentScopeRuntimeWebUISession[] = [];
-  private sessionPage = 0;
   private hasMoreSessionPages = false;
   private nextSessionCursor: string | null | undefined = null;
-  private sessionTotal = 0;
   private intendedSessionId: string | null = null;
 
   /**
@@ -1278,10 +1288,8 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.taskLookupScope = null;
     this.taskLookupGeneration += 1;
     this.sessionList = [];
-    this.sessionPage = 0;
     this.hasMoreSessionPages = false;
     this.nextSessionCursor = null;
-    this.sessionTotal = 0;
     this.sessionListRequest = null;
     this.sessionPageRequest = null;
     this.sessionRequests.clear();
@@ -1674,9 +1682,16 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       try {
         const allowPreferredSelection = this.sessionList.length === 0;
         const pendingSessions = this.getPendingSessions();
+        // Detail loads replace metadata; retain those updates if this list reply is late.
+        const metadataAtRequest = new Map(
+          this.sessionList.map((session) => {
+            const item = session as ExtendedSession;
+            return [item.realId || item.id, item.meta];
+          }),
+        );
 
         const [chatPage, jobsResult] = await Promise.all([
-          api.listChatsPage({
+          api.listChatSummaries({
             page_size: getSessionPageSize(),
             cursor: null,
           }),
@@ -1688,7 +1703,19 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         const activeTaskJobIds = taskPresence(jobsResult);
         const newList = chats
           .filter((c) => c.id && c.id !== "undefined" && c.id !== "null")
-          .map(chatSpecToSession);
+          .map((chat) => {
+            const summary = chatSummaryToSession(chat);
+            const previous = this.findSessionByIdentity(chat.id);
+            const changedDuringRequest =
+              previous?.meta &&
+              previous.meta !== metadataAtRequest.get(chat.id);
+            return {
+              ...summary,
+              meta: changedDuringRequest
+                ? { ...summary.meta, ...previous.meta }
+                : { ...previous?.meta, ...summary.meta },
+            };
+          });
         const filteredList = filterStaleTaskSessions(newList, activeTaskJobIds);
 
         const resolvedPendingSessionIds = new Set<string>();
@@ -1801,10 +1828,8 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
           allowReorder: allowPreferredSelection,
         });
         this.preferredChatId = null;
-        this.sessionPage = chatPage.page;
         this.hasMoreSessionPages = chatPage.has_more;
         this.nextSessionCursor = chatPage.next_cursor;
-        this.sessionTotal = chatPage.total;
 
         return [...this.sessionList];
       } finally {
@@ -1820,10 +1845,6 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     return this.hasMoreSessionPages;
   }
 
-  getSessionTotal(): number {
-    return this.sessionTotal;
-  }
-
   loadMoreSessions(): Promise<IAgentScopeRuntimeWebUISession[]> {
     const { context, accessKey, generation } = this.taskListScope();
     if (this.sessionPageRequest) return this.sessionPageRequest;
@@ -1831,15 +1852,20 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       return Promise.resolve([...this.sessionList]);
     }
 
-    const nextPage = this.sessionPage + 1;
     const pageSize = getSessionPageSize();
-    const paginationParams = this.nextSessionCursor
-      ? { page_size: pageSize, cursor: this.nextSessionCursor }
-      : { page: nextPage, page_size: pageSize };
+    if (!this.nextSessionCursor) {
+      return Promise.reject(
+        new Error("Chat summary continuation cursor missing"),
+      );
+    }
+    const paginationParams = {
+      page_size: pageSize,
+      cursor: this.nextSessionCursor,
+    };
     this.sessionPageRequest = (async () => {
       try {
         const [chatPage, jobsResult] = await Promise.all([
-          api.listChatsPage(paginationParams),
+          api.listChatSummaries(paginationParams),
           listTaskSources(context),
         ]);
         if (!this.taskListScopeMatches(accessKey, generation))
@@ -1852,7 +1878,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
               (chat) =>
                 chat.id && chat.id !== "undefined" && chat.id !== "null",
             )
-            .map(chatSpecToSession),
+            .map(chatSummaryToSession),
           activeTaskJobIds,
         ).map((backendSession) => {
           const pendingSession = pendingSessions.find(
@@ -1888,10 +1914,8 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         });
 
         this.sessionList = appendUniqueSessions(this.sessionList, nextSessions);
-        this.sessionPage = chatPage.page;
         this.hasMoreSessionPages = chatPage.has_more;
         this.nextSessionCursor = chatPage.next_cursor;
-        this.sessionTotal = chatPage.total;
         return [...this.sessionList];
       } finally {
         if (this.ownsTaskListRequest(accessKey, generation))
@@ -1946,15 +1970,13 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       return undefined;
     }
     const session = this.findSessionByIdentity(sessionId);
+    const metadata = { ...session?.meta, ...snapshot.chat?.meta };
     const messages = withArchiveBoundaries(
-      convertMessagesForSession(
-        snapshot.messages,
-        session?.meta,
-        session?.name,
-      ),
+      convertMessagesForSession(snapshot.messages, metadata, session?.name),
       snapshot.archive?.boundaries,
     ).map((message) => ({ ...message, history: true }));
     if (session) {
+      session.meta = metadata;
       session.messages = messages;
       session.generating = false;
       session.status = "idle";
@@ -1976,11 +1998,13 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     }
 
     const chatHistory = await api.getChat(realId);
+    const metadata = { ...fromList.meta, ...chatHistory.chat?.meta };
+    fromList.meta = metadata;
     const backendGenerating = isGenerating(chatHistory);
     const backendMessages = withArchiveBoundaries(
       convertMessagesForSession(
         chatHistory.messages || [],
-        fromList?.meta || {},
+        metadata,
         fromList?.name,
       ),
       chatHistory.archive?.boundaries,
@@ -2005,7 +2029,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       channel: getChannelWithoutWindow(fromList.channel),
       // ==================== userId 统一整改结束 ====================
       messages,
-      meta: fromList.meta || {},
+      meta: metadata,
       realId,
       generating,
     };
@@ -2064,11 +2088,13 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       fromList = chatSpecToSession(chatHistory.chat);
       this.sessionList = appendUniqueSessions([fromList], this.sessionList);
     }
+    const metadata = { ...fromList?.meta, ...chatHistory.chat?.meta };
+    if (fromList) fromList.meta = metadata;
     const generating = isGenerating(chatHistory);
     const messages = withArchiveBoundaries(
       convertMessagesForSession(
         chatHistory.messages || [],
-        fromList?.meta || {},
+        metadata,
         fromList?.name,
       ),
       chatHistory.archive?.boundaries,
@@ -2086,7 +2112,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       channel: getChannelWithoutWindow(fromList?.channel),
       // ==================== userId 统一整改结束 ====================
       messages,
-      meta: fromList?.meta || {},
+      meta: metadata,
       generating,
     };
 

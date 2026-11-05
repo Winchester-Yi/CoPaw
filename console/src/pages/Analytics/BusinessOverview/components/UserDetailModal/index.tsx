@@ -8,7 +8,7 @@ import {
   SessionListItem,
   SessionResourceFilter,
 } from "../../../../../api/modules/tracing";
-import type { ChatSpec } from "../../../../../api/types";
+import type { ChatSummary } from "../../../../../api/types";
 import { UserDetailModalProps } from "../../types";
 import UserStatsHeader from "./UserStatsHeader";
 import SessionCardList from "./SessionCardList";
@@ -47,7 +47,7 @@ export default function UserDetailModal({
   const [resourceFilter, setResourceFilter] =
     useState<SessionResourceFilter | null>(null);
   const [hasAutoSelectedSession, setHasAutoSelectedSession] = useState(false);
-  const [chatSpecs, setChatSpecs] = useState<ChatSpec[]>([]);
+  const [chatSpecs, setChatSpecs] = useState<ChatSummary[]>([]);
 
   // 聊天记录状态
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -113,17 +113,46 @@ export default function UserDetailModal({
     resourceFilter,
   ]);
 
-  // 获取聊天映射
-  const fetchUserChats = useCallback(async () => {
-    if (!userId) return;
-    try {
-      const data = await tracingApi.getUserChats(userId);
-      setChatSpecs(Array.isArray(data) ? data : []);
-    } catch (error) {
-      console.error("Failed to fetch user chats:", error);
-      setChatSpecs([]);
-    }
-  }, [userId]);
+  // Only the selected Session needs a mapping; complete Chat metadata is unused.
+  useEffect(() => {
+    setChatSpecs([]);
+    if (!open || !userId || !selectedSessionId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const chats: ChatSummary[] = [];
+        let cursor: string | null = null;
+        do {
+          const page = await tracingApi.getUserChatSummaries(userId, {
+            session_id: selectedSessionId,
+            page_size: 100,
+            cursor,
+          });
+          if (cancelled) return;
+          chats.push(...(Array.isArray(page.items) ? page.items : []));
+          if (
+            page.has_more &&
+            (!page.next_cursor || page.next_cursor === cursor)
+          ) {
+            throw new Error(
+              "Chat summary continuation cursor missing or repeated",
+            );
+          }
+          cursor = page.has_more ? page.next_cursor : null;
+        } while (cursor);
+        setChatSpecs(chats);
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to fetch chat summaries:", error);
+          setChatSpecs([]);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, userId, selectedSessionId]);
 
   // 获取会话统计
   const fetchSessionStats = useCallback(async (sessionId: string) => {
@@ -145,18 +174,12 @@ export default function UserDetailModal({
   useEffect(() => {
     if (open && userId) {
       fetchUserStats();
-      fetchUserChats();
       setSessionsPage(1);
       setHasAutoSelectedSession(false);
       setSelectedSessionId(null);
       setSessionStats(null);
     }
-  }, [
-    open,
-    userId,
-    fetchUserStats,
-    fetchUserChats,
-  ]);
+  }, [open, userId, fetchUserStats]);
 
   // 打开弹窗或筛选条件变化时重新加载会话列表
   useEffect(() => {

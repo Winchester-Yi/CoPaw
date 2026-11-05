@@ -31,6 +31,11 @@ from .context_usage import (
     ContextUsageUnavailable,
 )
 from .manager import ChatManager
+from .chat_summary import (
+    ChatSummaryPage,
+    MAX_SUMMARY_PAGE_SIZE,
+    MAX_SUMMARY_CURSOR_LENGTH,
+)
 from .expert_binding import (
     ChatExpertBinding,
     EXPERT_BINDING_META_KEY,
@@ -953,7 +958,12 @@ def _indexed_history(workspace):
     return getattr(storage, "history", None)
 
 
-async def _indexed_history_call(operation, *args, **kwargs):
+async def _indexed_history_call(
+    operation,
+    *args,
+    not_found_detail="Chat history not found",
+    **kwargs,
+):
     from ..conversation_storage.errors import StorageError
     from mysql.connector.errors import Error as MySQLError
 
@@ -962,7 +972,7 @@ async def _indexed_history_call(operation, *args, **kwargs):
     except KeyError as error:
         raise HTTPException(
             status_code=404,
-            detail="Chat history not found",
+            detail=not_found_detail,
         ) from error
     except (StorageError, OSError, RuntimeError, MySQLError) as error:
         raise HTTPException(
@@ -1075,6 +1085,70 @@ def _slice_answer_turn(
             end_index = index
             break
     return messages[anchor_index:end_index]
+
+
+@router.get("/-/summaries", response_model=ChatSummaryPage)
+async def list_chat_summaries(
+    request: Request,
+    user_id: str | None = Query(None),
+    channel: str | None = Query(None),
+    session_id: str | None = Query(None),
+    page_size: int = Query(100, ge=1, le=MAX_SUMMARY_PAGE_SIZE),
+    cursor: str | None = Query(None, max_length=MAX_SUMMARY_CURSOR_LENGTH),
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    """Discover chats using light fields and live latest-update pagination."""
+    current_user = _request_user_id(request)
+    if current_user is not None:
+        if user_id is not None:
+            _authorize_requested_user(request, user_id)
+        user_id = current_user
+    try:
+        result = await _indexed_history_call(
+            mgr.list_summaries,
+            user_id=user_id,
+            channel=channel,
+            session_id=session_id,
+            page_size=page_size,
+            cursor=cursor,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+    if _indexed_history(workspace) is None and coordinator is not None:
+        ids = [item.id for item in result.items]
+        batch = getattr(coordinator, "statuses", None)
+        statuses = (
+            await batch(ids)
+            if callable(batch)
+            else dict(
+                zip(
+                    ids,
+                    await asyncio.gather(
+                        *(coordinator.status(key) for key in ids),
+                    ),
+                ),
+            )
+        )
+        result = result.model_copy(
+            update={
+                "items": [
+                    item.model_copy(
+                        update={
+                            "status": getattr(
+                                statuses.get(item.id),
+                                "value",
+                                statuses.get(item.id),
+                            )
+                            or "idle",
+                        },
+                    )
+                    for item in result.items
+                ],
+            },
+        )
+    return result
 
 
 @router.get("", response_model=list[ChatSpec] | ChatPage)
@@ -1630,6 +1704,15 @@ async def get_chat_context_usage(
     workspace=Depends(get_workspace),
 ) -> ContextUsageResponse:
     """Return the last committed numeric context-occupancy snapshot."""
+    indexed = _indexed_history(workspace)
+    if indexed is not None:
+        return await _indexed_history_call(
+            indexed.context_usage,
+            chat_id,
+            not_found_detail=f"Chat not found: {chat_id}",
+            authorize=lambda chat: _authorize_chat(request, chat, workspace),
+        )
+
     chat_spec = await mgr.get_chat(chat_id)
     if not chat_spec:
         raise HTTPException(
@@ -1638,13 +1721,6 @@ async def get_chat_context_usage(
         )
     _authorize_chat(request, chat_spec, workspace)
 
-    indexed = _indexed_history(workspace)
-    if indexed is not None:
-        return await _indexed_history_call(
-            indexed.context_usage,
-            chat_id,
-            authorize=lambda chat: _authorize_chat(request, chat, workspace),
-        )
     state = await _read_history_state(
         session,
         chat_spec.session_id,

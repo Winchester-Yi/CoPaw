@@ -71,3 +71,20 @@ it("loads target-user archives through the analytics route with encoded paramete
   await tracingApi.getUserChatHistory("target user", "chat/id", "cursor+1", 20);
   expect(mocks.request).toHaveBeenLastCalledWith("/tracing/chats/chat%2Fid/history?user_id=target+user&limit=20&before=cursor%2B1");
 });
+
+it("queries target-user summaries for only the selected session", async () => {
+  mocks.request.mockResolvedValue({
+    items: [],
+    has_more: false,
+    next_cursor: null,
+    page_size: 100,
+  });
+  await tracingApi.getUserChatSummaries("target user", {
+    session_id: "session/a",
+    cursor: "a+1",
+    page_size: 100,
+  });
+  expect(mocks.request).toHaveBeenLastCalledWith(
+    "/tracing/chats/-/summaries?user_id=target+user&page_size=100&session_id=session%2Fa&cursor=a%2B1",
+  );
+});

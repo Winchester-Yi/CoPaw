@@ -14,7 +14,7 @@
 | `runner.py:init_handler` | 优先 `storage.session_for` 并返回 | SafeJSONSession 创建在该 return 后，非 SQL 故障 fallback |
 | `runner_integration.py` | 按 request.channel 选 Session，先持久化准入，再运行 Agent；终态提交后发终帧 | unknown 停止模型/工具推进，原 operation 对账；真实 MySQL Runner 专项 |
 | `runner/api.py` | SQL ChatManager；详情/Turn/归档/context 的 `_indexed_history` 在旧 reader 前返回 | `_archive_store` 仅 legacy 使用；SQL/NAS 错误返回 unavailable，`test_api_mysql.py` |
-| `routers/tracing.py` | 先解析目标用户 workspace，再 `indexed.tracing_view` | SQL 分支在文件 Session reader 前返回，不使用当前登录用户 scope |
+| `routers/tracing.py` | 先解析目标用户 workspace，SQL detail/archive 分别走 `indexed.current` / `archive_page`，传入目标对象校验 | `3337db27c` 已修复 parity；SQL 分支在文件 Session reader 前返回，不使用当前登录用户 scope |
 | `chat_sharing/router.py` / `service.py` | 可信 Chat.channel 选择 Session；全冷热候选、选中问答与 publication CAS | 永久 token 无 Chat 存活 JOIN；孤立分享保留原 publication scope；真实 API MySQL 测试 |
 | `emit_wplus_sop_event.py` | 可信 runtime scope 调 `workspace_storage`，注入 SQL ChatManager | 仅 storage=None 才检查 chats.json 并构造 Json repo；配置错误直接失败 |
 | `cli/chats_cmd.py` | 继续调用既有 /chats API，保留 Agent header | 无独立 file repo；Click→HTTP→SQL/NAS 契约测试 |
@@ -47,3 +47,34 @@
    活动状态；API 矩阵增量包含修复与真实 HTTP 回归，以最终 XML 为证据。
 
 原 NAS 原语、两节点双 Pod、固定旧镜像继续写和生产规模演练仍是独立环境门槛。
+
+
+## 2026-11-04 性能设计重整入口
+
+最新约束及逐入口成本见[会话数据库迁移性能设计](../../docs/superpowers/specs/2026-11-04-conversation-storage-performance-redesign.md)。
+保持现有 schema/存储格式，暂不设计列表并发更新下的稳定翻页或共享快照；非必要不访问 NAS。
+注意 SQL authority 不等于 SQL-only：当前列表仍会 hydrate NAS metadata。
+新方案按轻量查询、正文读取、语义写入、离线维护分流，已开始分工作包实施。
+checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、取消排空与 GC 正确性仍须验收。
+
+### 已落地首个工作包：context-usage
+
+- 计划：[context-usage SQL 读取](../../docs/superpowers/plans/2026-11-04-conversation-context-usage-sql-plan.md)。
+- `runner/api.get_chat_context_usage` 先选择 indexed reader，不再预先调用完整 `mgr.get_chat`。SQL 正常路径仍有身份查询、数值查询和 metadata revision/删除复核，不创建 reader pin，不读 NAS。
+- 若 SQL 缺少 `source_id` 或 `agent_id`，且有 content metadata publication，必须回退现有带 pin 的完整 Chat 读取来执行历史授权。长度超过 1024 字节的身份字符串可能因现有分拆规则存于 NAS；不能把 SQL 缺字段等同于历史字段不存在。
+- 错误 owner/已有 SQL 身份冲突在回退前拒绝；NAS 回退失败返回 503，pins 按原 reader 生命周期清理。404 detail、unavailable、stale 和 legacy 文件读取保持原契约。
+- 回归入口：`tests/unit/app/conversation_storage/test_context_usage.py`；真实数据库用例：`test_api_mysql.py::test_http_context_with_content_metadata_does_not_hydrate_nas`。真实 MySQL 配置缺失时只能报告 skipped。
+- 旧列表、详情的重复 hydrate、Stop 和其他内部身份入口仍待各自工作包处理。
+
+### 已落地第二个工作包：摘要查询与列表调用方
+
+- 计划：[summary SQL 查询和调用方迁移](../../docs/superpowers/plans/2026-11-04-conversation-summary-query-plan.md)。
+- 新路径为 `/chats/-/summaries` 和 `/tracing/chats/-/summaries`。不能使用 `/chats/summaries` 覆盖原详情路径：历史 Chat ID 支持任意 128 字节字符串，`summaries` 是合法旧 ID。
+- `MySQLChatRepository.list_summaries` 显式读取 SQL 列、复用 active Turn 的运行状态 CASE；固定上限 200，按 `updated_at/external_chat_key` 排序，读取 limit+1。每页一条业务 SELECT，无 COUNT、NAS IO、reader pin、完整 metadata hydrate；连接池健康检查不计入该业务查询数。
+- 摘要为独立 `ChatSummary/ChatSummaryPage`，只有 `display_metadata` 白名单与 typed `expert_binding`，不是完整 ChatSpec。SQL 中缺失的正文 metadata 不补读 NAS；旧完整数组、页码、v1/v2 cursor 和详情接口均保留。
+- Console 初始和后续列表改读 summary，以“已加载数量”展示，不提供假 total。普通 ID、本地已解析 ID、applyChatSnapshot 都合并完整详情字段；本地未冲突草稿字段保留。
+- 列表请求发出后若完整详情替换了 metadata，对象引用快照会让这些新值优先于迟到的 summary。专门覆盖 plan/goal false、清空专家绑定；普通刷新仍允许 SQL 摘要更新未被改动的字段。
+- Tracing 弹窗只对选中 Session 查询摘要，遍历该 Session 的 cursor 页，保持原按最近更新排序后最后一个 Chat 胜出的映射。切换 Session/user 或关闭时，旧请求不能写回。
+- 文件 repository 为新接口提供兼容投影；SQL 以可信 workspace scope、请求 user、channel 和可选 Session 条件过滤。摘要不能用作正文访问的授权凭据。
+- 回归入口：`tests/unit/app/conversation_storage/test_summaries.py`、`console/src/pages/Chat/sessionApi/index.test.ts` 和 UserDetailModal 测试；专用数据库用例 `test_api_mysql.py::test_http_summaries_keep_content_metadata_on_nas_and_scope_pages`。
+- 未改动：详情与归档的重复预读、Stop/Goal/SubAgent 内部身份查询、批量 NAS extent 读取、checkpoint 和 plan 容量检查。真实数据库和 Chromium 108/360 验收需独立记录。

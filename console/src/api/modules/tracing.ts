@@ -1,6 +1,11 @@
 import { request } from "../request";
 import { buildAuthHeaders } from "../authHeaders";
-import type { ChatArchivePage, ChatHistory, ChatSpec } from "../types";
+import type {
+  ChatArchivePage,
+  ChatHistory,
+  ChatSpec,
+  ChatSummaryPage,
+} from "../types";
 import type { FeedbackRecord } from "../types/feedback";
 
 // Types
@@ -489,6 +494,22 @@ export const tracingApi = {
     if (channel) params.append("channel", channel);
     const data = await request<unknown>(`/tracing/chats?${params.toString()}`);
     return Array.isArray(data) ? (data as ChatSpec[]) : [];
+  },
+
+  getUserChatSummaries: (
+    userId: string,
+    options: { session_id: string; page_size: number; cursor?: string | null },
+  ): Promise<ChatSummaryPage> => {
+    const params = new URLSearchParams({
+      user_id: userId,
+      page_size: String(options.page_size),
+      session_id: options.session_id,
+    });
+    if (options.cursor !== undefined)
+      params.append("cursor", options.cursor || "");
+    return request<ChatSummaryPage>(
+      `/tracing/chats/-/summaries?${params.toString()}`,
+    );
   },
 
   getUserChat: async (

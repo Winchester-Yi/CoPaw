@@ -19,6 +19,11 @@ from ..runner.api import (
     _indexed_history_call,
 )
 from ..runner.models import ChatArchivePage, ChatHistory, ChatSpec
+from ..runner.chat_summary import (
+    ChatSummaryPage,
+    MAX_SUMMARY_PAGE_SIZE,
+    MAX_SUMMARY_CURSOR_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +124,30 @@ async def get_user_chats(
         user_id=user_id,
         channel=channel,
     )
+
+
+@router.get("/tracing/chats/-/summaries", response_model=ChatSummaryPage)
+async def get_user_chat_summaries(
+    request: Request,
+    user_id: str = Query(...),
+    channel: str | None = Query(None),
+    session_id: str | None = Query(None),
+    page_size: int = Query(100, ge=1, le=MAX_SUMMARY_PAGE_SIZE),
+    cursor: str | None = Query(None, max_length=MAX_SUMMARY_CURSOR_LENGTH),
+):
+    """Read target-user discovery fields without complete metadata bodies."""
+    workspace = await _get_target_workspace(request, user_id)
+    try:
+        return await _indexed_history_call(
+            workspace.chat_manager.list_summaries,
+            user_id=user_id,
+            channel=channel,
+            session_id=session_id,
+            page_size=page_size,
+            cursor=cursor,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 async def _target_chat(request: Request, user_id: str, chat_id: str):

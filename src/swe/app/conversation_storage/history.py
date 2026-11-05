@@ -613,8 +613,17 @@ class HistoryStore:
                 (chat["session_id"],),
             )
         if authorize is not None:
-            # Numeric query deliberately does not hydrate content metadata.
-            authorize(self.chats._spec(chat, {}))
+            authorization_chat = self.chats._spec(chat, {})
+            authorize(authorization_chat)
+            if chat["content_meta_publication_id"] is not None and any(
+                key not in authorization_chat.meta
+                for key in ("source_id", "agent_id")
+            ):
+                # Historical oversized identity fields may live on NAS.
+                authorization_chat = await self.chats.get_chat(chat_id)
+                if authorization_chat is None:
+                    raise KeyError(chat_id)
+                authorize(authorization_chat)
         raw = usage["context_usage_text"]
         await self.chats._revalidate([chat])
         if raw is None:
@@ -624,7 +633,7 @@ class HistoryStore:
         except (ValueError, TypeError, ValidationError):
             return ContextUsageUnavailable()
         if authorize is not None:
-            authorize(self.chats._spec(chat, {}))
+            authorize(authorization_chat)
         return ContextUsageAvailable(
             **snapshot.model_dump(),
             stale=bool(usage["context_usage_invalid"])

@@ -387,7 +387,7 @@ function HistoryContent({
       <div className="expandable-panel-header">
         <HistoryIconSmall />
         <span className="expandable-panel-header-title">
-          历史记录({sessionTotal})
+          历史记录(已加载{sessionTotal})
         </span>
       </div>
       <div className="expandable-panel-content" ref={scrollContainerRef}>

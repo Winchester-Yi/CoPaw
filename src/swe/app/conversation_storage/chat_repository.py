@@ -15,6 +15,12 @@ from ..runner.expert_binding import (
     read_expert_binding,
 )
 from ..runner.models import ChatPage, ChatSpec, ChatsFile
+from ..runner.chat_summary import (
+    ChatSummary,
+    ChatSummaryPage,
+    display_metadata,
+    validate_summary_page,
+)
 from ..runner.repo.base import BaseChatRepository
 from .errors import ConflictError, IntegrityError, UnknownCommit
 from .identity import (
@@ -41,15 +47,23 @@ CHAT_FROM = (
     "AND s.agent_key=c.agent_key AND s.user_key=c.user_key "
     "AND s.channel_key=c.channel_key "
 )
-SELECT_CHAT = (
-    "SELECT c.*,s.external_session_key,"
+PROJECTED_STATUS = (
     "CASE WHEN t.chat_id=c.id AND t.state='stopping' THEN 'stopping' "
     "WHEN t.chat_id=c.id AND t.state IN "
     "('reserved','admitted','running','settling') THEN 'running' "
     "ELSE 'idle' END AS projected_status "
-    + CHAT_FROM
-    + "LEFT JOIN swe_conversation_turns t ON t.id=s.active_turn_id "
+)
+STATUS_FROM = (
+    CHAT_FROM + "LEFT JOIN swe_conversation_turns t ON t.id=s.active_turn_id "
     "AND t.session_id=s.id WHERE "
+)
+SELECT_CHAT = (
+    "SELECT c.*,s.external_session_key," + PROJECTED_STATUS + STATUS_FROM
+)
+SELECT_SUMMARY = (
+    "SELECT c.external_chat_key,s.external_session_key,c.user_key,"
+    "c.channel_key,c.title,c.created_at,c.updated_at,c.metadata_text,"
+    "c.expert_id,c.expert_binding_revision," + PROJECTED_STATUS + STATUS_FROM
 )
 
 
@@ -289,6 +303,75 @@ class MySQLChatRepository(BaseChatRepository):
             tuple(params),
         )
         return int(row["total"])
+
+    async def list_summaries(
+        self,
+        *,
+        page_size=100,
+        cursor=None,
+        user_id=None,
+        channel=None,
+        session_id=None,
+    ):
+        """Read one statement snapshot without counts, body pins or NAS IO."""
+        validate_summary_page(page_size, cursor)
+        where, params = self._where(user_id=user_id, channel=channel)
+        if session_id is not None:
+            where += " AND s.external_session_key=%s"
+            params.append(identity_bytes(session_id, 1024))
+        if cursor:
+            version, (stamp, key) = self._decode_cursor(cursor)
+            if version != "v2":
+                raise ValueError("Chat summaries require a v2 cursor")
+            where += (
+                " AND (c.updated_at<%s OR (c.updated_at=%s "
+                "AND c.external_chat_key<%s))"
+            )
+            params.extend(
+                [_sql_time(stamp), _sql_time(stamp), chat_key_bytes(key)],
+            )
+        rows = await self.db.fetch_all(
+            SELECT_SUMMARY
+            + where
+            + " ORDER BY c.updated_at DESC,c.external_chat_key DESC LIMIT %s",
+            (*params, page_size + 1),
+        )
+        has_more = len(rows) > page_size
+        items = [self._summary(row) for row in rows[:page_size]]
+        return ChatSummaryPage(
+            items=items,
+            page_size=page_size,
+            has_more=has_more,
+            next_cursor=(
+                self._encode_cursor(self._recency_sort_key(items[-1]))
+                if has_more
+                else None
+            ),
+        )
+
+    def _summary(self, row):
+        return ChatSummary(
+            id=_text(row["external_chat_key"]),
+            session_id=_text(row["external_session_key"]),
+            user_id=_text(row["user_key"]),
+            channel=_text(row["channel_key"]),
+            name=row["title"],
+            created_at=_utc(row["created_at"]),
+            updated_at=_utc(row["updated_at"]),
+            status=row["projected_status"],
+            display_metadata=display_metadata(
+                _light_meta(row["metadata_text"]),
+            ),
+            expert_binding=(
+                {
+                    "revision": row["expert_binding_revision"],
+                    "expert_id": _text(row["expert_id"]),
+                }
+                if row["expert_binding_revision"]
+                or row["expert_id"] is not None
+                else None
+            ),
+        )
 
     async def paginate_chats(
         self,

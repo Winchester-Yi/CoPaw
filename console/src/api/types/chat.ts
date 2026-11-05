@@ -86,6 +86,36 @@ export interface ChatPage {
   next_cursor?: string | null;
 }
 
+export interface ChatSummary {
+  id: string;
+  session_id: string;
+  user_id: string;
+  channel: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  status: ChatStatus;
+  display_metadata: {
+    plan_mode_enabled?: boolean;
+    goal_mode_enabled?: boolean;
+    session_title_generated?: boolean;
+    session_kind?: string;
+    task_job_id?: string;
+    management_owner?: string;
+    creator_user_id?: string;
+    source_id?: string;
+    agent_id?: string;
+  };
+  expert_binding: { revision: number; expert_id: string | null } | null;
+}
+
+export interface ChatSummaryPage {
+  items: ChatSummary[];
+  page_size: number;
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
 export interface ChatDeleteResponse {
   success: boolean;
   chat_id: string;

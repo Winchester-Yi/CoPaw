@@ -11,6 +11,7 @@ import json
 from typing import Optional
 
 from ..models import ChatPage, ChatSpec, ChatsFile
+from ..chat_summary import ChatSummary, ChatSummaryPage, validate_summary_page
 from ...channels.schema import DEFAULT_CHANNEL
 
 
@@ -301,6 +302,44 @@ class BaseChatRepository(ABC):
         if not isinstance(chat_id, str) or not chat_id:
             raise ValueError("Invalid chat pagination cursor")
         return version, (timestamp, chat_id)
+
+    async def list_summaries(
+        self,
+        *,
+        page_size=100,
+        cursor=None,
+        user_id=None,
+        channel=None,
+        session_id=None,
+    ):
+        """Compatibility path; SQL repositories override with a bounded query."""
+        validate_summary_page(page_size, cursor)
+        boundary = None
+        if cursor:
+            version, boundary = self._decode_cursor(cursor)
+            if version != "v2":
+                raise ValueError("Chat summaries require a v2 cursor")
+        chats = self.sort_chats_by_recency(
+            await self.filter_chats(user_id=user_id, channel=channel),
+        )
+        selected = [
+            chat
+            for chat in chats
+            if (session_id is None or chat.session_id == session_id)
+            and (boundary is None or self._recency_sort_key(chat) < boundary)
+        ][: page_size + 1]
+        has_more = len(selected) > page_size
+        items = selected[:page_size]
+        return ChatSummaryPage(
+            items=[ChatSummary.from_chat(chat) for chat in items],
+            page_size=page_size,
+            has_more=has_more,
+            next_cursor=(
+                self._encode_cursor(self._recency_sort_key(items[-1]))
+                if has_more
+                else None
+            ),
+        )
 
     async def paginate_chats_cursor(
         self,

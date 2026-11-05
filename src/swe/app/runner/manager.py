@@ -175,6 +175,24 @@ class ChatManager:
             cursor=cursor,
         )
 
+    async def list_summaries(
+        self,
+        *,
+        page_size=100,
+        cursor=None,
+        user_id=None,
+        channel=None,
+        session_id=None,
+    ):
+        """List discovery fields without requesting complete metadata."""
+        return await self._repo.list_summaries(
+            page_size=page_size,
+            cursor=cursor,
+            user_id=user_id,
+            channel=channel,
+            session_id=session_id,
+        )
+
     async def get_chat(self, chat_id: str) -> Optional[ChatSpec]:
         """Get chat spec by chat_id (UUID).
 

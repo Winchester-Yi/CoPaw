@@ -10,6 +10,7 @@ import type {
   ExpertBindingView,
   ExpertBindingUpdate,
   ChatPage,
+  ChatSummaryPage,
   ChatSpec,
   ChatCreateRequest,
   ChatCreateResponse,
@@ -263,6 +264,23 @@ export const chatApi = {
     if (params.user_id) searchParams.append("user_id", params.user_id);
     if (params.channel) searchParams.append("channel", params.channel);
     return request<ChatPage>(`/chats?${searchParams.toString()}`);
+  },
+
+  listChatSummaries: (params: {
+    page_size: number;
+    cursor?: string | null;
+    user_id?: string;
+    channel?: string;
+    session_id?: string;
+  }) => {
+    const search = new URLSearchParams({ page_size: String(params.page_size) });
+    if (params.cursor !== undefined)
+      search.append("cursor", params.cursor || "");
+    if (params.user_id !== undefined) search.append("user_id", params.user_id);
+    if (params.channel !== undefined) search.append("channel", params.channel);
+    if (params.session_id !== undefined)
+      search.append("session_id", params.session_id);
+    return request<ChatSummaryPage>(`/chats/-/summaries?${search.toString()}`);
   },
 
   createChat: (chat: ChatCreateRequest) =>
