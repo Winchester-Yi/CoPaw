@@ -78,3 +78,9 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - 文件 repository 为新接口提供兼容投影；SQL 以可信 workspace scope、请求 user、channel 和可选 Session 条件过滤。摘要不能用作正文访问的授权凭据。
 - 回归入口：`tests/unit/app/conversation_storage/test_summaries.py`、`console/src/pages/Chat/sessionApi/index.test.ts` 和 UserDetailModal 测试；专用数据库用例 `test_api_mysql.py::test_http_summaries_keep_content_metadata_on_nas_and_scope_pages`。
 - 未改动：详情与归档的重复预读、Stop/Goal/SubAgent 内部身份查询、批量 NAS extent 读取、checkpoint 和 plan 容量检查。真实数据库和 Chromium 108/360 验收需独立记录。
+
+### 2026-11-05 提交复核：列表链路后续优化
+
+- Console 的 `getSessionList/loadMoreSessions` 每次仍并行调用 `listTaskSources`，后者读取旧 Cron 完整清单并遍历新版调度器清单。旧 `/cron/jobs` 还逐项确认绑定、刷新 next_run_at；JSON repository 会加载整份任务文件。因此 summary API 零 NAS 不能等同于整个侧栏请求链零 NAS。优先将任务存在性查询与会话翻页解耦，复用当前身份的任务快照，任务变更/显式刷新时失效；失败保留未知状态，不能当成任务删除。
+- Tracing 为保持原多 Chat 映射语义，会遍历选中 Session 的全部摘要页后取最后一个 Chat。后续应提供可信 scope/user/Session 下的单对象 SQL 映射查询，按原排序的反向顺序取一条，保留相同更新时间的 external_chat_key 决胜规则，避免搬运全部摘要。文件模式继续保留兼容路径。
+- 这两项是后续设计建议，本提交没有实施。继续保持现有 schema/索引/格式；在专用库上确认实际查询计划、扫描行数及请求成本，再决定实现和批量参数，不能把 LIMIT 或查询次数断言当作延迟验收。
