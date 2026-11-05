@@ -118,6 +118,71 @@ async def test_crud_result_and_reuse(db):
 
 
 @pytest.mark.asyncio
+async def test_packet_capability_is_local_task_owned_and_read_only(db):
+    async with db.transaction() as session:
+        before = list(Connection.instances[0].calls)
+        assert session.max_allowed_packet == 1048576
+        async with db.acquire() as nested:
+            assert nested is session
+            assert nested.max_allowed_packet == 1048576
+        assert Connection.instances[0].calls == before
+        with pytest.raises(AttributeError):
+            session.max_allowed_packet = 1
+
+        async def foreign_task():
+            with pytest.raises(RuntimeError, match="different task"):
+                return session.max_allowed_packet
+
+        await asyncio.create_task(foreign_task())
+    with pytest.raises(RuntimeError, match="no longer usable"):
+        _ = session.max_allowed_packet
+
+
+@pytest.mark.asyncio
+async def test_reference_batches_reuse_transaction_without_extra_lease(
+    db,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.reference_queries import (
+        ReferenceQuery,
+        fetch_reference_rows,
+    )
+
+    async def rows(cursor):
+        service, *ids = cursor.conn.calls[-1][1]
+        return [
+            {
+                "id": identity,
+                "service_unit_key": service,
+                "session_id": 1,
+                "publication_id": 1,
+            }
+            for identity in ids
+        ]
+
+    monkeypatch.setattr(Cursor, "fetchall", rows)
+    async with db.transaction():
+        monkeypatch.setattr(
+            db._pool,
+            "acquire",
+            AsyncMock(side_effect=AssertionError("extra physical lease")),
+        )
+        result = await fetch_reference_rows(
+            db,
+            ReferenceQuery.MESSAGE_OWNERSHIP,
+            range(1, 258),
+            b"service",
+        )
+        assert set(result) == set(range(1, 258))
+    calls = Connection.instances[0].calls
+    assert (
+        sum("FROM swe_conversation_messages" in sql for sql, _ in calls) == 2
+    )
+    assert sum(sql == "BEGIN" for sql, _ in calls) == 1
+    assert sum(sql == "COMMIT" for sql, _ in calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_nested_transaction_and_lock_share_one_session(db):
     async with db.named_lock("key"):
         async with db.transaction() as session:

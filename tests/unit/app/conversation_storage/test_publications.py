@@ -36,6 +36,12 @@ from swe.app.conversation_storage.retention import RetentionStore
 class PublicationDatabase:
     """A stateful transaction double to inject lost responses after commit."""
 
+    max_allowed_packet = 1024 * 1024
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self
+
     def __init__(self):
         self.rows = {}
         self.queries = []
@@ -148,6 +154,22 @@ class PublicationDatabase:
 
     async def fetch_all(self, query, params=None):
         self.queries.append(query)
+        if "service_unit_key=%s AND id IN (" in query:
+            assert query.count("%s") == len(params)
+            if "swe_conversation_messages" in query:
+                candidates = []
+            elif "swe_conversation_turns" in query:
+                candidates = [self.turn]
+            else:
+                assert "swe_conversation_publications" in query
+                candidates = self.rows.values()
+            columns = query[7:].split(" FROM ")[0].split(",")
+            return [
+                {key: deepcopy(row[key]) for key in columns}
+                for row in candidates
+                if row["id"] in params[1:]
+                and row["service_unit_key"] == params[0]
+            ]
         assert "backup_fence" in query
         return []
 

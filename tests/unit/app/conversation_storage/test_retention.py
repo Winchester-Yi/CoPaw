@@ -12,6 +12,12 @@ from swe.app.conversation_storage.retention import RetentionStore
 
 
 class RetentionDatabase:
+    max_allowed_packet = 1024 * 1024
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self
+
     def __init__(self):
         self.pins = []
         self.objects = {

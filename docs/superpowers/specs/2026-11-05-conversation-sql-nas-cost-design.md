@@ -2,7 +2,7 @@
 
 日期：2026-11-05。分析基线：`f66a603ba`，工作区 `.worktrees/conversation-mysql-nas`。
 
-状态：工作包 A（路由去重复 hydrate）已实现，见[实现报告](../reports/2026-11-05-conversation-single-hydrate-implementation.md)。其余工作包仍为设计，未连接业务 MySQL 或 NAS。第 2 节保留分析基线的成本清单。
+状态：工作包 A（路由去重复 hydrate）已实现，见[实现报告](../reports/2026-11-05-conversation-single-hydrate-implementation.md)。B1a 引用批查也已实现，见[实现报告](../reports/2026-11-05-conversation-reference-batching-implementation.md)，真实 MySQL 待验收。其余工作包仍为设计，未连接业务 MySQL 或 NAS。第 2 节保留分析基线的成本清单。
 
 ## 1. 目标、范围与继承约束
 
@@ -317,7 +317,7 @@ A、B 是首选起点；C1 与 B 逻辑独立但实现应分提交，C2 不得�
 
 本设计不改变 guard 为共享锁、不调整 schema/index、不增加内容哈希或持久化投影、不取消 fsync、不把正文写入改成 fire-and-forget、不新增全量响应的隐式截断。SQL 连接归还检查合并、renew 控制容量和 deadline 保留在独立工作包中；本包混合负载验收必须与它们衔接。
 
-首批细化见[单次 hydrate 实施计划](../plans/2026-11-05-conversation-single-hydrate-plan.md)与[引用批量化详细设计](2026-11-05-conversation-reference-batching-design.md)。后者将 B1 拆为原事务内的引用查询 B1a、全量接口一致性和联合锁 B1b；它们尚未实现。B2/C1 各自独立设计和提交；资源参数使用受限初值做专用环境测量后确定，不把全套缓存/背压/写入改造塞进第一版实现。
+首批细化见[单次 hydrate 实施计划](../plans/2026-11-05-conversation-single-hydrate-plan.md)与[引用批量化详细设计](2026-11-05-conversation-reference-batching-design.md)。后者将 B1 拆为原事务内的引用查询 B1a、全量接口一致性和联合锁 B1b；B1a 已实现，B1b 尚未实现。B2/C1 各自独立设计和提交；资源参数使用受限初值做专用环境测量后确定，不把全套缓存/背压/写入改造塞进第一版实现。
 
 设计阶段的文档检查与实现阶段的验证分别记录；工作包 A 的运行时改动和测试证据见实现报告，不能外推为其余工作包或真实 MySQL/NAS 验收。
 

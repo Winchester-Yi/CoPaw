@@ -53,12 +53,32 @@ class HistoryDatabase(RetentionDatabase):
                 "layer": "task",
                 "source_msg_key": str(i).encode(),
                 "role_key": b"assistant",
+                "origin_chat_id": None,
+                "turn_id": None,
+                "source_occurrence_no": 0,
+                "kind_key": b"message",
+                "task_run_key": None,
+                "context_epoch": 0,
+                "message_timestamp": None,
+                "session_order": i,
+                "current_visible": 1,
+                "in_context": 1,
             }
             for i in self.objects
         }
 
     async def fetch_all(self, query, params):
         if "swe_conversation_messages" in query:
+            if "service_unit_key=%s AND id IN (" in query:
+                self.queries.append(query)
+                columns = query[7:].split(" FROM ")[0].split(",")
+                return [
+                    {key: self.messages[identity][key] for key in columns}
+                    for identity in params[1:]
+                    if identity in self.messages
+                    and self.messages[identity]["service_unit_key"]
+                    == params[0]
+                ]
             return list(self.messages.values())
         return await super().fetch_all(query, params)
 

@@ -19,6 +19,7 @@ from .identity import (
 )
 from .chat_mutations import install_chat_metadata, load_metadata_json
 from .retention import RetentionStore
+from .reference_queries import ReferenceQuery, fetch_reference_rows
 from .message_installs import install_messages, install_turn
 from .archive import install_archive
 from .archive_payloads import (
@@ -322,11 +323,14 @@ class PublicationStore(PublicationAssociations):
             for item in proof["questions"].values():
                 messages.add(item["message_id"])
                 publications.add(item["publication_id"])
+        rows = await fetch_reference_rows(
+            self.db,
+            ReferenceQuery.MESSAGE_OWNERSHIP,
+            messages,
+            request.scope.sql_values[0],
+        )
         for identity in sorted(messages):
-            row = await self.db.fetch_one(
-                "SELECT service_unit_key,session_id,publication_id FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s",
-                (identity, request.scope.sql_values[0]),
-            )
+            row = rows.get(identity)
             if (
                 row is None
                 or row["service_unit_key"] != request.scope.sql_values[0]
@@ -336,11 +340,14 @@ class PublicationStore(PublicationAssociations):
                     "Message reference service or Session mismatch",
                 )
             publications.add(row["publication_id"])
+        rows = await fetch_reference_rows(
+            self.db,
+            ReferenceQuery.PUBLICATION_OWNERSHIP,
+            publications,
+            request.scope.sql_values[0],
+        )
         for identity in sorted(publications):
-            row = await self.db.fetch_one(
-                "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s",
-                (identity, request.scope.sql_values[0]),
-            )
+            row = rows.get(identity)
             if (
                 row is None
                 or WorkspaceScope.from_row(row) != request.scope

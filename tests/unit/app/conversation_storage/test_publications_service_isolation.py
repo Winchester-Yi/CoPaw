@@ -25,14 +25,16 @@ async def test_plan_message_ids_reject_foreign_service_before_nas(
     from swe.app.conversation_storage.message_installs import MessageInstall
 
     class Database(PublicationDatabase):
-        async def fetch_one(self, query, params=None):
+        async def fetch_all(self, query, params=None):
             if "swe_conversation_messages" in query:
-                return {
-                    "id": 999,
-                    "session_id": 1,
-                    "service_unit_key": b"foreign",
-                }
-            return await super().fetch_one(query, params)
+                return [
+                    {
+                        "id": 999,
+                        "session_id": 1,
+                        "service_unit_key": b"foreign",
+                    },
+                ]
+            return await super().fetch_all(query, params)
 
     store = PublicationStore(
         Database(),

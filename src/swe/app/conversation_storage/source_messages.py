@@ -7,6 +7,7 @@ from .chat_mutations import load_metadata_json, utc_datetime
 from .errors import IntegrityError
 from .identity import identity_bytes
 from .retention import RetentionStore
+from .reference_queries import ReferenceQuery, fetch_reference_rows
 
 SOURCE_FIELDS = (
     "service_unit_key",
@@ -62,11 +63,18 @@ class SourceMessages:
     async def revalidate(self, db):
         if self.projection_references is not None:
             await self.projection_references.revalidate(db)
-        for identity, expected in sorted(self.rows.items()):
-            row = await db.fetch_one(
-                "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s FOR SHARE",
-                (identity, expected["service_unit_key"]),
+        rows = (
+            await fetch_reference_rows(
+                db,
+                ReferenceQuery.MESSAGE_CURRENT,
+                self.rows,
+                next(iter(self.rows.values()))["service_unit_key"],
             )
+            if self.rows
+            else {}
+        )
+        for identity, expected in sorted(self.rows.items()):
+            row = rows.get(identity)
             if row is None or any(
                 row[key] != expected[key] for key in SOURCE_FIELDS
             ):
@@ -204,11 +212,14 @@ async def snapshot_sources(service, request, plan):
     retentions = RetentionStore(service.db, request.scope)
     try:
         async with service.db.transaction():
+            rows = await fetch_reference_rows(
+                service.db,
+                ReferenceQuery.MESSAGE_LOCATOR,
+                ids,
+                request.scope.sql_values[0],
+            )
             for message in messages:
-                row = await service.db.fetch_one(
-                    "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s",
-                    (message.source_message_id, request.scope.sql_values[0]),
-                )
+                row = rows.get(message.source_message_id)
                 _validate_row(row, message, request)
                 snapshot.rows[row["id"]] = row
             orders = [

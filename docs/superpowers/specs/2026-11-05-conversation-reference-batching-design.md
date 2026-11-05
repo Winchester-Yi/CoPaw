@@ -1,6 +1,6 @@
 # 引用查询批量化：首批边界与一致性细化
 
-日期：2026-11-05。基线 `f66a603ba`。状态：详细设计，未实施。
+日期：2026-11-05。基线 `f66a603ba`。状态：B1a 已实现，真实 MySQL 待验收；B1b 未实施。见[实现报告](../reports/2026-11-05-conversation-reference-batching-implementation.md)。
 
 本文细化[SQL/NAS 成本总体设计](2026-11-05-conversation-sql-nas-cost-design.md)的 B1，不包含 pin/dependency INSERT、NAS 批读、缓存或写入准备。
 
@@ -137,6 +137,6 @@ B1b 需要单独实施计划，先确定以下协议后替换全量复核：
 
 ## 8. 实施顺序
 
-[单次 hydrate 工作包](../reports/2026-11-05-conversation-single-hydrate-implementation.md)已完成实现和独立回归。下一步按本文件形成 B1a 的代码级实施计划，首先固定查询模板、packet 能力和替身契约，再迁移捕获/复核调用方。B1b、B2 成员写入、NAS/缓存工作包继续分别推进。
+[单次 hydrate 工作包](../reports/2026-11-05-conversation-single-hydrate-implementation.md)已完成实现和独立回归。B1a 已按[实施计划](../plans/2026-11-05-conversation-reference-batching-plan.md)完成固定查询模板、packet 能力和捕获/复核调用方迁移，真实数据库验收仍待专用环境。B1b、B2 成员写入、NAS/缓存工作包继续分别推进。
 
 这项拆分用于避免一个“批量化”提交同时修改数据库事务协议、publication 锁顺序、正文 IO 和路由授权，方便分别证明性能收益及正确性。

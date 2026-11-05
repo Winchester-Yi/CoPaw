@@ -114,11 +114,11 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - CommitPlan.serialize 已检查最终 UTF-8 JSON <=1 MiB；reserve 在事务/NAS 前调用。effective projection plan、compact 模型前后及 bundle 的容量闭环仍待下一包，不能将此通用 guard 当作已全部修复。
 - 自动化扩大回归 865 passed、16 skipped；新增真实 MySQL 规模/并发/GC 用例因专用库缺失未执行，尚不能验收真实数据库或 NAS。
 
-### 2026-11-05 SQL/NAS 成本优化（A 已实现，其余设计中）
+### 2026-11-05 SQL/NAS 成本优化（A/B1a 已实现，其余设计中）
 
 - 见[专项设计](../../docs/superpowers/specs/2026-11-05-conversation-sql-nas-cost-design.md)。排查按路由重复 hydrate、projection/source 逐引用 SQL、RetentionStore 成员逐行 INSERT、BundleStore 每 extent 两次打开、写入 root 编码/解码与重复深复制展开。
 - 推荐依次拆为去重复 hydrate、有界引用查询/复核、pin/dependency/Message 批量写入、同 bundle 冷读分组、进程 NAS 背压、有界缓存、detached 快照准备。已有 request-local projection cache 不等于字节有界；全量接口分批 pin 后仍需修复无界 IN。
 - 本地真实 BundleStore 临时文件实验：同 bundle 64/256 个 extent 分别触发 64/256 次 inspect、128/512 次文件打开。只是调用次数，不代表 NAS 耗时或生产加速倍数。
 - SQL 批次不等于减少成员行数/事务总锁；cache hit 不省当前授权/版本/pin；新 publication 首次 durable 校验不能用准备内存冒充读回，离线目标验证必须 cold。NAS 运行中 worker 完成前不得释放 pins，进程关闭需先 drain 再关 SQL。
 - 首批[单次 hydrate 工作包已实现](../../docs/superpowers/reports/2026-11-05-conversation-single-hydrate-implementation.md)：四个 indexed 详情/归档入口先判断 reader，取消路由前置完整 Chat 读取，授权在 reader 内完整执行；Tracing 的 lookup 阶段测试迁为 reader 授权前后。四项禁止重复读取的测试先失败后通过，相关回归 98 passed。真实 HistoryStore 组装测试验证每请求一次 metadata hydrate，但数据库与 NAS payload 使用替身，不代表现场延迟收益。
-- [引用批量化细化](../../docs/superpowers/specs/2026-11-05-conversation-reference-batching-design.md)区分原事务内的 B1a 与全量一致性/联合锁 B1b。publication 批查不能 SELECT * 带回大 plan；256 IDs 是行数上限，实际按物理连接已知 packet 预算缩小批次。两包均未实现。
+- [引用批量化细化](../../docs/superpowers/specs/2026-11-05-conversation-reference-batching-design.md)区分原事务内的 B1a 与全量一致性/联合锁 B1b。publication 批查不能 SELECT * 带回大 plan；256 IDs 是行数上限，实际按物理连接已知 packet 预算缩小批次。B1a 已按[实现记录](../../docs/superpowers/reports/2026-11-05-conversation-reference-batching-implementation.md)完成：五种固定窄列模板、packet 预算与 256 IDs 双重切批；捕获和复核保持原逐字段检查、Message FOR SHARE 与 Turn 普通读。4,097 个 locator 在预算足够时为 17 次查询；B1b 未实现。专用库未配置，新增两项真实 MySQL 用例跳过，不能把替身成本等同现场性能。

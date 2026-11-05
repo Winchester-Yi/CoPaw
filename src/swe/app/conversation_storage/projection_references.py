@@ -9,6 +9,30 @@ from .identity import WorkspaceScope
 from .retention import ReaderPins, RetentionStore
 from .session_projection import hydrate_state, is_projection
 from .projection_cache import active, cache_key, cached, remember
+from .reference_queries import ReferenceQuery, fetch_reference_rows
+
+PROJECTION_FIELDS = (
+    "service_unit_key",
+    "session_id",
+    "publication_id",
+    "byte_offset",
+    "byte_length",
+    "layer",
+    "source_msg_key",
+    "role_key",
+    "context_epoch",
+    "current_visible",
+    "in_context",
+    "deleted_at",
+)
+TURN_FIELDS = (
+    "service_unit_key",
+    "session_id",
+    "chat_id",
+    "terminal_publication_id",
+    "history_status",
+    "question_msg_key",
+)
 
 
 def ref_key(ref):
@@ -50,46 +74,38 @@ class ProjectionReferences:
             self.batch = None
 
     async def revalidate(self, db):
-        for identity, expected in sorted(self.rows.items()):
-            row = await db.fetch_one(
-                "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s FOR SHARE",
-                (identity, expected["service_unit_key"]),
+        rows = (
+            await fetch_reference_rows(
+                db,
+                ReferenceQuery.MESSAGE_CURRENT,
+                self.rows,
+                next(iter(self.rows.values()))["service_unit_key"],
             )
+            if self.rows
+            else {}
+        )
+        for identity, expected in sorted(self.rows.items()):
+            row = rows.get(identity)
             if row is None or any(
-                row[key] != expected[key]
-                for key in (
-                    "service_unit_key",
-                    "session_id",
-                    "publication_id",
-                    "byte_offset",
-                    "byte_length",
-                    "layer",
-                    "source_msg_key",
-                    "role_key",
-                    "context_epoch",
-                    "current_visible",
-                    "in_context",
-                    "deleted_at",
-                )
+                row[key] != expected[key] for key in PROJECTION_FIELDS
             ):
                 raise IntegrityError(
                     "recovery projection occurrence locator changed",
                 )
-        for identity, expected in sorted(self.turns.items()):
-            row = await db.fetch_one(
-                "SELECT * FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s",
-                (identity, expected["service_unit_key"]),
+        turns = (
+            await fetch_reference_rows(
+                db,
+                ReferenceQuery.TURN_REFERENCE,
+                self.turns,
+                next(iter(self.turns.values()))["service_unit_key"],
             )
+            if self.turns
+            else {}
+        )
+        for identity, expected in sorted(self.turns.items()):
+            row = turns.get(identity)
             if row is None or any(
-                row[key] != expected[key]
-                for key in (
-                    "service_unit_key",
-                    "session_id",
-                    "chat_id",
-                    "terminal_publication_id",
-                    "history_status",
-                    "question_msg_key",
-                )
+                row[key] != expected[key] for key in TURN_FIELDS
             ):
                 raise IntegrityError("cold Turn projection authority changed")
 
@@ -106,13 +122,26 @@ def _same_locator(row, request, ref):
 
 
 async def _snapshot_rows(service, request, refs, snapshot):
+    rows = await fetch_reference_rows(
+        service.db,
+        ReferenceQuery.MESSAGE_LOCATOR,
+        [ref["message_id"] for ref in refs if "message_id" in ref],
+        request.scope.sql_values[0],
+    )
+    turns = await fetch_reference_rows(
+        service.db,
+        ReferenceQuery.TURN_REFERENCE,
+        [
+            ref["turn_id"]
+            for ref in refs
+            if "message_id" not in ref and "turn_id" in ref
+        ],
+        request.scope.sql_values[0],
+    )
     for ref in refs:
         if "message_id" not in ref:
             if "turn_id" in ref:
-                turn = await service.db.fetch_one(
-                    "SELECT * FROM swe_conversation_turns WHERE id=%s AND service_unit_key=%s",
-                    (ref["turn_id"], request.scope.sql_values[0]),
-                )
+                turn = turns.get(ref["turn_id"])
                 if (
                     turn is None
                     or turn["service_unit_key"] != request.scope.sql_values[0]
@@ -124,10 +153,7 @@ async def _snapshot_rows(service, request, refs, snapshot):
                     )
                 snapshot.turns[turn["id"]] = turn
             continue
-        row = await service.db.fetch_one(
-            "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s",
-            (ref["message_id"], request.scope.sql_values[0]),
-        )
+        row = rows.get(ref["message_id"])
         if not _same_locator(row, request, ref):
             raise IntegrityError(
                 "recovery projection reference does not match Session locator",

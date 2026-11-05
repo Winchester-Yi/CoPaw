@@ -138,13 +138,18 @@ async def test_locator_change_after_pin_rejects_commit():
         SOURCE_FIELDS,
     )
     from swe.app.conversation_storage.errors import IntegrityError
-    from unittest.mock import AsyncMock
-
-    row = {key: 1 for key in SOURCE_FIELDS}
-    sources = SourceMessages(rows={1: row})
-    db = SimpleNamespace(
-        fetch_one=AsyncMock(return_value={**row, "byte_offset": 99}),
+    from tests.unit.app.conversation_storage.test_reference_queries import (
+        ReferenceDatabase,
+        SERVICE,
     )
+
+    row = {
+        **dict.fromkeys(SOURCE_FIELDS, 1),
+        "service_unit_key": SERVICE,
+        "in_context": 1,
+    }
+    sources = SourceMessages(rows={1: row})
+    db = ReferenceDatabase(messages={1: {**row, "byte_offset": 99}})
     with pytest.raises(IntegrityError, match="changed"):
         await sources.revalidate(db)
 

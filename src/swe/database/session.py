@@ -27,6 +27,12 @@ class DatabaseSession:
         self._usable = True
         self._in_transaction = False
 
+    @property
+    def max_allowed_packet(self):
+        """Return this lease's verified server limit without another query."""
+        self._check()
+        return self._entry.max_allowed_packet
+
     def _check(self):
         if asyncio.current_task() is not self._owner:
             raise RuntimeError("Database session belongs to a different task")

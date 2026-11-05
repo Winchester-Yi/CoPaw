@@ -296,7 +296,7 @@ async def test_indexed_archive_maps_invalid_cursor(history_client, target):
 
 - [x] 对实际改动文件执行 pre-commit、`git diff --check`。检查没有额外 metadata cache，没有放宽 authorize 闭包，没有删减 ChatHistory 字段，没有让 indexed 存储错误落回文件后端。
 - [x] 在入口索引和实现报告记录成本边界：减少的是路由前置一次完整 metadata 查询/读取；详情必要正文和最终复核仍然存在。无真实 NAS 验证时不能给出延迟收益。
-- [ ] 用户要求提交时只暂存本工作包文件；本轮未请求提交，未暂存；保留其他工作区改动，不读取或修改 `src/swe/config/envs/dev.json`。
+- [x] 已按用户要求仅提交本工作包代码及相关设计文档，提交为 `19b77d542`；保留其他工作区改动，不读取或修改 `src/swe/config/envs/dev.json`。
 
 ## 已完成的计划前核对
 
