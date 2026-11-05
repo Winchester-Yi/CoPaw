@@ -12,12 +12,46 @@ from dataclasses import dataclass, field
 import asyncio
 import secrets
 
+from ...database.prepared import PreparedInsert
 from .errors import ConflictError, IntegrityError
 from .identity import WorkspaceScope, identity_bytes
+from .reference_queries import ReferenceQuery, fetch_reference_rows
 
 TABLE = "swe_conversation_retentions"
 SCOPE_WHERE = "scope_kind=%s AND service_unit_key=%s AND tenant_key=%s AND source_key=%s AND agent_key=%s"
 MAX_PIN_BATCH = 4096
+MEMBER_FIELDS = (
+    "retention_key",
+    "member_key",
+    "kind",
+    "scope_kind",
+    "service_unit_key",
+    "tenant_key",
+    "source_key",
+    "agent_key",
+    "publication_id",
+    "guard_marker",
+    "state",
+    "created_at",
+)
+MEMBER_INSERT = PreparedInsert(
+    f"INSERT INTO {TABLE} ({','.join(MEMBER_FIELDS)}) VALUES ",
+    "(" + ",".join(["%s"] * len(MEMBER_FIELDS)) + ")",
+    " ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
+)
+MEMBER_CHECK_FIELDS = (
+    "service_unit_key",
+    "scope_kind",
+    "tenant_key",
+    "source_key",
+    "agent_key",
+    "member_key",
+    "publication_id",
+    "kind",
+    "state",
+    "guard_marker",
+    "snapshot_ref",
+)
 
 
 def _ids(values, *, bounded=True):
@@ -178,6 +212,31 @@ class RetentionStore:
             tuple(fields.values()),
         )
 
+    async def _insert_members(self, key, ids, kind):
+        if len(ids) == 1:
+            await self._insert(key, ids[0], kind)
+        elif ids:
+            clock = await self.db.fetch_one(
+                "SELECT UTC_TIMESTAMP(6) AS created_at",
+            )
+            await self.db.insert_prepared(
+                MEMBER_INSERT,
+                (
+                    (
+                        key,
+                        identity,
+                        kind,
+                        self.scope_kind,
+                        *self.scope.sql_values,
+                        identity,
+                        None,
+                        "active",
+                        clock["created_at"],
+                    )
+                    for identity in ids
+                ),
+            )
+
     async def ensure_guard(self):
         """The unique scope marker arbitrates first-use races without a Session."""
         async with self.db.transaction():
@@ -303,13 +362,15 @@ class RetentionStore:
         ids = _ids(values)
         if not ids:
             return []
-        placeholders = ",".join(["%s"] * len(ids))
-        rows = await self.db.fetch_all(
-            f"SELECT * FROM swe_conversation_publications WHERE id IN ({placeholders}) AND service_unit_key=%s ORDER BY id FOR UPDATE",
-            (*ids, self.scope.sql_values[0]),
+        by_id = await fetch_reference_rows(
+            self.db,
+            ReferenceQuery.PUBLICATION_LOCK,
+            ids,
+            self.scope.sql_values[0],
         )
-        if [row["id"] for row in rows] != ids:
+        if set(by_id) != set(ids):
             raise IntegrityError("retention target publication is missing")
+        rows = [by_id[identity] for identity in ids]
         for row in rows:
             self._validate_scope(row)
         return rows
@@ -329,8 +390,7 @@ class RetentionStore:
                     raise ConflictError(
                         "publication is not committed/live for pinning",
                     )
-            for row in rows:
-                await self._insert(key, row["id"], kind)
+            await self._insert_members(key, [row["id"] for row in rows], kind)
             await self._validate_members(
                 key,
                 [row["id"] for row in rows],
@@ -338,28 +398,56 @@ class RetentionStore:
             )
         return PinBatch(key, tuple(rows))
 
-    async def _validate_members(self, key, publication_ids, kind):
-        members = await self.db.fetch_all(
-            f"SELECT * FROM {TABLE} WHERE retention_key=%s AND service_unit_key=%s ORDER BY member_key FOR UPDATE",
-            (key, self.scope.sql_values[0]),
+    async def _fetch_members(self, key, limit, *, after=None):
+        where = "retention_key=%s AND service_unit_key=%s"
+        params = (key, self.scope.sql_values[0])
+        if after is not None:
+            where += " AND member_key>%s"
+            params += (after,)
+        return await self.db.fetch_all(
+            f"SELECT {','.join(MEMBER_CHECK_FIELDS)} FROM {TABLE} WHERE {where} "
+            "ORDER BY member_key LIMIT %s FOR UPDATE",
+            (*params, limit),
         )
-        if len(members) != len(publication_ids):
+
+    async def _validate_members(self, key, publication_ids, kind):
+        position = 0
+        after = None
+        limit = (
+            len(publication_ids) + 1
+            if len(publication_ids) <= MAX_PIN_BATCH
+            else 256
+        )
+        while True:
+            members = await self._fetch_members(key, limit, after=after)
+            for row in members:
+                if position >= len(publication_ids):
+                    raise ConflictError(
+                        "retention identity already has a different member set",
+                    )
+                self._validate_scope(row)
+                identity = publication_ids[position]
+                current = (
+                    row["publication_id"],
+                    row["member_key"],
+                    row["kind"],
+                    row["state"],
+                )
+                if (
+                    current != (identity, identity, kind, "active")
+                    or row["guard_marker"] is not None
+                ):
+                    raise ConflictError(
+                        "retention identity is released or differs from this pin",
+                    )
+                position += 1
+            if len(members) < limit:
+                break
+            after = members[-1]["member_key"]
+        if position != len(publication_ids):
             raise ConflictError(
                 "retention identity already has a different member set",
             )
-        for row, publication_id in zip(members, publication_ids):
-            self._validate_scope(row)
-            expected = (publication_id, publication_id, kind, "active")
-            current = (
-                row["publication_id"],
-                row["member_key"],
-                row["kind"],
-                row["state"],
-            )
-            if current != expected or row["guard_marker"] is not None:
-                raise ConflictError(
-                    "retention identity is released or differs from this pin",
-                )
 
     async def release(self, retention_key: bytes):
         await self.db.execute(
@@ -404,28 +492,37 @@ class RetentionStore:
                         ordered[start : start + MAX_PIN_BATCH],
                     ),
                 )
-            source = rows[-1]
+            await self._install_locked_dependencies(rows[-1], rows[:-1])
+
+    async def _install_locked_dependencies(self, source, rows):
+        """Consume locks held by the caller's current publication transaction."""
+        async with self.db.acquire() as session:
+            if not session._in_transaction:
+                raise RuntimeError(
+                    "dependency installation requires the locking transaction",
+                )
+            self._validate_scope(source)
+            targets = [row["id"] for row in rows]
+            if targets != _ids(targets, bounded=False) or any(
+                value >= source["id"] for value in targets
+            ):
+                raise IntegrityError(
+                    "dependencies must point to older publications",
+                )
             if source["gc_state"] != "live" or source["state"] not in (
                 "prepared",
                 "committed",
             ):
                 raise ConflictError("dependency source is not publishable")
-            for row in rows[:-1]:
+            for row in rows:
+                self._validate_scope(row)
                 if row["state"] != "committed" or row["gc_state"] != "live":
                     raise ConflictError(
                         "dependency target is not committed/live",
                     )
-            for row in rows[:-1]:
-                await self._insert(
-                    f"dep:{source_id}".encode("ascii"),
-                    row["id"],
-                    "dependency",
-                )
-            await self._validate_members(
-                f"dep:{source_id}".encode("ascii"),
-                targets,
-                "dependency",
-            )
+            key = f"dep:{source['id']}".encode("ascii")
+            await self._insert_members(key, targets, "dependency")
+            await self._validate_members(key, targets, "dependency")
 
     async def release_dependencies(self, source_id: int):
         async with self.db.transaction():

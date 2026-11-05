@@ -141,6 +141,17 @@ def test_new_share_requires_selected_source_questions():
         validate_share_request(share_request(), mutation())
 
 
+def selection_database(**kwargs):
+    db = SimpleNamespace(max_allowed_packet=1024 * 1024, **kwargs)
+
+    @asynccontextmanager
+    async def acquire():
+        yield db
+
+    db.acquire = acquire
+    return db
+
+
 @pytest.mark.parametrize(
     "turn_changes,occurrences",
     [
@@ -169,7 +180,7 @@ async def test_share_selection_rechecks_completed_and_first_visible_occurrence(
         "history_status": "completed",
         **turn_changes,
     }
-    db = SimpleNamespace(
+    db = selection_database(
         fetch_all=AsyncMock(side_effect=[[turn], occurrences]),
     )
     with pytest.raises(ConflictError):
@@ -188,7 +199,7 @@ async def test_share_selection_preserves_source_identity_and_duplicate_occurrenc
         "state": "succeeded",
         "history_status": "completed",
     }
-    db = SimpleNamespace(
+    db = selection_database(
         fetch_all=AsyncMock(
             side_effect=[
                 [turn],
@@ -205,7 +216,11 @@ async def test_share_selection_preserves_source_identity_and_duplicate_occurrenc
         "question",
     )
     await lock_share_selection(db, share_request(), plan)
-    assert db.fetch_all.call_args_list[0].args[1] == (1, b"question")
+    assert db.fetch_all.call_args_list[0].args[1] == (
+        b"schema-test-service",
+        1,
+        b"question",
+    )
     assert all(
         "FOR UPDATE" in call.args[0] for call in db.fetch_all.call_args_list
     )
@@ -219,7 +234,7 @@ async def test_archived_anchor_is_not_a_visible_share_question():
         "state": "succeeded",
         "history_status": "completed",
     }
-    db = SimpleNamespace(
+    db = selection_database(
         fetch_all=AsyncMock(
             side_effect=[
                 [turn],

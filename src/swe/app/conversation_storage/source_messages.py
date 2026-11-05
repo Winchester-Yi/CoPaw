@@ -92,39 +92,53 @@ class SourceMessages:
     async def lock_current(self, service, current, operation_key):
         if self.publication_ids:
             return await self.lock_publications(service, current)
-        return await service.get(operation_key, lock=True)
+        return await service.get(operation_key, lock=True), {}
 
-    async def install_dependencies(self, service, request, publication):
+    async def install_dependencies(
+        self,
+        service,
+        request,
+        publication,
+        *,
+        locked_publications=None,
+    ):
         await self.revalidate(service.db)
         if self.publication_ids:
-            await RetentionStore(service.db, request.scope).add_dependencies(
-                publication["id"],
-                self.publication_ids,
-            )
+            store = RetentionStore(service.db, request.scope)
+            if locked_publications is None:
+                await store.add_dependencies(
+                    publication["id"],
+                    self.publication_ids,
+                )
+            else:
+                if set(locked_publications) != set(self.publication_ids):
+                    raise IntegrityError("locked dependency set differs")
+                await store._install_locked_dependencies(
+                    publication,
+                    [locked_publications[i] for i in self.publication_ids],
+                )
 
     async def lock_publications(self, service, current):
-        result = None
+        ids = self.publication_ids
+        if any(identity >= current["id"] for identity in ids):
+            raise IntegrityError(
+                "archive dependency must point to an older publication",
+            )
         expected = (
             {row["id"]: row for row in self.batch.publications}
             if self.batch is not None
             else {}
         )
         expected.update(self.dependency_publications)
-        for identity in sorted({*self.publication_ids, current["id"]}):
-            row = await service.db.fetch_one(
-                "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s FOR UPDATE",
-                (identity, service.service_unit_key),
-            )
+        rows = await fetch_reference_rows(
+            service.db,
+            ReferenceQuery.PUBLICATION_LOCK,
+            ids,
+            service.service_unit_key,
+        )
+        for identity in ids:
+            row = rows.get(identity)
             if (
-                row is not None
-                and row["service_unit_key"] != service.service_unit_key
-            ):
-                raise IntegrityError(
-                    "archive source publication service unit mismatch",
-                )
-            if identity == current["id"]:
-                result = row
-            elif (
                 row is None
                 or row["state"] != "committed"
                 or row["gc_state"] != "live"
@@ -132,11 +146,7 @@ class SourceMessages:
                 raise IntegrityError(
                     "archive source publication is not committed/live",
                 )
-            elif identity >= current["id"]:
-                raise IntegrityError(
-                    "archive dependency must point to an older publication",
-                )
-            elif identity in expected and any(
+            if identity in expected and any(
                 row[key] != expected[identity][key]
                 for key in (
                     "session_id",
@@ -152,7 +162,11 @@ class SourceMessages:
                 raise IntegrityError(
                     "archive source publication locator changed",
                 )
-        return result
+        result = await service.db.fetch_one(
+            "SELECT * FROM swe_conversation_publications WHERE id=%s AND service_unit_key=%s FOR UPDATE",
+            (current["id"], service.service_unit_key),
+        )
+        return result, rows
 
 
 def _validate_row(row, message, request):

@@ -535,6 +535,7 @@ async def test_offline_readonly_retention_never_writes_and_checks_scope():
 
     class Database:
         is_connected = True
+        max_allowed_packet = 1024 * 1024
 
         async def fetch_all(self, _query, _params=None):
             return [
@@ -553,6 +554,8 @@ async def test_offline_readonly_retention_never_writes_and_checks_scope():
         @asynccontextmanager
         async def transaction(self):
             yield self
+
+        acquire = transaction
 
         async def execute(self, *_args):
             pytest.fail("offline verification executed SQL mutation")

@@ -99,6 +99,12 @@ async def test_message_occurrences_allocate_stable_orders_without_deduplicating_
             source_occurrence_no=1,
         ),
     )
+    captured = []
+
+    async def prepared(template, rows):
+        captured.extend(rows)
+
+    db.insert_prepared = AsyncMock(side_effect=prepared)
     await install_messages(
         db,
         request,
@@ -107,9 +113,10 @@ async def test_message_occurrences_allocate_stable_orders_without_deduplicating_
         index,
         ({"history_high": 8}, {"history_high": 2}, None),
     )
-    assert db.insert.await_count == 2
-    assert db.insert.await_args_list[0].args[1][5] == 9
-    assert db.insert.await_args_list[1].args[1][5] == 10
+    db.insert.assert_not_awaited()
+    db.insert_prepared.assert_awaited_once()
+    assert captured[0][5] == 9
+    assert captured[1][5] == 10
     assert db.execute.await_args_list[0].args[1] == (10, 1)
 
 

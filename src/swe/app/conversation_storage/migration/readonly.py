@@ -4,6 +4,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import re
+from types import SimpleNamespace
 
 from ..errors import ConflictError
 from ..retention import PinBatch, RetentionStore
@@ -20,6 +21,15 @@ class ReadOnlyDatabase:
             )
         self._database = database
         self.boundary = boundary
+
+    @asynccontextmanager
+    async def acquire(self):
+        async with self._database.acquire() as session:
+            yield SimpleNamespace(
+                max_allowed_packet=session.max_allowed_packet,
+                fetch_one=self.fetch_one,
+                fetch_all=self.fetch_all,
+            )
 
     @property
     def is_connected(self):

@@ -82,7 +82,7 @@ class HistoryDatabase(RetentionDatabase):
             return list(self.messages.values())
         return await super().fetch_all(query, params)
 
-    async def fetch_one(self, query, params):
+    async def fetch_one(self, query, params=None):
         if "swe_conversation_messages" in query:
             return self.messages.get(params[0])
         return await super().fetch_one(query, params)

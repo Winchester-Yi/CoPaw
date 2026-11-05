@@ -128,6 +128,15 @@ async def test_duplicate_prune_ids_use_matching_placeholders_and_parameters():
         ),
         execute=AsyncMock(),
     )
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def acquire():
+        yield db
+
+    db.acquire = acquire
+    db.max_allowed_packet = 1024 * 1024
+    db._in_transaction = True
     from tests.unit.app.conversation_storage.test_publications import request
 
     await _prune(db, request(), (1, 1))

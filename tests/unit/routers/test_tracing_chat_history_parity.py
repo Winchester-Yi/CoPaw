@@ -441,15 +441,19 @@ async def test_indexed_tracing_real_reader_keeps_current_history(
     ]
 
     class Database:
+        max_allowed_packet = 1024 * 1024
+
         @asynccontextmanager
         async def transaction(self):
             yield self
+
+        acquire = transaction
 
         async def fetch_one(self, sql, params):
             return {"history_high": 4}
 
         async def fetch_all(self, sql, params):
-            if sql.startswith("SELECT source_msg_key"):
+            if sql.startswith("SELECT DISTINCT source_msg_key"):
                 return []
             assert sql.startswith("SELECT m.*")
             layers = params[3:]
@@ -476,8 +480,11 @@ async def test_indexed_tracing_real_reader_keeps_current_history(
             },
         ],
     )
-    store._revalidate_rows = AsyncMock()
-    store._validate_chat_row = AsyncMock()
+    store._validate_chat_row = AsyncMock(
+        side_effect=(
+            [None, ConflictError("changed")] if failure == "revision" else None
+        ),
+    )
     store._finish = AsyncMock()
     store.chats._hydrate = AsyncMock(
         return_value=[
@@ -488,8 +495,6 @@ async def test_indexed_tracing_real_reader_keeps_current_history(
             ),
         ],
     )
-    if failure == "revision":
-        store._revalidate_rows.side_effect = [None, ConflictError("changed")]
     payloads = {
         "anchor": question.to_dict(),
         "memory": answer.to_dict(),

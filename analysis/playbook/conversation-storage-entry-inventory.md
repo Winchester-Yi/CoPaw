@@ -121,13 +121,22 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - 本地真实 BundleStore 临时文件实验：同 bundle 64/256 个 extent 分别触发 64/256 次 inspect、128/512 次文件打开。只是调用次数，不代表 NAS 耗时或生产加速倍数。
 - SQL 批次不等于减少成员行数/事务总锁；cache hit 不省当前授权/版本/pin；新 publication 首次 durable 校验不能用准备内存冒充读回，离线目标验证必须 cold。NAS 运行中 worker 完成前不得释放 pins，进程关闭需先 drain 再关 SQL。
 - 首批[单次 hydrate 工作包已实现](../../docs/superpowers/reports/2026-11-05-conversation-single-hydrate-implementation.md)：四个 indexed 详情/归档入口先判断 reader，取消路由前置完整 Chat 读取，授权在 reader 内完整执行；Tracing 的 lookup 阶段测试迁为 reader 授权前后。四项禁止重复读取的测试先失败后通过，相关回归 98 passed。真实 HistoryStore 组装测试验证每请求一次 metadata hydrate，但数据库与 NAS payload 使用替身，不代表现场延迟收益。
-- [引用批量化细化](../../docs/superpowers/specs/2026-11-05-conversation-reference-batching-design.md)区分原事务内的 B1a 与全量一致性/联合锁 B1b。publication 批查不能 SELECT * 带回大 plan；256 IDs 是行数上限，实际按物理连接已知 packet 预算缩小批次。B1a 已按[实现记录](../../docs/superpowers/reports/2026-11-05-conversation-reference-batching-implementation.md)完成：五种固定窄列模板、packet 预算与 256 IDs 双重切批；捕获和复核保持原逐字段检查、Message FOR SHARE 与 Turn 普通读。4,097 个 locator 在预算足够时为 17 次查询；B1b 未实现。专用库未配置，新增两项真实 MySQL 用例跳过，不能把替身成本等同现场性能。
+- [引用批量化细化](../../docs/superpowers/specs/2026-11-05-conversation-reference-batching-design.md)区分原事务内的 B1a 与全量一致性/联合锁 B1b。publication 批查不能 SELECT * 带回大 plan；256 IDs 是行数上限，实际按物理连接已知 packet 预算缩小批次。B1a 已按[实现记录](../../docs/superpowers/reports/2026-11-05-conversation-reference-batching-implementation.md)完成：五种固定窄列模板、packet 预算与 256 IDs 双重切批；捕获和复核保持原逐字段检查、Message FOR SHARE 与 Turn 普通读。4,097 个 locator 在预算足够时为 17 次查询；该轮尚未实施 B1b，后续进度见下节。专用库未配置，新增两项真实 MySQL 用例跳过，不能把替身成本等同现场性能。
 
 ### 2026-11-05 B1a 提交后的剩余工作复核
 
 - B1a 已提交 `e7422898b`，提交前扩大回归 987 passed、2 skipped，pre-commit 通过。参见[剩余工作报告](../../docs/superpowers/reports/2026-11-05-conversation-remaining-work-review.md)。
-- 当前 SQL 成本下一包为 B1b（全量复核一致快照、无界集合 SQL 和 publication 锁）；随后 B2 成员写入、C1/C2 批读与背压、C3 有界缓存、D detached 快照。compact 容量/错误终态、续租总预算和真实环境验收仍应优先闭环。
+- 该轮规划的 B1b/B2 已由下节简化版实现替代，全量复核一致快照不再作为需求；后续为 C1/C2 批读与背压、C3 有界缓存、D detached 快照。compact 容量/错误终态、续租总预算和真实环境验收仍应优先闭环。
 - 复核时不要把 A/B1a 当作所有接口零 NAS、所有 SQL 已批量化。Stop 的 Session 回退查找、SubAgent/分享身份预读、guard 重复锁定、池归还检查和 GC/备份扫描仍有独立优化空间。manifest 锁定驱动 26.7.0，而当前 venv 为 9.4.0；需隔离环境验收，不能用替身测试宣称上线性能达标。
+
+### 2026-11-05 B1b / B2 简化版实现
+
+- 见[简化读取与 SQL 批量化设计](../../docs/superpowers/specs/2026-11-05-conversation-b1b-b2-batching-design.md)。用户选择展示不追求跨批一致；此前 NAS 后 RR 快照及全量 Message 复核方案被替代，不新增展示快照或 Message 行锁。
+- 新固定集合模板入口为 `collection_queries.py`，每批 256 项/64 KiB，并受实际连接 packet 缩小；binary key 按转义字节预算。覆盖 anchor suppression、boundary、Chat 删除、share selection/proof 和 prune；分享结果恢复跨批全局排序，删除冻结候选后先锁全部 Session 再锁 Chat，保留一个外层事务。
+- History/Tracing/archive/answer-turn 移除 NAS 前后全量 Message 二次复核，保留 scope、payload、授权与轻量 Chat 检查；完整 Chat 复核改窄列批查普通 SELECT。写入 Source/Projection 最终来源复核继续保留。
+- publication 沿用 FOR UPDATE，依赖窄列批锁，current 完整锁；commit 内锁验一次并立即复用于 dependency 安装，公开 add_dependencies 独立调用仍自行锁验，不跨事务保存锁证据。GC、Stop、fencing、UnknownCommit 保护保留。
+- 普通 pin/dependency 复用 PreparedInsert，guard/fence 不变；单 pin/backup 采用 expected+1 有界窄列完整检查，dependency 大集合按 member_key 分页并由 source 排他锁协调安装/释放。多余成员、released、scope 和 backup snapshot_ref 仍校验。
+- Message 按原高水位顺序批写，单事务回滚，不推算连续自增 ID；单行避免新增 prepare/时间查询。4096 单 pin/Message 与 plan 字节边界不变。推荐 S1 简化读 → S2 publication 消重 → S3 retention 批写 → S4 Message 批写 → S5 其他集合写。代码已按该顺序实施；实现与测试明细见[实现记录](../../docs/superpowers/reports/2026-11-05-conversation-simplified-batching-implementation.md)。本轮回归 1172 passed、287 skipped，任务文件 pre-commit 通过；真实数据库验收仍待专用库，SQL 次数不等于延迟验收。
 
 ### 2026-11-05 续租总预算与控制容量（历史严格租约，已由下节替代）
 

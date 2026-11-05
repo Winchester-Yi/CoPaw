@@ -41,9 +41,58 @@ TURN_REFERENCE_FIELDS = (
 )
 
 
+PUBLICATION_LOCK_FIELDS = (
+    "id",
+    "service_unit_key",
+    "scope_kind",
+    "tenant_key",
+    "source_key",
+    "agent_key",
+    "session_id",
+    "chat_id",
+    "turn_id",
+    "kind",
+    "operation_key",
+    "state",
+    "gc_state",
+    "relative_path",
+    "byte_length",
+)
+
+
+CHAT_CHECK_FIELDS = (
+    "id",
+    "service_unit_key",
+    "tenant_key",
+    "source_key",
+    "agent_key",
+    "session_id",
+    "metadata_revision",
+    "expert_binding_revision",
+    "content_meta_publication_id",
+    "content_meta_offset",
+    "content_meta_length",
+    "user_key",
+    "channel_key",
+    "deleted_at",
+)
+
+
 class ReferenceQuery(Enum):
     """Only trusted table, column and lock shapes can reach the helper."""
 
+    MESSAGE_PRUNE = (
+        "messages",
+        ("id", "service_unit_key", "session_id", "layer", "context_epoch"),
+        " FOR UPDATE",
+    )
+    MESSAGE_PROOF = (
+        "messages",
+        (*MESSAGE_LOCATOR_FIELDS, "archive_chat_id", "archive_order"),
+        " FOR UPDATE",
+    )
+    PUBLICATION_LOCK = ("publications", PUBLICATION_LOCK_FIELDS, " FOR UPDATE")
+    CHAT_CHECK = ("chats", CHAT_CHECK_FIELDS, "")
     MESSAGE_LOCATOR = ("messages", MESSAGE_LOCATOR_FIELDS, "")
     MESSAGE_CURRENT = ("messages", MESSAGE_LOCATOR_FIELDS, " FOR SHARE")
     MESSAGE_OWNERSHIP = (
@@ -107,11 +156,11 @@ def _batch_size(session, prefix, suffix, service_unit_key):
     return size
 
 
-async def fetch_reference_rows(database, query_kind, ids, service_unit_key):
-    """Return id-to-row using bounded fixed SQL on a task-owned lease.
+async def iter_reference_rows(database, query_kind, ids, service_unit_key):
+    """Yield requested IDs and narrow rows per batch on one task-owned lease.
 
-    Missing IDs are checked by the domain. This function neither creates a
-    transaction nor reuses results across stages, and never performs NAS IO.
+    Consumers that can exit early must close this iterator before leaving their
+    SQL stage. This helper does not start transactions or perform NAS IO.
     """
     identities, prefix, suffix = _query_shape(
         query_kind,
@@ -119,14 +168,14 @@ async def fetch_reference_rows(database, query_kind, ids, service_unit_key):
         service_unit_key,
     )
     if not identities:
-        return {}
-    result = {}
+        return
     async with database.acquire() as session:
         size = _batch_size(session, prefix, suffix, service_unit_key)
         for start in range(0, len(identities), size):
             batch = identities[start : start + size]
             requested = set(batch)
             query = prefix + ",".join(["%s"] * len(batch)) + suffix
+            result = {}
             for row in await session.fetch_all(
                 query,
                 (service_unit_key, *batch),
@@ -142,4 +191,17 @@ async def fetch_reference_rows(database, query_kind, ids, service_unit_key):
                         "Reference query returned invalid IDs or service",
                     )
                 result[identity] = row
+            yield batch, result
+
+
+async def fetch_reference_rows(database, query_kind, ids, service_unit_key):
+    """Return all narrow rows; the caller checks required IDs and authority."""
+    result = {}
+    async for _batch, rows in iter_reference_rows(
+        database,
+        query_kind,
+        ids,
+        service_unit_key,
+    ):
+        result.update(rows)
     return result

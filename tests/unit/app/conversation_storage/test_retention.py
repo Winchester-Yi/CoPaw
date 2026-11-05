@@ -20,6 +20,7 @@ class RetentionDatabase:
 
     def __init__(self):
         self.pins = []
+        self.depth = 0
         self.objects = {
             value: {
                 "service_unit_key": b"schema-test-service",
@@ -35,14 +36,31 @@ class RetentionDatabase:
         }
         self.queries = []
 
+    @property
+    def _in_transaction(self):
+        return self.depth > 0
+
+    async def insert_prepared(self, template, rows, **kwargs):
+        count = 0
+        for row in rows:
+            await self.insert(
+                template.prefix + template.row_template + template.suffix,
+                row,
+            )
+            count += 1
+        return count
+
     @asynccontextmanager
     async def transaction(self):
+        self.depth += 1
         before = deepcopy(self.pins)
         try:
             yield self
         except BaseException:
             self.pins = before
             raise
+        finally:
+            self.depth -= 1
 
     async def insert(self, query, params):
         assert query.count("%s") == len(params)
@@ -83,7 +101,9 @@ class RetentionDatabase:
         self.pins.append(row)
         return row["id"]
 
-    async def fetch_one(self, query, params):
+    async def fetch_one(self, query, params=None):
+        if "UTC_TIMESTAMP(6) AS created_at" in query:
+            return {"created_at": "database-time"}
         assert query.count("%s") == len(params)
         self.queries.append(query)
         if "guard_marker=1" in query:
@@ -112,6 +132,18 @@ class RetentionDatabase:
         assert query.count("%s") == len(params)
         self.queries.append(query)
         if "swe_conversation_publications" in query:
+            if "service_unit_key=%s AND id IN (" in query:
+                service, ids = params[0], params[1:]
+                columns = query[7:].split(" FROM ")[0].split(",")
+                return [
+                    {
+                        key: deepcopy(self.objects[value].get(key))
+                        for key in columns
+                    }
+                    for value in sorted(set(ids))
+                    if value in self.objects
+                    and self.objects[value]["service_unit_key"] == service
+                ]
             return [
                 deepcopy(self.objects[value])
                 for value in sorted(set(params[:-1]))
@@ -119,12 +151,20 @@ class RetentionDatabase:
                 and self.objects[value]["service_unit_key"] == params[-1]
             ]
         if "retention_key=%s" in query:
-            return [
-                deepcopy(row)
-                for row in self.pins
-                if row["retention_key"] == params[0]
-                and row["service_unit_key"] == params[1]
-            ]
+            rows = sorted(
+                [
+                    deepcopy(row)
+                    for row in self.pins
+                    if row["retention_key"] == params[0]
+                    and row["service_unit_key"] == params[1]
+                    and (
+                        "member_key>%s" not in query
+                        or row["member_key"] > params[2]
+                    )
+                ],
+                key=lambda row: row["member_key"],
+            )
+            return rows[: params[-1]] if "LIMIT %s" in query else rows
         if "kind='backup_fence'" in query:
             return [
                 deepcopy(row)

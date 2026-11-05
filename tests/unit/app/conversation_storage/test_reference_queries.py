@@ -217,10 +217,10 @@ async def test_fixed_query_shapes_cover_all_required_columns():
     )
     from swe.app.conversation_storage.source_messages import SOURCE_FIELDS
 
-    db = ReferenceDatabase(messages={}, turns={}, publications={})
+    db = ReferenceDatabase(messages={}, turns={}, publications={}, chats={})
     for kind in ReferenceQuery:
         await fetch_reference_rows(db, kind, [2**64 - 1], SERVICE)
-    assert len(db.calls) == 5
+    assert len(db.calls) == len(ReferenceQuery)
     for query, params in db.calls:
         assert params == (SERVICE, 2**64 - 1)
         if "in_context" in query:
@@ -229,6 +229,7 @@ async def test_fixed_query_shapes_cover_all_required_columns():
         assert "result_metadata_text" not in query
         assert "execution_identity_text" not in query
     assert sum(query.endswith("FOR SHARE") for query, _ in db.calls) == 1
+    assert sum(query.endswith("FOR UPDATE") for query, _ in db.calls) == 3
     with pytest.raises(ValueError):
         await fetch_reference_rows(db, "DROP TABLE messages", [1], SERVICE)
 

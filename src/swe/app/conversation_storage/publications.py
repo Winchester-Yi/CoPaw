@@ -906,7 +906,11 @@ class PublicationStore(PublicationAssociations):
                         archive_turns,
                     )
                 )
-                row = await sources.lock_current(self, initial, operation_key)
+                row, locked_publications = await sources.lock_current(
+                    self,
+                    initial,
+                    operation_key,
+                )
                 self._matches(row, request, initial["result_metadata_text"])
                 if row["state"] == "committed":
                     return row
@@ -919,7 +923,12 @@ class PublicationStore(PublicationAssociations):
                     _settlement_generation,
                 )
                 archive_payloads.validate_chat(associations[1])
-                await sources.install_dependencies(self, request, row)
+                await sources.install_dependencies(
+                    self,
+                    request,
+                    row,
+                    locked_publications=locked_publications,
+                )
                 await self._install(
                     row,
                     plan,

@@ -114,16 +114,18 @@ async def test_real_reference_templates_and_transaction_lease(
             return await original(query, params)
 
         monkeypatch.setattr(session, "fetch_all", capture)
+        expected_queries = 0
         for kind in ReferenceQuery:
-            identities = (
-                [publication]
-                if kind is ReferenceQuery.PUBLICATION_OWNERSHIP
-                else (
-                    [turn]
-                    if kind is ReferenceQuery.TURN_REFERENCE
-                    else list(range(1, 258))
-                )
-            )
+            table = kind.value[0]
+            if table == "publications":
+                identities = [publication]
+            elif table == "turns":
+                identities = [turn]
+            elif table == "chats":
+                identities = [rows[0]["origin_chat_id"]]
+            else:
+                identities = list(range(1, 258))
+            expected_queries += (len(identities) + 255) // 256
             result = await fetch_reference_rows(db, kind, identities, SERVICE)
             assert set(result) == set(identities)
             assert all(
@@ -131,7 +133,7 @@ async def test_real_reference_templates_and_transaction_lease(
                 and "execution_identity_text" not in row
                 for row in result.values()
             )
-        assert len(calls) == 8
+        assert len(calls) == expected_queries
         assert (
             await fetch_reference_rows(
                 db,

@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, fields
 
 from .chat_mutations import utc_datetime
 from .errors import ConflictError, IntegrityError
+from .reference_queries import ReferenceQuery, fetch_reference_rows
+from .collection_queries import CollectionQuery, update_collection
 from .identity import identity_bytes
 
 
@@ -258,11 +260,13 @@ async def _prune(db, request, prune_ids, *, context_epoch=None):
     ):
         raise ValueError("prune IDs must be a bounded positive set")
     prune_ids = tuple(sorted(set(prune_ids)))
-    placeholders = ",".join(["%s"] * len(prune_ids))
-    rows = await db.fetch_all(
-        f"SELECT id,service_unit_key,session_id,layer,context_epoch FROM swe_conversation_messages WHERE id IN ({placeholders}) AND service_unit_key=%s ORDER BY id FOR UPDATE",
-        (*prune_ids, request.scope.sql_values[0]),
+    current = await fetch_reference_rows(
+        db,
+        ReferenceQuery.MESSAGE_PRUNE,
+        prune_ids,
+        request.scope.sql_values[0],
     )
+    rows = list(current.values())
     if len(rows) != len(set(prune_ids)) or any(
         row["service_unit_key"] != request.scope.sql_values[0]
         or row["session_id"] != request.session_id
@@ -275,9 +279,11 @@ async def _prune(db, request, prune_ids, *, context_epoch=None):
         raise IntegrityError(
             "pruned occurrence does not belong to current Session",
         )
-    await db.execute(
-        f"UPDATE swe_conversation_messages SET in_context=0,current_visible=0 WHERE id IN ({placeholders}) AND service_unit_key=%s",
-        (*prune_ids, request.scope.sql_values[0]),
+    await update_collection(
+        db,
+        CollectionQuery.PRUNE,
+        prune_ids,
+        (request.scope.sql_values[0],),
     )
 
 

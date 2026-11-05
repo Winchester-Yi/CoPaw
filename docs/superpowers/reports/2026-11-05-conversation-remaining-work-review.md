@@ -6,6 +6,8 @@
 
 > 2026-11-05 后续更新：第 2 项已改为并实现软租约＋代次校验，见[当前设计](../specs/2026-11-05-conversation-soft-lease-design.md)。下文保留当时严格租约的排查证据；“过期必须拒绝写入”不再是当前规则。
 
+> B1b/B2 后续更新：已按简化展示读取方案实现，见[实现记录](2026-11-05-conversation-simplified-batching-implementation.md)。不新增展示 RR 快照或全量 Message 复核；下文旧 B1b/B2 表格为当时分析，当前待办以末节为准。
+
 ## 已完成的边界
 
 - checkpoint 的 record/prefix/page/full 与完整遍历已实现；通用持久化 plan 最终 UTF-8 字节检查已实现。不能由此推断 compact 和扩展内存 plan 的容量闭环也已完成。
@@ -67,3 +69,20 @@ B1a 两项目标库用例尚未执行；真实小 packet 缩批、writer/GC 交�
 如果继续当前 SQL 成本工作，下一步是 **B1b → B2 → C1/C2 → C3 → D**，每包独立证明成本和兼容语义；C2 不能拖到缓存之后。
 
 发布前同时优先闭环 compact 容量/终态与续租可用性，并建立匹配锁定驱动的真实环境证据。summary、checkpoint、A/B1a 不需要推倒重做；列表并发稳定翻页仍按用户决定暂不纳入，继续保持既有 schema、索引和存储格式。
+
+
+## B1b/B2 完成后的当前待办
+
+本包已完成展示读取简化、固定集合查询、publication 同事务锁复用，以及 pin/dependency/Message 批写。checkpoint 四种读取契约、通用 plan 字节 guard 和软租约＋代次校验均已实现，不重复列为开发待办。没有引入 schema、索引或 NAS 格式变更。
+
+| 优先级 | 待办 | 处理重点 |
+| --- | --- | --- |
+| 高 | Compact / effective plan 全链路容量与错误终态 | 模型前预检源数量、plan/envelope、bundle/index/extent 预算，模型后最终复核；容量失败应可观测并阻止继续超预算调用，保留原子提交及 unknown 对账。通用 serialize guard 不能替代此闭环。 |
+| 高 | 真实环境与迁移验收 | 专用 MySQL、匹配部署的驱动、EXPLAIN/扫描/锁等待、小 packet、批写回滚、GC/备份交错、checkpoint 边界、慢 NAS/跨 Pod/退出，以及迁移/备份恢复演练；此前 Console 仍需真实 Chromium 108/360 和 hideMenu 验收。当前 1172 passed、287 skipped，真实库验收未完成。 |
+| 中高 | C1：同 bundle 批读 | 在预算内复用一次安全打开和 index 校验，按 bundle/窗口读取必要 extents；物理去重保留业务 occurrence，不额外预读无关正文。 |
+| 中高 | C2：进程级 NAS 背压 | 有界 worker、队列和在途字节；等待不占 SQL 事务；取消及停机须先 drain 实际 IO、释放 pins，再关闭 SQL。与 C1 分包但衔接推进。 |
+| 中 | C3：有界缓存 | 冷路径优化后增加按字节限制的缓存；命中仍做当前授权、版本与 pin 检查，离线验证强制 cold，防可变返回值污染。 |
+| 中 | D：写入快照准备 | 明确私有快照所有权，减少重复深复制、编码/解码和旧内容读取；保留未知模块及 durable NAS 读回证据。依赖容量校验和读取接口稳定。 |
+| 较低 | 剩余 SQL 点查与内部预读 | 旧无 proof 分享逐 key 查询、历史 projection locator 点查、Stop 回退身份查询、SubAgent/分享预读、guard/连接归还检查等；先测量热点再独立优化。 |
+
+建议下一开发包先处理 Compact 容量与错误终态，同时准备专用环境验收；随后按 C1 → C2 → C3 → D 推进。继续遵守不改 schema/存储格式、非必要减少 NAS 交互、保留旧接口兼容、不增加展示跨批一致性设计的约束。

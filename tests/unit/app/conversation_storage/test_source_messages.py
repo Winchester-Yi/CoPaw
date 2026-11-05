@@ -158,23 +158,39 @@ async def test_source_publications_lock_older_then_current_in_integer_order():
     from swe.app.conversation_storage.source_messages import SourceMessages
     from unittest.mock import AsyncMock
 
-    calls = []
+    from tests.unit.app.conversation_storage.test_reference_queries import (
+        ReferenceDatabase,
+        SERVICE,
+    )
 
-    async def fetch(query, params):
-        calls.append(params[0])
-        return {
-            "service_unit_key": b"schema-test-service",
-            "id": params[0],
-            "state": "prepared" if params[0] == 9 else "committed",
+    rows = {
+        identity: {
+            "service_unit_key": SERVICE,
+            "id": identity,
+            "state": "committed",
             "gc_state": "live",
+            "scope_kind": "workspace",
+            "tenant_key": b"t",
+            "source_key": b"s",
+            "agent_key": b"a",
+            "session_id": 1,
+            "chat_id": None,
+            "turn_id": None,
+            "kind": "state",
+            "operation_key": str(identity).encode(),
+            "relative_path": b"path",
+            "byte_length": 100,
         }
-
+        for identity in (1, 2)
+    }
+    db = ReferenceDatabase(publications=rows)
+    db.fetch_one = AsyncMock(return_value={"id": 9})
     sources = SourceMessages(
         rows={11: {"publication_id": 2}, 12: {"publication_id": 1}},
     )
-    service = SimpleNamespace(
-        service_unit_key=b"schema-test-service",
-        db=SimpleNamespace(fetch_one=fetch),
-    )
-    assert (await sources.lock_publications(service, {"id": 9}))["id"] == 9
-    assert calls == [1, 2, 9]
+    service = SimpleNamespace(service_unit_key=SERVICE, db=db)
+    current, locked = await sources.lock_publications(service, {"id": 9})
+    assert current["id"] == 9
+    assert locked == rows
+    assert db.calls[0][1] == (SERVICE, 1, 2)
+    assert db.fetch_one.await_args.args[1] == (9, SERVICE)

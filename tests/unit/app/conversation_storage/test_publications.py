@@ -105,6 +105,20 @@ class PublicationDatabase:
             self.lose_commit = False
             raise ConnectionError("commit response lost")
 
+    @property
+    def _in_transaction(self):
+        return self.transaction_depth > 0
+
+    async def insert_prepared(self, template, rows, **kwargs):
+        count = 0
+        for row in rows:
+            await self.insert(
+                template.prefix + template.row_template + template.suffix,
+                row,
+            )
+            count += 1
+        return count
+
     async def fetch_one(self, query, params=None):
         self.queries.append(query)
         if self.fail_read:

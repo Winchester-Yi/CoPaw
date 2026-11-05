@@ -10,6 +10,8 @@ from ..chat_sharing.models import ChatShareRecord, ChatShareSnapshot
 from ..chat_sharing.store import ChatShareStore
 from .bundle import BundleBlock, new_operation_key
 from .chat_mutations import load_metadata_json, utc_datetime
+from .collection_queries import CollectionQuery, query_collection
+from .reference_queries import ReferenceQuery, fetch_reference_rows
 from .errors import ConflictError, IntegrityError, StorageUnavailable
 from .identity import (
     WorkspaceScope,
@@ -187,12 +189,8 @@ async def _lock_selection_proof(db, request, proof):
         raise ConflictError("share selection history changed")
 
 
-async def _lock_proven_occurrence(db, request, key, proof, turn):
+def _validate_proven_occurrence(row, request, key, proof, turn):
     item = proof["questions"][key.decode("utf-8")]
-    row = await db.fetch_one(
-        "SELECT * FROM swe_conversation_messages WHERE id=%s AND service_unit_key=%s FOR UPDATE",
-        (item["message_id"], request.scope.sql_values[0]),
-    )
     expected = {
         "service_unit_key": request.scope.sql_values[0],
         "session_id": request.session_id,
@@ -236,16 +234,22 @@ async def lock_share_selection(db, request, plan):
             identity_bytes(key, 256) for key in plan.selected_question_keys
         ),
     )
-    marks = ",".join(["%s"] * len(keys))
-    turns = await db.fetch_all(
-        "SELECT * FROM swe_conversation_turns WHERE session_id=%s "
-        "AND question_msg_key IN (" + marks + ") ORDER BY id FOR UPDATE",
-        (request.session_id, *keys),
+    turns = await query_collection(
+        db,
+        CollectionQuery.SHARE_TURNS,
+        keys,
+        (request.scope.sql_values[0], request.session_id),
     )
     by_key = {row["question_msg_key"]: row for row in turns}
     proof = plan.selection_proof
     if proof is not None:
         await _lock_selection_proof(db, request, proof)
+        proven = await fetch_reference_rows(
+            db,
+            ReferenceQuery.MESSAGE_PROOF,
+            [item["message_id"] for item in proof["questions"].values()],
+            request.scope.sql_values[0],
+        )
     elif len(by_key) != len(keys):
         raise ConflictError("selected share question has no durable Turn")
     for key in keys:
@@ -257,7 +261,14 @@ async def lock_share_selection(db, request, plan):
         ):
             raise ConflictError("selected share Turn is not completed")
         if proof is not None:
-            await _lock_proven_occurrence(db, request, key, proof, turn)
+            item = proof["questions"][key.decode("utf-8")]
+            _validate_proven_occurrence(
+                proven.get(item["message_id"]),
+                request,
+                key,
+                proof,
+                turn,
+            )
             continue
         occurrences = await db.fetch_all(
             "SELECT m.* FROM swe_conversation_messages m WHERE "
@@ -438,7 +449,7 @@ class ShareStorage:
 
     async def _selection_occurrences(self, chat_id, snapshot, keys):
         from ..runner import api
-        from .history import HistorySnapshot, HistoryStore, VISIBLE_ONLINE
+        from .history import HistorySnapshot, HistoryStore
 
         history = HistoryStore(
             self.db,
@@ -449,23 +460,30 @@ class ShareStorage:
         encoded = tuple(identity_bytes(key, 256) for key in keys)
         if not encoded:
             return {}
-        marks = ",".join(["%s"] * len(encoded))
         async with self.db.transaction():
             chat = await history._chat(chat_id)
-            rows = await self.db.fetch_all(
-                "SELECT m.* FROM swe_conversation_messages m WHERE ("
-                "(m.archive_chat_id=%s AND m.deleted_at IS NULL AND m.archive_order<=%s) OR ("
-                + VISIBLE_ONLINE
-                + " AND m.session_order<=%s)) "
-                "AND m.source_msg_key IN (" + marks + ") "
-                "ORDER BY m.archive_order,m.session_order,m.id",
+            rows = await query_collection(
+                self.db,
+                CollectionQuery.SHARE_OCCURRENCES,
+                encoded,
                 (
+                    self.scope.sql_values[0],
                     chat["id"],
                     snapshot["archive_history_high"],
                     chat["session_id"],
                     chat["id"],
                     snapshot["session_history_high"],
-                    *encoded,
+                ),
+            )
+            # SQL batches have disjoint source keys; restore the original global
+            # MySQL ascending order (NULL sorts before numeric values).
+            rows.sort(
+                key=lambda row: (
+                    row["archive_order"] is not None,
+                    row["archive_order"] or 0,
+                    row["session_order"] is not None,
+                    row["session_order"] or 0,
+                    row["id"],
                 ),
             )
             batches = await history._pins(chat, rows, [])
@@ -655,7 +673,11 @@ class ShareStorage:
                     [record.publication_id],
                     kind="reader",
                 )
-            publication = batch.publications[0]
+            pinned = batch.publications[0]
+            if any(
+                publication[name] != value for name, value in pinned.items()
+            ):
+                raise IntegrityError("share publication changed while pinning")
             self._validate_record_publication(record, publication)
             if publication["kind"] not in ("share", "share_import"):
                 raise IntegrityError(

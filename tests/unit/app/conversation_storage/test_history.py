@@ -157,7 +157,6 @@ async def test_tracing_overlay_binds_target_scope_and_restores_operator(
     store.chats._hydrate = AsyncMock(return_value=[spec])
     store._validate_chat_row = AsyncMock()
     store._payloads = AsyncMock(return_value=[])
-    store._revalidate_rows = AsyncMock()
     store._finish = AsyncMock()
     seen = []
 
@@ -220,7 +219,6 @@ async def test_target_approval_overlay_uses_actual_scope_filter(
     store.chats._hydrate = AsyncMock(return_value=[spec])
     store._validate_chat_row = AsyncMock()
     store._payloads = AsyncMock(return_value=[])
-    store._revalidate_rows = AsyncMock()
     store._finish = AsyncMock()
     message = ChatMessage(
         id="approval",

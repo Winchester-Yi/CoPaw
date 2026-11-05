@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Scoped SQL Chat metadata with pinned immutable content reads."""
 
+from contextlib import aclosing
 from datetime import timezone
 import asyncio
 import json
@@ -22,6 +23,11 @@ from ..runner.chat_summary import (
     validate_summary_page,
 )
 from ..runner.repo.base import BaseChatRepository
+from .collection_queries import (
+    CollectionQuery,
+    query_collection,
+    update_collection,
+)
 from .errors import ConflictError, IntegrityError, UnknownCommit
 from .identity import (
     SessionIdentity,
@@ -30,6 +36,7 @@ from .identity import (
     identity_bytes,
 )
 from .retention import MAX_PIN_BATCH, RetentionStore
+from .reference_queries import ReferenceQuery, iter_reference_rows
 from .chat_mutations import (
     ChatMetadataInstall,
     split_metadata,
@@ -216,14 +223,6 @@ class MySQLChatRepository(BaseChatRepository):
     async def _revalidate(self, rows):
         if not rows:
             return
-        ids = [row["id"] for row in rows]
-        placeholders = ",".join(["%s"] * len(ids))
-        current = await self.db.fetch_all(
-            f"SELECT * FROM {TABLE} c WHERE {SCOPE_WHERE} AND c.id IN "
-            f"({placeholders}) AND c.deleted_at IS NULL",
-            (*self.scope.sql_values, *ids),
-        )
-        by_id = {row["id"]: row for row in current}
         fields = (
             "session_id",
             "metadata_revision",
@@ -234,12 +233,39 @@ class MySQLChatRepository(BaseChatRepository):
             "user_key",
             "channel_key",
         )
-        if any(
-            row["id"] not in by_id
-            or any(row[field] != by_id[row["id"]][field] for field in fields)
-            for row in rows
-        ):
-            raise ConflictError("Chat changed while metadata was read")
+        expected = {row["id"]: row for row in rows}
+        async with aclosing(
+            iter_reference_rows(
+                self.db,
+                ReferenceQuery.CHAT_CHECK,
+                expected,
+                self.scope.sql_values[0],
+            ),
+        ) as batches:
+            async for ids, current in batches:
+                for identity in ids:
+                    row = current.get(identity)
+                    if (
+                        row is None
+                        or row["deleted_at"] is not None
+                        or tuple(
+                            row[key]
+                            for key in (
+                                "service_unit_key",
+                                "tenant_key",
+                                "source_key",
+                                "agent_key",
+                            )
+                        )
+                        != self.scope.sql_values
+                        or any(
+                            row[field] != expected[identity][field]
+                            for field in fields
+                        )
+                    ):
+                        raise ConflictError(
+                            "Chat changed while metadata was read",
+                        )
 
     async def load(self):
         return ChatsFile(chats=await self.list_chats())
@@ -569,44 +595,43 @@ class MySQLChatRepository(BaseChatRepository):
         keys = sorted({chat_key_bytes(value) for value in chat_ids})
         if not keys:
             return False
-        placeholders = ",".join(["%s"] * len(keys))
         async with self.db.transaction():
             await self.retentions.assert_writes_allowed()
-            rows = await self.db.fetch_all(
-                f"SELECT id,session_id FROM {TABLE} c WHERE {SCOPE_WHERE} "
-                f"AND external_chat_key IN ({placeholders}) AND deleted_at "
-                f"IS NULL ORDER BY id",
-                (*self.scope.sql_values, *keys),
+            rows = await query_collection(
+                self.db,
+                CollectionQuery.DELETE_CANDIDATES,
+                keys,
+                self.scope.sql_values,
             )
+            rows.sort(key=lambda row: row["id"])
             if not rows:
                 return False
-            for session_id in sorted({row["session_id"] for row in rows}):
-                await self.db.fetch_one(
-                    "SELECT id FROM swe_conversation_sessions WHERE id=%s "
-                    "FOR UPDATE",
-                    (session_id,),
-                )
-            for row in rows:
-                current = await self.db.fetch_one(
-                    f"SELECT id,session_id FROM {TABLE} WHERE id=%s FOR "
-                    f"UPDATE",
-                    (row["id"],),
-                )
-                if (
-                    current is None
-                    or current["session_id"] != row["session_id"]
-                ):
-                    raise ConflictError("Chat Session association changed")
+            session_ids = {row["session_id"] for row in rows}
+            await query_collection(
+                self.db,
+                CollectionQuery.SESSION_LOCK,
+                session_ids,
+                (self.scope.sql_values[0],),
+            )
             ids = [row["id"] for row in rows]
-            locked_placeholders = ",".join(["%s"] * len(ids))
-            changed = await self.db.execute(
-                f"UPDATE {TABLE} c SET "
-                "deleted_at=UTC_TIMESTAMP(6),"
-                "metadata_revision=metadata_revision+1 "
-                f"WHERE {SCOPE_WHERE} "
-                f"AND c.id IN ({locked_placeholders}) "
-                "AND deleted_at IS NULL",
-                (*self.scope.sql_values, *ids),
+            current = await query_collection(
+                self.db,
+                CollectionQuery.CHAT_LOCK,
+                ids,
+                (self.scope.sql_values[0],),
+            )
+            by_id = {row["id"]: row for row in current}
+            if any(
+                row["id"] not in by_id
+                or by_id[row["id"]]["session_id"] != row["session_id"]
+                for row in rows
+            ):
+                raise ConflictError("Chat Session association changed")
+            changed = await update_collection(
+                self.db,
+                CollectionQuery.DELETE_CHATS,
+                ids,
+                self.scope.sql_values,
             )
             return bool(changed)
 

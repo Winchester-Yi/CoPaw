@@ -24,6 +24,12 @@ from swe.app.conversation_storage.retention import (
 
 
 class CheckpointDatabase:
+    max_allowed_packet = 1024 * 1024
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self
+
     def __init__(self, count, active=False, shared=False, group=1):
         self.depth = 0
         self.event_queries = []
@@ -109,6 +115,13 @@ class CheckpointDatabase:
     async def fetch_all(self, query, params):
         assert query.count("%s") == len(params)
         assert self.depth
+        if "service_unit_key=%s AND id IN (" in query:
+            columns = query[7:].split(" FROM ")[0].split(",")
+            return [
+                {key: deepcopy(self.objects[i].get(key)) for key in columns}
+                for i in params[1:]
+                if i in self.objects
+            ]
         if "WHERE id IN" in query:
             return [deepcopy(self.objects[key]) for key in params[:-1]]
         self.event_queries.append((query, params))

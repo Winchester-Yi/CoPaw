@@ -1017,13 +1017,12 @@ class ConversationBackup:
             for store in self.stores:
                 await store.lock_guard()
             for key, (namespace, ids) in expected.items():
-                rows = await self.db.fetch_all(
-                    "SELECT * FROM swe_conversation_retentions WHERE service_unit_key=%s AND retention_key=%s ORDER BY member_key FOR UPDATE",
-                    (
-                        self.scope.sql_values[0],
-                        key.encode(),
-                    ),
+                store = next(
+                    store
+                    for store in self.stores
+                    if store.scope_values == namespace
                 )
+                rows = await store._fetch_members(key.encode(), len(ids) + 1)
                 if [row["member_key"] for row in rows] != ids or any(
                     row["kind"] != "backup"
                     or row["state"] != "active"

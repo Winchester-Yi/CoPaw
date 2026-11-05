@@ -23,6 +23,7 @@ from .chat_repository import (
     SCOPE_WHERE,
     _text,
 )
+from .collection_queries import CollectionQuery, query_collection
 from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes, identity_bytes
 from .retention import MAX_PIN_BATCH, RetentionStore
@@ -235,10 +236,13 @@ class HistoryStore:
                     if r["archive_publication_id"] is not None
                 },
             )
-            if not ids:
-                return []
-            where += " AND id IN (" + ",".join(["%s"] * len(ids)) + ")"
-            params.extend(ids)
+            result = await query_collection(
+                self.db,
+                CollectionQuery.BOUNDARIES,
+                ids,
+                (self.scope.sql_values[0], chat["id"]),
+            )
+            return sorted(result, key=lambda row: row["boundary_order"])
         suffix = (
             " ORDER BY boundary_order DESC LIMIT 1"
             if latest
@@ -250,6 +254,26 @@ class HistoryStore:
             + suffix,
             tuple(params),
         )
+
+    async def _suppress_anchors(self, chat, rows):
+        keys = [
+            row["source_msg_key"]
+            for row in rows
+            if row["layer"] == "anchor" and row["source_msg_key"] is not None
+        ]
+        archived = await query_collection(
+            self.db,
+            CollectionQuery.ARCHIVED_KEYS,
+            keys,
+            (self.scope.sql_values[0], chat["id"]),
+        )
+        suppressed = {row["source_msg_key"] for row in archived}
+        return [
+            row
+            for row in rows
+            if row["layer"] != "anchor"
+            or row["source_msg_key"] not in suppressed
+        ]
 
     async def _snapshot(self, chat_id, *, layers=None):
         async with self.db.transaction():
@@ -274,76 +298,16 @@ class HistoryStore:
                 + " ORDER BY m.session_order ASC,m.id ASC",
                 tuple(params),
             )
-            anchors = [
-                r["source_msg_key"]
-                for r in rows
-                if r["layer"] == "anchor" and r["source_msg_key"] is not None
-            ]
-            if anchors:
-                placeholders = ",".join(["%s"] * len(anchors))
-                archived = await self.db.fetch_all(
-                    "SELECT source_msg_key FROM swe_conversation_messages "
-                    "WHERE archive_chat_id=%s AND deleted_at IS NULL "
-                    "AND source_msg_key IN (" + placeholders + ")",
-                    (chat["id"], *anchors),
-                )
-                suppressed = {r["source_msg_key"] for r in archived}
-                rows = [
-                    r
-                    for r in rows
-                    if r["layer"] != "anchor"
-                    or r["source_msg_key"] not in suppressed
-                ]
+            rows = await self._suppress_anchors(chat, rows)
             boundaries = (
                 await self._boundaries(chat, latest=True)
                 if layers is None
                 else []
             )
             batches = await self._pins(chat, rows, boundaries)
-            await self._revalidate_rows(chat, rows, current_read=True)
             return HistorySnapshot(chat, rows, boundaries, batches)
 
-    async def _revalidate_rows(self, chat, rows, *, current_read=False):
-        if not current_read:
-            await self._validate_chat_row(chat)
-        if not rows:
-            return
-        ids = [row["id"] for row in rows]
-        markers = ",".join(["%s"] * len(ids))
-        actual = await self.db.fetch_all(
-            "SELECT * FROM swe_conversation_messages WHERE id IN ("
-            + markers
-            + ") AND service_unit_key=%s"
-            + (" FOR SHARE" if current_read else ""),
-            (*ids, self.scope.sql_values[0]),
-        )
-        by_id = {row["id"]: row for row in actual}
-        fields = (
-            "service_unit_key",
-            "session_id",
-            "origin_chat_id",
-            "archive_chat_id",
-            "layer",
-            "session_order",
-            "archive_order",
-            "publication_id",
-            "byte_offset",
-            "byte_length",
-            "deleted_at",
-            "current_visible",
-            "context_epoch",
-        )
-        for row in rows:
-            if row["id"] not in by_id or any(
-                by_id[row["id"]][field] != row[field] for field in fields
-            ):
-                raise ConflictError("History locator or visibility changed")
-
     async def _validate_chat_row(self, chat):
-        current = await self.db.fetch_one(
-            "SELECT * FROM swe_conversation_chats WHERE id=%s AND service_unit_key=%s",
-            (chat["id"], self.scope.sql_values[0]),
-        )
         chat_fields = (
             "service_unit_key",
             "session_id",
@@ -357,6 +321,12 @@ class HistoryStore:
             "content_meta_publication_id",
             "content_meta_offset",
             "content_meta_length",
+        )
+        current = await self.db.fetch_one(
+            "SELECT "
+            + ",".join(chat_fields)
+            + " FROM swe_conversation_chats WHERE id=%s AND service_unit_key=%s",
+            (chat["id"], self.scope.sql_values[0]),
         )
         if current is None or any(
             current[field] != chat[field] for field in chat_fields
@@ -491,7 +461,7 @@ class HistoryStore:
                 )
             if not tracing:
                 messages = api._redact_hidden_context_messages(messages)
-            await self._revalidate_rows(snapshot.chat, snapshot.rows)
+            await self._validate_chat_row(snapshot.chat)
             if authorize is not None:
                 authorize(spec)
             archive = ChatArchiveMetadata(
@@ -555,7 +525,6 @@ class HistoryStore:
             rows = list(reversed(rows[:limit]))
             boundaries = await self._boundaries(chat, rows)
             batches = await self._pins(chat, rows, boundaries)
-            await self._revalidate_rows(chat, rows, current_read=True)
             snapshot = HistorySnapshot(chat, rows, boundaries, batches)
         try:
             await self._validate_chat_row(chat)
@@ -567,7 +536,7 @@ class HistoryStore:
                 await self._payloads(snapshot),
                 chat_id,
             )
-            await self._revalidate_rows(chat, rows)
+            await self._validate_chat_row(chat)
             if authorize is not None:
                 authorize(spec)
             visible = [
@@ -711,28 +680,8 @@ class HistoryStore:
                     *message_params,
                 ),
             )
-            anchors = [
-                r["source_msg_key"]
-                for r in rows
-                if r["layer"] == "anchor" and r["source_msg_key"] is not None
-            ]
-            if anchors:
-                marks = ",".join(["%s"] * len(anchors))
-                archived = await self.db.fetch_all(
-                    "SELECT source_msg_key FROM swe_conversation_messages "
-                    "WHERE archive_chat_id=%s AND deleted_at IS NULL "
-                    "AND source_msg_key IN (" + marks + ")",
-                    (chat["id"], *anchors),
-                )
-                suppressed = {r["source_msg_key"] for r in archived}
-                rows = [
-                    r
-                    for r in rows
-                    if r["layer"] != "anchor"
-                    or r["source_msg_key"] not in suppressed
-                ]
+            rows = await self._suppress_anchors(chat, rows)
             batches = await self._pins(chat, rows, [])
-            await self._revalidate_rows(chat, rows, current_read=True)
             return HistorySnapshot(
                 chat,
                 rows,

@@ -3,6 +3,7 @@
 
 from dataclasses import asdict, dataclass, fields
 
+from ...database.prepared import PreparedInsert
 from .chat_mutations import load_metadata_json, utc_datetime
 from .errors import ConflictError, IntegrityError
 from .identity import identity_bytes
@@ -222,6 +223,35 @@ def _message_values(message, request, row, index, order, *, sources=None):
     }
 
 
+MESSAGE_FIELDS = (
+    "service_unit_key",
+    "session_id",
+    "origin_chat_id",
+    "archive_chat_id",
+    "layer",
+    "session_order",
+    "archive_order",
+    "turn_id",
+    "source_msg_key",
+    "source_occurrence_no",
+    "role_key",
+    "kind_key",
+    "task_run_key",
+    "publication_id",
+    "byte_offset",
+    "byte_length",
+    "archive_publication_id",
+    "context_epoch",
+    "in_context",
+    "current_visible",
+    "message_timestamp",
+)
+MESSAGE_INSERT = PreparedInsert(
+    f"INSERT INTO swe_conversation_messages ({','.join(MESSAGE_FIELDS)}) VALUES ",
+    "(" + ",".join(["%s"] * len(MESSAGE_FIELDS)) + ")",
+)
+
+
 async def install_messages(
     db,
     request,
@@ -237,32 +267,40 @@ async def install_messages(
         raise IntegrityError("Message publication requires a Session")
     online = session["history_high"]
     archived = chat["history_high"] if chat is not None else 0
-    for message in messages:
-        if (
-            message.layer != "archive"
-            and message.context_epoch != session.get("context_epoch", 0)
-        ):
-            raise ConflictError("message context epoch changed")
-        if message.layer == "archive":
-            if chat is None:
-                raise IntegrityError("archive publication requires a Chat")
-            archived += 1
-            order = archived
-        else:
-            online += 1
-            order = online
-        values = _message_values(
-            message,
-            request,
-            publication,
-            index,
-            order,
-            sources=sources,
-        )
+
+    def rows():
+        nonlocal online, archived
+        for message in messages:
+            if (
+                message.layer != "archive"
+                and message.context_epoch != session.get("context_epoch", 0)
+            ):
+                raise ConflictError("message context epoch changed")
+            if message.layer == "archive":
+                if chat is None:
+                    raise IntegrityError("archive publication requires a Chat")
+                archived += 1
+                order = archived
+            else:
+                online += 1
+                order = online
+            values = _message_values(
+                message,
+                request,
+                publication,
+                index,
+                order,
+                sources=sources,
+            )
+            yield tuple(values[field] for field in MESSAGE_FIELDS)
+
+    if len(messages) == 1:
         await db.insert(
-            f"INSERT INTO swe_conversation_messages ({','.join(values)}) VALUES ({','.join(['%s'] * len(values))})",
-            tuple(values.values()),
+            MESSAGE_INSERT.prefix + MESSAGE_INSERT.row_template,
+            next(rows()),
         )
+    elif messages:
+        await db.insert_prepared(MESSAGE_INSERT, rows())
     if online != session["history_high"]:
         await db.execute(
             "UPDATE swe_conversation_sessions SET history_high=%s WHERE id=%s",

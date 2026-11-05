@@ -67,6 +67,12 @@ async def test_draft_final_read_rejects_concurrent_deletion(tmp_path):
 
 
 class ReadDatabase:
+    max_allowed_packet = 1024 * 1024
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self
+
     def __init__(self, rows):
         self.rows = rows
         self.queries = []
@@ -77,6 +83,8 @@ class ReadDatabase:
 
     async def fetch_all(self, query, params=None):
         self.queries.append((query, params))
+        if "service_unit_key=%s AND id IN (" in query:
+            return [row for row in self.rows if row["id"] in params[1:]]
         return self.rows
 
     async def fetch_one(self, query, params=None):
