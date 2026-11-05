@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     error_type      VARCHAR(64) DEFAULT NULL COMMENT '异步失败原始类型，例如 Prompt',
     need_notification TINYINT(1) DEFAULT 0 COMMENT '是否需要通知: 0-否, 1-是',
     error_message   VARCHAR(2048) DEFAULT '' COMMENT '错误信息',
+    error_type      LONGTEXT DEFAULT NULL COMMENT '子任务错误类型，逗号分隔',
 
     -- 执行上下文
     instance_id     VARCHAR(64) DEFAULT '' COMMENT '执行实例标识',
@@ -350,6 +351,8 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     need_notification TINYINT(1) DEFAULT 1 COMMENT '是否需要通知: 0-否, 1-是',
     has_main_task TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否有关联主任务: 0-否, 1-是',
     status       VARCHAR(16) DEFAULT NULL COMMENT '子任务状态: SUC/FAIL/PART_SUC/TIMEOUT',
+    error_type   VARCHAR(128) DEFAULT NULL COMMENT '错误类型',
+    error_reason VARCHAR(2048) DEFAULT NULL COMMENT '错误原因',
     info         VARCHAR(2048) DEFAULT '' COMMENT '预留扩展信息',
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at   DATETIME DEFAULT NULL COMMENT '更新时间',
@@ -738,6 +741,8 @@ AFTER task_id
 
 # SQL for adding new columns to cron_subtasks table
 ALTER_CRON_SUBTASKS_NEW_COLUMNS = [
+    "ALTER TABLE swe_cron_subtasks ADD COLUMN error_type TEXT DEFAULT NULL COMMENT '错误类型'",
+    "ALTER TABLE swe_cron_subtasks ADD COLUMN error_reason LONGTEXT DEFAULT NULL COMMENT '错误原因'",
     """
     ALTER TABLE swe_cron_subtasks
     ADD COLUMN task_type VARCHAR(16) DEFAULT NULL
@@ -961,6 +966,7 @@ async def init_database_tables() -> None:
 
         # 添加 need_notification 字段
         for alter_sql in [
+            "ALTER TABLE swe_cron_executions ADD COLUMN error_type LONGTEXT DEFAULT NULL COMMENT '子任务错误类型，逗号分隔'",
             ALTER_CRON_SUBTASKS_NEED_NOTIFICATION,
             ALTER_CRON_SUBTASKS_HAS_MAIN_TASK,
             ALTER_CRON_EXECUTIONS_NEED_NOTIFICATION,
