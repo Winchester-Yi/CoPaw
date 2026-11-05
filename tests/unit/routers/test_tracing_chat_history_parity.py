@@ -269,14 +269,54 @@ async def test_indexed_tracing_uses_target_current_and_archive(history_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", [False, True])
+@pytest.mark.parametrize("archive", [False, True])
+async def test_indexed_routes_do_not_preload_complete_chat(
+    history_client,
+    target,
+    archive,
+):
+    client, _, chat, workspace = history_client
+    workspace.chat_manager.get_chat.side_effect = AssertionError(
+        "indexed route duplicated complete metadata hydration",
+    )
+
+    async def current(chat_id, *, authorize):
+        assert chat_id == chat.id
+        authorize(chat)
+        return ChatHistory(chat=chat, messages=[], status="running")
+
+    async def archive_page(chat_id, *, before, limit, authorize):
+        assert (chat_id, before, limit) == (chat.id, None, 2)
+        authorize(chat)
+        return ChatArchivePage()
+
+    indexed = SimpleNamespace(
+        current=AsyncMock(side_effect=current),
+        archive_page=AsyncMock(side_effect=archive_page),
+    )
+    workspace.conversation_storage = SimpleNamespace(history=indexed)
+    params = {"user_id": "target"} if target else {}
+    if archive:
+        params["limit"] = 2
+    prefix = "/tracing/chats" if target else "/chats"
+    suffix = "/history" if archive else ""
+    response = client.get(f"{prefix}/{chat.id}{suffix}", params=params)
+    assert response.status_code == 200
+    workspace.chat_manager.get_chat.assert_not_awaited()
+    assert indexed.current.await_count == (0 if archive else 1)
+    assert indexed.archive_page.await_count == (1 if archive else 0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("suffix", ["", "/history"])
 @pytest.mark.parametrize("field", ["id", "user_id", "source_id", "agent_id"])
-@pytest.mark.parametrize("phase", ["lookup", "reader"])
+@pytest.mark.parametrize("authorize_phase", ["first", "last"])
 async def test_indexed_target_checks_at_each_read(
     history_client,
     suffix,
     field,
-    phase,
+    authorize_phase,
 ):
     client, _, chat, workspace = history_client
     changed = chat.model_copy(deep=True)
@@ -284,63 +324,74 @@ async def test_indexed_target_checks_at_each_read(
         setattr(changed, field, "foreign")
     else:
         changed.meta[field] = "foreign"
-    if phase == "lookup":
-        workspace.chat_manager.get_chat.return_value = changed
+    workspace.chat_manager.get_chat.side_effect = AssertionError(
+        "indexed route must authorize through its reader",
+    )
 
     async def read(*args, authorize, **kwargs):
-        authorize(changed if phase == "reader" else chat)
+        authorize(changed if authorize_phase == "first" else chat)
+        authorize(changed if authorize_phase == "last" else chat)
         return ChatArchivePage() if suffix else ChatHistory(chat=chat)
 
-    indexed = SimpleNamespace(
-        current=AsyncMock(side_effect=read),
-        tracing_view=AsyncMock(side_effect=read),
-        archive_page=AsyncMock(side_effect=read),
+    workspace.conversation_storage = SimpleNamespace(
+        history=SimpleNamespace(
+            current=AsyncMock(side_effect=read),
+            archive_page=AsyncMock(side_effect=read),
+        ),
     )
-    workspace.conversation_storage = SimpleNamespace(history=indexed)
     response = client.get(
         f"/tracing/chats/{chat.id}{suffix}",
         params={"user_id": "target"},
         headers={"X-Source-Id": "source", "X-Agent-Id": "agent"},
     )
     assert response.status_code == 404
-    if phase == "lookup":
-        indexed.current.assert_not_awaited()
-        indexed.archive_page.assert_not_awaited()
+    workspace.chat_manager.get_chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", [False, True])
 @pytest.mark.parametrize("suffix", ["", "/history"])
-@pytest.mark.parametrize("phase", ["lookup", "reader"])
 @pytest.mark.parametrize(
-    "error",
+    "error,status",
     [
-        StorageUnavailable("NAS unavailable"),
-        ConflictError("revision changed"),
-        OSError("read failed"),
-        RuntimeError("unavailable"),
-        MySQLError("database unavailable"),
+        (StorageUnavailable("NAS unavailable"), 503),
+        (ConflictError("revision changed"), 503),
+        (OSError("read failed"), 503),
+        (RuntimeError("unavailable"), 503),
+        (MySQLError("database unavailable"), 503),
+        (KeyError("missing"), 404),
     ],
 )
-async def test_indexed_tracing_storage_failure_is_unavailable(
+async def test_indexed_route_reader_failure_mapping(
     history_client,
+    target,
     suffix,
-    phase,
     error,
+    status,
 ):
     client, _, chat, workspace = history_client
-    indexed = SimpleNamespace(
-        current=AsyncMock(side_effect=error),
-        tracing_view=AsyncMock(side_effect=error),
-        archive_page=AsyncMock(side_effect=error),
+    workspace.chat_manager.get_chat.side_effect = AssertionError(
+        "indexed failure must not fall back to complete lookup",
     )
-    workspace.conversation_storage = SimpleNamespace(history=indexed)
-    if phase == "lookup":
-        workspace.chat_manager.get_chat.side_effect = error
-    response = client.get(
-        f"/tracing/chats/{chat.id}{suffix}",
-        params={"user_id": "target"},
+    workspace.conversation_storage = SimpleNamespace(
+        history=SimpleNamespace(
+            current=AsyncMock(side_effect=error),
+            archive_page=AsyncMock(side_effect=error),
+        ),
     )
-    assert response.status_code == 503
+    prefix = "/tracing/chats" if target else "/chats"
+    params = {"user_id": "target"} if target else {}
+    response = client.get(f"{prefix}/{chat.id}{suffix}", params=params)
+    assert response.status_code == status
+    if status == 503:
+        assert response.json()["detail"] == "Conversation storage unavailable"
+    workspace.chat_manager.get_chat.assert_not_awaited()
+
+
+def _assert_indexed_read_counts(store, workspace, count=1):
+    assert store.chats._hydrate.await_count == count
+    assert store._finish.await_count == count
+    workspace.chat_manager.get_chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -355,6 +406,9 @@ async def test_indexed_tracing_real_reader_keeps_current_history(
     failure,
 ):
     client, _, chat, workspace = history_client
+    workspace.chat_manager.get_chat.side_effect = AssertionError(
+        "real indexed reader must not preload complete metadata",
+    )
     question = Msg(
         "user",
         "question + secret",
@@ -467,15 +521,15 @@ async def test_indexed_tracing_real_reader_keeps_current_history(
         request = Request({"type": "http", "headers": []})
         with pytest.raises(asyncio.CancelledError):
             await tracing.get_user_chat(request, chat.id, user_id="target")
-        store._finish.assert_awaited_once()
+        _assert_indexed_read_counts(store, workspace)
         return
     response = client.get(
         f"/tracing/chats/{chat.id}",
         params={"user_id": "target"},
     )
+    _assert_indexed_read_counts(store, workspace)
     if failure:
         assert response.status_code == (404 if failure == "owner" else 503)
-        store._finish.assert_awaited_once()
         return
     assert response.status_code == 200
     body = response.json()
@@ -495,4 +549,27 @@ async def test_indexed_tracing_real_reader_keeps_current_history(
     normal = client.get(f"/chats/{chat.id}")
     assert normal.status_code == 200
     assert normal.json() == body
-    assert store._finish.await_count == 2
+    _assert_indexed_read_counts(store, workspace, count=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [False, True])
+async def test_indexed_archive_maps_invalid_cursor(history_client, target):
+    client, _, chat, workspace = history_client
+    workspace.chat_manager.get_chat.side_effect = AssertionError(
+        "indexed archive must not preload complete metadata",
+    )
+    workspace.conversation_storage = SimpleNamespace(
+        history=SimpleNamespace(
+            archive_page=AsyncMock(
+                side_effect=ValueError("invalid history cursor"),
+            ),
+        ),
+    )
+    prefix = "/tracing/chats" if target else "/chats"
+    params = {"user_id": "target"} if target else {}
+    params["before"] = "invalid"
+    response = client.get(f"{prefix}/{chat.id}/history", params=params)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "invalid history cursor"
+    workspace.chat_manager.get_chat.assert_not_awaited()

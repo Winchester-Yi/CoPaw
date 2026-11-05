@@ -174,12 +174,9 @@ async def _target_chat(request: Request, user_id: str, chat_id: str):
 
     storage = getattr(workspace, "conversation_storage", None)
     if getattr(storage, "history", None) is not None:
-        chat = await _indexed_history_call(
-            workspace.chat_manager.get_chat,
-            chat_id,
-        )
-    else:
-        chat = await workspace.chat_manager.get_chat(chat_id)
+        return workspace, None, authorize
+
+    chat = await workspace.chat_manager.get_chat(chat_id)
     if chat is None:
         raise HTTPException(
             status_code=404,
@@ -230,7 +227,7 @@ async def get_user_chat_history(
         if indexed is not None:
             return await _indexed_history_call(
                 indexed.archive_page,
-                chat.id,
+                chat_id,
                 before=before,
                 limit=limit,
                 authorize=authorize,
