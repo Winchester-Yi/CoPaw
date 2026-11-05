@@ -11,6 +11,7 @@ from swe.app.conversation_storage.bundle import BundleStore, new_operation_key
 from swe.app.conversation_storage.errors import (
     ConflictError,
     IntegrityError,
+    StorageUnavailable,
     UnknownCommit,
 )
 from swe.app.conversation_storage.execution import ExecutionStore
@@ -320,7 +321,7 @@ async def test_stop_beats_natural_completion_and_stopped_terminal_releases(
     assert stopped["state"] == "stopped"
 
 
-async def test_expired_owner_keeps_busy_and_cannot_execute_or_publish(
+async def test_expired_heartbeat_allows_completion_but_never_automatic_takeover(
     conversation_test_database,
     tmp_path,
 ):
@@ -332,22 +333,31 @@ async def test_expired_owner_keeps_busy_and_cannot_execute_or_publish(
         "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=%s",
         (session_id,),
     )
-    for action in (
-        service.start(admission.authority),
-        service.renew(admission.authority),
-        service.finish(
-            admission.authority,
-            "completed",
-            {},
-            operation_key=new_operation_key(),
-        ),
-    ):
-        with pytest.raises(ConflictError, match="authority"):
-            await action
     with pytest.raises(ConflictError, match="busy"):
         await admit(store(db, tmp_path, "other-owner"), question="different")
     duplicate = await admit(store(db, tmp_path, "other-owner"))
     assert not duplicate.created and duplicate.authority is None
+    await service.start(admission.authority)
+    completed = await service.finish(
+        admission.authority,
+        "completed",
+        {},
+        operation_key=new_operation_key(),
+    )
+    assert completed["state"] == "committed"
+    session = await db.fetch_one(
+        "SELECT * FROM swe_conversation_sessions WHERE id=%s",
+        (session_id,),
+    )
+    assert session["active_turn_id"] is None and session["owner_key"] is None
+    following = await admit(
+        store(db, tmp_path, "other-owner"),
+        question="following",
+    )
+    assert (
+        following.created
+        and following.authority.generation > admission.authority.generation
+    )
 
 
 async def test_session_adapter_pins_complete_root_and_cold_turn_lookup(
@@ -518,3 +528,168 @@ async def test_cold_turn_rejects_chat_deleted_during_nas_read(
     adapter.retentions.pin = delete_after_pin
     with pytest.raises(ConflictError, match="Chat"):
         await adapter.get_turn_state("session", "alice", {}, "question")
+
+
+@pytest.mark.parametrize(
+    "locked_table",
+    ["retentions", "sessions", "chats", "turns"],
+)
+async def test_renewal_total_budget_includes_real_lock_waits(
+    conversation_test_database,
+    tmp_path,
+    locked_table,
+):
+    db = conversation_test_database
+    await seed(db)
+    service = store(db, tmp_path, "owner")
+    admission = await admit(service)
+    service.lease_seconds = 1
+    locked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocker():
+        async with db.transaction():
+            await db.fetch_all(
+                f"SELECT id FROM swe_conversation_{locked_table} FOR UPDATE",
+            )
+            locked.set()
+            await release.wait()
+
+    task = asyncio.create_task(blocker())
+    try:
+        await asyncio.wait_for(locked.wait(), 5)
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(StorageUnavailable, match="heartbeat"):
+            await asyncio.wait_for(service.renew(admission.authority), 2)
+        assert asyncio.get_running_loop().time() - started < 1
+    finally:
+        release.set()
+        await task
+
+
+async def test_renewal_allows_expiry_between_select_and_update_mysql(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    await seed(db)
+    service = store(db, tmp_path, "owner")
+    admission = await admit(service)
+    service.lease_seconds = 3
+    associations = service._turn_associations
+
+    async def delay_after_validation(*args):
+        rows = await associations(*args)
+        # Expiry advances while the authority's rows remain locked.
+        await db.execute(
+            "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=%s",
+            (admission.authority.session_id,),
+        )
+        return rows
+
+    monkeypatch.setattr(service, "_turn_associations", delay_after_validation)
+    await service.renew(admission.authority)
+    session = await service._session(admission.authority.identity)
+    assert session["owner_key"] == b"owner"
+
+
+async def test_reserved_admission_can_renew_before_nas_publish_mysql(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    await seed(db)
+    service = store(db, tmp_path, "owner")
+    admission = await service.reserve_admission(
+        identity(),
+        "one",
+        "question",
+        operation_key=new_operation_key(),
+        runtime_turn_key="budget-test",
+    )
+    await service.renew(admission.authority)
+    await service.publish_admission(
+        admission,
+        {"id": "question", "role": "user", "content": "hello"},
+        {},
+    )
+    await service.start(admission.authority)
+
+
+async def test_expired_heartbeat_can_renew_with_matching_generation_mysql(
+    conversation_test_database,
+    tmp_path,
+):
+    db = conversation_test_database
+    session_id = await seed(db)
+    service = store(db, tmp_path, "owner")
+    admission = await admit(service)
+    await db.execute(
+        "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=%s",
+        (session_id,),
+    )
+    await service.renew(admission.authority)
+    row = await db.fetch_one(
+        "SELECT generation,owner_key,lease_until>UTC_TIMESTAMP(6) AS heartbeat_fresh FROM swe_conversation_sessions WHERE id=%s",
+        (session_id,),
+    )
+    assert row["heartbeat_fresh"]
+    assert row["generation"] == admission.authority.generation
+    assert row["owner_key"] == b"owner"
+
+
+@pytest.mark.parametrize("method", ["start", "renew", "finish"])
+async def test_expired_heartbeat_never_reactivates_fenced_owner_mysql(
+    conversation_test_database,
+    tmp_path,
+    method,
+):
+    db = conversation_test_database
+    session_id = await seed(db)
+    service = store(db, tmp_path, "owner")
+    admission = await admit(service)
+    await db.execute(
+        "UPDATE swe_conversation_sessions SET generation=generation+1,owner_key=NULL,lease_until=NULL WHERE id=%s",
+        (session_id,),
+    )
+    with pytest.raises(ConflictError, match="authority"):
+        if method == "finish":
+            await service.finish(
+                admission.authority,
+                "completed",
+                {},
+                operation_key=new_operation_key(),
+            )
+        else:
+            await getattr(service, method)(admission.authority)
+
+
+async def test_terminal_can_commit_after_heartbeat_expires_during_nas_write_mysql(
+    conversation_test_database,
+    tmp_path,
+    monkeypatch,
+):
+    db = conversation_test_database
+    session_id = await seed(db)
+    service = store(db, tmp_path, "owner")
+    admission = await admit(service)
+    await service.start(admission.authority)
+    write = service.publications.write_bundle
+
+    async def expire_after_nas(*args, **kwargs):
+        result = await write(*args, **kwargs)
+        await db.execute(
+            "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=%s",
+            (session_id,),
+        )
+        return result
+
+    monkeypatch.setattr(service.publications, "write_bundle", expire_after_nas)
+    completed = await service.finish(
+        admission.authority,
+        "completed",
+        {},
+        operation_key=new_operation_key(),
+    )
+    assert completed["state"] == "committed"

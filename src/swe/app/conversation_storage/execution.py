@@ -7,8 +7,16 @@ import asyncio
 import json
 import secrets
 
+from anyio import fail_after
+
 from .bundle import BundleBlock, BundleStore
-from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
+from .errors import (
+    ConflictError,
+    IntegrityError,
+    StorageError,
+    StorageUnavailable,
+    UnknownCommit,
+)
 from .identity import (
     SessionIdentity,
     service_unit_bytes,
@@ -31,6 +39,8 @@ LIVE_STATES = frozenset(
 TERMINAL_STATES = frozenset(
     {"succeeded", "failed", "stopped", "interrupted", "rejected"},
 )
+HEARTBEAT_BUDGET_EXPIRED = "conversation heartbeat SQL budget expired"
+HEARTBEAT_UNAVAILABLE = "conversation heartbeat could not be confirmed"
 
 
 @dataclass(frozen=True)
@@ -80,7 +90,7 @@ def _json_bytes(value):
 
 
 class ExecutionStore:
-    """Database lease protects admission and publication, never resumes dead IO."""
+    """Generation fences execution; the soft lease only tracks heartbeat freshness."""
 
     def __init__(
         self,
@@ -523,7 +533,7 @@ class ExecutionStore:
         if not isinstance(identity, SessionIdentity):
             raise TypeError("execution requires a full Session identity")
         row = await self.db.fetch_one(
-            "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid FROM "
+            "SELECT * FROM "
             f"swe_conversation_sessions WHERE {IDENTITY_WHERE} FOR UPDATE",
             identity.sql_values,
         )
@@ -593,8 +603,8 @@ class ExecutionStore:
             authority.owner_key.encode("utf-8"),
             authority.turn_id,
         )
-        if current != expected or not session["lease_valid"]:
-            raise ConflictError("execution authority expired or changed")
+        if current != expected:
+            raise ConflictError("execution authority changed or revoked")
         if (
             chat["deleted_at"] is not None
             or turn["generation"] != authority.generation
@@ -623,7 +633,50 @@ class ExecutionStore:
             )
             return {**turn, "state": "running"}
 
+    def renewal_capacity(self):
+        return self.db.reserve_control_capacity()
+
     async def renew(self, authority):
+        # MySQL remains optional when importing the legacy application runtime.
+        from mysql.connector import errorcode
+        from mysql.connector.errors import (
+            Error as MySQLError,
+            InterfaceError,
+            OperationalError,
+            ConnectionTimeoutError,
+            ReadTimeoutError,
+            WriteTimeoutError,
+        )
+
+        # Same task: bound queue, locks, commit and return checks together.
+        try:
+            with (
+                fail_after(self.lease_seconds / 3) as budget,
+                self.db.control_priority(),
+            ):
+                await self._renew(authority)
+                if asyncio.get_running_loop().time() >= budget.deadline:
+                    raise TimeoutError(HEARTBEAT_BUDGET_EXPIRED)
+        except (
+            OSError,
+            asyncio.TimeoutError,
+            InterfaceError,
+            OperationalError,
+            ConnectionTimeoutError,
+            ReadTimeoutError,
+            WriteTimeoutError,
+        ) as error:
+            raise StorageUnavailable(HEARTBEAT_UNAVAILABLE) from error
+        except MySQLError as error:
+            if error.errno in (
+                errorcode.ER_CON_COUNT_ERROR,
+                errorcode.ER_LOCK_WAIT_TIMEOUT,
+                errorcode.ER_LOCK_DEADLOCK,
+            ):
+                raise StorageUnavailable(HEARTBEAT_UNAVAILABLE) from error
+            raise
+
+    async def _renew(self, authority):
         async with self.db.transaction():
             await self._assert_writes_allowed(authority.identity)
             associations = await self._turn_associations(
@@ -633,15 +686,25 @@ class ExecutionStore:
             )
             self._validate_authority(authority, *associations)
             if associations[2]["state"] not in (
+                "reserved",
                 "admitted",
                 "running",
                 "stopping",
             ):
                 raise ConflictError("settling Turn cannot continue execution")
-            await self.db.execute(
-                "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)+INTERVAL %s SECOND WHERE id=%s",
-                (self.lease_seconds, authority.session_id),
+            changed = await self.db.execute(
+                "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)+INTERVAL %s SECOND "
+                "WHERE id=%s AND generation=%s AND owner_key=%s AND active_turn_id=%s",
+                (
+                    self.lease_seconds,
+                    authority.session_id,
+                    authority.generation,
+                    authority.owner_key.encode("utf-8"),
+                    authority.turn_id,
+                ),
             )
+            if changed != 1:
+                raise ConflictError("execution authority changed or revoked")
 
     async def request_stop(self, identity, question_key):
         question = question_msg_key_bytes(question_key)

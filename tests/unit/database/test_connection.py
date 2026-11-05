@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from swe.database import DatabaseConfig, DatabaseConnection, ExecutionResult
+from swe.app.conversation_storage.errors import StorageUnavailable
 from swe.database import connection as module
 
 
@@ -759,3 +760,266 @@ async def test_closed_pool_does_not_start_rollback_io(db):
         await db.close()
         await db._rollback(session)
         rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_control_reservation_preserves_capacity_and_pool_limit(db):
+    db.config.max_connections = 2
+    db.config.acquire_timeout = 0.03
+    async with db.reserve_control_capacity():
+        async with db.acquire():
+
+            async def ordinary():
+                async with db.acquire():
+                    pytest.fail("ordinary work consumed control capacity")
+
+            with pytest.raises(TimeoutError):
+                await contextvars.Context().run(
+                    asyncio.create_task,
+                    ordinary(),
+                )
+
+            async def control():
+                with db.control_priority():
+                    async with db.acquire():
+                        assert len(db._pool._entries) == 2
+
+            await contextvars.Context().run(asyncio.create_task, control())
+        assert len(db._pool._entries) == 2
+    # Reservation ends, both physical positions are available to ordinary work.
+    async with db.acquire():
+
+        async def ordinary_after_release():
+            async with db.acquire():
+                return True
+
+        assert await contextvars.Context().run(
+            asyncio.create_task,
+            ordinary_after_release(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_control_reservations_share_one_slot_and_single_connection_works(
+    db,
+):
+    async with db.reserve_control_capacity():
+        async with db.reserve_control_capacity():
+            async with db.acquire():
+                assert len(db._pool._entries) == 1
+        with db.control_priority():
+            async with db.acquire():
+                assert len(db._pool._entries) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase",
+    ["pool", "begin", "guard", "associations", "update", "commit", "release"],
+)
+async def test_renewal_budget_bounds_entire_database_operation(
+    db,
+    monkeypatch,
+    phase,
+):
+    from swe.app.conversation_storage.execution import ExecutionStore
+    from tests.unit.app.conversation_storage.test_execution import (
+        AuthorityDatabase,
+        authority,
+    )
+
+    db.config.acquire_timeout = 5
+    db.config.read_timeout = db.config.write_timeout = 5
+    await db.fetch_one("warm")
+    connection = Connection.instances[0]
+    rows = AuthorityDatabase()
+    monkeypatch.setattr(Cursor, "rowcount", 1)
+    store = ExecutionStore(
+        db,
+        service_unit_id="schema-test-service",
+        lease_seconds=1,
+    )
+    monkeypatch.setattr(store, "_assert_writes_allowed", AsyncMock())
+    monkeypatch.setattr(
+        store,
+        "_turn_associations",
+        AsyncMock(return_value=(rows.session, rows.chat, rows.turn)),
+    )
+    entered = asyncio.Event()
+
+    async def stalled(*args, **kwargs):
+        entered.set()
+        await asyncio.sleep(5)
+
+    if phase == "pool":
+        monkeypatch.setattr(db._pool, "acquire", stalled)
+    elif phase == "guard":
+        monkeypatch.setattr(store, "_assert_writes_allowed", stalled)
+    elif phase == "associations":
+        monkeypatch.setattr(store, "_turn_associations", stalled)
+    elif phase == "update":
+        monkeypatch.setattr(db, "execute", stalled)
+    else:
+        method = {
+            "begin": "start_transaction",
+            "commit": "commit",
+            "release": "get_autocommit",
+        }[phase]
+        monkeypatch.setattr(connection, method, stalled)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(StorageUnavailable, match="heartbeat"):
+        await asyncio.wait_for(store.renew(authority()), 0.7)
+    assert entered.is_set()
+    assert asyncio.get_running_loop().time() - started < 0.6
+
+
+@pytest.mark.asyncio
+async def test_renewal_uses_reserved_capacity_under_ordinary_pool_load(
+    db,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.execution import ExecutionStore
+    from tests.unit.app.conversation_storage.test_execution import (
+        AuthorityDatabase,
+        authority,
+    )
+
+    db.config.max_connections = 2
+    rows = AuthorityDatabase()
+    monkeypatch.setattr(Cursor, "rowcount", 1)
+    store = ExecutionStore(db, service_unit_id="schema-test-service")
+    monkeypatch.setattr(store, "_assert_writes_allowed", AsyncMock())
+    monkeypatch.setattr(
+        store,
+        "_turn_associations",
+        AsyncMock(return_value=(rows.session, rows.chat, rows.turn)),
+    )
+    async with store.renewal_capacity():
+        async with db.acquire():
+            await contextvars.Context().run(
+                asyncio.create_task,
+                store.renew(authority()),
+            )
+            assert len(Connection.instances) == 2
+    assert db._pool.control_reservations == 0
+
+
+@pytest.mark.asyncio
+async def test_renewal_timeout_quarantines_uncertain_commit_until_io_drains(
+    db,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.execution import ExecutionStore
+    from tests.unit.app.conversation_storage.test_execution import (
+        AuthorityDatabase,
+        authority,
+    )
+
+    db.config.read_timeout = db.config.write_timeout = 5
+    await db.fetch_one("warm")
+    connection = Connection.instances[0]
+    rows = AuthorityDatabase()
+    monkeypatch.setattr(Cursor, "rowcount", 1)
+    store = ExecutionStore(
+        db,
+        service_unit_id="schema-test-service",
+        lease_seconds=1,
+    )
+    monkeypatch.setattr(store, "_assert_writes_allowed", AsyncMock())
+    monkeypatch.setattr(
+        store,
+        "_turn_associations",
+        AsyncMock(return_value=(rows.session, rows.chat, rows.turn)),
+    )
+    drained = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def uncertain_commit():
+        try:
+            await drained.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await drained.wait()
+        connection.in_transaction = False
+
+    monkeypatch.setattr(connection, "commit", uncertain_commit)
+    try:
+        with pytest.raises(StorageUnavailable, match="heartbeat"):
+            await asyncio.wait_for(store.renew(authority()), 0.7)
+        await asyncio.wait_for(cancelled.wait(), 0.1)
+        assert len(db._pool._entries) == 1
+        assert not db._pool._idle
+        with pytest.raises(TimeoutError):
+            await db.fetch_one("cannot replace quarantined connection")
+        assert len(Connection.instances) == 1
+    finally:
+        drained.set()
+        await asyncio.wait_for(asyncio.gather(*tuple(db._pool._tasks)), 0.5)
+    assert not db._pool._entries
+    assert (await db.fetch_one("replacement after drain"))["value"] == "中文"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_capacity_scope_releases_reservation_and_wakes_waiter(
+    db,
+):
+    db.config.max_connections = 2
+    db.config.acquire_timeout = 0.5
+    active = asyncio.Event()
+
+    async def reserve():
+        async with db.reserve_control_capacity():
+            active.set()
+            await asyncio.Event().wait()
+
+    reservation = asyncio.create_task(reserve())
+    await active.wait()
+    async with db.acquire():
+
+        async def ordinary():
+            async with db.acquire():
+                return True
+
+        waiter = contextvars.Context().run(asyncio.create_task, ordinary())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        reservation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reservation
+        assert await asyncio.wait_for(waiter, 0.2)
+    assert db._pool.control_reservations == 0
+
+
+@pytest.mark.asyncio
+async def test_renewal_budget_is_shared_across_sequential_phases(
+    db,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.execution import ExecutionStore
+    from tests.unit.app.conversation_storage.test_execution import (
+        AuthorityDatabase,
+        authority,
+    )
+
+    db.config.read_timeout = db.config.write_timeout = 5
+    rows = AuthorityDatabase()
+    store = ExecutionStore(
+        db,
+        service_unit_id="schema-test-service",
+        lease_seconds=1,
+    )
+
+    async def guard(*args):
+        await asyncio.sleep(0.2)
+
+    async def associations(*args):
+        await asyncio.sleep(0.2)
+        return rows.session, rows.chat, rows.turn
+
+    monkeypatch.setattr(store, "_assert_writes_allowed", guard)
+    monkeypatch.setattr(store, "_turn_associations", associations)
+    execute = AsyncMock(return_value=1)
+    monkeypatch.setattr(db, "execute", execute)
+    with pytest.raises(StorageUnavailable, match="heartbeat"):
+        await store.renew(authority())
+    execute.assert_not_called()

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Session authority rejects replay, stale writers and independent busy requests."""
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
@@ -11,7 +11,11 @@ from swe.app.conversation_storage.execution import (
     ExecutionAuthority,
     ExecutionStore,
 )
-from swe.app.conversation_storage.errors import ConflictError, IntegrityError
+from swe.app.conversation_storage.errors import (
+    ConflictError,
+    IntegrityError,
+    StorageUnavailable,
+)
 from swe.app.conversation_storage.identity import (
     SessionIdentity,
     WorkspaceScope,
@@ -23,6 +27,8 @@ from tests.unit.app.conversation_storage.test_retention import (
 
 
 class AuthorityDatabase:
+    control_priority = staticmethod(nullcontext)
+
     def __init__(self):
         self.queries = []
         self.retention = RetentionDatabase()
@@ -114,7 +120,7 @@ class AuthorityDatabase:
         self.queries.append((query, params))
         if "SET state=%s" in query:
             self.turn["state"] = params[0]
-        elif "active_turn_id=%s" in query:
+        elif "SET generation=%s,owner_key=%s,active_turn_id=%s" in query:
             self.session.update(
                 generation=params[0],
                 owner_key=params[1],
@@ -250,11 +256,10 @@ async def test_start_and_renew_validate_database_time_lease_and_exact_authority(
     [
         ("generation", 3),
         ("owner_key", b"other"),
-        ("lease_valid", 0),
         ("active_turn_id", None),
     ],
 )
-async def test_old_or_expired_owner_cannot_start_or_renew(field, value):
+async def test_changed_owner_cannot_start_or_renew(field, value):
     db = AuthorityDatabase()
     db.session[field] = value
     store = ExecutionStore(
@@ -439,3 +444,187 @@ def test_execution_rejects_foreign_publication_store():
             publications=PublicationDouble(None),
             service_unit_id="other-service",
         )
+
+
+async def test_reserved_authority_can_renew_during_admission_publication():
+    db = AuthorityDatabase()
+    db.turn["state"] = "reserved"
+    store = ExecutionStore(db, service_unit_id="schema-test-service")
+    await store.renew(authority())
+    assert db.turn["state"] == "reserved"
+
+
+async def test_renewal_rechecks_identity_at_update_after_association_locks():
+    db = AuthorityDatabase()
+    db.execute = AsyncMock(return_value=0)
+    store = ExecutionStore(db, service_unit_id="schema-test-service")
+    with pytest.raises(ConflictError, match="authority"):
+        await store.renew(authority())
+    sql, params = db.execute.call_args.args
+    assert "lease_until>UTC_TIMESTAMP(6)" not in sql
+    assert "generation=%s" in sql and "owner_key=%s" in sql
+    assert "active_turn_id=%s" in sql
+    assert params == (30, 1, 2, b"owner", 3)
+
+
+async def test_renewal_checks_elapsed_budget_when_loop_could_not_deliver_timer():
+    import time
+
+    db = AuthorityDatabase()
+    store = ExecutionStore(
+        db,
+        service_unit_id="schema-test-service",
+        lease_seconds=1,
+    )
+
+    async def blocked_update(*args):
+        time.sleep(0.36)
+        return 1
+
+    db.execute = blocked_update
+    with pytest.raises(StorageUnavailable, match="heartbeat"):
+        await store.renew(authority())
+
+
+@pytest.mark.parametrize("method", ["start", "renew", "finish"])
+async def test_expired_heartbeat_does_not_revoke_matching_execution(method):
+    db = AuthorityDatabase()
+    db.session["lease_valid"] = 0
+    publications = PublicationDouble(db)
+    store = ExecutionStore(
+        db,
+        publications=publications,
+        service_unit_id="schema-test-service",
+    )
+    if method == "finish":
+        result = await store.finish(
+            authority(),
+            "completed",
+            {},
+            operation_key="c" * 64,
+        )
+        assert result["state"] == "committed"
+    else:
+        await getattr(store, method)(authority())
+    assert not db.in_transaction
+
+
+@pytest.mark.parametrize("method", ["start", "renew", "finish"])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"generation": 3},
+        {"owner_key": b"other"},
+        {"owner_key": None},
+        {"active_turn_id": 4},
+    ],
+)
+async def test_expired_heartbeat_never_bypasses_execution_fencing(
+    method,
+    changed,
+):
+    db = AuthorityDatabase()
+    db.session.update(lease_valid=0, **changed)
+    store = ExecutionStore(
+        db,
+        publications=PublicationDouble(db),
+        service_unit_id="schema-test-service",
+    )
+    with pytest.raises(ConflictError, match="authority"):
+        if method == "finish":
+            await store.finish(
+                authority(),
+                "completed",
+                {},
+                operation_key="d" * 64,
+            )
+        else:
+            await getattr(store, method)(authority())
+    assert not db.reserved
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("budget"),
+        ConnectionError("disconnected"),
+        OSError("network"),
+        pytest.param(("InterfaceError", 2003), id="driver-connect"),
+        pytest.param(
+            ("ConnectionTimeoutError", None),
+            id="driver-connect-timeout",
+        ),
+        pytest.param(("ReadTimeoutError", None), id="driver-read-timeout"),
+        pytest.param(("WriteTimeoutError", None), id="driver-write-timeout"),
+        pytest.param(("OperationalError", 2013), id="driver-lost"),
+        pytest.param(("DatabaseError", 1040), id="connection-limit"),
+        pytest.param(("DatabaseError", 1205), id="lock-timeout"),
+        pytest.param(("InternalError", 1213), id="deadlock"),
+    ],
+)
+async def test_heartbeat_transient_errors_are_reported_as_unavailability(
+    failure,
+):
+    from mysql.connector import errors
+    from swe.app.conversation_storage.errors import StorageUnavailable
+
+    if isinstance(failure, tuple):
+        failure = getattr(errors, failure[0])(
+            "database temporarily unavailable",
+            errno=failure[1],
+        )
+    db = AuthorityDatabase()
+    store = ExecutionStore(db, service_unit_id="schema-test-service")
+    store._assert_writes_allowed = AsyncMock(side_effect=failure)
+    with pytest.raises(StorageUnavailable, match="heartbeat") as caught:
+        await store.renew(authority())
+    assert caught.value.__cause__ is failure
+    assert not db.in_transaction
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("unexpected bug"),
+        ConflictError("backup fence"),
+        IntegrityError("association"),
+        pytest.param(("ProgrammingError", 1064), id="sql-syntax"),
+        pytest.param(("IntegrityError", 1062), id="duplicate-key"),
+    ],
+)
+async def test_heartbeat_fatal_errors_are_not_reclassified(failure):
+    from mysql.connector import errors
+
+    if isinstance(failure, tuple):
+        failure = getattr(errors, failure[0])(
+            "invalid database operation",
+            errno=failure[1],
+        )
+    db = AuthorityDatabase()
+    store = ExecutionStore(db, service_unit_id="schema-test-service")
+    store._assert_writes_allowed = AsyncMock(side_effect=failure)
+    with pytest.raises(type(failure)) as caught:
+        await store.renew(authority())
+    assert caught.value is failure
+
+
+async def test_expired_heartbeat_finish_still_honors_stop_and_deleted_chat():
+    db = AuthorityDatabase()
+    db.session["lease_valid"] = 0
+    store = ExecutionStore(
+        db,
+        publications=PublicationDouble(db),
+        service_unit_id="schema-test-service",
+    )
+    db.turn["state"] = "stopping"
+    with pytest.raises(ConflictError, match="Stop"):
+        await store.finish(
+            authority(),
+            "completed",
+            {},
+            operation_key="e" * 64,
+        )
+    db.chat["deleted_at"] = "deleted"
+    with pytest.raises(ConflictError, match="Chat"):
+        await store.renew(authority())
+    assert not db.reserved

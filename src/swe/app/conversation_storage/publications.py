@@ -507,7 +507,7 @@ class PublicationStore(PublicationAssociations):
         session_rows = {}
         for identity in ids:
             session_rows[identity] = await self.db.fetch_one(
-                "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
+                "SELECT * "
                 "FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s FOR UPDATE",
                 (identity, request.scope.sql_values[0]),
             )
@@ -666,8 +666,10 @@ class PublicationStore(PublicationAssociations):
             request.owner_key.encode("utf-8"),
             request.turn_id,
         )
-        if current != expected or not session["lease_valid"]:
-            raise ConflictError("publication execution authority expired")
+        if current != expected:
+            raise ConflictError(
+                "publication execution authority changed or revoked",
+            )
         if turn["generation"] != request.generation or turn["state"] not in (
             "reserved",
             "admitted",

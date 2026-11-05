@@ -282,13 +282,20 @@ async def test_mysql_missing_reservation_waits_for_original_insert_arbitration(
 
 
 @pytest.mark.parametrize("winner", ["writer", "abort"])
+@pytest.mark.parametrize("expired_heartbeat", [False, True])
 async def test_mysql_writer_abort_serialize_on_same_lock_order(
     conversation_test_database,
     tmp_path,
     winner,
+    expired_heartbeat,
 ):
     db = conversation_test_database
     operation, _ = await prepared_root(db, tmp_path)
+    if expired_heartbeat:
+        await db.execute(
+            "UPDATE swe_conversation_sessions SET lease_until=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE id=%s",
+            (operation.session_id,),
+        )
     marker = (
         "SET state='committed'"
         if winner == "writer"

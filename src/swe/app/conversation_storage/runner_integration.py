@@ -2,15 +2,26 @@
 """Request-owned SQL admission and terminal publication for the Runner."""
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from anyio import fail_after
+
 from .bundle import new_operation_key
-from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
+from .errors import (
+    ConflictError,
+    IntegrityError,
+    StorageError,
+    StorageUnavailable,
+    UnknownCommit,
+)
 from .execution import ExecutionAuthority
 from .publications import _request
+
+logger = logging.getLogger(__name__)
 
 
 class IndexedQuery:
@@ -38,8 +49,9 @@ class IndexedQuery:
     @asynccontextmanager
     async def admit(self, messages):
         try:
-            async with self._admit(messages):
-                yield self
+            async with self.storage.executions.renewal_capacity():
+                async with self._admit(messages):
+                    yield self
         finally:
             # The caller closes its source first; _admit drains its renewer and
             # every PublicationStore NAS operation drains cancellation workers.
@@ -96,46 +108,46 @@ class IndexedQuery:
             return
         self.authority = admission.authority
         self._register()
-        state = deepcopy(self.execution.state)
-        state.setdefault("turn_states", {})[self.question_key] = {
-            "status": "admitted",
-            "message": question,
-            "chat_id": self.chat.id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        state["revision"] = self.execution.revision + 1
+        parent = asyncio.current_task()
+        renewer = asyncio.create_task(self._renew(parent))
         try:
-            await self.storage.executions.publish_admission(
-                admission,
-                question,
-                state,
-            )
-            self.execution.accept_committed_state(state)
-            await self.storage.executions.start(self.authority)
-        except (Exception, asyncio.CancelledError) as error:
-            self._unknown(
-                (
-                    error
-                    if isinstance(error, UnknownCommit)
-                    else UnknownCommit(
-                        self._admission_args["operation_key"],
-                    )
-                ),
-            )
-            raise
-        async with self.session.bind_authority(self.authority):
-            parent = asyncio.current_task()
-            renewer = asyncio.create_task(self._renew(parent))
+            state = deepcopy(self.execution.state)
+            state.setdefault("turn_states", {})[self.question_key] = {
+                "status": "admitted",
+                "message": question,
+                "chat_id": self.chat.id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            state["revision"] = self.execution.revision + 1
             try:
-                yield self
-            except asyncio.CancelledError:
-                if self.renew_error is not None:
-                    raise self.renew_error
+                await self.storage.executions.publish_admission(
+                    admission,
+                    question,
+                    state,
+                )
+                self.execution.accept_committed_state(state)
+                await self.storage.executions.start(self.authority)
+            except (Exception, asyncio.CancelledError) as error:
+                self._unknown(
+                    (
+                        error
+                        if isinstance(error, UnknownCommit)
+                        else UnknownCommit(
+                            self._admission_args["operation_key"],
+                        )
+                    ),
+                )
                 raise
-            finally:
-                renewer.cancel()
-                with suppress(asyncio.CancelledError):
-                    await renewer
+            async with self.session.bind_authority(self.authority):
+                yield self
+        except asyncio.CancelledError:
+            if self.renew_error is not None:
+                raise self.renew_error
+            raise
+        finally:
+            renewer.cancel()
+            with suppress(asyncio.CancelledError):
+                await renewer
 
     def _unknown(self, error):
         if self.pending_operation != error.operation_key:
@@ -149,17 +161,42 @@ class IndexedQuery:
             self.execution.pending_request = self.pending_request
 
     async def _renew(self, parent):
+        loop = asyncio.get_running_loop()
+        interval = self.storage.executions.lease_seconds / 3
+        next_attempt = loop.time() + interval
+        unavailable = False
         while True:
-            await asyncio.sleep(self.storage.executions.lease_seconds / 3)
+            await asyncio.sleep(max(0, next_attempt - loop.time()))
+            started = loop.time()
             try:
                 await self.storage.executions.renew(self.authority)
             except Exception as error:
-                if await self._own_terminal_committed():
+                if isinstance(error, UnknownCommit) or not isinstance(
+                    error,
+                    StorageUnavailable,
+                ):
+                    if await self._own_terminal_committed():
+                        return
+                    self.renew_error = error
+                    if parent is not None:
+                        parent.cancel()
                     return
-                self.renew_error = error
-                if parent is not None:
-                    parent.cancel()
-                return
+                if not unavailable:
+                    logger.warning(
+                        "Conversation heartbeat unavailable; execution continues under generation checks",
+                        exc_info=True,
+                    )
+                unavailable = True
+                # An outage never causes catch-up attempts or a tight retry loop.
+                next_attempt = loop.time() + interval
+                continue
+            if unavailable:
+                logger.info("Conversation heartbeat recovered")
+                unavailable = False
+            # Do not accumulate SQL duration, or burst after a delayed attempt.
+            next_attempt = started + interval
+            if next_attempt <= loop.time():
+                next_attempt = loop.time() + interval
 
     async def _own_terminal_committed(self):
         # Terminal SQL releases ownership before asynchronous reader cleanup.
@@ -167,7 +204,13 @@ class IndexedQuery:
         if self.terminal_operation is None:
             return False
         try:
-            row = await self.storage.publications.get(self.terminal_operation)
+            with (
+                fail_after(self.storage.executions.lease_seconds / 3),
+                self.storage.db.control_priority(),
+            ):
+                row = await self.storage.publications.get(
+                    self.terminal_operation,
+                )
             if row is None or (
                 row["state"] != "committed" or row["kind"] != "terminal"
             ):

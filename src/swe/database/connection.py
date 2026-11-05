@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from hashlib import sha256
 from typing import Any
@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 _CURRENT_CONNECTION: ContextVar[dict | None] = ContextVar(
     "swe_db_connection",
     default=None,
+)
+_CONTROL_CONNECTIONS: ContextVar[frozenset] = ContextVar(
+    "swe_db_control_connections",
+    default=frozenset(),
 )
 
 
@@ -81,6 +85,30 @@ class DatabaseConnection:
             session._check()
         return session
 
+    @contextmanager
+    def control_priority(self):
+        """Allow this task's short control IO to use reserved pool capacity."""
+        token = _CONTROL_CONNECTIONS.set(_CONTROL_CONNECTIONS.get() | {self})
+        try:
+            yield
+        finally:
+            _CONTROL_CONNECTIONS.reset(token)
+
+    @asynccontextmanager
+    async def reserve_control_capacity(self):
+        """Share one reserved position across all live conversation leases."""
+        if not self.is_connected:
+            raise RuntimeError("Database not connected")
+        pool = self._pool
+        pool.control_reservations += 1
+        try:
+            yield
+        finally:
+            # No await before decrement: cancellation must not leak reservations.
+            pool.control_reservations -= 1
+            async with pool._condition:
+                pool._condition.notify_all()
+
     @asynccontextmanager
     async def acquire(self):
         current = self._current()
@@ -90,7 +118,11 @@ class DatabaseConnection:
         if not self.is_connected:
             raise RuntimeError("Database not connected")
         pool = self._pool
-        entry = await pool.acquire()
+        entry = (
+            await pool.acquire(control=True)
+            if self in _CONTROL_CONNECTIONS.get()
+            else await pool.acquire()
+        )
         session = DatabaseSession(pool, entry)
         token = _CURRENT_CONNECTION.set(
             {**(_CURRENT_CONNECTION.get() or {}), self: session},

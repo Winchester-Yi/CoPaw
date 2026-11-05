@@ -18,7 +18,7 @@ class PublicationAssociations:
         if request.session_id is not None:
             if session_rows is None:
                 session = await self.db.fetch_one(
-                    "SELECT *,lease_until>UTC_TIMESTAMP(6) AS lease_valid "
+                    "SELECT * "
                     "FROM swe_conversation_sessions WHERE id=%s AND service_unit_key=%s FOR UPDATE",
                     (request.session_id, request.scope.sql_values[0]),
                 )

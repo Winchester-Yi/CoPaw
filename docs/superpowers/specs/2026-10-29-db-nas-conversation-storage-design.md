@@ -174,7 +174,8 @@ p99、数据库往返、锁等待、NAS 打开/字节、RSS及写放大。不捏
 所有影响共享上下文的写入锁 Session 行；执行不持有数据库事务。短事务统一锁顺序
 Session → 涉及的 Chat（ID 排序）→ Turn → publication（ID 排序）。只读pin只锁publication；GC顺序为guard→publication，之后不再回头锁Session。长模型、工具、NAS IO 和备份复制均在事务外。
 
-1. 完整身份解析 Session，锁行，用 DB `UTC_TIMESTAMP(6)` 判定 lease。
+1. 完整身份解析 Session 并锁行；DB `UTC_TIMESTAMP(6)` 用于记录软租约心跳新鲜度，
+   时间过期不自动撤销执行权。2026-11-05 起采用[软租约与代次校验](2026-11-05-conversation-soft-lease-design.md)。
 2. 已有同 question msgid：返回原已准入/终态；不覆盖请求正文。用户准入 payload
    在 NAS 保留，重试需要一致性比较时读取原 payload做语义比较，不新增 digest。
 3. 有其他 active Turn，包括 settling/未知提交：独立新问题返回 busy；显式重连
@@ -184,7 +185,8 @@ Session → 涉及的 Chat（ID 排序）→ Turn → publication（ID 排序）
    准入准备中的 active reservation 也占 Session，失败经对账终结后释放，不能留无主 busy。
 5. Lease 由 owner 使用当前 generation 条件续约；间隔/TTL 是可配置运维参数，
    部署前按暂停/网络预算验证。失效 owner 停止新增动作；已起外部工具不能凭 DB 撤销。
-   每次发布再次验证 owner、generation、未过期 lease 和精确 active Turn。
+   每次发布再次验证 owner、generation、精确 active Turn、关联和 revision/epoch；
+   lease 过期但代次未撤销时仍可提交。
 
 Turn状态约束：`reserved → admitted → running → stopping/settling →
 succeeded/failed/stopped/interrupted`；Stop可以从admitted/running进入stopping，
@@ -193,7 +195,8 @@ succeeded/failed/stopped/interrupted`；Stop可以从admitted/running进入stopp
 `prepared → committed/aborted`，终态不可逆；GC状态仅`live → deleting → reclaimed`。
 所有状态转换用锁/CAS和同事务引用更新，不能仅写一个status字符串。
 
-租约过期只能 fence旧 owner和对账存储，不自动接管执行/重放模型工具。没有可提交
+租约过期仅提示疑似失联，不自动 fence 旧 owner，也不自动接管执行/重放模型工具。
+明确恢复需要核实旧执行停止且 IO 排空，再在锁内递增 generation 撤销旧执行权。没有可提交
 终态时，恢复流程显式提交 interrupted 结果及已确认的历史，再释放执行槽；无法
 确认原发布结果时保持 unavailable/busy，不假成功。持久化恢复与继续执行是两回事。
 Stop 与自然完成对同一 Turn 终态 CAS，先提交再本地通知；settling barrier 保留。

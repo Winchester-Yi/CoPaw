@@ -128,3 +128,23 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - B1a 已提交 `e7422898b`，提交前扩大回归 987 passed、2 skipped，pre-commit 通过。参见[剩余工作报告](../../docs/superpowers/reports/2026-11-05-conversation-remaining-work-review.md)。
 - 当前 SQL 成本下一包为 B1b（全量复核一致快照、无界集合 SQL 和 publication 锁）；随后 B2 成员写入、C1/C2 批读与背压、C3 有界缓存、D detached 快照。compact 容量/错误终态、续租总预算和真实环境验收仍应优先闭环。
 - 复核时不要把 A/B1a 当作所有接口零 NAS、所有 SQL 已批量化。Stop 的 Session 回退查找、SubAgent/分享身份预读、guard 重复锁定、池归还检查和 GC/备份扫描仍有独立优化空间。manifest 锁定驱动 26.7.0，而当前 venv 为 9.4.0；需隔离环境验收，不能用替身测试宣称上线性能达标。
+
+### 2026-11-05 续租总预算与控制容量（历史严格租约，已由下节替代）
+
+本节记录前一轮实现；用户随后选择软租约，本地截止和过期拒绝不再生效，以下作为历史排查依据。
+
+- 见[实施记录](../../docs/superpowers/reports/2026-11-05-conversation-renewal-budget-implementation.md)与[计划](../../docs/superpowers/plans/2026-11-05-conversation-renewal-budget-plan.md)。入口为 `IndexedQuery.admit/_admit/_renew` → `ExecutionStore.renew` → `DatabaseConnection.control_priority/reserve_control_capacity` → `ConnectionPool.acquire`。
+- 默认租约 30 秒，续租操作总预算 10 秒，周期硬截止为保守锚点后 25 秒；锚点取 reserve/成功续租尝试开始时间，不能取 SQL/归还完成时间。admission NAS 发布前已经启动 renewer，reserved 可续租但不能执行模型；过慢 admission 在 NAS/模型入口前拒绝。
+- 同池动态共享一个控制位置，所有物理连接和隔离 IO 仍受 max_connections 限制。普通业务不能占用最后预留位置；单连接退化共享，已有满占和 guard 锁不被抢占，不能用预留承诺所有负载下都可续租。取消后先退出注册，连接自身仍按原隔离排空协议清理。
+- SELECT 的 lease_valid 不能跨后续等待作为续命依据，UPDATE 要再次检查数据库当前租期和 owner/generation/active turn，影响行数必须为 1。超时不推测 COMMIT 成败，不重试执行；精确 terminal 对账使用控制容量且共享周期截止，外部取消不能吞掉。
+- 完全阻塞 event loop 时 timer 可能迟到，必须补查单调时间；请求等待结束不等于取消抵抗的数据库 IO 已排空。真实 MySQL 的锁/过期用例已增加，仍需专用库和匹配 manifest 的驱动验收。
+- 本包最终扩大回归 1011 passed、38 skipped（真实 MySQL 专用库未配置），pre-commit 通过；部署版本驱动与真实数据库验收仍未完成。
+
+### 2026-11-05 软租约＋代次校验（当前规则）
+
+- 见[设计](../../docs/superpowers/specs/2026-11-05-conversation-soft-lease-design.md)与[实施记录](../../docs/superpowers/reports/2026-11-05-conversation-soft-lease-implementation.md)。`lease_until` 只表达心跳新鲜度；过期既不自动 fence 也不允许抢占。执行权以 owner/generation/active Turn 和完整关联、revision/epoch、删除及终态校验为准。
+- `ExecutionStore.start/renew/finish`、`PublicationStore.reserve/commit` 共用当前身份检查，原租期时间谓词和 `lease_valid` 计算列已移除。同身份可过期后续心跳、提交迟到结果；旧代次和错误 owner/Turn 仍拒绝。备份/写屏障、Stop、NAS durable 读回与 UnknownCommit 对账照旧。
+- `IndexedQuery._renew` 重试规范化心跳 StorageUnavailable（明确排除 UnknownCommit），不因过期或数据库暂时不可达取消计算；首次失联 warning、恢复 info，失败按固定间隔等待，成功跳过错过的调度，不积压补发。明确冲突、完整性错误和编程错误仍取消；精确 terminal 查询独立总预算。
+- 原单次 lease/3 SQL 总预算、同池一个动态控制位置与取消隔离保留；移除本地周期 25 秒停止和 admission 时间拒绝。普通业务 SQL/模型发布错误不能套用心跳重试策略。故障期间业务保存仍可能失败，恢复仍需 stopped/drained 证据；数据库 fencing 无法撤销外部工具副作用。
+- 不改 DDL/NAS/HTTP 格式。旧代码仍按严格租期拒绝，部署需使用一致版本；真实 MySQL、驱动版本和跨 Pod 验收仍需专用环境。
+- 当前软租约包扩大回归 1084 passed、51 skipped（专用 MySQL 库未配置），pre-commit 通过；按用户指令提交本包，真实环境仍待验收。

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """SQL admission and settlement fence all model work and final frames."""
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -50,6 +50,7 @@ def setup_runtime():
         turn={"id": 3, "question_msg_key": b"question"},
     )
     service = SimpleNamespace(
+        renewal_capacity=nullcontext,
         reserve_admission=AsyncMock(return_value=admitted),
         publish_admission=AsyncMock(
             side_effect=lambda *args: events.append("admitted"),
@@ -62,6 +63,7 @@ def setup_runtime():
         ),
     )
     storage = SimpleNamespace(
+        db=SimpleNamespace(control_priority=nullcontext),
         session_for=lambda channel: adapter,
         executions=service,
         history=SimpleNamespace(answer_turn=AsyncMock()),
@@ -616,3 +618,318 @@ async def test_renewal_loss_after_own_terminal_commit_does_not_cancel_cleanup(
 
     assert parent.cancel.called is not ignore_renewal_loss
     assert query.renew_error is (None if ignore_renewal_loss else loss)
+
+
+async def test_renewal_starts_before_slow_admission_publication():
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, question, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.06
+    renewed = asyncio.Event()
+    storage.executions.renew.side_effect = lambda *args: renewed.set()
+
+    async def publish(*args):
+        await asyncio.wait_for(renewed.wait(), 0.15)
+
+    storage.executions.publish_admission.side_effect = publish
+    query = IndexedQuery(storage, owner, request, execution)
+    async with query.admit([question]):
+        assert renewed.is_set()
+
+
+async def test_terminal_reconciliation_is_bounded_and_preserves_confirmed_conflict():
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.errors import ConflictError
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.06
+    storage.executions.renew.side_effect = ConflictError("expired")
+    query = IndexedQuery(storage, owner, request, execution)
+    query.terminal_operation = "a" * 64
+    storage.publications = SimpleNamespace(
+        get=AsyncMock(side_effect=lambda *args: None),
+    )
+
+    async def stalled(*args):
+        await asyncio.sleep(5)
+
+    storage.publications.get.side_effect = stalled
+    parent = SimpleNamespace(cancel=Mock())
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(query._renew(parent), 0.2)
+    assert asyncio.get_running_loop().time() - started < 0.15
+    assert parent.cancel.called
+    assert isinstance(query.renew_error, ConflictError)
+
+
+async def test_delayed_heartbeat_still_checks_current_authority(monkeypatch):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.app.conversation_storage.errors import ConflictError
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.03
+    query = integration.IndexedQuery(storage, owner, request, execution)
+    loss = ConflictError("generation changed")
+    storage.executions.renew.side_effect = loss
+    sleep = asyncio.sleep
+
+    async def delayed(delay):
+        await sleep(0.04)
+
+    monkeypatch.setattr(integration.asyncio, "sleep", delayed)
+    parent = SimpleNamespace(cancel=Mock())
+    await query._renew(parent)
+    storage.executions.renew.assert_awaited_once()
+    assert parent.cancel.called
+    assert query.renew_error is loss
+
+
+async def test_renewal_schedule_subtracts_prior_operation_duration(
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.app.conversation_storage.errors import ConflictError
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.12
+    query = integration.IndexedQuery(storage, owner, request, execution)
+    parent = SimpleNamespace(cancel=Mock())
+    sleep = asyncio.sleep
+    waits = []
+
+    async def track_sleep(delay):
+        waits.append(delay)
+        await sleep(delay)
+
+    async def renew(*args):
+        if len(waits) == 1:
+            await sleep(0.025)
+        else:
+            raise ConflictError("stop after second cycle")
+
+    storage.executions.renew.side_effect = renew
+    monkeypatch.setattr(integration.asyncio, "sleep", track_sleep)
+    await query._renew(parent)
+    assert len(waits) == 2
+    assert waits[1] < 0.025
+
+
+async def test_external_cancellation_during_reconciliation_is_preserved():
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.errors import ConflictError
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.06
+    storage.executions.renew.side_effect = ConflictError("expired")
+    query = IndexedQuery(storage, owner, request, execution)
+    query.terminal_operation = "a" * 64
+    entered = asyncio.Event()
+
+    async def stalled(*args):
+        entered.set()
+        await asyncio.Event().wait()
+
+    storage.publications = SimpleNamespace(get=stalled)
+    parent = SimpleNamespace(cancel=Mock())
+    task = asyncio.create_task(query._renew(parent))
+    await asyncio.wait_for(entered.wait(), 0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert query.renew_error is None
+    assert not parent.cancel.called
+
+
+async def test_delayed_heartbeat_success_does_not_expire_execution(
+    monkeypatch,
+):
+    import time
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.06
+
+    async def late(*args):
+        time.sleep(0.06)
+        # Stop a missing-budget implementation after two renewals.
+        if storage.executions.renew.await_count > 1:
+            raise RuntimeError("unexpected second renewal")
+
+    storage.executions.renew.side_effect = late
+    from swe.app.conversation_storage import runner_integration as integration
+
+    sleep = asyncio.sleep
+    waits = []
+
+    async def track_sleep(delay):
+        waits.append(delay)
+        await sleep(delay)
+
+    monkeypatch.setattr(integration.asyncio, "sleep", track_sleep)
+    query = IndexedQuery(storage, owner, request, execution)
+    parent = SimpleNamespace(cancel=Mock())
+    await query._renew(parent)
+    assert isinstance(query.renew_error, RuntimeError)
+    assert storage.executions.renew.await_count == 2
+
+    assert waits[1] >= 0.019
+
+
+async def test_admission_renewal_failure_prevents_start_and_keeps_unknown_operation():
+    from swe.app.conversation_storage.errors import ConflictError
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, question, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.06
+    loss = ConflictError("admission lease lost")
+    storage.executions.renew.side_effect = loss
+
+    async def publish(*args):
+        await asyncio.Event().wait()
+
+    storage.executions.publish_admission.side_effect = publish
+    query = IndexedQuery(storage, owner, request, execution)
+    with pytest.raises(ConflictError, match="admission lease lost"):
+        async with query.admit([question]):
+            pytest.fail("model work started after renewal failure")
+    storage.executions.start.assert_not_called()
+    assert query.pending_operation == query._admission_args["operation_key"]
+    assert query.request_ended
+
+
+async def test_slow_reservation_uses_sql_authority_before_model_work():
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    storage, owner, execution, request, question, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.03
+    query = IndexedQuery(storage, owner, request, execution)
+    admission = storage.executions.reserve_admission.return_value
+
+    async def reserve(*args, **kwargs):
+        await asyncio.sleep(0.04)
+        return admission
+
+    storage.executions.reserve_admission.side_effect = reserve
+    async with query.admit([question]):
+        storage.executions.publish_admission.assert_awaited_once()
+        storage.executions.start.assert_awaited_once_with(admission.authority)
+    assert query.pending_operation is None
+
+
+async def test_heartbeat_unavailability_retries_without_cancelling_model_work(
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.errors import StorageUnavailable
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.app.conversation_storage.runner_integration import IndexedQuery
+
+    logger = Mock()
+    monkeypatch.setattr(integration, "logger", logger)
+    storage, owner, execution, request, question, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.06
+    calls = 0
+    recovered = asyncio.Event()
+
+    async def renew(*args):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise StorageUnavailable("heartbeat database unavailable")
+        recovered.set()
+
+    storage.executions.renew.side_effect = renew
+    query = IndexedQuery(storage, owner, request, execution)
+    async with query.admit([question]):
+        await asyncio.wait_for(recovered.wait(), 0.3)
+        assert query.renew_error is None
+        await query.finish()
+    assert calls >= 3
+    logger.warning.assert_called_once()
+    logger.info.assert_called_once_with("Conversation heartbeat recovered")
+    assert query.terminal_status == "completed"
+
+
+async def test_heartbeat_unavailability_waits_between_retries_and_external_cancel(
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.app.conversation_storage.errors import StorageUnavailable
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.03
+    query = integration.IndexedQuery(storage, owner, request, execution)
+    storage.executions.renew.side_effect = StorageUnavailable("offline")
+    parent = SimpleNamespace(cancel=Mock())
+    waits = []
+
+    async def sleep(delay):
+        waits.append(delay)
+        if len(waits) == 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(integration.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await query._renew(parent)
+    assert all(delay >= 0.009 for delay in waits)
+    assert storage.executions.renew.await_count == 3
+    assert not parent.cancel.called
+    assert query.renew_error is None
+
+
+async def test_heartbeat_never_retries_an_unknown_business_commit(monkeypatch):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import runner_integration as integration
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    failure = UnknownCommit("e" * 64)
+    storage.executions.renew.side_effect = failure
+    query = integration.IndexedQuery(storage, owner, request, execution)
+    parent = SimpleNamespace(cancel=Mock())
+    waits = 0
+
+    async def sleep(delay):
+        nonlocal waits
+        waits += 1
+        if waits > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(integration.asyncio, "sleep", sleep)
+    await query._renew(parent)
+    assert query.renew_error is failure
+    assert parent.cancel.called
+    storage.executions.renew.assert_awaited_once()
+
+
+async def test_heartbeat_timeout_is_transient_not_authority_rejection(
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage import runner_integration as integration
+    from swe.app.conversation_storage.errors import StorageUnavailable
+
+    storage, owner, execution, request, _, _ = setup_runtime()
+    storage.executions.lease_seconds = 0.03
+    storage.executions.renew.side_effect = StorageUnavailable("deadline")
+    query = integration.IndexedQuery(storage, owner, request, execution)
+    parent = SimpleNamespace(cancel=Mock())
+    sleeps = 0
+
+    async def sleep(delay):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(integration.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await query._renew(parent)
+    assert storage.executions.renew.await_count == 1
+    assert query.renew_error is None
+    assert not parent.cancel.called

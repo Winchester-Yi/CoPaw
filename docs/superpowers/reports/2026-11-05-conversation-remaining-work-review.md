@@ -4,6 +4,8 @@
 
 本轮提交 B1a，并对照当前源码、[整体性能设计](../specs/2026-11-04-conversation-storage-performance-redesign.md)、[SQL/NAS 成本设计](../specs/2026-11-05-conversation-sql-nas-cost-design.md)复核待办。除本报告与入口索引外，没有新增运行时改动；以下影响为静态分析，未经现场压测量化。
 
+> 2026-11-05 后续更新：第 2 项已改为并实现软租约＋代次校验，见[当前设计](../specs/2026-11-05-conversation-soft-lease-design.md)。下文保留当时严格租约的排查证据；“过期必须拒绝写入”不再是当前规则。
+
 ## 已完成的边界
 
 - checkpoint 的 record/prefix/page/full 与完整遍历已实现；通用持久化 plan 最终 UTF-8 字节检查已实现。不能由此推断 compact 和扩展内存 plan 的容量闭环也已完成。
@@ -29,7 +31,7 @@
 
 证据：`execution.py` 默认 lease 为 30 秒；`runner_integration.py:_renew` 每 10 秒才进入续租；`database/config.py` 默认 acquire_timeout 为 30 秒，之后还可能遇到 guard/行锁与 SQL 等待。当前 renew 路径没有覆盖整个操作的总 deadline。
 
-影响：默认配置不能证明满池时健康执行仍能在租约到期前续租。此项关乎任务可用性，不只是平均延迟；旧 authority 过期后必须继续拒绝写入。
+影响：默认配置不能证明满池时健康执行仍能在租约到期前续租。此项关乎任务可用性，不只是平均延迟；旧 authority 在被明确撤销或代次变化后必须拒绝写入；软租约时间过期本身不再拒绝。
 
 处理：统一剩余租期、池排队、锁等待、SQL 与清理的总预算，设计受总连接数约束的控制请求容量/优先级；是否拆池须依据测量，不能无上限加连接。验证满池、慢 SQL、同 scope guard 竞争、事件循环延迟与停止/结算并发。
 

@@ -907,3 +907,126 @@ async def test_commit_preserves_imported_committed_at(tmp_path):
     assert (
         db.rows[operation.operation_key.encode()]["committed_at"] == "imported"
     )
+
+
+@pytest.mark.parametrize("expires_before", ["reserve", "commit"])
+async def test_expired_heartbeat_allows_matching_publication(
+    tmp_path,
+    expires_before,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    operation = request()
+    if expires_before == "reserve":
+        db.session["lease_valid"] = 0
+    await service.reserve(operation, CommitPlan(recovery_block="root"))
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("root", "recovery", b"{}")],
+    )
+    db.session["lease_valid"] = 0
+    result = await service.commit(operation.operation_key)
+    assert result["state"] == "committed"
+    assert db.session["state_revision"] == 1
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["admission", "state", "compact", "reset", "terminal"],
+)
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {},
+        {"generation": 2},
+        {"owner_key": None},
+        {"owner_key": b"other"},
+        {"active_turn_id": 4},
+        {"state_revision": 1},
+    ],
+)
+def test_soft_heartbeat_publication_checks_identity_and_revision(
+    kind,
+    changed,
+):
+    db = PublicationDatabase()
+    operation = replace(request(), kind=kind)
+    db.session.update(lease_valid=0, **changed)
+    if changed:
+        with pytest.raises(ConflictError):
+            PublicationStore._validate_authority(
+                operation,
+                db.session,
+                db.chat,
+                db.turn,
+            )
+    else:
+        PublicationStore._validate_authority(
+            operation,
+            db.session,
+            db.chat,
+            db.turn,
+        )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"generation": 2},
+        {"owner_key": None},
+        {"owner_key": b"other"},
+        {"active_turn_id": 4},
+        {"state_revision": 1},
+    ],
+)
+async def test_expired_heartbeat_durable_publication_still_rechecks_fence(
+    tmp_path,
+    changed,
+):
+    db = PublicationDatabase()
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    operation = request()
+    await service.reserve(operation, CommitPlan(recovery_block="root"))
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("root", "recovery", b"{}")],
+    )
+    db.session.update(lease_valid=0, **changed)
+    with pytest.raises(ConflictError):
+        await service.commit(operation.operation_key)
+    assert db.rows[operation.operation_key.encode()]["state"] == "prepared"
+    assert "recovery_publication_id" not in db.session
+
+
+async def test_expired_heartbeat_terminal_still_honors_stop(tmp_path):
+    db = PublicationDatabase()
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    operation = replace(request(), kind="terminal")
+    await service.reserve(
+        operation,
+        CommitPlan(
+            recovery_block="root",
+            turn_install=TurnInstall("terminal", history_status="completed"),
+        ),
+    )
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("root", "recovery", b"{}")],
+    )
+    db.session["lease_valid"] = 0
+    db.turn["state"] = "stopping"
+    with pytest.raises(ConflictError, match="Stop"):
+        await service.commit(operation.operation_key)
+    assert db.rows[operation.operation_key.encode()]["state"] == "prepared"
