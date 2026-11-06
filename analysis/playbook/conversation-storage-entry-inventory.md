@@ -149,6 +149,13 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - 完全阻塞 event loop 时 timer 可能迟到，必须补查单调时间；请求等待结束不等于取消抵抗的数据库 IO 已排空。真实 MySQL 的锁/过期用例已增加，仍需专用库和匹配 manifest 的驱动验收。
 - 本包最终扩大回归 1011 passed、38 skipped（真实 MySQL 专用库未配置），pre-commit 通过；部署版本驱动与真实数据库验收仍未完成。
 
+### 2026-11-05 Compact 当前流程梳理
+
+- 2026-11-06 用户决定：Compact 容量、错误终态及摘要生成/组装优化延后到 NAS 迁移功能完成后处理；当前仅记录并提交分析，未实施修复。恢复时先复核代码与依赖版本。
+- 见[当前流程报告](../../docs/superpowers/reports/2026-11-05-conversation-compaction-flow-review.md)。自动入口为 `MemoryCompactionHook`；后台 candidate 当前追加事件事实，不调用摘要模型；degraded 写引用投影但不归档在线消息；真正语义摘要走 ReMe `compact_memory`。手动 `/compact` 直接传入全部在线消息，与自动保留近期消息的选择不同。
+- 检查摘要覆盖时必须追到依赖 `AsMsgHandler.format_msgs_to_str`：它可能省略所选集合内较旧的消息，而归档仍使用完整所选集合。模型前容量、输出预算与最终请求预算不能只依赖 plan serialize guard。
+- 模型组装由 `ReMeInMemoryMemory.get_memory` 将长期记忆和当前摘要合成一条 user 消息，前置于原始消息；`prepend_summary=False` 仍可能注入长期记忆。ReMe 字符串摘要与 checkpoint record 的语义字段并未自动互相转换。聚焦回归 70 passed；本轮为现状分析，未修复运行时行为。
+
 ### 2026-11-05 软租约＋代次校验（当前规则）
 
 - 见[设计](../../docs/superpowers/specs/2026-11-05-conversation-soft-lease-design.md)与[实施记录](../../docs/superpowers/reports/2026-11-05-conversation-soft-lease-implementation.md)。`lease_until` 只表达心跳新鲜度；过期既不自动 fence 也不允许抢占。执行权以 owner/generation/active Turn 和完整关联、revision/epoch、删除及终态校验为准。
