@@ -10,6 +10,7 @@ import platform
 import queue
 import sys
 import threading
+import traceback
 from typing import TextIO
 
 _ASYNC_LOG_QUEUE_MAXSIZE = 10000
@@ -291,8 +292,21 @@ class _Utf8StderrStream(io.TextIOBase):
         super().close()
 
 
+class _SingleLineErrorStreamHandler(logging.StreamHandler):
+    def handleError(self, record: logging.LogRecord) -> None:
+        if not logging.raiseExceptions or sys.stderr is None:
+            return
+        try:
+            details = "".join(traceback.format_exception(*sys.exc_info()))
+            details += f"Message: {record.msg!r}\nArguments: {record.args!r}"
+            details = ColorFormatter._escape_line_breaks(details)
+            sys.stderr.write(f"--- Logging error --- | {details}\n")
+        except Exception:
+            pass
+
+
 def _create_stderr_handler(formatter: logging.Formatter) -> logging.Handler:
-    handler = logging.StreamHandler(_Utf8StderrStream(sys.stderr))
+    handler = _SingleLineErrorStreamHandler(_Utf8StderrStream(sys.stderr))
     handler.setFormatter(formatter)
     return handler
 

@@ -341,8 +341,7 @@ def load_cron_auth_state(
         tenant_id=tenant_id,
         workspace_dir=workspace_dir,
     )
-    logger.info("load_cron_auth_state workspace_dir")
-    print(path)
+    logger.info(f"load_cron_auth_state workspace_dir: {path}")
     if not path.is_file():
         return CronAuthState()
     try:

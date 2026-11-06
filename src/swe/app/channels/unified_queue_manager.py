@@ -109,13 +109,6 @@ class UnifiedQueueManager:
         # Running flag
         self._running = False
 
-        logger.info(
-            f"UnifiedQueueManager initialized: "
-            f"maxsize={queue_maxsize}, "
-            f"idle_timeout={idle_timeout}s, "
-            f"cleanup_interval={cleanup_interval}s",
-        )
-
     async def enqueue(
         self,
         channel_id: str,
@@ -286,7 +279,6 @@ class UnifiedQueueManager:
             self._cleanup_idle_queues(),
             name="unified_queue_cleanup",
         )
-        logger.info("Cleanup loop started")
 
     async def clear_queue(
         self,
@@ -453,8 +445,6 @@ class UnifiedQueueManager:
                 break
             except Exception:
                 logger.exception("Cleanup loop error")
-
-        logger.info("Cleanup loop stopped")
 
     async def get_metrics(self) -> Dict[str, Any]:
         """Get queue metrics for monitoring.

@@ -59,8 +59,6 @@ class CommandRegistry:
         # Register default control commands
         self._register_defaults()
 
-        logger.info("CommandRegistry initialized")
-
     def _register_defaults(self) -> None:
         """Register default control commands."""
         # Critical (0): Control commands requiring immediate response
@@ -126,10 +124,6 @@ class CommandRegistry:
         # Register to lookup table
         prefix_lower = command_prefix.lower()
         self._command_to_level[prefix_lower] = level
-
-        logger.info(
-            f"Registered command: {command_prefix} → level={level}",
-        )
 
     def is_control_command(self, query: str) -> bool:
         """Check if query is a registered control command.

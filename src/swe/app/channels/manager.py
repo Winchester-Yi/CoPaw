@@ -647,9 +647,6 @@ class ChannelManager:
         self._workspace = workspace
         for ch in self.channels:
             ch.set_workspace(workspace, self._command_registry)
-        logger.info(
-            f"Injected workspace into {len(self.channels)} channels",
-        )
 
     async def clear_queue(
         self,
