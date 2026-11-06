@@ -2310,7 +2310,6 @@ class CronExecutor:
         stream = self._runner.stream_query(req)
         async for event in stream:
             stream_state.event_count += 1
-            self._record_agent_stream_event(job, event, stream_state)
             flags = self._classify_agent_stream_event(event)
             self._collect_agent_stream_output(event, stream_state)
             self._apply_agent_stream_event_state(

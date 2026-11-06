@@ -30,6 +30,30 @@ def test_color_formatter_escapes_multiline_messages() -> None:
     assert r"first line\nsecond line\r\nthird line" in formatted
 
 
+def test_handler_error_is_single_line(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    handler = my_logging._create_stderr_handler(
+        logging.Formatter("%(message)s"),
+    )
+    record = logging.LogRecord(
+        "swe.test",
+        logging.ERROR,
+        __file__,
+        1,
+        "value: %d",
+        ("bad",),
+        None,
+    )
+
+    handler.handle(record)
+
+    output = capsys.readouterr().err
+    assert len(output.splitlines()) == 1
+    assert "Logging error" in output
+    assert "TypeError" in output
+    assert r"\n" in output
+
+
 def test_setup_logger_installs_one_async_handler() -> None:
     my_logging.shutdown_logger()
 
