@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 
 from agentscope.message import Msg
 
@@ -335,6 +336,60 @@ class ConversationImporter:
     async def _batch_finished(self, position):
         self._batch_committed(position)
 
+    def _assert_source_fresh(self, report):
+        from .freshness import changed_source, tenant_key
+
+        timestamps = self.manifest.data.get("tenant_sync_started_at_ns", {})
+        for workspace in report["workspaces"]:
+            service_unit_id, tenant_id = workspace["scope"][:2]
+            cutoff = timestamps.get(tenant_key(service_unit_id, tenant_id))
+            if cutoff is None:
+                continue
+            changed = changed_source(workspace.get("source_paths", []), cutoff)
+            if changed:
+                path, modified_at_ns = changed
+                blocker = {
+                    "code": "source_modified_after_sync_started",
+                    "position": workspace["position"],
+                    "scope": [service_unit_id, tenant_id],
+                    "path": str(path),
+                    "mtime_ns": modified_at_ns,
+                    "cutoff_ns": cutoff,
+                }
+                self.manifest.record_source_change(blocker)
+                raise ValueError(
+                    "tenant source changed after synchronization started: "
+                    + str(path),
+                )
+        for share in report["shares"]:
+            service_unit_id = share["service_unit_id"]
+            tenant_id = share["record"]["tenant_id"]
+            cutoff = timestamps.get(tenant_key(service_unit_id, tenant_id))
+            if cutoff is None or not share.get("snapshot_path"):
+                continue
+            changed = changed_source(
+                [
+                    share["snapshot_path"],
+                    str(Path(share["snapshot_path"]).parent),
+                ],
+                cutoff,
+            )
+            if changed:
+                path, modified_at_ns = changed
+                blocker = {
+                    "code": "source_modified_after_sync_started",
+                    "position": share["position"],
+                    "scope": [service_unit_id, tenant_id],
+                    "path": str(path),
+                    "mtime_ns": modified_at_ns,
+                    "cutoff_ns": cutoff,
+                }
+                self.manifest.record_source_change(blocker)
+                raise ValueError(
+                    "tenant source changed after synchronization started: "
+                    + str(path),
+                )
+
     async def _publish(self, position, scope, rows, blocks, *, spec=None):
         self.bundles = self.bundle_stores[scope.service_unit_id]
         self.store = self.stores[scope.service_unit_id]
@@ -409,6 +464,7 @@ class ConversationImporter:
 
         validate_inventory(report)
         self._validate_source_binding(report)
+        self._assert_source_fresh(report)
         self._validate_runtime_sources(report)
         await next(iter(self.stores.values())).validate_target()
         await self._retain_source_artifacts(report)
@@ -420,6 +476,7 @@ class ConversationImporter:
             for chat in workspace["chats"]:
                 await self._archive(chat, scope)
         await self._shares(report)
+        self._assert_source_fresh(report)
         return {
             "migration_id": self.manifest.migration_id,
             "batches": dict(self.manifest.data["batches"]),

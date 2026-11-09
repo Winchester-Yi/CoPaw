@@ -570,12 +570,6 @@ def discover_services(services, *, shares=(), overrides=()):
                         service["service_unit_id"],
                         "target NAS overlaps another service's source inputs",
                     )
-    try:
-        report["fingerprints"] = fingerprints(report["services"])
-    except (OSError, ValueError) as error:
-        _block(report, "source_invalid", "source", error)
-    if any(item["code"] == "source_invalid" for item in report["blockers"]):
-        return report
     for index, service in enumerate(report["services"]):
         for other in report["services"][:index]:
             if _overlaps(Path(service["nas_root"]), Path(other["nas_root"])):
@@ -621,13 +615,13 @@ def freeze_discovery(report, path, boundary, application_schema):
     """Revalidate discovery and atomically save a v3 manifest outside the source."""
     if not report.get("ready") or report.get("blockers"):
         raise ValueError("discovery contains blockers")
-    if fingerprints(report["services"]) != report["fingerprints"]:
-        raise ValueError("source changed since discovery")
     current = discover_services(
         report["services"],
         shares=report["shares"],
         overrides=report.get("overrides", ()),
     )
+    if current["fingerprints"] != report["fingerprints"]:
+        raise ValueError("source changed since discovery")
     if current != report:
         raise ValueError(
             "discovery report differs from verified source evidence",

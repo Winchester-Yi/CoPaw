@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import re
+import time
 from uuid import UUID
 
 from ..identity import WorkspaceScope, service_unit_bytes
@@ -43,6 +44,14 @@ class V3Manifest(MigrationManifest):
             value not in TRANSITIONS for value in self.data["batches"].values()
         ):
             raise ValueError("invalid batch state")
+        timestamps = self.data.get("tenant_sync_started_at_ns", {})
+        if not isinstance(timestamps, dict) or any(
+            not isinstance(key, str) or type(value) is not int or value <= 0
+            for key, value in timestamps.items()
+        ):
+            raise ValueError("invalid tenant source mtime cutoff")
+        if not isinstance(self.data.get("source_change_blockers", []), list):
+            raise ValueError("invalid source change blocker journal")
         if self.data.get("target") is not None:
             self._validate_target(self.data["target"])
 
@@ -80,9 +89,39 @@ class V3Manifest(MigrationManifest):
                 "direct migration IDs must be allocated by the SQL journal",
             ) from None
 
+    def begin_tenant_sync(self, service_unit_id, tenant_id):
+        from .freshness import tenant_key
+
+        key = tenant_key(service_unit_id, tenant_id)
+        with self._lock():
+            self._refresh()
+            timestamps = self.data.setdefault("tenant_sync_started_at_ns", {})
+            if key not in timestamps:
+                timestamps[key] = time.time_ns()
+                self._persist()
+            return timestamps[key]
+
+    def record_source_change(self, blocker):
+        with self._lock():
+            self._refresh()
+            values = self.data.setdefault("source_change_blockers", [])
+            if blocker not in values:
+                values.append(blocker)
+                self._persist()
+            return list(values)
+
     def _refresh(self):
         current = self.load(self.path)
         for key in ("services", "fingerprints", "shares", "discovery_version"):
             if current.data.get(key) != self.data.get(key):
                 raise ValueError("frozen source discovery binding changed")
+        current_timestamps = current.data.get("tenant_sync_started_at_ns", {})
+        if any(
+            current_timestamps.get(key) != value
+            for key, value in self.data.get(
+                "tenant_sync_started_at_ns",
+                {},
+            ).items()
+        ):
+            raise ValueError("tenant source mtime cutoff changed")
         super()._refresh()

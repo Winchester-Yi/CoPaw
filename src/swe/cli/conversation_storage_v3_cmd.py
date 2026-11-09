@@ -387,7 +387,10 @@ def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
                     or source.is_relative_to(nas)
                 ):
                     raise ValueError("source and target NAS roots overlap")
-    inventory = inventory_v3(manifest)
+    inventory = inventory_v3(
+        manifest,
+        begin_sync=operation in ("import", "resume") and apply,
+    )
     if operation in ("inventory", "plan", "inspect"):
         return {
             "version": 3,
@@ -414,7 +417,10 @@ def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
             "ready": inventory["ready"],
         }
     if not inventory.get("ready") or inventory.get("blockers"):
-        raise ValueError("frozen inventory has blockers")
+        raise ValueError(
+            "frozen inventory has blockers: "
+            + json.dumps(inventory["blockers"], ensure_ascii=False),
+        )
     if operation in ("import", "resume", "finalize") and not apply:
         return {
             "version": 3,

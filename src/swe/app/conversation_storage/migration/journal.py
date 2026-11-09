@@ -55,6 +55,7 @@ class MigrationJournal:
                 "services",
                 "workspaces",
                 "fingerprints",
+                "tenant_sync_started_at_ns",
                 "shares",
                 "discovery_version",
             )

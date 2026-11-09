@@ -64,7 +64,11 @@ def test_discovers_disabled_profile_and_rebases_absolute_path(tmp_path):
     assert item["runtime_root"].startswith(service["nas_root"])
 
 
-def test_freeze_rechecks_source_and_keeps_service_authority(tmp_path):
+def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration import discovery
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
         freeze_discovery,
@@ -75,6 +79,14 @@ def test_freeze_rechecks_source_and_keeps_service_authority(tmp_path):
 
     service = fixture_service(tmp_path)
     report = discover_services([service])
+    fingerprint_calls = []
+    original_fingerprints = discovery.fingerprints
+
+    def count_fingerprints(services):
+        fingerprint_calls.append(True)
+        return original_fingerprints(services)
+
+    monkeypatch.setattr(discovery, "fingerprints", count_fingerprints)
     boundary = SourceBoundary(
         "snapshot",
         "2026-11-02T00:00:00Z",
@@ -87,16 +99,30 @@ def test_freeze_rechecks_source_and_keeps_service_authority(tmp_path):
         boundary,
         "business",
     )
+    assert fingerprint_calls == []
     assert manifest.data["version"] == 3
     assert inventory_v3(manifest)["ready"]
+    assert "tenant_sync_started_at_ns" not in manifest.data
+    assert inventory_v3(manifest, begin_sync=True)["ready"]
     registry = (
         __import__("pathlib").Path(report["workspaces"][0]["root"])
         / "chats.json"
     )
+    cutoff = manifest.data["tenant_sync_started_at_ns"]["SERVICE\x00default"]
     registry.chmod(0o644)
-    registry.write_text('{"version": 1, "chats": [], "changed": true}')
-    with pytest.raises(ValueError, match="source"):
-        inventory_v3(manifest)
+    registry.write_text("{changed")
+    import os
+
+    os.utime(registry, ns=(cutoff + 1, cutoff + 1))
+    registry.chmod(0o444)
+    result = inventory_v3(manifest)
+    assert not result["ready"]
+    blocker = result["blockers"][0]
+    assert blocker["code"] == "source_modified_after_sync_started"
+    assert blocker["scope"] == ["SERVICE", "default"]
+    assert blocker["path"] == str(registry)
+    assert blocker["mtime_ns"] > blocker["cutoff_ns"]
+    assert manifest.data["source_change_blockers"] == [blocker]
 
 
 def test_unregistered_workspace_is_blocker(tmp_path):
@@ -169,7 +195,7 @@ def test_rejects_another_services_source_overlapping_target_nas(tmp_path):
     )
 
 
-def test_fingerprints_detect_empty_directory_addition(tmp_path):
+def test_source_change_blocker_survives_manifest_reload(tmp_path):
     from pathlib import Path
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,
@@ -178,24 +204,36 @@ def test_fingerprints_detect_empty_directory_addition(tmp_path):
 
     service = fixture_service(tmp_path)
     report = discover_services([service])
-    root = Path(service["source_root"])
-    root.chmod(0o755)
-    (root / "new-empty-candidate").mkdir()
-    (root / "new-empty-candidate").chmod(0o555)
-    root.chmod(0o555)
     boundary = SourceBoundary(
         "snapshot",
         "2026-11-02T00:00:00Z",
         "old@sha256:" + "a" * 64,
         ("stop", "readonly"),
     )
-    with pytest.raises(ValueError, match="source changed"):
-        freeze_discovery(
-            report,
-            tmp_path / "manifest.json",
-            boundary,
-            "business",
-        )
+    manifest_path = tmp_path / "manifest.json"
+    manifest = freeze_discovery(report, manifest_path, boundary, "business")
+    from swe.app.conversation_storage.migration.freshness import tenant_key
+
+    cutoff = manifest.begin_tenant_sync("SERVICE", "default")
+    blocker = {
+        "code": "source_modified_after_sync_started",
+        "position": report["workspaces"][0]["position"],
+        "scope": ["SERVICE", "default"],
+        "path": str(Path(service["source_root"])),
+        "mtime_ns": cutoff + 1,
+        "cutoff_ns": cutoff,
+    }
+    manifest.record_source_change(blocker)
+    from swe.app.conversation_storage.migration.v3_manifest import V3Manifest
+
+    loaded = V3Manifest.load(manifest_path)
+    assert (
+        loaded.data["tenant_sync_started_at_ns"][
+            tenant_key("SERVICE", "default")
+        ]
+        == cutoff
+    )
+    assert loaded.data["source_change_blockers"] == [blocker]
 
 
 def test_freeze_rejects_modified_discovery_identity(tmp_path):
@@ -369,10 +407,18 @@ def test_share_only_service_snapshot_lives_outside_workspace(tmp_path):
         boundary,
         "business",
     )
-    result = inventory_v3(manifest)
+    result = inventory_v3(manifest, begin_sync=True)
     assert result["ready"], result["blockers"]
     assert result["shares"][0]["scope_kind"] == "legacy_share"
     assert result["shares"][0]["record"]["access_count"] == 4
+    cutoff = manifest.data["tenant_sync_started_at_ns"]["SERVICE\x00tenant"]
+    import os
+
+    os.utime(target, ns=(cutoff + 1, cutoff + 1))
+    result = inventory_v3(manifest)
+    assert not result["ready"]
+    assert result["blockers"][0]["scope"] == ["SERVICE", "tenant"]
+    assert result["blockers"][0]["path"] == str(target)
 
 
 def test_relative_profile_requires_original_process_directory(tmp_path):
