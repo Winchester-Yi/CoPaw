@@ -347,6 +347,7 @@ class ConversationExporter:
             if self.target.session_version == 3 and any(
                 key in state for key in LEDGER_FIELDS
             ):
+                self._retain_session_root(name, row)
                 self._complete_v3_admission_order(state, row["id"])
             value = export_session_state(
                 state,
@@ -357,11 +358,11 @@ class ConversationExporter:
 
                 path = destination / "sessions" / name
                 if any(key in value for key in LEDGER_FIELDS):
-                    if str(Path("sessions") / name) not in self.artifacts:
+                    original = self.artifacts.get("state:" + name)
+                    if not isinstance(original, dict):
                         raise ValueError(
-                            "full original ledger generation requires retained export source artifacts",
+                            "full original ledger generation requires its retained source root",
                         )
-                    original = self.artifacts["state:" + name]
                     if original.get("session_generation") != value.get(
                         "session_generation",
                     ):
@@ -380,6 +381,17 @@ class ConversationExporter:
             _atomic_json(destination / "sessions" / name, value)
             expected[name] = state
         return expected
+
+    def _retain_session_root(self, name, row):
+        original = self.artifacts.get("state:" + name)
+        if original is None:
+            original = self.block(
+                row["recovery_publication_id"],
+                "legacy_root",
+            )
+        if not isinstance(original, dict):
+            raise IntegrityError("retained original Session root is invalid")
+        self.artifacts["state:" + name] = original
 
     def _complete_v3_admission_order(self, state, session_id):
         turns = state["turn_states"]

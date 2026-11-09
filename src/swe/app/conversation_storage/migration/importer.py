@@ -43,6 +43,31 @@ def validate_inventory(report):
             raise ValueError("share service ownership mismatch")
 
 
+def artifact_is_reconstructed(item, workspace):
+    """Whether canonical SQL/content data already recreates this source file."""
+    from pathlib import Path
+
+    path = Path(item["path"])
+    if path == Path("chats.json"):
+        return True
+    for session in workspace["sessions"]:
+        if path != Path(session["path"]):
+            continue
+        root = session["legacy"]["root"]
+        return not any(
+            key in root
+            for key in (
+                "session_generation",
+                "turn_ledger_version",
+                "ledger_nonce",
+                "next_admission_order",
+                "cold_turn_count",
+                "ledger_latest",
+            )
+        )
+    return False
+
+
 def _entry(
     payload,
     layer,
@@ -431,6 +456,8 @@ class ConversationImporter:
 
         for item in report["files"]:
             workspace = report["workspaces"][item["workspace"]]
+            if artifact_is_reconstructed(item, workspace):
+                continue
             root = Path(workspace["root"]).resolve(strict=True)
             relative = Path(item["path"])
             if relative.is_absolute() or ".." in relative.parts:

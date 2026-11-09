@@ -132,9 +132,14 @@ async def verify_import(database, bundles, manifest, inventory, target):
             _verify_share(database, stores[share["service_unit_id"]], share),
         )
     for item in inventory.get("files", []):
+        from .importer import artifact_is_reconstructed
+
+        workspace = inventory["workspaces"][item["workspace"]]
+        if artifact_is_reconstructed(item, workspace):
+            continue
         position = (
             "service:"
-            + inventory["workspaces"][item["workspace"]]["scope"][0]
+            + workspace["scope"][0]
             + "/source-artifact:"
             + str(item["workspace"])
             + "/"

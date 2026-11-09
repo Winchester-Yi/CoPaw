@@ -340,6 +340,48 @@ def test_export_keeps_only_deleted_marker_for_legally_reclaimed_archive(
     exporter._verify_archive(destination, chat)
 
 
+def test_export_uses_canonical_legacy_root_for_v3_session_baseline(
+    tmp_path,
+):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from swe.app.conversation_storage.migration.exporter import (
+        ConversationExporter,
+    )
+
+    original = {
+        "session_generation": "generation-1",
+        "revision": 4,
+        "turn_ledger_version": 1,
+        "turn_states": {},
+    }
+    current = {**original, "revision": 5}
+    row = {
+        "id": 3,
+        "recovery_publication_id": 9,
+        "recovery_offset": 10,
+        "recovery_length": 20,
+        "external_session_key": b"session",
+        "user_key": b"alice",
+    }
+    exporter = object.__new__(ConversationExporter)
+    exporter.sessions = {3: row}
+    exporter.snapshot = {"turns": []}
+    exporter.target = SimpleNamespace(session_version=3)
+    exporter.artifacts = {}
+    exporter.payload = lambda *args: current
+    exporter.recovery = lambda _publication, value: value
+    exporter.block = lambda _publication, _name: original
+
+    with patch(
+        "swe.app.runner.turn_ledger.TurnLedger.initialize",
+        side_effect=lambda _ledger, value: value,
+    ):
+        exporter._sessions(tmp_path)
+
+    assert exporter.artifacts["state:alice_session.json"] == original
+
+
 def test_reclaimed_deleted_chat_metadata_alone_does_not_discard_archive_history():
     from swe.app.conversation_storage.migration.exporter import (
         ConversationExporter,

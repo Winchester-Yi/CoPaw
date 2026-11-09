@@ -384,6 +384,102 @@ def test_large_recovery_is_explicitly_blocked_before_import():
         _block("recovery", "recovery", {"huge": "x" * MAX_READ_BYTES})
 
 
+def test_inventory_files_rebuilt_from_database_and_recovery_are_not_copied():
+    from swe.app.conversation_storage.migration.importer import (
+        artifact_is_reconstructed,
+    )
+
+    workspace = {
+        "sessions": [
+            {
+                "path": "sessions/alice.json",
+                "legacy": {"root": {"schema_version": 2}},
+            },
+            {
+                "path": "sessions/bob.json",
+                "legacy": {
+                    "root": {
+                        "schema_version": 3,
+                        "session_generation": "generation",
+                    },
+                },
+            },
+        ],
+    }
+
+    assert artifact_is_reconstructed(
+        {"path": "chats.json"},
+        workspace,
+    )
+    assert artifact_is_reconstructed(
+        {"path": "sessions/alice.json"},
+        workspace,
+    )
+    assert not artifact_is_reconstructed(
+        {"path": "sessions/bob.json"},
+        workspace,
+    )
+    assert not artifact_is_reconstructed(
+        {"path": "sessions/.turn-ledger/generation/head.json"},
+        workspace,
+    )
+    assert not artifact_is_reconstructed(
+        {"path": "dialog/chat/candidates/candidate.json"},
+        workspace,
+    )
+
+
+async def test_resume_of_committed_batch_verifies_without_republishing():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from swe.app.conversation_storage.migration.importer import (
+        ConversationImporter,
+    )
+
+    assignment = {
+        "operation_key": "a" * 64,
+        "target_id": 41,
+        "relative_path": "bundles/stable-operation",
+    }
+    current = {"id": 41, "state": "committed"}
+    store = SimpleNamespace(
+        reserve_batch=AsyncMock(return_value=current),
+        verify_batch=AsyncMock(return_value=current),
+        verify_blocks=AsyncMock(),
+        write_bundle=AsyncMock(),
+        confirm_bundle=AsyncMock(),
+        commit=AsyncMock(),
+    )
+    bundle_store = SimpleNamespace(root="unused")
+    importer = ConversationImporter.__new__(ConversationImporter)
+    importer.bundle_stores = {"svc": bundle_store}
+    importer.stores = {"svc": store}
+    importer.manifest = SimpleNamespace(migration_id="migration")
+    importer.target = SimpleNamespace(schema="business")
+    importer._allocate = AsyncMock(return_value=assignment)
+    importer._batch_finished = AsyncMock()
+
+    body = SimpleNamespace(content=b"{}")
+    with patch(
+        "swe.app.conversation_storage.migration.install_records.plan_block",
+        return_value=body,
+    ):
+        result = await importer._publish(
+            "svc/session/0",
+            WorkspaceScope("t", "s", "a", service_unit_id="svc"),
+            [],
+            [],
+        )
+
+    assert result is current
+    store.verify_batch.assert_awaited_once()
+    store.verify_blocks.assert_awaited_once_with(current, [body])
+    importer._batch_finished.assert_awaited_once_with("svc/session/0")
+    store.write_bundle.assert_not_awaited()
+    store.confirm_bundle.assert_not_awaited()
+    store.commit.assert_not_awaited()
+
+
 async def test_archived_only_questions_are_unselectable_but_current_duplicates_remain():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
