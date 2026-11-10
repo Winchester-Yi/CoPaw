@@ -49,6 +49,12 @@ def payload(value):
 
 def make_row(bundles, session, chat, first, last, *, record=None):
     operation = new_operation_key()
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent",
+        service_unit_id="schema-test-service",
+    )
     blocks = []
     if first is not None:
         events = [
@@ -69,6 +75,7 @@ def make_row(bundles, session, chat, first, last, *, record=None):
     index = bundles.publish(
         operation,
         blocks,
+        scope=scope,
         metadata={"operation_key": operation},
     )
     event = index.blocks.get("events")

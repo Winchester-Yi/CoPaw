@@ -1014,6 +1014,7 @@ async def add_collectable_message(
         insert_publication,
         insert_row,
     )
+    from swe.app.conversation_storage.identity import WorkspaceScope
 
     operation = new_operation_key()
     message = {
@@ -1029,6 +1030,12 @@ async def add_collectable_message(
     index = bundles.publish(
         operation,
         blocks,
+        scope=WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="schema-test-service",
+        ),
         metadata={"operation_key": operation},
     )
     extent = index.blocks["message"]

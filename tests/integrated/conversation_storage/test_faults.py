@@ -34,7 +34,7 @@ async def test_fsync_failure_never_installs_sql_root(
         service_unit_id="schema-test-service",
     )
     await store.reserve(request, CommitPlan(recovery_block="root"))
-    bundles.prepare_directory(request.operation_key)
+    bundles.prepare_directory(request.operation_key, request.scope)
     original = os.fsync
     calls = 0
 
