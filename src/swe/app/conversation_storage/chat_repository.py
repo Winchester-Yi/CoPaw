@@ -71,8 +71,7 @@ SELECT_CHAT = (
 SELECT_SUMMARY = (
     "SELECT c.external_chat_key,c.external_session_key,c.user_key,"
     "c.channel_key,c.title,c.created_at,c.updated_at,c.metadata_text,"
-    "c.expert_id,c.expert_binding_revision,c.status AS projected_status "
-    "FROM swe_conversation_chats c WHERE "
+    "c.expert_id,c.expert_binding_revision," + PROJECTED_STATUS + STATUS_FROM
 )
 
 
