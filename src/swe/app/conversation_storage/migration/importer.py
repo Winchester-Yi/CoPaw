@@ -338,8 +338,20 @@ class ConversationImporter:
     def assigned(self, kind, position):
         return self.manifest.allocate(kind, position)["target_id"]
 
-    async def _allocate(self, kind, position):
-        return self.manifest.allocate(kind, position)
+    async def _allocate(
+        self,
+        kind,
+        position,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
+        return self.manifest.allocate(
+            kind,
+            position,
+            scope=scope,
+            scope_kind=scope_kind,
+        )
 
     async def _assigned(self, kind, position):
         return (await self._allocate(kind, position))["target_id"]
@@ -418,7 +430,12 @@ class ConversationImporter:
         from ..publications import PublicationRequest, CommitPlan
         from .install_records import plan_block
 
-        assignment = await self._allocate("publication", position)
+        assignment = await self._allocate(
+            "publication",
+            position,
+            scope=scope,
+            scope_kind=scope_kind,
+        )
         operation = assignment["operation_key"]
         request = PublicationRequest(
             operation,
@@ -1036,6 +1053,7 @@ class ConversationImporter:
             pub = await self._allocate(
                 "publication",
                 chat["position"] + "/boundary:" + boundary["id"],
+                scope=scope,
             )
             values = {
                 "id": pub["target_id"],
@@ -1076,7 +1094,7 @@ class ConversationImporter:
         epochs = chat["archive"]["epochs"]
         for item in reversed(epochs):
             position = chat["position"] + "/epoch:" + str(item["epoch"])
-            pub = await self._allocate("publication", position)
+            pub = await self._allocate("publication", position, scope=scope)
             record = item["record"]
             events = [
                 event

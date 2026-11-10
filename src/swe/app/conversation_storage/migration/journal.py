@@ -3,6 +3,7 @@
 
 import json
 from ..bundle import BundleStore, new_operation_key
+from ..identity import WorkspaceScope
 
 JOBS = "swe_conversation_migration_jobs"
 ENTRIES = "swe_conversation_migration_entries"
@@ -213,12 +214,29 @@ class MigrationJournal:
             )
         return kind.encode(), position.encode()
 
-    async def allocate(self, kind, position):
+    async def allocate(
+        self,
+        kind,
+        position,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
         if kind not in TICKET_KINDS:
             raise ValueError(
                 "only five entity kinds may allocate integer tickets",
             )
         kind_key, key = self._key(kind, position)
+        if kind == "publication":
+            if scope is None:
+                raise ValueError("publication assignment requires its scope")
+            scope_values = list(scope.values)
+        else:
+            if scope is not None:
+                raise ValueError(
+                    "only publication assignments have bundle scope",
+                )
+            scope_values = None
         async with self.db.transaction():
             row = await self.db.fetch_one(
                 "SELECT * FROM "
@@ -228,11 +246,32 @@ class MigrationJournal:
             )
             if row is None:
                 operation = new_operation_key()
+                details_text = (
+                    _json(
+                        {
+                            "scope": scope_values,
+                            "scope_kind": scope_kind,
+                            "relative_path": BundleStore.path_for(
+                                operation,
+                                scope,
+                                scope_kind=scope_kind,
+                            ),
+                        },
+                    )
+                    if kind == "publication"
+                    else None
+                )
                 identity = await self.db.insert(
                     "INSERT INTO "
                     + ENTRIES
-                    + " (migration_id,entry_kind,source_key,operation_key,state,created_at,updated_at) VALUES (%s,%s,%s,%s,'mapped',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
-                    (self.migration_id, kind_key, key, operation.encode()),
+                    + " (migration_id,entry_kind,source_key,operation_key,state,details_text,created_at,updated_at) VALUES (%s,%s,%s,%s,'mapped',%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
+                    (
+                        self.migration_id,
+                        kind_key,
+                        key,
+                        operation.encode(),
+                        details_text,
+                    ),
                 )
                 await self.db.execute(
                     "UPDATE "
@@ -244,8 +283,37 @@ class MigrationJournal:
                     "id": identity,
                     "target_id": identity,
                     "operation_key": operation,
+                    "details_text": details_text,
                 }
-            assignment = self._assignment(row)
+            elif kind == "publication":
+                details_text = _json(
+                    {
+                        "scope": scope_values,
+                        "scope_kind": scope_kind,
+                        "relative_path": BundleStore.path_for(
+                            _text(row["operation_key"]),
+                            scope,
+                            scope_kind=scope_kind,
+                        ),
+                    },
+                )
+                current_details = row.get("details_text")
+                if current_details is None:
+                    await self.db.execute(
+                        "UPDATE "
+                        + ENTRIES
+                        + " SET details_text=%s WHERE migration_id=%s AND id=%s AND details_text IS NULL",
+                        (details_text, self.migration_id, row["id"]),
+                    )
+                    row["details_text"] = details_text
+                elif _text(current_details) != details_text:
+                    raise ValueError("SQL publication ticket scope changed")
+            assignment = self._assignment(
+                row,
+                kind,
+                scope=scope,
+                scope_kind=scope_kind,
+            )
         self.manifest.data["assignments"].setdefault(kind, {})[
             position
         ] = assignment
@@ -253,15 +321,51 @@ class MigrationJournal:
         return dict(assignment)
 
     @staticmethod
-    def _assignment(row):
+    def _assignment(row, kind, *, scope=None, scope_kind="workspace"):
         if row["id"] != row["target_id"] or not row["target_id"]:
             raise ValueError("SQL journal integer ticket mapping is invalid")
         operation = _text(row["operation_key"])
-        return {
+        assignment = {
             "target_id": row["target_id"],
             "operation_key": operation,
-            "relative_path": BundleStore.path_for(operation),
+            "relative_path": None,
         }
+        if kind == "publication":
+            details = row.get("details_text")
+            if details is None:
+                if scope is None:
+                    raise ValueError("SQL publication ticket scope is missing")
+                scope_values = list(scope.values)
+                relative_path = BundleStore.path_for(
+                    operation,
+                    scope,
+                    scope_kind=scope_kind,
+                )
+            else:
+                details = json.loads(_text(details))
+                scope_values = details["scope"]
+                scope_kind = details["scope_kind"]
+                relative_path = details["relative_path"]
+                stored_scope = WorkspaceScope.from_values(scope_values)
+                if scope is not None and stored_scope != scope:
+                    raise ValueError("SQL publication ticket scope changed")
+                if (
+                    BundleStore.path_for(
+                        operation,
+                        stored_scope,
+                        scope_kind=scope_kind,
+                    )
+                    != relative_path
+                ):
+                    raise ValueError("SQL publication ticket path is invalid")
+            assignment.update(
+                scope=scope_values,
+                scope_kind=scope_kind,
+                relative_path=relative_path,
+            )
+        elif scope is not None:
+            raise ValueError("only publication assignments have bundle scope")
+        return assignment
 
     async def hydrate(self, *, persist=True):
         rows = await self.db.fetch_all(
@@ -272,7 +376,8 @@ class MigrationJournal:
         for row in rows:
             kind, key = _text(row["entry_kind"]), _text(row["source_key"])
             if kind in TICKET_KINDS:
-                assignments.setdefault(kind, {})[key] = self._assignment(row)
+                assignment = self._assignment(row, kind)
+                assignments.setdefault(kind, {})[key] = assignment
             elif kind == "batch":
                 batches[key] = (
                     "importing" if row["state"] == "prepared" else row["state"]

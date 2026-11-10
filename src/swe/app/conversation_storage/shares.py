@@ -8,7 +8,7 @@ import secrets
 
 from ..chat_sharing.models import ChatShareRecord, ChatShareSnapshot
 from ..chat_sharing.store import ChatShareStore
-from .bundle import BundleBlock, new_operation_key
+from .bundle import BundleBlock, BundleStore, new_operation_key
 from .chat_mutations import load_metadata_json, utc_datetime
 from .collection_queries import CollectionQuery, query_collection
 from .reference_queries import ReferenceQuery, fetch_reference_rows
@@ -690,9 +690,12 @@ class ShareStorage:
                 raise IntegrityError(
                     "legacy share publication has workspace associations",
                 )
+            relative_path = BundleStore.validate_publication_locator(
+                publication,
+            )
             index = await batch.read(
                 self.bundles.inspect,
-                publication["relative_path"].decode("utf-8"),
+                relative_path,
                 expected_length=publication["byte_length"],
             )
             if not any(
@@ -706,7 +709,7 @@ class ShareStorage:
                 )
             payload = await batch.read(
                 self.bundles.read_extent,
-                publication["relative_path"].decode("utf-8"),
+                relative_path,
                 record.byte_offset,
                 record.byte_length,
                 expected_length=publication["byte_length"],

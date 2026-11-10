@@ -29,6 +29,7 @@ from .archive_reader import ArchiveReader, text
 from .bundle import BundleBlock, new_operation_key
 from .commit_plan import CommitPlan
 from .errors import ConflictError, IntegrityError
+from .identity import WorkspaceScope
 from .message_installs import MessageInstall
 from .publications import PublicationRequest, PublicationStore
 from .retention import RetentionStore
@@ -545,11 +546,13 @@ class MySQLArchiveStore:
             raise ValueError("checkpoint candidate scope or epoch is invalid")
         operation = candidate.id.replace("-", "")
         key = operation + operation
+        scope = WorkspaceScope.from_row(chat)
         await PublicationStore._nas_io(
             key,
             self.bundles.publish,
             key,
             [_block("candidate", "candidate", candidate.to_dict())],
+            scope=scope,
             metadata={"operation_key": key},
         )
 
@@ -558,10 +561,12 @@ class MySQLArchiveStore:
             raise ValueError("candidate ID must be canonical UUID")
         operation = str(candidate_id).replace("-", "")
         key = operation + operation
+        chat = await self.reader.chat(chat_id)
+        scope = WorkspaceScope.from_row(chat)
         index = await PublicationStore._nas_io(
             key,
             self.bundles.inspect,
-            self.bundles.path_for(key),
+            self.bundles.path_for(key, scope),
         )
         extent = index.blocks.get("candidate")
         if extent is None:

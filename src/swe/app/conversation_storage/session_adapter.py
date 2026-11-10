@@ -9,7 +9,7 @@ import asyncio
 import json
 import time
 
-from .bundle import BundleBlock, new_operation_key
+from .bundle import BundleBlock, BundleStore, new_operation_key
 from .chat_mutations import load_metadata_json
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
 from .execution import IDENTITY_WHERE, ExecutionAuthority
@@ -275,7 +275,7 @@ class MySQLSessionAdapter:
                 self._publication_session(publication, row)
                 payload = await batch.read(
                     self.bundles.read_extent,
-                    publication["relative_path"].decode("utf-8"),
+                    BundleStore.validate_publication_locator(publication),
                     row["recovery_offset"],
                     row["recovery_length"],
                     expected_length=publication["byte_length"],
@@ -556,7 +556,9 @@ class MySQLSessionAdapter:
             ):
                 raise IntegrityError("Turn publication association mismatch")
             await self._revalidate_turn(identity, turn, chat)
-            relative_path = publication["relative_path"].decode("utf-8")
+            relative_path = BundleStore.validate_publication_locator(
+                publication,
+            )
             index = await batch.read(
                 self.bundles.inspect,
                 relative_path,

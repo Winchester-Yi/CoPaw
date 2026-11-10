@@ -10,17 +10,20 @@ from swe.app.conversation_storage.bundle import (
     new_operation_key,
 )
 from swe.app.conversation_storage.errors import IntegrityError
+from swe.app.conversation_storage.identity import WorkspaceScope
 
 
 def test_reclaim_refuses_missing_nas_root(tmp_path):
     root = tmp_path / "missing"
     with pytest.raises(IntegrityError, match="root is unavailable"):
-        BundleStore(root).reclaim("a" * 64)
+        BundleStore(root).reclaim(BundleStore.path_for("a" * 64))
     assert not root.exists()
 
 
 def test_reclaim_absent_generated_directory_is_idempotent(tmp_path):
-    assert BundleStore(tmp_path).reclaim("a" * 64) is False
+    assert (
+        BundleStore(tmp_path).reclaim(BundleStore.path_for("a" * 64)) is False
+    )
 
 
 def test_bundle_roundtrip_has_byte_extents_and_no_body_in_index(tmp_path):
@@ -50,6 +53,73 @@ def test_bundle_roundtrip_has_byte_extents_and_no_body_in_index(tmp_path):
         not in (tmp_path / result.relative_path).read_bytes()[: extent.offset]
     )
     assert store.inspect(result.relative_path) == result
+
+
+def test_bundle_path_uses_tenant_source_scope_without_agent(tmp_path):
+    first = WorkspaceScope(
+        "tenant-a",
+        "source-a",
+        "agent-a",
+        service_unit_id="svc",
+    )
+    second = WorkspaceScope(
+        "tenant-a",
+        "source-a",
+        "agent-b",
+        service_unit_id="svc",
+    )
+    operation = "ab" + "0" * 62
+    expected_scope = "dGVuYW50LWE.c291cmNlLWE"
+    store = BundleStore(tmp_path)
+    path = store.path_for(operation, first)
+    assert path == f"bundles/{expected_scope}/ab/{operation}.bundle"
+    assert store.path_for(operation, second) == path
+    empty_source = WorkspaceScope(
+        "tenant-a",
+        "",
+        "agent-a",
+        service_unit_id="svc",
+    )
+    assert store.path_for(operation, empty_source).startswith(
+        "bundles/dGVuYW50LWE.~",
+    )
+
+
+def test_bundle_locator_is_bound_to_scope_and_operation():
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    operation = "ab" + "0" * 62
+    row = {
+        **scope.fields,
+        "scope_kind": "workspace",
+        "operation_key": operation.encode(),
+        "relative_path": BundleStore.path_for(operation, scope).encode(),
+    }
+    assert (
+        BundleStore.validate_publication_locator(row)
+        == row["relative_path"].decode()
+    )
+    row["relative_path"] = BundleStore.path_for(
+        operation,
+        WorkspaceScope(
+            "tenant-other",
+            "source",
+            "agent",
+            service_unit_id="svc",
+        ),
+    ).encode()
+    with pytest.raises(IntegrityError, match="differs from its scope"):
+        BundleStore.validate_publication_locator(row)
+
+
+def test_bundle_path_rejects_noncanonical_scope_identity():
+    scope = WorkspaceScope(
+        "tenant/name",
+        "source",
+        "agent",
+        service_unit_id="svc",
+    )
+    with pytest.raises(ValueError, match="tenant_id"):
+        BundleStore.path_for("ab" + "0" * 62, scope)
 
 
 def test_bundle_header_rejects_body_fields(tmp_path):

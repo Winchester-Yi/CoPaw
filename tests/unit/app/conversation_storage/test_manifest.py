@@ -45,7 +45,7 @@ def test_manifest_allocates_and_persists_identity_before_return(tmp_path):
         == first
     )
     assert first["target_id"] == 1
-    assert first["relative_path"].endswith(first["operation_key"] + ".bundle")
+    assert first["relative_path"] is None
     again = MigrationManifest.load(path)
     assert again.migration_id == manifest.migration_id
     assert (
@@ -93,9 +93,15 @@ def test_manifest_rejects_unfixed_boundary_and_tampered_mapping(tmp_path):
         boundary(),
         [],
     )
-    manifest.allocate("session", "s")
+    from swe.app.conversation_storage.identity import WorkspaceScope
+
+    manifest.allocate(
+        "publication",
+        "s",
+        scope=WorkspaceScope("t", "s", "a", service_unit_id="svc"),
+    )
     value = json.loads(manifest.path.read_text())
-    value["assignments"]["session"]["s"]["relative_path"] = "../escape"
+    value["assignments"]["publication"]["s"]["relative_path"] = "../escape"
     manifest.path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="path"):
         MigrationManifest.load(manifest.path)
@@ -184,7 +190,7 @@ def test_stale_manifest_instance_rejects_changed_or_removed_known_assignment(
         operation = new_operation_key()
         value["assignments"]["session"]["known-source"].update(
             operation_key=operation,
-            relative_path=BundleStore.path_for(operation),
+            relative_path=None,
         )
     elif tamper == "target_id":
         value["assignments"]["session"]["known-source"]["target_id"] = (

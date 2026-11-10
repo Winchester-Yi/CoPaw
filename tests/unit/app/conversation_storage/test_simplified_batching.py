@@ -692,9 +692,12 @@ async def test_share_read_keeps_full_identity_plan_with_narrow_pin_rows(
 
     bundles = BundleStore(tmp_path)
     raw = b'{"chat_name":"shared","messages":[]}'
+    operation = new_operation_key()
+    scope = share_request().scope
     index = bundles.publish(
-        new_operation_key(),
+        operation,
         [BundleBlock("share", "share", raw)],
+        scope=scope,
     )
     plan = mutation()
     row = {
@@ -707,7 +710,7 @@ async def test_share_read_keeps_full_identity_plan_with_narrow_pin_rows(
         "state": "committed",
         "gc_state": "live",
         "kind": "share",
-        "operation_key": b"operation",
+        "operation_key": operation.encode(),
         "relative_path": index.relative_path.encode(),
         "byte_length": index.byte_length,
         "result_metadata_text": CommitPlan(share=plan).serialize(),

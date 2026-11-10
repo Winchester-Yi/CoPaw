@@ -43,7 +43,7 @@ async def _payload(database, bundles, row, offset, length, *, service_unit_id):
     if publication is None:
         raise ValueError("referenced publication is not committed/live")
     value = bundles.read_extent(
-        publication["relative_path"].decode(),
+        bundles.validate_publication_locator(publication),
         row[offset],
         row[length],
         expected_length=publication["byte_length"],

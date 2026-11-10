@@ -483,6 +483,7 @@ async def test_existing_bundle_needs_explicit_durability_confirmation(
     original = store.publish(
         operation.operation_key,
         [BundleBlock("root", "recovery", b"original")],
+        scope=operation.scope,
         metadata={"operation_key": operation.operation_key},
     )
     # This represents a published file whose response/directory fsync was lost.
@@ -591,7 +592,9 @@ async def test_cancellation_waits_for_nas_writer_before_reporting_unknown(
     assert was_pending
     assert finished.is_set()
     assert error.value.operation_key == operation.operation_key
-    assert (tmp_path / bundles.path_for(operation.operation_key)).exists()
+    assert (
+        tmp_path / bundles.path_for(operation.operation_key, operation.scope)
+    ).exists()
     assert not db.rows[operation.operation_key.encode()].get("durable_at")
     await service.confirm_bundle(operation.operation_key)
 

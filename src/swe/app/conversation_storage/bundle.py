@@ -8,6 +8,7 @@ the final name is never overwritten or removed on an uncertain result.
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+import base64
 import io
 import errno
 import json
@@ -20,7 +21,8 @@ import stat
 from typing import BinaryIO, Iterator
 
 from .errors import IntegrityError
-from .identity import identity_bytes
+from .identity import SCOPE_COLUMNS, WorkspaceScope, identity_bytes
+from ...config.context import encode_scope_id, is_valid_identity_value
 
 MAGIC = b"SWECONV\x00"
 VERSION = 1
@@ -51,7 +53,9 @@ _METADATA_FIELDS = frozenset(
     },
 )
 _OPERATION = re.compile(r"[0-9a-f]{64}\Z")
-_PATH = re.compile(r"bundles/([0-9a-f]{2})/([0-9a-f]{64})\.bundle\Z")
+_PATH = re.compile(
+    r"bundles/([A-Za-z0-9._~-]{1,255})/([0-9a-f]{2})/([0-9a-f]{64})\.bundle\Z",
+)
 
 
 def new_operation_key() -> str:
@@ -113,6 +117,54 @@ def _unique_object(pairs):
 
 def _reject_constant(value):
     raise ValueError(f"nonfinite JSON number: {value}")
+
+
+def _encode_scope_component(value):
+    if not value:
+        return "~"
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode().rstrip("=")
+
+
+def _scope_segment(scope):
+    if scope.tenant_id and scope.source_id:
+        return encode_scope_id(scope.tenant_id, scope.source_id)
+    for value in (scope.tenant_id, scope.source_id):
+        if value and not is_valid_identity_value(value):
+            raise ValueError("invalid tenant/source identity for bundle path")
+    return ".".join(
+        (
+            _encode_scope_component(scope.tenant_id),
+            _encode_scope_component(scope.source_id),
+        ),
+    )
+
+
+def _text_identity(value):
+    return (
+        bytes(value).decode("utf-8")
+        if isinstance(value, (bytes, bytearray))
+        else value
+    )
+
+
+def _valid_scope_segment(value):
+    if value == "legacy-share":
+        return True
+    parts = value.split(".")
+    if len(parts) != 2:
+        return False
+    for part in parts:
+        if part == "~":
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", part):
+            return False
+        try:
+            raw = base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+        except (ValueError, base64.binascii.Error):
+            return False
+        if base64.urlsafe_b64encode(raw).decode().rstrip("=") != part:
+            return False
+    return True
 
 
 def _load_json(content):
@@ -189,12 +241,65 @@ class BundleStore:
         self.root = Path(root).absolute()
 
     @staticmethod
-    def path_for(operation_key: str) -> str:
+    def path_for(
+        operation_key: str,
+        scope: WorkspaceScope | None = None,
+        *,
+        scope_kind=None,
+    ) -> str:
         if not isinstance(operation_key, str) or not _OPERATION.fullmatch(
             operation_key,
         ):
             raise ValueError("invalid conversation operation key")
-        return f"bundles/{operation_key[:2]}/{operation_key}.bundle"
+        if scope_kind is None:
+            scope_kind = "legacy_share" if scope is None else "workspace"
+        if scope_kind not in ("workspace", "legacy_share"):
+            raise ValueError("invalid conversation bundle scope kind")
+        if scope_kind == "legacy_share":
+            if scope is not None and (scope.source_id or scope.agent_id):
+                raise ValueError("legacy share bundle scope is invalid")
+            scope_segment = "legacy-share"
+        elif not isinstance(scope, WorkspaceScope):
+            raise TypeError("bundle path requires a trusted workspace scope")
+        else:
+            scope_segment = _scope_segment(scope)
+        if len(scope_segment.encode("ascii")) > 255:
+            raise ValueError("conversation scope ID exceeds filesystem limit")
+        return (
+            f"bundles/{scope_segment}/{operation_key[:2]}/"
+            f"{operation_key}.bundle"
+        )
+
+    @staticmethod
+    def path_for_row(row) -> str:
+        scope = WorkspaceScope.from_row(row)
+        scope_kind = row["scope_kind"]
+        if scope_kind == "legacy_share":
+            if scope.source_id or scope.agent_id:
+                raise IntegrityError("legacy share bundle scope is invalid")
+            return BundleStore.path_for(
+                _text_identity(row["operation_key"]),
+                scope_kind="legacy_share",
+            )
+        if scope_kind != "workspace":
+            raise IntegrityError("bundle publication scope kind is invalid")
+        return BundleStore.path_for(
+            _text_identity(row["operation_key"]),
+            scope,
+        )
+
+    @staticmethod
+    def validate_publication_locator(row) -> str:
+        relative_path = _text_identity(row["relative_path"])
+        if not set(("scope_kind", *SCOPE_COLUMNS, "operation_key")).issubset(
+            row,
+        ):
+            return relative_path
+        if relative_path != BundleStore.path_for_row(row):
+            raise IntegrityError(
+                "publication bundle path differs from its scope",
+            )
+        return relative_path
 
     @staticmethod
     def _parts(relative_path):
@@ -203,7 +308,11 @@ class BundleStore:
             if isinstance(relative_path, str)
             else None
         )
-        if match is None or match[1] != match[2][:2]:
+        if (
+            match is None
+            or match[2] != match[3][:2]
+            or not _valid_scope_segment(match[1])
+        ):
             raise IntegrityError(
                 "bundle path is not a generated relative path",
             )
@@ -239,13 +348,12 @@ class BundleStore:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
-    def prepare_directory(self, operation_key):
-        with self._directory(self.path_for(operation_key), create=True):
+    def prepare_directory(self, operation_key, scope=None):
+        with self._directory(self.path_for(operation_key, scope), create=True):
             pass
 
-    def reclaim(self, operation_key: str) -> bool:
+    def reclaim(self, relative_path: str) -> bool:
         """Unlink only one server-generated regular bundle, then fsync its dir."""
-        relative_path = self.path_for(operation_key)
         try:
             with self._directory(relative_path) as (directory, name):
                 try:
@@ -290,9 +398,10 @@ class BundleStore:
         operation_key: str,
         blocks: list[BundleBlock],
         *,
+        scope: WorkspaceScope | None = None,
         metadata: dict | None = None,
     ) -> BundleIndex:
-        relative_path = self.path_for(operation_key)
+        relative_path = self.path_for(operation_key, scope)
         metadata_value = metadata if metadata is not None else {}
         _validate_metadata(metadata_value)
         metadata_bytes = _json_bytes(metadata_value)

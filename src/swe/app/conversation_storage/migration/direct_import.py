@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 import re
 
+from ..bundle import BundleStore
 from ..errors import IntegrityError
 from .importer import ConversationImporter
 from .install_records import OfflineImportStore
@@ -65,7 +66,7 @@ class DirectImportStore(OfflineImportStore):
             index = await self._nas_io(
                 request.operation_key,
                 self.bundles.inspect,
-                row["relative_path"].decode(),
+                BundleStore.validate_publication_locator(row),
                 expected_length=row["byte_length"],
             )
             actual = await self.db.fetch_one(
@@ -195,8 +196,20 @@ class DirectImporter(ConversationImporter):
             ),
         )
 
-    async def _allocate(self, kind, position):
-        return await self.journal.allocate(kind, position)
+    async def _allocate(
+        self,
+        kind,
+        position,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
+        return await self.journal.allocate(
+            kind,
+            position,
+            scope=scope,
+            scope_kind=scope_kind,
+        )
 
     async def _set_batch_state(self, position, state):
         await self.journal.set_batch_state(position, state)

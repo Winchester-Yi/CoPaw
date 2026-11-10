@@ -204,7 +204,7 @@ def _atomic_json(path, value):
 
 
 def _copy_bundle(source, target_root, row):
-    relative = row["relative_path"].decode()
+    relative = BundleStore.validate_publication_locator(row)
     index = source.inspect(relative, expected_length=row["byte_length"])
     if index.metadata.get("operation_key") != row["operation_key"].decode():
         raise IntegrityError("backup bundle operation identity mismatch")
@@ -447,8 +447,9 @@ def validate_backup(snapshot, bundles):
     indexes = {}
     for identity in ids:
         row = publications[identity]
+        BundleStore.validate_publication_locator(row)
         index = bundles.inspect(
-            row["relative_path"].decode(),
+            bundles.validate_publication_locator(row),
             expected_length=row["byte_length"],
         )
         if (
@@ -569,7 +570,7 @@ def _read_payload(snapshot, bundles, publication_id, offset, length):
     return load_metadata_json(
         b"".join(
             bundles.iter_extent(
-                publication["relative_path"].decode(),
+                bundles.validate_publication_locator(publication),
                 offset,
                 length,
                 expected_length=publication["byte_length"],
@@ -591,7 +592,7 @@ def _recovery_payload(
     publications = {row["id"]: row for row in snapshot["publications"]}
     current = publications[publication_id]
     index = bundles.inspect(
-        current["relative_path"].decode(),
+        bundles.validate_publication_locator(current),
         expected_length=current["byte_length"],
     )
     extent = (
@@ -653,7 +654,9 @@ def _recovery_payload(
             )
         if ref["operation_key"] != target["operation_key"].decode():
             raise IntegrityError("backup projection operation differs")
-        target_index = bundles.inspect(target["relative_path"].decode())
+        target_index = bundles.inspect(
+            bundles.validate_publication_locator(target),
+        )
         target_extent = target_index.blocks[ref["block_name"]]
         return _read_payload(
             snapshot,

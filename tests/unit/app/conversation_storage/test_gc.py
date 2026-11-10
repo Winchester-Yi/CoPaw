@@ -22,11 +22,11 @@ def test_bundle_reclaim_uses_generated_exact_object_and_is_idempotent(
     other = new_operation_key()
     first = store.publish(operation, [BundleBlock("body", "message", b"one")])
     second = store.publish(other, [BundleBlock("body", "message", b"two")])
-    assert store.reclaim(operation) is True
+    assert store.reclaim(first.relative_path) is True
     assert not (tmp_path / first.relative_path).exists()
     assert (tmp_path / second.relative_path).is_file()
-    assert store.reclaim(operation) is False
-    with pytest.raises(ValueError):
+    assert store.reclaim(first.relative_path) is False
+    with pytest.raises(IntegrityError):
         store.reclaim("../escape")
 
 
@@ -40,12 +40,12 @@ def test_bundle_reclaim_rejects_symlink_files_and_directories(tmp_path):
     path.parent.mkdir(parents=True)
     path.symlink_to(target)
     with pytest.raises(IntegrityError):
-        store.reclaim(operation)
+        store.reclaim(relative)
     assert target.read_bytes() == b"keep"
     path.unlink()
     path.mkdir()
     with pytest.raises(IntegrityError):
-        store.reclaim(operation)
+        store.reclaim(relative)
 
 
 async def test_gc_defaults_to_report_only_and_cannot_mark_or_unlink(tmp_path):

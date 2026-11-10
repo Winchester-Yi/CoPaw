@@ -135,7 +135,7 @@ class ExecutionStore:
         expected_state_revision=None,
     ):
         """Reserve once; retries never acquire authority to run an old question."""
-        BundleStore.path_for(operation_key)
+        BundleStore.path_for(operation_key, identity.scope)
         question = question_msg_key_bytes(question_key)
         runtime = runtime_turn_key_bytes(runtime_turn_key)
         if not question or not runtime:
@@ -341,7 +341,7 @@ class ExecutionStore:
     ):
         """Publish terminal state and release only through the original atomic plan."""
         turn_install = TurnInstall("terminal", history_status=history_status)
-        BundleStore.path_for(operation_key)
+        BundleStore.path_for(operation_key, authority.identity.scope)
         recovery_bytes = _json_bytes(recovery)
         request = None
         try:

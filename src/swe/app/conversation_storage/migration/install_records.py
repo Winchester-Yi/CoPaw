@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import re
 
-from ..bundle import BundleBlock
+from ..bundle import BundleBlock, BundleStore
 from ..chat_mutations import load_metadata_json
 from ..errors import ConflictError, IntegrityError
 from ..publications import (
@@ -376,7 +376,7 @@ class OfflineImportStore(PublicationStore):
         index = await self._nas_io(
             publication["operation_key"].decode(),
             self.bundles.inspect,
-            publication["relative_path"].decode(),
+            BundleStore.validate_publication_locator(publication),
             expected_length=publication["byte_length"],
         )
         for item in [*plan["rows"], *plan["updates"]]:
@@ -408,7 +408,7 @@ class OfflineImportStore(PublicationStore):
         index = await self._nas_io(
             operation,
             self.bundles.inspect,
-            row["relative_path"].decode(),
+            BundleStore.validate_publication_locator(row),
             expected_length=row["byte_length"],
         )
         for block in blocks:
@@ -466,7 +466,7 @@ class OfflineImportStore(PublicationStore):
         index = await self._nas_io(
             operation,
             self.bundles.inspect,
-            row["relative_path"].decode(),
+            BundleStore.validate_publication_locator(row),
             expected_length=row["byte_length"],
         )
         extent = index.blocks.get("import_plan")

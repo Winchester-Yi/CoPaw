@@ -78,6 +78,7 @@ async def test_foreign_service_request_is_rejected_before_database_or_nas():
 
 async def test_operation_lookup_is_service_scoped():
     db = AsyncMock()
+    db.fetch_one.return_value = None
     store = PublicationStore(db, AsyncMock(), service_unit_id="service-a")
     await store.get("a" * 64)
     query, values = db.fetch_one.call_args.args

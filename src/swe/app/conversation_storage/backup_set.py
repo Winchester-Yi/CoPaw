@@ -24,7 +24,7 @@ def _comparable(name, row):
 
 
 def _same_bundle(left, right, row):
-    relative = row["relative_path"].decode()
+    relative = BundleStore.validate_publication_locator(row)
     with left._open(relative) as first, right._open(relative) as second:
         while True:
             chunk = first.read(CHUNK_BYTES)

@@ -105,7 +105,7 @@ class GarbageCollector:
             != self.retentions.scope_values
         ):
             raise IntegrityError("GC publication scope mismatch")
-        expected = self.bundles.path_for(_text(row["operation_key"]))
+        expected = self.bundles.path_for_row(row)
         if _text(row["relative_path"]) != expected:
             raise IntegrityError(
                 "GC publication path differs from generated identity",
@@ -172,9 +172,9 @@ class GarbageCollector:
             async with self.db.transaction():
                 yield
 
-    async def _unlink(self, operation_key):
+    async def _unlink(self, relative_path):
         worker = asyncio.create_task(
-            asyncio.to_thread(self.bundles.reclaim, operation_key),
+            asyncio.to_thread(self.bundles.reclaim, relative_path),
         )
         cancelled = False
         while not worker.done():
@@ -415,7 +415,7 @@ class GarbageCollector:
                 )
         # Aborted tombstones are intentionally rechecked on explicit retries:
         # a delayed NAS object must never escape its exact operation tombstone.
-        await self._unlink(_text(row["operation_key"]))
+        await self._unlink(_text(row["relative_path"]))
         async with self.db.transaction():
             await self.retentions.lock_guard()
             current = await self._row(publication_id, lock=True)

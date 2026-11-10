@@ -78,7 +78,7 @@ class MigrationManifest:
         return self.data["migration_id"]
 
     def _validate(self):
-        if self.data.get("version") != 2:
+        if self.data.get("version") != 3:
             raise ValueError("unsupported migration manifest version")
         if str(UUID(self.data["migration_id"])) != self.data["migration_id"]:
             raise ValueError("invalid migration identity")
@@ -103,7 +103,12 @@ class MigrationManifest:
                 raise ValueError("unknown assignment kind")
             ids[kind] = set()
             for source, assignment in assignments.items():
-                self._validate_assignment(source, assignment, ids[kind])
+                self._validate_assignment(
+                    kind,
+                    source,
+                    assignment,
+                    ids[kind],
+                )
                 if assignment["operation_key"] in operations:
                     raise ValueError("duplicate migration operation identity")
                 operations.add(assignment["operation_key"])
@@ -113,21 +118,33 @@ class MigrationManifest:
             raise ValueError("invalid batch state")
 
     @staticmethod
-    def _validate_assignment(source, assignment, identities):
+    def _validate_assignment(kind, source, assignment, identities):
         if not isinstance(source, str) or not source:
             raise ValueError("source position is required")
         target = assignment["target_id"]
         if type(target) is not int or target <= 0 or target in identities:
             raise ValueError("invalid or duplicate target identity")
         identities.add(target)
-        expected = BundleStore.path_for(assignment["operation_key"])
-        if assignment["relative_path"] != expected:
-            raise ValueError("manifest bundle path does not match operation")
+        if kind == "publication":
+            scope = WorkspaceScope.from_values(assignment["scope"])
+            expected = BundleStore.path_for(
+                assignment["operation_key"],
+                scope,
+                scope_kind=assignment["scope_kind"],
+            )
+            if assignment["relative_path"] != expected:
+                raise ValueError(
+                    "manifest bundle path does not match operation scope",
+                )
+        elif assignment["relative_path"] is not None:
+            raise ValueError(
+                "non-publication assignment cannot locate a bundle",
+            )
 
     @classmethod
     def create(cls, path, boundary, workspaces):
         data = {
-            "version": 2,
+            "version": 3,
             "migration_id": str(uuid4()),
             "source_boundary": {
                 **asdict(boundary),
@@ -213,7 +230,14 @@ class MigrationManifest:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    def allocate(self, kind, source_position):
+    def allocate(
+        self,
+        kind,
+        source_position,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
         if (
             kind not in KINDS
             or not isinstance(source_position, str)
@@ -232,9 +256,37 @@ class MigrationManifest:
                     )
                     + 1,
                     "operation_key": operation,
-                    "relative_path": BundleStore.path_for(operation),
+                    "relative_path": None,
                 }
-                self._persist()
+            if kind == "publication":
+                if scope is None:
+                    raise ValueError(
+                        "publication assignment requires its scope",
+                    )
+                assignments[source_position]["scope"] = list(scope.values)
+                assignments[source_position]["scope_kind"] = scope_kind
+                assignments[source_position]["relative_path"] = (
+                    BundleStore.path_for(
+                        assignments[source_position]["operation_key"],
+                        scope,
+                        scope_kind=scope_kind,
+                    )
+                )
+            elif scope is not None:
+                raise ValueError(
+                    "only publication assignments have bundle scope",
+                )
+            self._validate_assignment(
+                kind,
+                source_position,
+                assignments[source_position],
+                {
+                    value["target_id"]
+                    for key, value in assignments.items()
+                    if key != source_position
+                },
+            )
+            self._persist()
             return dict(assignments[source_position])
 
     def bind_target(self, target):

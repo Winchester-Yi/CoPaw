@@ -74,9 +74,13 @@ class PublicationRequest:
     scope_kind: str = "workspace"
 
     def __post_init__(self):
-        BundleStore.path_for(self.operation_key)
         if not isinstance(self.scope, WorkspaceScope):
             raise TypeError("publication scope must be a WorkspaceScope")
+        BundleStore.path_for(
+            self.operation_key,
+            self.scope,
+            scope_kind=self.scope_kind,
+        )
         identity_bytes(self.owner_key, 128)
         identity_bytes(self.kind, 32)
         if not self.owner_key or not self.kind:
@@ -145,15 +149,17 @@ class PublicationRequest:
             "base_state_revision": self.base_state_revision,
             "base_history_revision": self.base_history_revision,
             "epoch": self.epoch,
-            "relative_path": BundleStore.path_for(self.operation_key).encode(
-                "ascii",
-            ),
+            "relative_path": BundleStore.path_for(
+                self.operation_key,
+                self.scope,
+                scope_kind=self.scope_kind,
+            ).encode("ascii"),
             "format_key": FORMAT_KEY,
         }
 
 
 def _request(row):
-    return PublicationRequest(
+    request = PublicationRequest(
         operation_key=_text(row["operation_key"]),
         scope=WorkspaceScope.from_row(row),
         kind=row["kind"],
@@ -167,6 +173,8 @@ def _request(row):
         epoch=row["epoch"],
         scope_kind=row["scope_kind"],
     )
+    BundleStore.validate_publication_locator(row)
+    return request
 
 
 class PublicationStore(PublicationAssociations):
@@ -212,12 +220,23 @@ class PublicationStore(PublicationAssociations):
             raise UnknownCommit(operation_key) from error
 
     async def get(self, operation_key, *, lock=False):
-        BundleStore.path_for(operation_key)
-        return await self.db.fetch_one(
+        if (
+            not isinstance(operation_key, str)
+            or len(operation_key) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in operation_key
+            )
+        ):
+            raise ValueError("invalid conversation operation key")
+        row = await self.db.fetch_one(
             f"SELECT * FROM {TABLE} WHERE service_unit_key=%s AND operation_key=%s"
             + (" FOR UPDATE" if lock else ""),
             (self.service_unit_key, operation_key.encode("ascii")),
         )
+        if row is not None:
+            _request(row)
+        return row
 
     async def _insert(self, request, plan_text, state):
         fields = {
@@ -403,6 +422,7 @@ class PublicationStore(PublicationAssociations):
             raise ConflictError(
                 "publication must be prepared before writing NAS",
             )
+        request = _request(row)
         plan = await self._validate_prepared_references(row)
         blocks = await prepare_recovery_blocks(
             self,
@@ -415,6 +435,7 @@ class PublicationStore(PublicationAssociations):
             self.bundles.publish,
             operation_key,
             blocks,
+            scope=request.scope,
             metadata={"operation_key": operation_key},
         )
         await self._mark_durable(operation_key, index)

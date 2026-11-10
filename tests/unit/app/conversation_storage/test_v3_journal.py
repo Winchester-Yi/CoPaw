@@ -76,7 +76,7 @@ class Database:
                 state="mapped",
                 target_id=None,
                 operation_key=params[3],
-                details_text=None,
+                details_text=params[4],
             ),
         )
         return self.next_id
@@ -86,6 +86,8 @@ class Database:
         self.queries.append(query)
         if "SET target_id" in query:
             self.entries[-1]["target_id"] = params[0]
+        elif "SET details_text" in query:
+            self.entries[-1]["details_text"] = params[0]
         return 1
 
 
@@ -113,11 +115,13 @@ async def test_sql_ticket_is_committed_before_manifest_mirror():
 
 async def test_hydrate_rebuilds_lost_external_mirror():
     from swe.app.conversation_storage.migration.journal import MigrationJournal
+    from swe.app.conversation_storage.identity import WorkspaceScope
 
     db, frozen = Database(), manifest()
     assigned = await MigrationJournal(db, frozen).allocate(
         "publication",
         "svc/body",
+        scope=WorkspaceScope("t", "s", "a", service_unit_id="svc"),
     )
     frozen.data["assignments"] = {}
     await MigrationJournal(db, frozen).hydrate()

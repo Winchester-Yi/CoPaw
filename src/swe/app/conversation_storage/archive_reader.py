@@ -4,6 +4,7 @@
 from ...agents.memory.conversation_archive import (
     ConversationArchiveStore,
 )
+from .bundle import BundleStore
 from .chat_mutations import load_metadata_json
 from .checkpoint_reader import CheckpointReads
 from .errors import IntegrityError
@@ -58,7 +59,7 @@ class ArchiveReader(CheckpointReads):
     async def payload(self, batch, publication, prefix):
         raw = await batch.read(
             self.bundles.read_extent,
-            text(publication["relative_path"]),
+            BundleStore.validate_publication_locator(publication),
             publication[prefix + "_offset"],
             publication[prefix + "_length"],
             expected_length=publication["byte_length"],
