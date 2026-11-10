@@ -126,3 +126,19 @@ def test_light_metadata_rejects_duplicate_authority_fields():
         validate_light_metadata(
             '{"plan_mode_enabled":false,"plan_mode_enabled":true}',
         )
+
+
+def test_display_metadata_budget_allows_all_valid_escaped_fields():
+    value = {
+        key: "\x00" * 1024
+        for key in (
+            "session_kind",
+            "task_job_id",
+            "management_owner",
+            "creator_user_id",
+            "source_id",
+            "agent_id",
+        )
+    }
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    assert validate_light_metadata(text) == value

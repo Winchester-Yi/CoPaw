@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Observe durable settlement after the request-owned execution has closed."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -859,8 +860,8 @@ async def test_terminal_owner_release_does_not_cancel_publication_cleanup(
         if operation == query.terminal_operation:
             # The SQL terminal is committed, but the publication caller still
             # owns cache refresh and reader release outside the transaction.
-            storage.executions.lease_seconds = 0.001
-            await query._renew(parent)
+            # Keep a real SQL budget while exercising the post-commit race.
+            await asyncio.wait_for(query._renew(parent), 30)
         return await original(operation, projection, references)
 
     storage.publications._committed_projection = renew_during_cleanup

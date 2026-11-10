@@ -12,6 +12,7 @@ from swe.app.conversation_storage.publications import PublicationStore
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.runner.expert_binding import ExpertBindingConflict
 from swe.app.runner.models import ChatSpec
+from swe.database.session import DatabaseSession
 from tests.integrated.conversation_storage.test_schema import (
     insert_chat,
     insert_session,
@@ -271,24 +272,24 @@ async def test_atomic_rebind_and_busy_target_rejection(
 async def test_delete_does_not_capture_chat_created_after_candidate_read(
     conversation_test_database,
     tmp_path,
+    monkeypatch,
 ):
     db = conversation_test_database
     session = await insert_session(db)
     selected = asyncio.Event()
     resume = asyncio.Event()
 
-    class PausedDatabase:
-        def __getattr__(self, name):
-            return getattr(db, name)
+    fetch_all = DatabaseSession.fetch_all
 
-        async def fetch_all(self, query, params=None):
-            rows = await db.fetch_all(query, params)
-            if query.startswith("SELECT id,session_id FROM"):
-                selected.set()
-                await resume.wait()
-            return rows
+    async def select_then_pause(sql_session, query, params=None):
+        rows = await fetch_all(sql_session, query, params)
+        if query.startswith("SELECT id,session_id FROM"):
+            selected.set()
+            await resume.wait()
+        return rows
 
-    repo = repository(PausedDatabase(), tmp_path)
+    monkeypatch.setattr(DatabaseSession, "fetch_all", select_then_pause)
+    repo = repository(db, tmp_path)
     deletion = asyncio.create_task(repo.delete_chats(["late-chat"]))
     try:
         await asyncio.wait_for(selected.wait(), 5)
@@ -388,9 +389,11 @@ async def test_lost_chat_creation_commit_retries_without_duplicate(
     )["n"] == 1
 
 
+@pytest.mark.parametrize("has_content", [False, True])
 async def test_draft_commit_uses_ordinary_chat_created_after_preflight(
     conversation_test_database,
     tmp_path,
+    has_content,
 ):
     db = conversation_test_database
     repo = repository(db, tmp_path)
@@ -408,11 +411,20 @@ async def test_draft_commit_uses_ordinary_chat_created_after_preflight(
         repo.bundles,
         service_unit_id="schema-test-service",
     )
+    write_sql = repo._write_sql_metadata
+
+    async def paused_sql(request, mutation):
+        before_commit.set()
+        await proceed.wait()
+        return await write_sql(request, mutation)
+
+    repo._write_sql_metadata = paused_sql
     draft = ChatSpec(
         id="draft-loser",
         session_id="shared",
         user_id="alice",
         channel="console",
+        meta={"private": "content"} if has_content else {},
     )
     task = asyncio.create_task(repo.create_chat_if_absent_by_session(draft))
     try:

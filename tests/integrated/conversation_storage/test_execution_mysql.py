@@ -576,7 +576,8 @@ async def test_renewal_allows_expiry_between_select_and_update_mysql(
     await seed(db)
     service = store(db, tmp_path, "owner")
     admission = await admit(service)
-    service.lease_seconds = 3
+    # Force expiry below without shrinking the remote SQL budget to one second.
+    service.lease_seconds = 30
     associations = service._turn_associations
 
     async def delay_after_validation(*args):

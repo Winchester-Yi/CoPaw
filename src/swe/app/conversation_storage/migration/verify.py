@@ -2,10 +2,14 @@
 """Full semantic comparisons from committed SQL locators and immutable bodies."""
 
 from ..chat_repository import MySQLChatRepository
-from ..chat_mutations import load_metadata_json
+from ..chat_mutations import (
+    load_metadata_json,
+    split_metadata,
+    validate_light_metadata,
+)
 from ..identity import WorkspaceScope
 from ..session_adapter import MySQLSessionAdapter
-from .importer import validate_inventory, bundle_stores
+from .importer import bundle_stores, validate_inventory
 from .install_records import OfflineImportStore
 from ..shares import ShareStorage
 from ..errors import StorageError
@@ -150,7 +154,7 @@ async def verify_import(database, bundles, manifest, inventory, target):
             position,
             _verify_artifact(
                 database,
-                stores[inventory["workspaces"][item["workspace"]]["scope"][0]],
+                stores[workspace["scope"][0]],
                 manifest,
                 inventory,
                 item,
@@ -313,8 +317,33 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
             raise ValueError("Message role/body/order/occurrence differs")
 
 
+async def _verify_chat_projection(database, scope, spec):
+    projection = await database.fetch_one(
+        "SELECT c.external_session_key,c.metadata_text,c.status,"
+        "s.external_session_key AS session_external_key "
+        "FROM swe_conversation_chats c JOIN swe_conversation_sessions s "
+        "ON s.id=c.session_id AND s.service_unit_key=c.service_unit_key "
+        "WHERE c.service_unit_key=%s AND c.tenant_key=%s AND c.source_key=%s "
+        "AND c.agent_key=%s AND c.external_chat_key=%s",
+        (*scope.sql_values, spec["id"].encode("utf-8")),
+    )
+    expected_light, _ = split_metadata(spec["meta"])
+    if (
+        projection is None
+        or projection["external_session_key"]
+        != projection["session_external_key"]
+        or projection["external_session_key"]
+        != spec["session_id"].encode("utf-8")
+        or validate_light_metadata(projection["metadata_text"])
+        != expected_light
+        or projection["status"] != "idle"
+    ):
+        raise ValueError("Chat summary SQL projection differs from source")
+
+
 async def _verify_chat(database, bundles, manifest, workspace, chat):
     scope = WorkspaceScope.from_values(workspace["scope"])
+    await _verify_chat_projection(database, scope, chat["spec"])
     actual = await read_only_adapter(
         MySQLChatRepository(database, scope, bundles),
     ).get_chat(

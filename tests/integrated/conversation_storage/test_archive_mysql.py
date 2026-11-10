@@ -505,7 +505,6 @@ async def test_archive_rejects_cross_session_historical_turn(
         },
     )
     request = await operation(db, session, first, "compact")
-    await service.reserve(request, compact_plan(first, ids, turn_id=turn))
-    await service.write_bundle(request.operation_key, compact_blocks())
     with pytest.raises(IntegrityError, match="Session"):
-        await service.commit(request.operation_key)
+        await service.reserve(request, compact_plan(first, ids, turn_id=turn))
+    assert await service.get(request.operation_key) is None

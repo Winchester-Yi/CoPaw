@@ -257,7 +257,7 @@ class ExecutionStore:
             ),
         )
         await self.db.execute(
-            "UPDATE swe_conversation_chats SET next_turn_order=next_turn_order+1 WHERE id=%s",
+            "UPDATE swe_conversation_chats SET next_turn_order=next_turn_order+1,status='running' WHERE id=%s",
             (chat["id"],),
         )
         request = PublicationRequest(
@@ -523,6 +523,10 @@ class ExecutionStore:
                 "UPDATE swe_conversation_sessions SET active_turn_id=NULL,owner_key=NULL,lease_until=NULL WHERE id=%s",
                 (authority.session_id,),
             )
+            await self.db.execute(
+                "UPDATE swe_conversation_chats SET status='idle' WHERE id=%s",
+                (authority.chat_id,),
+            )
 
     def _validate_service(self, identity):
         if identity.scope.sql_values[0] != self.service_unit_key:
@@ -735,5 +739,9 @@ class ExecutionStore:
             await self.db.execute(
                 "UPDATE swe_conversation_turns SET state=%s WHERE id=%s",
                 ("stopping", turn["id"]),
+            )
+            await self.db.execute(
+                "UPDATE swe_conversation_chats SET status='stopping' WHERE id=%s",
+                (turn["chat_id"],),
             )
             return {**turn, "state": "stopping"}

@@ -169,6 +169,43 @@ async def test_terminal_stop_prevents_natural_completion_without_clearing_slot()
     db.execute.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "phase,status,expected",
+    [
+        ("admission", None, "running"),
+        ("terminal", "completed", "idle"),
+        ("terminal", "failed", "idle"),
+        ("terminal", "stopped", "idle"),
+    ],
+)
+async def test_turn_install_updates_display_projection_without_changing_recency(
+    phase,
+    status,
+    expected,
+):
+    db = SimpleNamespace(execute=AsyncMock(return_value=1))
+    request = SimpleNamespace(session_id=1, chat_id=2, turn_id=3)
+    await install_turn(
+        db,
+        request,
+        TurnInstall(phase, history_status=status),
+        {"id": 4},
+        ({}, {}, {"state": "reserved" if phase == "admission" else "running"}),
+    )
+    writes = [
+        call.args
+        for call in db.execute.await_args_list
+        if "SET status=" in call.args[0]
+    ]
+    if phase == "admission":
+        assert not writes
+        return
+    assert len(writes) == 1
+    query, params = writes[0]
+    assert f"status='{expected}'" in query and params == (2,)
+    assert ("updated_at=UTC_TIMESTAMP(6)" in query) == (phase == "terminal")
+
+
 async def test_online_message_cannot_install_into_another_context_epoch():
     db = SimpleNamespace(insert=AsyncMock(), execute=AsyncMock())
     request = SimpleNamespace(

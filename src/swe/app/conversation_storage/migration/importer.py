@@ -51,6 +51,20 @@ def artifact_is_reconstructed(item, workspace):
     path = Path(item["path"])
     if path == Path("chats.json"):
         return True
+    if len(path.parts) == 3 and path.parts[0] == "dialog":
+        chat_id, filename = path.parts[1:]
+        if filename.endswith(".jsonl"):
+            boundary_id = filename[: -len(".jsonl")]
+            return any(
+                chat["spec"]["id"] == chat_id
+                and boundary_id
+                in {
+                    batch["boundary"]["id"]
+                    for epoch in chat["archive"].get("epochs", [])
+                    for batch in epoch.get("batches", [])
+                }
+                for chat in workspace["chats"]
+            )
     for session in workspace["sessions"]:
         if path != Path(session["path"]):
             continue
@@ -610,7 +624,7 @@ class ConversationImporter:
 
     async def _identities(self, workspace, scope):
         from ..bundle import BundleBlock
-        from ..chat_mutations import split_metadata
+        from ..chat_mutations import split_metadata, validate_light_metadata
         from swe.app.runner.models import ChatSpec
         from swe.app.runner.expert_binding import read_expert_binding
         import json
@@ -645,6 +659,13 @@ class ConversationImporter:
                 cid = await self._assigned("chat", item["position"])
                 self.chat_ids[item["position"]] = cid
                 light, content = split_metadata(spec.meta)
+                light_text = json.dumps(
+                    light,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                validate_light_metadata(light_text)
                 binding = read_expert_binding(spec)
                 block = "content:" + str(cid)
                 archive = item["archive"]
@@ -655,6 +676,7 @@ class ConversationImporter:
                     "id": cid,
                     "session_id": sid,
                     "external_chat_key": spec.id,
+                    "external_session_key": spec.session_id,
                     "registry_order": item["registry_order"],
                     "service_unit_key": scope.service_unit_id,
                     "tenant_key": scope.tenant_id,
@@ -663,7 +685,7 @@ class ConversationImporter:
                     "user_key": spec.user_id,
                     "channel_key": spec.channel,
                     "title": spec.name,
-                    "metadata_text": json.dumps(light, ensure_ascii=False),
+                    "metadata_text": light_text,
                     "expert_id": binding.expert_id,
                     "expert_binding_revision": binding.revision,
                     "content_meta_publication_id": {"publication": True},

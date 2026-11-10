@@ -857,9 +857,9 @@ async def test_http_tracing_target_scope_permissions_and_approval_overlay(
     assert result.status_code == 200
     assert message_ids(result.json()) == [
         "approval",
+        "anchor",
         "task",
         "error",
-        "anchor",
     ]
     assert result.json()["chat"]["user_id"] == "alice"
     assert result.json()["archive"]["has_more"] is True

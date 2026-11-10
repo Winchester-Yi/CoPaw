@@ -4,6 +4,7 @@
 from contextlib import asynccontextmanager
 import re
 
+from ....database.prepared import PreparedInsert
 from ..schema_contract import COLUMNS, DEFAULTS, EXTRAS, CHARSETS, INDEXES
 from .install import _columns, _indexes, _encoding_matches, SHARE_COLUMNS
 
@@ -19,6 +20,15 @@ class DMLDatabase:
     @property
     def is_connected(self):
         return self._owner.is_connected
+
+    @property
+    def max_allowed_packet(self):
+        return self._database.max_allowed_packet
+
+    @asynccontextmanager
+    async def acquire(self):
+        async with self._owner.acquire() as session:
+            yield DMLDatabase(session, owner=self._owner)
 
     @staticmethod
     def check(query):
@@ -57,8 +67,13 @@ class DMLDatabase:
         )
 
     async def insert_prepared(self, template, rows, **options):
+        if not isinstance(template, PreparedInsert):
+            raise ValueError(
+                "direct migration requires a fixed prepared insert",
+            )
+        self.check(template.prefix + template.row_template + template.suffix)
         return await self._database.insert_prepared(
-            self.check(template),
+            template,
             rows,
             **options,
         )

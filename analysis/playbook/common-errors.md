@@ -896,6 +896,13 @@
 - **前端**：工作台只上报洞察 `insight`、电访 `phone`，不传 `file_url`；客户 ID 使用 `custUid`，来源为 `WP_AGENT_WORKSPACE_TASK_LIST` / `WP`，运行时 API 补齐操作者与机构信息。
 - **回归入口**：`tests/unit/app/test_html_preview_clicks.py`、`console/src/pages/WealthWorkbench/Tasks/groupTables.test.tsx`、`console/src/api/modules/htmlPreviewEvents.test.ts`。先部署允许省略字段的后端，再部署工作台前端。
 
+## 会话迁移全局审计发现的恢复与规模边界（尚未修复）
+
+- `restore requires an empty metadata target`：当前 backup 按单 workspace scope 捕获，但 restore 要求七表整体为空；首个 scope 恢复后不能继续恢复第二个 scope。不要删除已恢复数据重试，也不要直接去掉空表保护；需要完整的多 scope 聚合恢复能力。
+- `publication pins require bounded positive integer IDs`：先检查去重后的 publication 引用数是否超过 4096。`projection_publication._existing` 和 `projection_references.snapshot_projection` 当前没有对整个集合分批 pin，长期 Session/Cron 历史可能触发；不是数据库连接错误，不应删历史规避。
+- `conversation-storage export --apply` 在旧冻结源路径报 ENOENT：当前 CLI 在导出前仍重扫原 inventory，即使一致性 backup 自足也会被阻断。保留备份和原源，不以空目录或修改成功标记绕过核验。
+- 这三项是 `858fc4d65` 基线的已确认问题，本次仅记录审计，未修复。复现、修复方向及验收范围见[全局审计](../../docs/superpowers/reports/2026-11-01-conversation-global-review.md)。
+
 
 ## MySQL/NAS 会话有归档，但运营看板没有加载入口
 

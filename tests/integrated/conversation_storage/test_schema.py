@@ -45,9 +45,14 @@ async def insert_session(db, **changes):
 
 
 async def insert_chat(db, session_id, key=b"chat", **changes):
+    session = await db.fetch_one(
+        "SELECT external_session_key FROM swe_conversation_sessions WHERE id=%s",
+        (session_id,),
+    )
     values = {
         "session_id": session_id,
         "external_chat_key": key,
+        "external_session_key": session["external_session_key"],
         "registry_order": 1,
         "tenant_key": b"tenant",
         "source_key": b"source",
@@ -105,7 +110,7 @@ async def test_mysql_capabilities_and_exact_six_table_schema(
         "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
         "ORDER BY TABLE_NAME, ORDINAL_POSITION",
     )
-    assert len(columns) == 157
+    assert len(columns) == 158
     assert {row["TABLE_NAME"] for row in columns} == set(TABLES)
     draft = (SQL_ROOT / "conversation_metadata_tables.sql").read_text(
         encoding="utf-8",

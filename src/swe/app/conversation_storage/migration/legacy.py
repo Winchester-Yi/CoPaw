@@ -68,8 +68,14 @@ def _json(path):
 def read_session(path):
     path = Path(path).resolve(strict=True)
     _, committed = _read_json_state_sync(str(path), allow_not_exist=False)
-    if _json(path) != committed:
-        raise ValueError("Session root is not a stable JSON object")
+    if committed.get("schema_version") != 3:
+        return {
+            "format": "session-v" + str(committed.get("schema_version", 1)),
+            "root": deepcopy(committed),
+            "state": committed,
+            "recovery_actions": [],
+            "files": [path.name],
+        }
     generation = committed.get("session_generation")
 
     def selected(relative):

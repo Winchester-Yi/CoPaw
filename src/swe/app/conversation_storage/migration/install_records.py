@@ -44,6 +44,7 @@ COLUMNS = {
         "id",
         "session_id",
         "external_chat_key",
+        "external_session_key",
         "registry_order",
         "service_unit_key",
         "tenant_key",
@@ -191,6 +192,7 @@ IMMUTABLE = {
         "id",
         "session_id",
         "external_chat_key",
+        "external_session_key",
         "registry_order",
         "service_unit_key",
         "tenant_key",
@@ -766,6 +768,14 @@ class OfflineImportStore(PublicationStore):
         session = self._related("sessions", values["session_id"])
         if any(session[key] != publication[key] for key in scope):
             raise IntegrityError("offline related Session scope mismatch")
+        if (
+            "external_session_key" in values
+            and values["external_session_key"]
+            != session["external_session_key"]
+        ):
+            raise IntegrityError(
+                "offline Chat Session key projection mismatch",
+            )
         for key in ("chat_id", "origin_chat_id", "archive_chat_id"):
             if values.get(key) is not None:
                 chat = self._related("chats", values[key])

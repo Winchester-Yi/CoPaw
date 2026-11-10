@@ -19,7 +19,13 @@ def tree_bytes(root):
 
 
 @pytest.mark.parametrize("schema", [1, 2])
-def test_legacy_root_preserves_all_unknown_modules(tmp_path, schema):
+def test_legacy_root_preserves_all_unknown_modules_without_copy(
+    tmp_path,
+    schema,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration import legacy
+
     path = tmp_path / "session.json"
     state = {
         "schema_version": schema,
@@ -34,6 +40,11 @@ def test_legacy_root_preserves_all_unknown_modules(tmp_path, schema):
     }
     path.write_text(json.dumps(state))
     before = tree_bytes(tmp_path)
+    monkeypatch.setattr(
+        legacy.shutil,
+        "copyfile",
+        lambda *_args: pytest.fail("legacy Session should not be copied"),
+    )
     result = read_session(path)
     assert result["root"] == state and result["state"] == state
     assert tree_bytes(tmp_path) == before
@@ -194,22 +205,20 @@ async def test_archive_quarantine_and_uncommitted_tail_are_explicit(tmp_path):
         read_archive(tmp_path, chat)
 
 
-def test_session_reader_does_not_copy_other_sessions(tmp_path, monkeypatch):
+def test_session_reader_does_not_copy_legacy_session(tmp_path, monkeypatch):
     from swe.app.conversation_storage.migration import legacy
 
     path = tmp_path / "selected.json"
     path.write_text("{}")
     (tmp_path / "unrelated.json").write_text("{}")
-    original = legacy.shutil.copyfile
     copied = []
 
-    def copy(source, target):
-        copied.append(source.name)
-        return original(source, target)
+    def copy(*_args):
+        copied.append(True)
 
     monkeypatch.setattr(legacy.shutil, "copyfile", copy)
     read_session(path)
-    assert copied == ["selected.json"]
+    assert copied == []
 
 
 def test_v1_checkpoint_watermark_requires_events_even_when_file_missing(

@@ -759,6 +759,7 @@ async def test_retained_v3_ledger_new_write_exports_and_old_reader_continues(
         [
             {
                 "root": str(source),
+                "service_unit_id": scope.service_unit_id,
                 "tenant_id": "tenant",
                 "source_id": "source",
                 "agent_id": "agent",

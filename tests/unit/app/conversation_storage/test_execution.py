@@ -56,6 +56,7 @@ class AuthorityDatabase:
             "tenant_key": b"tenant",
             "source_key": b"source",
             "agent_key": b"agent",
+            "status": "running",
         }
         self.turn = {
             "service_unit_key": b"schema-test-service",
@@ -129,6 +130,14 @@ class AuthorityDatabase:
             )
         elif "next_turn_order=next_turn_order+1" in query:
             self.chat["next_turn_order"] += 1
+        if (
+            "UPDATE swe_conversation_chats SET" in query
+            and "status='" in query
+        ):
+            assert self.in_transaction
+            self.chat["status"] = query.split("status='", 1)[1].split("'", 1)[
+                0
+            ]
         return 1
 
 
@@ -237,6 +246,7 @@ async def test_start_and_renew_validate_database_time_lease_and_exact_authority(
     )
     result = await store.start(authority())
     assert result["state"] == "running"
+    assert db.chat["status"] == "running"
     await store.renew(authority())
     assert not db.in_transaction
     assert any("UTC_TIMESTAMP(6)" in query for query, _ in db.queries)
@@ -283,6 +293,9 @@ async def test_stop_is_persisted_before_return_and_terminal_is_not_overwritten()
     )
     first = await store.request_stop(authority().identity, "question")
     assert first["state"] == "stopping"
+    assert db.chat["status"] == "stopping"
+    projection_sql = [q for q, _ in db.queries if "SET status=" in q]
+    assert all("updated_at" not in q for q in projection_sql)
     assert not db.in_transaction
     db.turn.update(state="succeeded", history_status="completed")
     second = await store.request_stop(authority().identity, "question")
@@ -302,6 +315,80 @@ async def test_stop_rejects_another_question_and_scope_mismatch():
     db.session["user_key"] = b"other"
     with pytest.raises(IntegrityError, match="identity"):
         await store.request_stop(authority().identity, "question")
+
+
+@pytest.mark.parametrize("method", ["request_stop", "reserve_admission"])
+async def test_chat_projection_failure_rolls_back_authority_changes(method):
+    db = AuthorityDatabase()
+    db.chat["status"] = "idle" if method == "reserve_admission" else "running"
+    if method == "reserve_admission":
+        db.turn = None
+        db.session.update(active_turn_id=None, owner_key=None)
+    before = deepcopy((db.session, db.chat, db.turn))
+    execute = db.execute
+
+    async def failing_projection(query, params=None):
+        if "UPDATE swe_conversation_chats SET" in query:
+            raise RuntimeError("projection write failed")
+        return await execute(query, params)
+
+    db.execute = failing_projection
+    store = ExecutionStore(
+        db,
+        publications=PublicationDouble(db),
+        owner_key="owner",
+        service_unit_id="schema-test-service",
+    )
+    from swe.app.conversation_storage.errors import UnknownCommit
+
+    with pytest.raises((RuntimeError, UnknownCommit)):
+        if method == "request_stop":
+            await store.request_stop(authority().identity, "question")
+        else:
+            await store.reserve_admission(
+                authority().identity,
+                "chat",
+                "question",
+                operation_key="a" * 64,
+                runtime_turn_key="runtime",
+            )
+    assert (db.session, db.chat, db.turn) == before
+
+
+async def test_rejected_admission_clears_chat_projection_in_same_transaction():
+    from swe.app.conversation_storage.publications import PublicationRequest
+
+    db = AuthorityDatabase()
+    db.turn["state"] = "reserved"
+    db.chat["status"] = "running"
+    publications = PublicationDouble(db)
+    publications.abort = AsyncMock(return_value={"state": "aborted"})
+    store = ExecutionStore(
+        db,
+        publications=publications,
+        service_unit_id="schema-test-service",
+    )
+    request = PublicationRequest(
+        "a" * 64,
+        authority().identity.scope,
+        "admission",
+        "owner",
+        2,
+        session_id=1,
+        chat_id=2,
+        turn_id=3,
+        base_state_revision=4,
+    )
+    await store.reject_ended_admission(
+        authority(),
+        request,
+        owner_stopped=True,
+    )
+    assert db.chat["status"] == "idle"
+    assert any("SET active_turn_id=NULL" in q for q, _ in db.queries)
+    assert not any(
+        "updated_at" in q for q, _ in db.queries if "SET status=" in q
+    )
 
 
 async def test_same_question_returns_original_admission_without_execution_replay():
@@ -372,6 +459,7 @@ async def test_new_admission_reserves_turn_slot_and_original_publication_atomica
     assert db.turn["state"] == "reserved"
     assert db.turn["question_msg_key"] == b"new-question"
     assert db.chat["next_turn_order"] == 2
+    assert db.chat["status"] == "running"
     request, plan = db.reserved[0]
     assert request.operation_key == "a" * 64
     assert plan.recovery_block == "recovery"

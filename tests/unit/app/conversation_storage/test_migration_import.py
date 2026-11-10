@@ -148,6 +148,59 @@ def test_offline_target_rejects_business_schema_and_untrusted_names():
     )
 
 
+@pytest.mark.parametrize(
+    "defect",
+    [None, "missing", "session", "authority", "metadata", "status"],
+)
+async def test_migration_verification_checks_chat_summary_projection(defect):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from swe.app.conversation_storage.migration.verify import (
+        _verify_chat_projection,
+    )
+
+    row = {
+        "external_session_key": b"session",
+        "session_external_key": b"session",
+        "metadata_text": '{"plan_mode_enabled": true}',
+        "status": "idle",
+    }
+    if defect == "session":
+        row["external_session_key"] = b"wrong"
+    elif defect == "authority":
+        row["session_external_key"] = b"wrong"
+    elif defect == "metadata":
+        row["metadata_text"] = "{}"
+    elif defect == "status":
+        row["status"] = "running"
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(
+            return_value=(None if defect == "missing" else deepcopy(row)),
+        ),
+    )
+    scope = WorkspaceScope(
+        "t",
+        "s",
+        "a",
+        service_unit_id="schema-test-service",
+    )
+    check = _verify_chat_projection(
+        db,
+        scope,
+        {
+            "id": "chat",
+            "session_id": "session",
+            "meta": {"plan_mode_enabled": True, "prompt": "NAS content"},
+        },
+    )
+    if defect is None:
+        await check
+    else:
+        with pytest.raises(ValueError, match="projection"):
+            await check
+
+
 def test_offline_timestamp_normalizes_offset_to_utc():
     from datetime import datetime
     from swe.app.conversation_storage.migration.install_records import (
@@ -405,6 +458,20 @@ def test_inventory_files_rebuilt_from_database_and_recovery_are_not_copied():
                 },
             },
         ],
+        "chats": [
+            {
+                "spec": {"id": "chat-id"},
+                "archive": {
+                    "epochs": [
+                        {
+                            "batches": [
+                                {"boundary": {"id": "boundary-id"}},
+                            ],
+                        },
+                    ],
+                },
+            },
+        ],
     }
 
     assert artifact_is_reconstructed(
@@ -425,6 +492,18 @@ def test_inventory_files_rebuilt_from_database_and_recovery_are_not_copied():
     )
     assert not artifact_is_reconstructed(
         {"path": "dialog/chat/candidates/candidate.json"},
+        workspace,
+    )
+    assert artifact_is_reconstructed(
+        {"path": "dialog/chat-id/boundary-id.jsonl"},
+        workspace,
+    )
+    assert not artifact_is_reconstructed(
+        {"path": "dialog/chat-id/unknown.jsonl"},
+        workspace,
+    )
+    assert not artifact_is_reconstructed(
+        {"path": "dialog/chat-id/state-v2.json"},
         workspace,
     )
 

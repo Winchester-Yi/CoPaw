@@ -1,5 +1,13 @@
 # B1a 提交后：会话迁移剩余工作复核
 
+2026-11-06 字段及实施次序进一步收敛到[SQL 契约草案](../specs/2026-11-06-conversation-sql-contract-review.md)：单来源 CREATE 与业务 locator 列矩阵、Chat writer/排序兼容矩阵均已记录，尚未运行 DDL。先关闭内容字段归属、真实旧样本和描述容量边界，再冻结一套部署 SQL；可独立推进的纯 SQL/投影/CLI 修复不等于整个迁移已完成。
+2026-11-06 最新结构建议以[减少关联的反规范化方案](../specs/2026-11-06-conversation-denormalized-schema-design.md)为准，替代前轮三表建议。新增一张 legacy_sources，内联旧组合恢复清单；不为新 bundle 增加 object/view/parts；Chat 小型投影同事务维护以减少摘要关联。这里只记录设计变更，实际库与源码未按此变更。
+2026-11-06 P0 结构复核已形成[三表调整草案](../specs/2026-11-06-conversation-content-schema-design.md)。[只读实库核对](2026-11-06-conversation-database-schema-audit.md)发现六会话表缺服务字段与相应索引，分享未扩展、两控制表不存在；六业务表当前为空，原分享三条须保留。先冻结最终 locator/DDL，再一次性对齐结构；本轮未改表，不重复执行旧 bundle-only 预建脚本。
+
+2026-11-06 调整计划见[纯元数据同步设计草案](../specs/2026-11-06-conversation-metadata-only-adjustment-design.md)。P0 首先验证旧格式定位与字段归属，P1 可独立完成现有表内 Chat 纯 SQL、context usage 投影和 CLI facade 修复；复杂旧格式尚不能承诺完全免 DDL。本轮仅出方案，未新增运行时实现。
+
+2026-11-06 最新目标及排期以[目标对齐复核](2026-11-06-conversation-migration-goal-alignment-review.md)为准：当前历史导入会重打包正文，不能满足“只同步元数据、原 NAS 不变”的严格目标。先处理历史只读定位、纯同步及纯 DB 元数据写入；v3 CLI 验证必须修复，自研恢复失败单列灾备待办。下文保留各轮历史事实，不作为最新目标已经满足的证明。
+
 日期：2026-11-05。代码基线：`e7422898b`。工作区：`.worktrees/conversation-mysql-nas`。
 
 本轮提交 B1a，并对照当前源码、[整体性能设计](../specs/2026-11-04-conversation-storage-performance-redesign.md)、[SQL/NAS 成本设计](../specs/2026-11-05-conversation-sql-nas-cost-design.md)复核待办。除本报告与入口索引外，没有新增运行时改动；以下影响为静态分析，未经现场压测量化。
@@ -7,6 +15,8 @@
 > 2026-11-05 后续更新：第 2 项已改为并实现软租约＋代次校验，见[当前设计](../specs/2026-11-05-conversation-soft-lease-design.md)。下文保留当时严格租约的排查证据；“过期必须拒绝写入”不再是当前规则。
 
 > B1b/B2 后续更新：已按简化展示读取方案实现，见[实现记录](2026-11-05-conversation-simplified-batching-implementation.md)。不新增展示 RR 快照或全量 Message 复核；下文旧 B1b/B2 表格为当时分析，当前待办以末节为准。
+
+> 2026-11-06 真实库更新：已使用用户提供的服务器和隔离安装的锁定驱动完成本轮测试，历史的“专用库未配置”不再代表最新状态，详见[真实 MySQL 验收报告](2026-11-06-conversation-real-mysql-acceptance.md)。最终去重 335 passed、9 failed、1 skipped；checkpoint 16 项真实边界及关键 EXPLAIN 已通过。8 项恢复验读因 reader release 子任务违反 SQL session task ownership 失败，另 1 项 v3 CLI verify 因 DMLDatabase 缺少 acquire 失败，均为迁移验收阻断项。连接故障与定向复测细节以该报告为准，不能直接将历史跳过数改写为通过。真实 NAS/多 Pod/最小权限/浏览器等边界仍独立待验收，Compact 延期决定不变。
 
 ## 已完成的边界
 

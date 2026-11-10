@@ -27,11 +27,16 @@
 | [log-entrypoints.md](log-entrypoints.md) | 运行日志、daemon logs、query error dump、Tracing 的实际入口 |
 | [my-mcp-manual-validation.md](my-mcp-manual-validation.md) | MyMCP 在本地环境下按用户、来源、应用和管理员身份进行手工验证的方法 |
 | [performance-optimization-plan.md](performance-optimization-plan.md) | freshness 扫描优化与官方 MySQL 异步驱动迁移的方案表、风险和验收标准 |
+| [会话迁移性能需求与整体设计](../../docs/superpowers/specs/2026-11-04-conversation-storage-performance-redesign.md) | 最新设计：保持 schema/格式、轻量 SQL 入口、减少 NAS、批量引用/IO、资源调度；列表并发快照已撤出本轮 |
 | [conversation-storage-design-audit.md](conversation-storage-design-audit.md) | 会话元数据入库设计复核：当前契约、新增专家和历史逻辑、缺失设计/SQL 与重新设计入口 |
+| [长会话与轻量列表分析方案](../../docs/superpowers/reports/2026-11-03-long-conversation-and-list-design-review.md) | checkpoint 截断与 pin 边界、compact 容量、严格快照分页和 HTTP 兼容设计；含证据与验收矩阵 |
+| [长会话与列表合并后复核](../../docs/superpowers/reports/2026-11-04-long-conversation-and-list-reanalysis.md) | checkpoint 实际边界、compact plan 写读不对称、迁移/备份调用方、Tracing 兼容及共享列表快照约束 |
 | [运营看板历史读取修复设计](../../docs/superpowers/specs/2026-11-04-tracing-history-parity-design.md) | 目标用户对象校验、SQL current/archive 分派及错误映射已实施；专用 MySQL/页面验收待完成 |
 | [NAS 数据与 CRUD 迁移方案](../../docs/superpowers/specs/2026-10-30-nas-conversation-migration-plan.md) | 多格式离线导入、统一读写适配、一次连续停机整体切换及固定镜像回退 |
 | [会话数据库迁移实施计划](../../docs/superpowers/plans/2026-10-30-conversation-mysql-nas-implementation.md) | 15 项代码/工具任务、文件职责、故障回归、七表安装及目标环境验收 |
 | [conversation-storage-cutover.md](conversation-storage-cutover.md) | 离线 CLI、七表原子安装、一次连续停机审计、未知 RENAME 对账及保留新写的回退步骤 |
+| [会话元数据迁移及上线全流程](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) | 当前 v3 自动发现、预建表 DML 导入、续跑、全量验收、目录边界与 Kubernetes 上线操作 |
+| [已有 NAS 迁移操作单（历史）](../../docs/superpowers/plans/2026-11-02-conversation-migration-operation-guide.md) | 881ab1764 的 v2 staging 操作记录，已由 v3 方案替代 |
 | [conversation-storage-entry-inventory.md](conversation-storage-entry-inventory.md) | SQL authority 全入口分支、legacy reader 的离线边界及正文治理/备份旁路保护 |
 | [python-memory-hotspots.md](python-memory-hotspots.md) | Python 后端前五内存热点、引用持有链、运行时验证与第一阶段生命周期及临时缓存设计入口 |
 | [python-installation-denial.md](python-installation-denial.md) | Shell pip 安装平台拒绝、语法识别边界、Hook 改写与前后台执行入口 |

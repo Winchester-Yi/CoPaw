@@ -29,7 +29,13 @@ from tests.unit.app.conversation_storage.test_chat_repository import (
 
 
 def chat_row(key=b"chat", **changes):
-    return stored_chat_row(key, **{"projected_status": "idle", **changes})
+    return stored_chat_row(
+        key,
+        **{
+            "projected_status": "idle",
+            **changes,
+        },
+    )
 
 
 async def test_summary_query_uses_one_sql_and_no_nas(tmp_path):
@@ -57,7 +63,8 @@ async def test_summary_query_uses_one_sql_and_no_nas(tmp_path):
     )
     assert "c.deleted_at IS NULL" in query
     assert "c.user_key=%s" in query and "c.channel_key=%s" in query
-    assert "t.chat_id=c.id" in query
+    assert "JOIN" not in query
+    assert "c.metadata_text" in query
     assert "meta" not in page.items[0].model_dump()
     assert "total" not in page.model_dump() and "page" not in page.model_dump()
     assert not page.has_more and page.next_cursor is None
@@ -75,7 +82,7 @@ async def test_summary_cursor_uses_last_returned_row_and_session_filter(
     version, (stamp, key) = repo._decode_cursor(page.next_cursor)
     assert version == "v2" and key == "z"
     assert stamp == rows[0]["updated_at"].replace(tzinfo=timezone.utc)
-    assert "s.external_session_key=%s" in db.queries[0][0]
+    assert "c.external_session_key=%s" in db.queries[0][0]
     assert db.queries[0][1][-2:] == (b"session", 2)
     db.rows = [rows[1]]
     second = await repo.list_summaries(page_size=1, cursor=page.next_cursor)

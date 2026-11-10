@@ -39,6 +39,7 @@ from .retention import MAX_PIN_BATCH, RetentionStore
 from .reference_queries import ReferenceQuery, iter_reference_rows
 from .chat_mutations import (
     ChatMetadataInstall,
+    install_chat_metadata,
     split_metadata,
     validate_light_metadata,
 )
@@ -68,9 +69,10 @@ SELECT_CHAT = (
     "SELECT c.*,s.external_session_key," + PROJECTED_STATUS + STATUS_FROM
 )
 SELECT_SUMMARY = (
-    "SELECT c.external_chat_key,s.external_session_key,c.user_key,"
+    "SELECT c.external_chat_key,c.external_session_key,c.user_key,"
     "c.channel_key,c.title,c.created_at,c.updated_at,c.metadata_text,"
-    "c.expert_id,c.expert_binding_revision," + PROJECTED_STATUS + STATUS_FROM
+    "c.expert_id,c.expert_binding_revision,c.status AS projected_status "
+    "FROM swe_conversation_chats c WHERE "
 )
 
 
@@ -343,7 +345,7 @@ class MySQLChatRepository(BaseChatRepository):
         validate_summary_page(page_size, cursor)
         where, params = self._where(user_id=user_id, channel=channel)
         if session_id is not None:
-            where += " AND s.external_session_key=%s"
+            where += " AND c.external_session_key=%s"
             params.append(identity_bytes(session_id, 1024))
         if cursor:
             version, (stamp, key) = self._decode_cursor(cursor)
@@ -675,7 +677,6 @@ class MySQLChatRepository(BaseChatRepository):
         create_if_absent=False,
     ):
         source_session = row["session_id"] if row else session["id"]
-        await self._ensure_no_pending_metadata(source_session)
         light, content = split_metadata(spec.meta)
         binding = (
             read_expert_binding(spec)
@@ -698,13 +699,13 @@ class MySQLChatRepository(BaseChatRepository):
             ),
             "created_at": _utc(spec.created_at).isoformat(),
             "updated_at": _utc(spec.updated_at).isoformat(),
-            "content_meta_block": "content_meta",
+            "content_meta_block": "content_meta" if content else None,
             "expected_metadata_revision": (
                 row["metadata_revision"] if row else None
             ),
             "expert_id": binding.expert_id,
             "expert_binding_revision": binding.revision,
-            "status": spec.status,
+            "status": "idle",
             "create_if_absent": create_if_absent,
         }
         if row is not None and row["session_id"] != session["id"]:
@@ -719,6 +720,9 @@ class MySQLChatRepository(BaseChatRepository):
             session_id=source_session,
             chat_id=row["id"] if row else None,
         )
+        if not content:
+            return await self._write_sql_metadata(request, mutation)
+        await self._ensure_no_pending_metadata(source_session)
         plan = CommitPlan(chat_metadata=mutation)
         await self.publications.reserve(request, plan)
         await self.publications.write_bundle(
@@ -741,6 +745,31 @@ class MySQLChatRepository(BaseChatRepository):
         except ConflictError:
             await self.publications.abort(request, owner_stopped=True)
             raise
+
+    async def _write_sql_metadata(self, request, mutation):
+        """Install body-free metadata under the same locks as publication."""
+        async with self.db.transaction():
+            await self.retentions.assert_writes_allowed()
+            associations, target = (
+                await self.publications._lock_metadata_associations(
+                    request,
+                    mutation,
+                )
+            )
+            self.publications._validate_associations(request, *associations)
+            await self._ensure_no_pending_metadata(request.session_id)
+            if target is not None:
+                await self._ensure_no_pending_metadata(target["id"])
+            chat_id = await install_chat_metadata(
+                self.db,
+                request,
+                mutation,
+                None,
+                None,
+                associations,
+                target_session=target,
+            )
+            return {"chat_id": chat_id}
 
     async def _ensure_no_pending_metadata(self, session_id):
         rows = await self.db.fetch_all(
@@ -767,6 +796,11 @@ class MySQLChatRepository(BaseChatRepository):
         row = await self._raw_chat(spec.id)
         if row is None or row["deleted_at"] is not None:
             return None
+        _, content = split_metadata(spec.meta)
+        if not content:
+            session = await self._session_for(spec)
+            await self._publish_metadata(spec, session, row)
+            return await self.get_chat(spec.id)
         current = await self.get_chat(spec.id)
         if current is None:
             return None

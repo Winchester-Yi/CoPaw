@@ -32,6 +32,7 @@ COLUMNS = {
         "service_unit_key": ("varbinary(256)", "NO"),
         "session_id": ("bigint unsigned", "NO"),
         "external_chat_key": ("varbinary(128)", "NO"),
+        "external_session_key": ("varbinary(1024)", "NO"),
         "registry_order": ("bigint unsigned", "NO"),
         "tenant_key": ("varbinary(256)", "NO"),
         "source_key": ("varbinary(256)", "NO"),

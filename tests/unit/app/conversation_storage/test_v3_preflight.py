@@ -68,6 +68,48 @@ async def test_direct_facade_wraps_configless_session_and_nested_transaction():
     assert session.fetch_one.await_count == 2
 
 
+async def test_direct_facade_acquire_keeps_packet_budget_and_dml_policy():
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from swe.app.conversation_storage.migration.preflight import DMLDatabase
+
+    session = SimpleNamespace(
+        max_allowed_packet=1024 * 1024,
+        fetch_one=AsyncMock(return_value={"n": 1}),
+    )
+
+    @asynccontextmanager
+    async def acquire():
+        yield session
+
+    raw = SimpleNamespace(config=object(), is_connected=True, acquire=acquire)
+    async with DMLDatabase(raw).acquire() as leased:
+        assert leased.max_allowed_packet == 1024 * 1024
+        assert leased.config is raw.config
+        assert await leased.fetch_one("SELECT 1") == {"n": 1}
+        with pytest.raises(ValueError, match="DML"):
+            await leased.fetch_one("DROP TABLE x")
+
+
+async def test_direct_facade_accepts_prepared_insert_without_exposing_ddl():
+    from swe.database.prepared import PreparedInsert
+    from swe.app.conversation_storage.migration.preflight import DMLDatabase
+
+    raw = AsyncMock()
+    template = PreparedInsert("INSERT INTO x (id) VALUES ", "(%s)")
+    await DMLDatabase(raw).insert_prepared(template, [(1,)], max_rows=10)
+    raw.insert_prepared.assert_awaited_once_with(
+        template,
+        [(1,)],
+        max_rows=10,
+    )
+    with pytest.raises(ValueError, match="DML"):
+        await DMLDatabase(raw).insert_prepared(
+            PreparedInsert("DROP TABLE x; INSERT INTO x VALUES ", "(%s)"),
+            [(1,)],
+        )
+
+
 @pytest.mark.parametrize(
     "defect",
     [

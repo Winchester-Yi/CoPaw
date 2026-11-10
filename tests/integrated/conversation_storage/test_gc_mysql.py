@@ -137,6 +137,7 @@ async def protect(db, gc, publication, session, chat, kind):
             db,
             "swe_chat_shares",
             {
+                "service_unit_key": gc.scope.sql_values[0],
                 "token": "permanent",
                 "chat_id": "chat",
                 "creator_id": "alice",
@@ -492,8 +493,9 @@ async def test_gc_does_not_reverse_session_publication_lock_order(
     writer_task = asyncio.create_task(writer())
     await session_locked.wait()
     try:
-        await asyncio.wait_for(gc.mark(publication), 3)
-        await asyncio.wait_for(writer_task, 3)
+        # This checks lock order, not a three-second remote database SLO.
+        await asyncio.wait_for(gc.mark(publication), 30)
+        await asyncio.wait_for(writer_task, 30)
     finally:
         if not writer_task.done():
             writer_task.cancel()

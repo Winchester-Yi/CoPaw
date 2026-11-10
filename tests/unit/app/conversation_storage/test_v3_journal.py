@@ -124,6 +124,35 @@ async def test_hydrate_rebuilds_lost_external_mirror():
     assert frozen.data["assignments"]["publication"]["svc/body"] == assigned
 
 
+@pytest.mark.parametrize(
+    ("sql_state", "expected"),
+    [("prepared", "importing"), ("committed", "committed")],
+)
+async def test_hydrate_rebuilds_batch_state_from_sql_after_mirror_loss(
+    sql_state,
+    expected,
+):
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    db, frozen = Database(), manifest()
+    db.entries.append(
+        {
+            "id": 84,
+            "migration_id": b"00000000-0000-0000-0000-000000000001",
+            "entry_kind": b"batch",
+            "source_key": b"svc/session/0",
+            "state": sql_state,
+            "target_id": None,
+            "operation_key": None,
+            "details_text": None,
+        },
+    )
+
+    await MigrationJournal(db, frozen).hydrate()
+
+    assert frozen.data["batches"] == {"svc/session/0": expected}
+
+
 async def test_first_job_refuses_unknown_business_rows():
     from swe.app.conversation_storage.migration.journal import MigrationJournal
 

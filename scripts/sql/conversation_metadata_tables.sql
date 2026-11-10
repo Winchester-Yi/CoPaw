@@ -19,6 +19,10 @@
 -- All times UTC DATETIME(6). Identities are exact UTF-8 bytes, never hashes.
 -- TEXT fields contain application-validated serialized metadata, never SQL JSON types.
 -- Bodies, tool arguments/results, summaries and recovery payloads remain on NAS.
+-- 2026-11-09 Chat projection amendment: external_session_key is copied from
+-- the locked Session; status is maintained with Turn authority changes.
+-- metadata_text remains the bounded nine-key display projection (40 KiB).
+-- This CREATE script is not an ALTER/backfill procedure for existing tables.
 
 CREATE TABLE swe_conversation_sessions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '内部自增主键',
@@ -58,6 +62,7 @@ CREATE TABLE swe_conversation_chats (
     service_unit_key VARBINARY(256) NOT NULL COMMENT '所属服务单元原值，与关联Session同事务维护，不由客户端指定',
     session_id BIGINT UNSIGNED NOT NULL COMMENT '关联逻辑Session内部ID，由应用事务校验关联和作用域',
     external_chat_key VARBINARY(128) NOT NULL COMMENT '保留现有外部Chat UUID，不替换为数据库整数ID',
+    external_session_key VARBINARY(1024) NOT NULL COMMENT '同事务复制Session外部ID，供无关联摘要查询',
     registry_order BIGINT UNSIGNED NOT NULL COMMENT '原registry位置；新增记录递增分配，兼容相同更新时间的选择顺序',
     tenant_key VARBINARY(256) NOT NULL COMMENT '租户标识原值，按UTF-8字节精确匹配',
     source_key VARBINARY(256) NOT NULL COMMENT 'Chat所属来源标识，与关联Session同事务维护',

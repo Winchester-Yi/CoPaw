@@ -1,5 +1,13 @@
 # 会话存储入口审计
 
+2026-11-06 最新[SQL 契约与实施拆解](../../docs/superpowers/specs/2026-11-06-conversation-sql-contract-review.md)给出单来源表 CREATE 草案与列矩阵：Chat 不增加重复 checkpoint source head；publication 的 archive/checkpoint/event 分角色定位，GC 明确区分 bundle/legacy_index。Chat 状态投影需覆盖 reserve/Stop/reject/settling，保留原终态/历史 updated_at 行为。合成 16,385 文件描述约 4.56 MB，仅证明清单增长，不是业务规模或延迟验收；DDL 未执行。
+2026-11-06 用户要求减少关联、允许反规范化后，最新[单来源表方案](../../docs/superpowers/specs/2026-11-06-conversation-denormalized-schema-design.md)替代 objects/views/parts 三表优先建议：旧内容使用 legacy_sources 和内联无正文 manifest，新 bundle 继续现有 Publication/pins/GC；Chat 冗余外部 Session ID、轻量 meta 及同事务展示状态，避免摘要关联。复杂 manifest 容量、状态 writer 全覆盖及混合恢复仍需验收；未建表、未改 runtime。
+2026-11-06 [实际库结构审计](../../docs/superpowers/reports/2026-11-06-conversation-database-schema-audit.md)只读确认 copaw_dev 六会话表缺 service_unit_key、14 项索引列序列与 worktree 不符、原分享仅八列、两控制表不存在；六表无记录，分享有三条。推荐[内容定位三表设计](../../docs/superpowers/specs/2026-11-06-conversation-content-schema-design.md)：保留业务身份/状态模型，分离 publication 操作与真实 object、组合 view；普通消息直接定位，不另增每消息 ref+part。未改数据库或运行时代码，不能把该库当作已完成预建/迁移验收。
+
+2026-11-06 [调整方案与分期计划](../../docs/superpowers/specs/2026-11-06-conversation-metadata-only-adjustment-design.md)按 P0 契约验证 → P1 纯 SQL/已有列投影/CLI → P2 旧内容只读 → P3 元数据同步 → P4 全入口混合引用 → P5 真实验收推进。复杂 ledger/checkpoint 恢复不能伪装成单字节范围；安装计划也需从 bundle 转入 SQL。专用 update_title 已为纯 SQL，仍需调整完整 Chat 创建/更新，不能笼统归为所有改名写 NAS。
+
+2026-11-06 最新需求复核见[目标对齐报告](../../docs/superpowers/reports/2026-11-06-conversation-migration-goal-alignment-review.md)：用户要求只同步元数据、原 NAS 内容继续原位使用。当前导入仍复制原件并重打包 bundle；SQL runtime 不直接读旧格式，尚不符合这一严格目标。此前“原 NAS 保留”仅证明未覆盖旧文件，不能当作纯元数据同步已实现。v3 CLI 验证是核心切换阻断；八项自研恢复失败单列灾备缺陷。
+
 2026-11-01，Asia/Shanghai。对象为迁移分支当前实现；本清单不是目标环境验收。
 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql` 后数据库不可用即拒绝服务，不回退
 旧文件。业务 workspace 与 NAS 根复用原有目录。
@@ -164,3 +172,14 @@ checkpoint 完整遍历改为逐页引用保护；固定 high、版本复核、�
 - 原单次 lease/3 SQL 总预算、同池一个动态控制位置与取消隔离保留；移除本地周期 25 秒停止和 admission 时间拒绝。普通业务 SQL/模型发布错误不能套用心跳重试策略。故障期间业务保存仍可能失败，恢复仍需 stopped/drained 证据；数据库 fencing 无法撤销外部工具副作用。
 - 不改 DDL/NAS/HTTP 格式。旧代码仍按严格租期拒绝，部署需使用一致版本；真实 MySQL、驱动版本和跨 Pod 验收仍需专用环境。
 - 当前软租约包扩大回归 1084 passed、51 skipped（专用 MySQL 库未配置），pre-commit 通过；按用户指令提交本包，真实环境仍待验收。
+
+
+### 2026-11-06 真实 MySQL 验收入口
+
+- 见[验收报告](../../docs/superpowers/reports/2026-11-06-conversation-real-mysql-acceptance.md)。使用随机专用 schema、MySQL 8.0.46 和隔离安装的 manifest 驱动 26.7.0；共享 venv 未升级、业务 schema 未作为目标。历史记录中的“未配置库跳过”是当时结果，当前证据以本报告为准。
+- checkpoint 的 16 项真实库边界已通过；查询计划需使用当前必填 service_unit_key，七条关键查询命中索引，管理员全量仍有 filesort。SQL 估算与调用次数不能代替延迟或生产规模验收。
+- 恢复失败从 backup.restore_backup → _verify_restored_readers → session/projection/share reader → RetentionStore.finish_reader 排查。安装事务内创建 reader release 子任务会继承父任务 SQL 上下文，被 DatabaseSession task ownership 拒绝。不能删除 ownership 检查或另开连接读取未提交行来绕过；修复须保留完整验读、失败原子回滚与取消时的 IO/pin 生命周期。
+- v3 CLI verify 的另一路失败从 conversation_storage_v3_cmd._execute → DMLDatabase → verify_import → ReadOnlyDatabase.acquire 排查：DMLDatabase 没有 acquire，无法提供批查所需的 session/packet 能力。不能简单透传裸 session 绕过 DML/只读策略，修复后必须跑到 finalize/ready。最终去重结果为 335 passed、9 failed、1 skipped（345 项，其中 287 项使用真实库 fixture）；8 项恢复失败和 1 项 CLI 验证失败仍未解决。
+- 两个阻断的[原因与修复草案](../../docs/superpowers/specs/2026-11-06-conversation-offline-verification-blockers-design.md)建议先补 DML 的受限 acquire/session，再让恢复验读复用离线 ReadOnlyRetention。仅把 release 移回当前任务仍会给恢复元数据添加 reader tombstone；仅验证 reader 前的元数据相等不足以发现此问题。须覆盖验读前后 retention 内容/自增不变、六类 reader 注入、原事务内取消 drain/回滚和完整 CLI finalize。当前只有最小根因复现，尚未实施运行时修复。
+- 真实 SQL 测试不能靠缩短 lease 来加速心跳：lease/3 同时决定 SQL 总预算，0.001 秒会变成约 0.00033 秒预算和重试周期。终态竞争应在真实提交后注入，保留正常 SQL 预算并单独限制测试整体等待。远程连接故障要与实现断言失败区分，保留原日志后定向复测。
+- 本轮正文 IO 使用本地临时目录，不覆盖跨节点 NAS、Kubernetes 多 Pod、真实小 packet、DML 最小权限和现有 workspace/secret 启动。Compact 延期决定不变。
