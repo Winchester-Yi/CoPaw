@@ -277,6 +277,34 @@ async def test_reader_releases_pin_after_content_read_exception():
     assert db.pins[0]["state"] == "released"
 
 
+async def test_reader_pin_release_stays_in_transaction_owner_task():
+    class TaskOwnedRetentionDatabase(RetentionDatabase):
+        def __init__(self):
+            super().__init__()
+            self.owner = None
+
+        @asynccontextmanager
+        async def transaction(self):
+            if self.depth == 0:
+                self.owner = asyncio.current_task()
+            async with super().transaction():
+                yield self
+
+        async def execute(self, query, params):
+            if self.depth and asyncio.current_task() is not self.owner:
+                raise RuntimeError(
+                    "database session belongs to a different task",
+                )
+            return await super().execute(query, params)
+
+    db = TaskOwnedRetentionDatabase()
+    service = store(db)
+    async with db.transaction():
+        batch = await service.pin([1], kind="reader")
+        await service.finish_reader(batch)
+    assert db.pins[0]["state"] == "released"
+
+
 async def test_dependency_must_point_to_older_committed_publication():
     db = RetentionDatabase()
     db.objects[3]["state"] = "prepared"

@@ -4,7 +4,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from hashlib import sha256
 from typing import Any
 
@@ -84,6 +84,16 @@ class DatabaseConnection:
         if session is not None:
             session._check()
         return session
+
+    @property
+    def has_current_session(self):
+        return self._current() is not None
+
+    def create_independent_task(self, coroutine):
+        """Start work without inheriting database sessions from this task."""
+        context = copy_context()
+        context.run(_CURRENT_CONNECTION.set, {})
+        return context.run(asyncio.create_task, coroutine)
 
     @contextmanager
     def control_priority(self):

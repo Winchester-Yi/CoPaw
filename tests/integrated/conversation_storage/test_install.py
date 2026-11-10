@@ -132,6 +132,41 @@ def test_partial_verification_report_rejected(tmp_path):
         )
 
 
+def test_verification_coverage_omits_reconstructed_source_artifacts(tmp_path):
+    from swe.app.conversation_storage.migration.install import (
+        check_verification,
+    )
+
+    inventory = {
+        "workspaces": [
+            {
+                "scope": ["service", "tenant", "source", "agent"],
+                "sessions": [],
+                "chats": [],
+            },
+        ],
+        "shares": [],
+        "files": [
+            {"workspace": 0, "path": "chats.json"},
+            {"workspace": 0, "path": "sessions/alice/session.json"},
+        ],
+    }
+    retained = "service:service/source-artifact:0/sessions/alice/session.json"
+    check_verification(
+        {"passed": True, "blockers": [], "checked": [retained]},
+        inventory,
+    )
+    with pytest.raises(ValueError, match="coverage"):
+        check_verification(
+            {
+                "passed": True,
+                "blockers": [],
+                "checked": [retained, retained],
+            },
+            inventory,
+        )
+
+
 async def test_cross_server_staging_rejected_before_ddl(tmp_path):
     from swe.app.conversation_storage.migration.install import (
         ConversationInstaller,

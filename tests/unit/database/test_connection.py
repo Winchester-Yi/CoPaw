@@ -214,6 +214,22 @@ async def test_cross_database_and_child_task_binding(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_independent_task_does_not_inherit_database_session(db):
+    session = object()
+    token = module._CURRENT_CONNECTION.set({db: session})
+    try:
+
+        async def current_session():
+            return db._current()
+
+        task = db.create_independent_task(current_session())
+        assert await task is None
+        assert module._CURRENT_CONNECTION.get() == {db: session}
+    finally:
+        module._CURRENT_CONNECTION.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_saturated_pool_wait_is_cancellable_and_session_expires(db):
     async with db.acquire() as session:
         waiter = contextvars.Context().run(

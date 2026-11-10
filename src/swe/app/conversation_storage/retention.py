@@ -465,15 +465,25 @@ class RetentionStore:
             await self.finish_reader(batch)
 
     async def finish_reader(self, batch: PinBatch):
-        """Drain and release outside the locator snapshot SQL transaction."""
+        """Drain IO, then release on the active database session's task."""
         cancelled = await batch.drain()
-        release = asyncio.create_task(self.release(batch.retention_key))
-        while not release.done():
+        if getattr(self.db, "has_current_session", False):
+            await self.release(batch.retention_key)
+        elif hasattr(self.db, "create_independent_task"):
+            release = self.db.create_independent_task(
+                self.release(batch.retention_key),
+            )
+            while not release.done():
+                try:
+                    await asyncio.shield(release)
+                except asyncio.CancelledError:
+                    cancelled = True
+            release.result()
+        else:
             try:
-                await asyncio.shield(release)
+                await self.release(batch.retention_key)
             except asyncio.CancelledError:
                 cancelled = True
-        release.result()
         if cancelled:
             raise asyncio.CancelledError
 

@@ -2,12 +2,20 @@
 """Execute the exact six-table DDL in a generated isolated MySQL schema."""
 
 from datetime import datetime
+from fnmatch import fnmatchcase
 import re
 
 import pytest
 from mysql.connector.errors import IntegrityError, ProgrammingError
 
 from swe.app.chat_sharing.store import ChatShareStore
+from swe.app.conversation_storage.schema_contract import (
+    CHARSETS,
+    COLUMNS,
+    DEFAULTS,
+    EXTRAS,
+    INDEXES,
+)
 from tests.integrated.conversation_storage.conftest import (
     SQL_ROOT,
     TABLES,
@@ -106,40 +114,74 @@ async def test_mysql_capabilities_and_exact_six_table_schema(
     )
     assert server["time_zone"] == "+00:00"
     columns = await db.fetch_all(
-        "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_COMMENT "
+        "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_COMMENT, "
+        "COLUMN_DEFAULT, EXTRA, CHARACTER_SET_NAME, COLLATION_NAME "
         "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
         "ORDER BY TABLE_NAME, ORDINAL_POSITION",
     )
-    assert len(columns) == 158
     assert {row["TABLE_NAME"] for row in columns} == set(TABLES)
-    draft = (SQL_ROOT / "conversation_metadata_tables.sql").read_text(
+    ddl = (SQL_ROOT / "conversation_metadata_tables.sql").read_text(
         encoding="utf-8",
     )
-    expected = {}
+    expected_comments = {}
     for table, body in re.findall(
         r"CREATE TABLE (\w+) \((.*?)\) ENGINE",
-        draft,
+        ddl,
         re.S,
     ):
-        for name, sql_type, attributes, comment in re.findall(
-            r"^    (\w+) ((?:BIGINT|VARBINARY|DATETIME|TEXT|MEDIUMTEXT|TINYINT|VARCHAR)(?:\(\d+\))?(?: UNSIGNED)?) (.*?) COMMENT '([^']*)',?$",
+        for name, comment in re.findall(
+            r"^    (\w+) .*? COMMENT '((?:[^']|'')*)',?$",
             body,
             re.M,
         ):
-            expected[table, name] = (
-                sql_type.lower(),
-                "NO" if "NOT NULL" in attributes else "YES",
-                comment,
-            )
-    assert len(expected) == 157
+            expected_comments[table, name] = comment
+    expected_columns = {
+        (table, name): definition
+        for table, definitions in COLUMNS.items()
+        for name, definition in definitions.items()
+    }
+    assert set(expected_comments) == set(expected_columns)
+    assert len(columns) == len(expected_columns)
+    actual_order = {table: [] for table in COLUMNS}
     for row in columns:
+        identity = row["TABLE_NAME"], row["COLUMN_NAME"]
+        actual_order[row["TABLE_NAME"]].append(row["COLUMN_NAME"])
+        expected_type, expected_nullable = expected_columns[identity]
+        assert row["COLUMN_TYPE"].lower() == expected_type
+        assert row["IS_NULLABLE"] == expected_nullable
+        assert row["COLUMN_COMMENT"] == expected_comments[identity]
+        table, name = identity
+        assert row["COLUMN_DEFAULT"] == DEFAULTS[table].get(name)
+        assert row["EXTRA"] == EXTRAS[table].get(name, "")
+        charset, collation = CHARSETS[table][name]
+        assert row["CHARACTER_SET_NAME"] == charset
         assert (
-            row["COLUMN_TYPE"],
-            row["IS_NULLABLE"],
-            row["COLUMN_COMMENT"],
-        ) == expected[row["TABLE_NAME"], row["COLUMN_NAME"]]
+            row["COLLATION_NAME"] is None
+            if collation is None
+            else fnmatchcase(row["COLLATION_NAME"], collation)
+        )
         assert re.search("[\u4e00-\u9fff]", row["COLUMN_COMMENT"])
+    assert actual_order == {
+        table: list(definitions) for table, definitions in COLUMNS.items()
+    }
     for table in TABLES:
+        indexes = await db.fetch_all(
+            "SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX "
+            "FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME=%s ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+            (table,),
+        )
+        actual_indexes = {}
+        for index in indexes:
+            entry = actual_indexes.setdefault(
+                index["INDEX_NAME"],
+                [int(index["NON_UNIQUE"]), []],
+            )
+            entry[1].append(index["COLUMN_NAME"])
+        assert {
+            name: (unique, tuple(names))
+            for name, (unique, names) in actual_indexes.items()
+        } == INDEXES[table]
         create = await db.fetch_one(f"SHOW CREATE TABLE {table}")
         ddl = create["Create Table"]
         assert "ENGINE=InnoDB" in ddl and "ROW_FORMAT=DYNAMIC" in ddl

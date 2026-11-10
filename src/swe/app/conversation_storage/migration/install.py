@@ -48,23 +48,16 @@ def _table(schema, name):
 def check_verification(report, inventory):
     if not report.get("passed") or report.get("blockers"):
         raise ValueError("full migration verification has blockers")
-    expected = [
-        item["position"]
-        for workspace in inventory["workspaces"]
-        for kind in ("sessions", "chats")
-        for item in workspace[kind]
-    ]
-    expected += [item["position"] for item in inventory["shares"]]
-    expected += [
-        "service:"
-        + inventory["workspaces"][item["workspace"]]["scope"][0]
-        + "/source-artifact:"
-        + str(item["workspace"])
-        + "/"
-        + item["path"]
-        for item in inventory["files"]
-    ]
-    if sorted(report.get("checked", [])) != sorted(expected):
+    from .importer import verification_positions
+
+    expected = verification_positions(inventory)
+    checked = report.get("checked", [])
+    if (
+        not isinstance(checked, list)
+        or not all(isinstance(position, str) for position in checked)
+        or len(checked) != len(set(checked))
+        or sorted(checked) != sorted(expected)
+    ):
         raise ValueError("migration verification coverage is incomplete")
 
 

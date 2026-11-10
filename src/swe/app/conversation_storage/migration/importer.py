@@ -83,6 +83,30 @@ def artifact_is_reconstructed(item, workspace):
     return False
 
 
+def verification_positions(inventory):
+    """Return the exact objects that semantic verification must report."""
+    positions = [
+        item["position"]
+        for workspace in inventory["workspaces"]
+        for kind in ("sessions", "chats")
+        for item in workspace[kind]
+    ]
+    positions.extend(item["position"] for item in inventory["shares"])
+    for item in inventory.get("files", []):
+        workspace = inventory["workspaces"][item["workspace"]]
+        if artifact_is_reconstructed(item, workspace):
+            continue
+        positions.append(
+            "service:"
+            + workspace["scope"][0]
+            + "/source-artifact:"
+            + str(item["workspace"])
+            + "/"
+            + item["path"],
+        )
+    return positions
+
+
 def _entry(
     payload,
     layer,
