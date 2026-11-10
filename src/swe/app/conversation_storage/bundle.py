@@ -399,9 +399,14 @@ class BundleStore:
         blocks: list[BundleBlock],
         *,
         scope: WorkspaceScope | None = None,
+        scope_kind=None,
         metadata: dict | None = None,
     ) -> BundleIndex:
-        relative_path = self.path_for(operation_key, scope)
+        relative_path = self.path_for(
+            operation_key,
+            scope,
+            scope_kind=scope_kind,
+        )
         metadata_value = metadata if metadata is not None else {}
         _validate_metadata(metadata_value)
         metadata_bytes = _json_bytes(metadata_value)

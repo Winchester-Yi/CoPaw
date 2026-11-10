@@ -36,11 +36,6 @@ async def setup(db, root, *, state="committed", scope_kind="workspace"):
     )
     bundles = BundleStore(root)
     operation = new_operation_key()
-    index = bundles.publish(
-        operation,
-        [BundleBlock("body", "message", b"body")],
-        metadata={"operation_key": operation},
-    )
     scope = (
         WorkspaceScope(
             "tenant",
@@ -55,6 +50,13 @@ async def setup(db, root, *, state="committed", scope_kind="workspace"):
             "",
             service_unit_id="schema-test-service",
         )
+    )
+    index = bundles.publish(
+        operation,
+        [BundleBlock("body", "message", b"body")],
+        scope=scope,
+        scope_kind=scope_kind,
+        metadata={"operation_key": operation},
     )
     session = await insert_session(db) if scope_kind == "workspace" else None
     chat = await insert_chat(db, session) if session else None
@@ -90,7 +92,10 @@ async def protect(db, gc, publication, session, chat, kind):
             db,
             operation.encode(),
             state="committed",
-            relative_path=gc.bundles.path_for(operation).encode(),
+            relative_path=gc.bundles.path_for(
+                operation,
+                gc.scope,
+            ).encode(),
         )
         await gc.retentions.add_dependencies(newer, [publication])
     elif kind == "root":
@@ -174,7 +179,10 @@ async def protect(db, gc, publication, session, chat, kind):
                 db,
                 operation.encode(),
                 state="committed",
-                relative_path=gc.bundles.path_for(operation).encode(),
+                relative_path=gc.bundles.path_for(
+                    operation,
+                    gc.scope,
+                ).encode(),
                 session_id=session,
                 chat_id=chat,
             )
@@ -217,7 +225,9 @@ async def test_each_live_reference_prevents_mark_and_reports_reason(
     with pytest.raises(ConflictError, match="protected"):
         await gc.mark(publication)
     assert (await gc._row(publication))["gc_state"] == "live"
-    assert (tmp_path / gc.bundles.path_for(report[0].operation_key)).is_file()
+    assert (
+        tmp_path / gc.bundles.path_for(report[0].operation_key, gc.scope)
+    ).is_file()
 
 
 async def test_report_only_does_not_mutate_and_explicit_reclaim_preserves_tombstone(
@@ -305,13 +315,17 @@ async def test_unlink_failure_stays_deleting_and_dependencies_release_only_after
         db,
         operation.encode(),
         state="committed",
-        relative_path=gc.bundles.path_for(operation).encode(),
+        relative_path=gc.bundles.path_for(
+            operation,
+            gc.scope,
+        ).encode(),
     )
     # Dependencies must point backwards: use a new publication as the GC source.
     operation = new_operation_key()
     index = gc.bundles.publish(
         operation,
         [BundleBlock("body", "message", b"new")],
+        scope=gc.scope,
     )
     newer = await insert_publication(
         db,
@@ -446,13 +460,18 @@ async def test_aborted_tombstone_rescans_exact_late_file(
     await gc.reclaim(publication, proof=proof)
     # Simulate an already queued NAS write surfacing after the first unlink.
     operation = proof.operation_key
-    gc.bundles.publish(operation, [BundleBlock("body", "message", b"late")])
+    gc.bundles.publish(
+        operation,
+        [BundleBlock("body", "message", b"late")],
+        scope=gc.scope,
+    )
     other = gc.bundles.publish(
         new_operation_key(),
         [BundleBlock("body", "message", b"keep")],
+        scope=gc.scope,
     )
     await gc.reclaim(publication, proof=proof)
-    assert not (tmp_path / gc.bundles.path_for(operation)).exists()
+    assert not (tmp_path / gc.bundles.path_for(operation, gc.scope)).exists()
     assert (tmp_path / other.relative_path).is_file()
     assert (await gc._row(publication))["gc_state"] == "reclaimed"
 
@@ -545,8 +564,8 @@ async def test_mark_waits_for_concurrent_pin_then_preserves_bundle(
         assert (await gc._row(publication))["gc_state"] == "live"
         assert (
             tmp_path
-            / gc.bundles.path_for(
-                (await gc._row(publication))["operation_key"].decode(),
+            / BundleStore.path_for_row(
+                await gc._row(publication),
             )
         ).is_file()
         await gc.retentions.release(batch.retention_key)

@@ -356,10 +356,13 @@ async def test_stop_wins_over_ended_unknown_completed_publication(
     await execution.__aexit__(None, None, None)
     await query.finish("failed")
     assert query.terminal_status == "stopped"
-    assert (await storage.publications.get(operation))["state"] == "aborted"
+    publication = await storage.publications.get(operation)
+    assert publication["state"] == "aborted"
     assert (
         storage.publications.bundles.inspect(
-            storage.publications.bundles.path_for(operation),
+            storage.publications.bundles.validate_publication_locator(
+                publication,
+            ),
         ).byte_length
         > 0
     )
@@ -617,7 +620,10 @@ async def test_restart_recovery_rejects_wrong_incarnation_and_preserves_unreadab
         True,
         service_unit_id="schema-test-service",
     )
-    path = storage.bundles.root / storage.bundles.path_for(operation)
+    publication = await storage.publications.get(operation)
+    path = storage.bundles.root / storage.bundles.validate_publication_locator(
+        publication,
+    )
     path.write_bytes(b"truncated")
     with pytest.raises(IntegrityError, match="truncated|length"):
         await service.recover(identity(), authority.turn_id, proof)

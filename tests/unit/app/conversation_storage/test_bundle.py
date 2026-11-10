@@ -85,6 +85,35 @@ def test_bundle_path_uses_tenant_source_scope_without_agent(tmp_path):
     )
 
 
+def test_bundle_publish_accepts_explicit_legacy_share_scope_kind(tmp_path):
+    store = BundleStore(tmp_path)
+    operation = new_operation_key()
+    scope = WorkspaceScope(
+        "tenant",
+        "",
+        "",
+        service_unit_id="svc",
+    )
+
+    index = store.publish(
+        operation,
+        [BundleBlock("share", "share", b"snapshot")],
+        scope=scope,
+        scope_kind="legacy_share",
+    )
+
+    assert index.relative_path == (
+        f"bundles/legacy-share/{operation[:2]}/{operation}.bundle"
+    )
+    row = {
+        **scope.fields,
+        "scope_kind": "legacy_share",
+        "operation_key": operation.encode(),
+        "relative_path": index.relative_path.encode(),
+    }
+    assert BundleStore.validate_publication_locator(row) == index.relative_path
+
+
 def test_bundle_locator_is_bound_to_scope_and_operation():
     scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
     operation = "ab" + "0" * 62

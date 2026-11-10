@@ -436,6 +436,7 @@ class PublicationStore(PublicationAssociations):
             operation_key,
             blocks,
             scope=request.scope,
+            scope_kind=request.scope_kind,
             metadata={"operation_key": operation_key},
         )
         await self._mark_durable(operation_key, index)
