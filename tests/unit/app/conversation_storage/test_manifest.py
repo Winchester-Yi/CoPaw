@@ -169,6 +169,44 @@ def test_manifest_rejects_reused_operation_keys(tmp_path):
         MigrationManifest.load(manifest.path)
 
 
+def test_publication_assignment_scope_is_immutable(tmp_path):
+    from swe.app.conversation_storage.identity import WorkspaceScope
+
+    manifest = MigrationManifest.create(
+        tmp_path / "migration.json",
+        boundary(),
+        [],
+    )
+    scope = WorkspaceScope(
+        "tenant",
+        "source",
+        "agent-a",
+        service_unit_id="svc",
+    )
+    original = manifest.allocate(
+        "publication",
+        "publication:body",
+        scope=scope,
+    )
+
+    with pytest.raises(ValueError, match="scope is immutable"):
+        manifest.allocate(
+            "publication",
+            "publication:body",
+            scope=WorkspaceScope(
+                "tenant",
+                "source",
+                "agent-b",
+                service_unit_id="svc",
+            ),
+        )
+
+    assert (
+        manifest.data["assignments"]["publication"]["publication:body"]
+        == original
+    )
+
+
 @pytest.mark.parametrize("tamper", ["operation", "target_id", "remove"])
 def test_stale_manifest_instance_rejects_changed_or_removed_known_assignment(
     tmp_path,

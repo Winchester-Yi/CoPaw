@@ -234,6 +234,21 @@ def test_source_change_blocker_survives_manifest_reload(tmp_path):
         == cutoff
     )
     assert loaded.data["source_change_blockers"] == [blocker]
+    loaded.data["assignments"]["publication"] = {
+        "legacy-ticket": {
+            "target_id": 1,
+            "operation_key": "a" * 64,
+            "relative_path": None,
+        },
+    }
+    loaded._persist()
+    resumed = V3Manifest.load(manifest_path)
+    assert (
+        resumed.data["assignments"]["publication"]["legacy-ticket"][
+            "relative_path"
+        ]
+        is None
+    )
 
 
 def test_freeze_rejects_modified_discovery_identity(tmp_path):

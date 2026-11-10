@@ -126,6 +126,24 @@ class MigrationManifest:
             raise ValueError("invalid or duplicate target identity")
         identities.add(target)
         if kind == "publication":
+            if (
+                "scope" not in assignment
+                and "scope_kind" not in assignment
+                and assignment["relative_path"] is None
+            ):
+                operation = assignment["operation_key"]
+                if (
+                    not isinstance(operation, str)
+                    or len(operation) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in operation
+                    )
+                ):
+                    raise ValueError(
+                        "unscoped publication operation is invalid",
+                    )
+                return
             scope = WorkspaceScope.from_values(assignment["scope"])
             expected = BundleStore.path_for(
                 assignment["operation_key"],
@@ -263,8 +281,21 @@ class MigrationManifest:
                     raise ValueError(
                         "publication assignment requires its scope",
                     )
-                assignments[source_position]["scope"] = list(scope.values)
-                assignments[source_position]["scope_kind"] = scope_kind
+                assignment = assignments[source_position]
+                scope_values = list(scope.values)
+                if "scope" in assignment and (
+                    assignment["scope"] != scope_values
+                    or assignment.get("scope_kind") != scope_kind
+                ):
+                    raise ValueError(
+                        "publication assignment scope is immutable",
+                    )
+                if "scope_kind" in assignment and "scope" not in assignment:
+                    raise ValueError(
+                        "publication assignment has incomplete scope metadata",
+                    )
+                assignment["scope"] = scope_values
+                assignment["scope_kind"] = scope_kind
                 assignments[source_position]["relative_path"] = (
                     BundleStore.path_for(
                         assignments[source_position]["operation_key"],

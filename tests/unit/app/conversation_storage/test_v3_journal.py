@@ -128,6 +128,51 @@ async def test_hydrate_rebuilds_lost_external_mirror():
     assert frozen.data["assignments"]["publication"]["svc/body"] == assigned
 
 
+async def test_hydrate_backfills_ticket_scope_from_manifest_assignment():
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    db, frozen = Database(), manifest()
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    assigned = await MigrationJournal(db, frozen).allocate(
+        "publication",
+        "svc/body",
+        scope=scope,
+    )
+    db.entries[0]["details_text"] = None
+
+    await MigrationJournal(db, frozen).hydrate()
+
+    assert db.entries[0]["details_text"] is not None
+    assert frozen.data["assignments"]["publication"]["svc/body"] == assigned
+
+
+async def test_hydrate_defers_legacy_ticket_until_import_scope_is_available():
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    db, frozen = Database(), manifest()
+    journal = MigrationJournal(db, frozen)
+    scope = WorkspaceScope("tenant", "source", "agent", service_unit_id="svc")
+    assigned = await journal.allocate("publication", "svc/body", scope=scope)
+    db.entries[0]["details_text"] = None
+    frozen.data["assignments"]["publication"]["svc/body"] = {
+        "target_id": assigned["target_id"],
+        "operation_key": assigned["operation_key"],
+        "relative_path": "bundles/aa/" + assigned["operation_key"] + ".bundle",
+    }
+
+    await journal.hydrate()
+    unresolved = frozen.data["assignments"]["publication"]["svc/body"]
+    assert unresolved["operation_key"] == assigned["operation_key"]
+    assert unresolved["relative_path"] is None
+    assert db.entries[0]["details_text"] is None
+
+    resumed = await journal.allocate("publication", "svc/body", scope=scope)
+    assert resumed["relative_path"] == assigned["relative_path"]
+    assert db.entries[0]["details_text"] is not None
+
+
 @pytest.mark.parametrize(
     ("sql_state", "expected"),
     [("prepared", "importing"), ("committed", "committed")],

@@ -39,7 +39,12 @@ class V3Manifest(MigrationManifest):
                 raise ValueError("unknown assignment kind")
             identities = set()
             for source, assignment in assignments.items():
-                self._validate_assignment(source, assignment, identities)
+                self._validate_assignment(
+                    kind,
+                    source,
+                    assignment,
+                    identities,
+                )
         if any(
             value not in TRANSITIONS for value in self.data["batches"].values()
         ):
