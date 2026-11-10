@@ -204,6 +204,14 @@ def _profiles(service, report):
     configs = [Path(service["config_root"]) / "config.json"]
     configs.extend(sorted(Path(service["config_root"]).glob("*/config.json")))
     for config in configs:
+        if config.is_symlink():
+            _block(
+                report,
+                "source_invalid",
+                str(config),
+                "source contains symlink; explicit regular-file snapshot required",
+            )
+            continue
         if not config.exists():
             continue
         try:
@@ -221,7 +229,16 @@ def _profiles(service, report):
                     config,
                     service,
                 )
-                if _read_json(frozen / "agent.json")["id"] != key:
+                agent_metadata = frozen / "agent.json"
+                if agent_metadata.is_symlink():
+                    _block(
+                        report,
+                        "source_invalid",
+                        str(agent_metadata),
+                        "source contains symlink; explicit regular-file snapshot required",
+                    )
+                    continue
+                if _read_json(agent_metadata)["id"] != key:
                     raise ValueError(
                         "profile and agent.json identities disagree",
                     )
