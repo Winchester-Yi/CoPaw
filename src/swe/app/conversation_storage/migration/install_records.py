@@ -322,6 +322,45 @@ class OfflineImportStore(PublicationStore):
         from .offline_commit import OfflineCommitStages
 
         self._commit_stages = OfflineCommitStages(self)
+        from .offline_verify import OfflineVerifyStages
+
+        self._verify_stages = OfflineVerifyStages(self)
+
+    async def prepare_verify_batch(self, *args):
+        return await self._verify_stages.prepare(*args)
+
+    async def prepare_verify_blocks(self, operation_key, blocks):
+        return await self._verify_stages.prepare_blocks(operation_key, blocks)
+
+    async def read_verify_evidence(self, ticket, io):
+        return await self._verify_stages.read(ticket, io)
+
+    async def capture_verify_recovery(self, evidence):
+        return await self._verify_stages.capture_recovery(evidence)
+
+    async def compare_verify_recovery(self, capture, io):
+        return await self._verify_stages.compare_recovery(capture, io)
+
+    async def commit_verify_evidence(self, evidence):
+        return await self._verify_stages.verify(evidence)
+
+    async def release_verify_recovery(self, capture):
+        return await self._verify_stages.release_recovery(capture)
+
+    async def close_verify_stages(self):
+        await self._verify_stages.close()
+
+    async def read_write_recovery(self, ticket, io):
+        return await self._write_stages.read_recovery(ticket, io)
+
+    async def finish_write_recovery(self, ticket, evidence):
+        return await self._write_stages.finish_recovery(ticket, evidence)
+
+    async def close_migration_stages(self):
+        try:
+            await self._verify_stages.close()
+        finally:
+            await self._write_stages.close()
 
     async def prepare_commit(self, operation_key):
         return await self._commit_stages.prepare(operation_key)

@@ -216,14 +216,13 @@ async def test_cancelled_publish_drains_before_unknown(tmp_path, monkeypatch):
     )
 
 
-async def test_recovery_transform_stays_in_owner_before_ticket(
+async def test_prepare_freezes_sequence_before_sql(
     tmp_path,
     monkeypatch,
 ):
     store, operation = await prepared_store(tmp_path)
-    owner = asyncio.current_task()
-    supplied = [BundleBlock("root", "recovery", b"before")]
-    transformed = BundleBlock("root", "recovery", b"after")
+    block = BundleBlock("root", "message", b"before")
+    supplied = [block]
     validate = store._validate_prepared_references
 
     async def references(row):
@@ -231,20 +230,12 @@ async def test_recovery_transform_stays_in_owner_before_ticket(
         supplied.clear()
         return plan
 
-    async def recovery(service, row, plan, blocks):
-        assert asyncio.current_task() is owner
-        assert service is store
-        assert blocks[0].content == b"before"
-        assert not store._confirm_tickets
-        return [transformed]
-
     monkeypatch.setattr(store, "_validate_prepared_references", references)
-    monkeypatch.setattr(offline_write, "prepare_recovery_blocks", recovery)
     ticket, blocks = await store.prepare_write_bundle(
         operation.operation_key,
         supplied,
     )
-    assert blocks == (transformed,)
+    assert blocks == (block,)
     assert store._confirm_tickets[id(ticket)] is ticket
 
 
@@ -271,3 +262,202 @@ async def test_default_write_bundle_still_uses_existing_protocol(tmp_path):
     assert store.db.rows[operation.operation_key.encode()]["durable_at"]
     assert not store._confirm_tickets
     assert not store._write_stages.prepared
+
+
+async def test_turn_recovery_no_candidate_uses_raw_write_ticket(tmp_path):
+    store, operation = await prepared_store(tmp_path)
+    plan = CommitPlan(recovery_block="recovery")
+    row = store.db.rows[operation.operation_key.encode()]
+    row["kind"] = "offline_import"
+    row["session_id"] = 1
+    row["turn_id"] = 3
+    store._validate_prepared_references = AsyncMock(return_value=plan)
+    store.db.fetch_all = AsyncMock(return_value=[])
+    blocks = [
+        BundleBlock(
+            "recovery",
+            "recovery",
+            b'{"turn_states":{"new":{"status":"done"}}}',
+        ),
+    ]
+
+    ticket, prepared = await store.prepare_write_bundle(
+        operation.operation_key,
+        blocks,
+    )
+
+    assert ticket.request.turn_id == 3
+    assert prepared == tuple(blocks)
+    store.db.fetch_all.assert_awaited_once()
+
+
+async def turn_recovery_fixture(tmp_path):
+    store, operation = await prepared_store(tmp_path)
+    plan = CommitPlan(recovery_block="recovery")
+    row = store.db.rows[operation.operation_key.encode()]
+    row.update(session_id=1, turn_id=3, kind="offline_import")
+    store._validate_prepared_references = AsyncMock(return_value=plan)
+    turn = {
+        "id": 3,
+        "service_unit_key": b"schema-test-service",
+        "session_id": 1,
+        "question_msg_key": b"question",
+        "history_status": "done",
+        "terminal_publication_id": 9,
+    }
+    publication = {
+        "id": 9,
+        "service_unit_key": b"schema-test-service",
+        "session_id": 1,
+        "turn_id": 3,
+        "operation_key": b"a" * 64,
+        "relative_path": BundleStore.path_for(
+            "a" * 64,
+            operation.scope,
+        ).encode(),
+        "byte_length": 100,
+        "state": "committed",
+        "gc_state": "live",
+    }
+    store.db.fetch_all = AsyncMock(return_value=[turn])
+    original_fetch = store.db.fetch_one
+
+    async def fetch(query, params=None):
+        if "swe_conversation_turns WHERE id=" in query:
+            return dict(turn)
+        return await original_fetch(query, params)
+
+    store.db.fetch_one = fetch
+    batch = SimpleNamespace(
+        retention_key=b"reader-key",
+        publications=(publication,),
+    )
+    retentions = SimpleNamespace(
+        pin=AsyncMock(return_value=batch),
+        finish_reader=AsyncMock(),
+        _lock_publications=AsyncMock(return_value=[publication]),
+        _validate_members=AsyncMock(),
+    )
+    import swe.app.conversation_storage.migration.offline_write as module
+    from unittest.mock import patch
+
+    with patch.object(module, "RetentionStore", return_value=retentions):
+        candidate = await store.prepare_write_bundle(
+            operation.operation_key,
+            [
+                BundleBlock(
+                    "recovery",
+                    "recovery",
+                    b'{"turn_states":{"question":{"status":"done"}}}',
+                ),
+            ],
+        )
+    assert isinstance(candidate, module.TurnRecoveryTicket)
+    return store, operation, turn, batch, retentions, candidate
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "projection",
+        "missing",
+        "different",
+        "changed",
+        "cleanup",
+        "forged",
+        "cancel",
+    ],
+)
+async def test_turn_recovery_candidate_reads_and_owner_revalidates(
+    tmp_path,
+    scenario,
+):
+    store, operation, turn, batch, retentions, candidate = (
+        await turn_recovery_fixture(tmp_path)
+    )
+    from swe.app.conversation_storage.migration import offline_write as module
+
+    if scenario == "cancel":
+        entered, release = threading.Event(), threading.Event()
+        original_inspect = store.bundles.inspect
+
+        def delayed_inspect(*args, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            return original_inspect(*args, **kwargs)
+
+        store.bundles.inspect = delayed_inspect
+        async with MigrationIO(1) as io:
+            reading = asyncio.create_task(
+                store._write_stages.read_recovery(candidate, io),
+            )
+            while not entered.is_set():
+                await asyncio.sleep(0)
+            reading.cancel()
+            await asyncio.sleep(0)
+            assert not reading.done()
+            retentions.finish_reader.assert_not_awaited()
+            release.set()
+            with pytest.raises(UnknownCommit):
+                await reading
+        await store._write_stages.close()
+        retentions.finish_reader.assert_awaited_once_with(batch)
+        assert not store._write_stages.recoveries
+        return
+    if scenario == "cleanup":
+        await store._write_stages.close()
+        retentions.finish_reader.assert_awaited_once_with(batch)
+        assert not store._write_stages.recoveries
+        return
+    nas_calls = []
+    store.bundles.inspect = lambda *args, **kwargs: SimpleNamespace(
+        metadata={"operation_key": "a" * 64},
+        blocks=(
+            {}
+            if scenario == "missing"
+            else {
+                "turn:question": SimpleNamespace(
+                    kind="turn",
+                    offset=0,
+                    length=9,
+                ),
+            }
+        ),
+    )
+    store.bundles.read_extent = lambda *args, **kwargs: nas_calls.append(
+        threading.current_thread().name,
+    ) or (
+        b'{"status":"other"}'
+        if scenario == "different"
+        else b'{"status":"done"}'
+    )
+    async with MigrationIO(1) as io:
+        evidence = await store._write_stages.read_recovery(candidate, io)
+    store.bundles = ForbiddenSurface()
+    if scenario != "missing":
+        assert nas_calls and nas_calls[0].startswith("migration-io")
+    if scenario == "changed":
+        turn["terminal_publication_id"] = 99
+    if scenario == "forged":
+        evidence = replace(evidence)
+    if scenario in ("projection", "changed", "forged"):
+        message = {
+            "projection": "general projection protocol",
+            "changed": "cold Turn changed",
+            "forged": "altered recovery evidence",
+        }[scenario]
+        with pytest.raises(IntegrityError, match=message):
+            await store._write_stages.finish_recovery(candidate, evidence)
+    else:
+        ticket, prepared = await store._write_stages.finish_recovery(
+            candidate,
+            evidence,
+        )
+        assert (
+            prepared[0].content
+            == b'{"turn_states":{"question":{"status":"done"}}}'
+        )
+        assert store._confirm_tickets[id(ticket)] is ticket
+    retentions.finish_reader.assert_awaited_once_with(batch)
+    assert not store._write_stages.recoveries
+    assert not store._write_stages.recovery_evidence
