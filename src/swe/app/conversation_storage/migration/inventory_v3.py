@@ -31,6 +31,15 @@ def _source_change(position, scope, paths, cutoff):
 def _inventory_shares(data, report):
     for source in data["shares"]:
         snapshot_path = Path(source["snapshot_path"])
+        if snapshot_path.stat().st_size > MAX_READ_BYTES:
+            report["blockers"].append(
+                {
+                    "code": "share_snapshot_oversized",
+                    "position": source["position"],
+                    "detail": "share snapshot exceeds bounded reader size",
+                },
+            )
+            continue
         cutoff = data.get("tenant_sync_started_at_ns", {}).get(
             tenant_key(source["service_unit_id"], source["tenant_id"]),
         )
@@ -75,6 +84,23 @@ def _inventory_shares(data, report):
                 "snapshot_path": source["snapshot_path"],
             },
         )
+
+
+def _inventory_native_files(mapping, report, index, position):
+    for path in safe_files(mapping.root):
+        size = path.stat().st_size
+        relative = str(path.relative_to(mapping.root))
+        report["files"].append(
+            {"workspace": index, "path": relative, "bytes": size},
+        )
+        if size > MAX_READ_BYTES:
+            report["blockers"].append(
+                {
+                    "code": "source_artifact_oversized",
+                    "position": position,
+                    "detail": relative,
+                },
+            )
 
 
 def inventory_discovery(data, *, workspace_offset=0):
@@ -204,13 +230,11 @@ def inventory_discovery(data, *, workspace_offset=0):
         ):
             workspace = _workspace(mapping, report, index + workspace_offset)
         else:
-            report["files"].extend(
-                {
-                    "workspace": index + workspace_offset,
-                    "path": str(path.relative_to(mapping.root)),
-                    "bytes": path.stat().st_size,
-                }
-                for path in safe_files(mapping.root)
+            _inventory_native_files(
+                mapping,
+                report,
+                index + workspace_offset,
+                mapped["position"],
             )
             workspace = {
                 "root": str(mapping.root),
