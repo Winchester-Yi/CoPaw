@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
@@ -85,6 +85,37 @@ async def test_workspace_context_is_closed_after_import_failure():
     with pytest.raises(RuntimeError, match="import failed"):
         await prototype.run(workspaces(1), lambda _context: Importer())
 
+    assert prototype._router._contexts == {}
+
+
+async def test_cancel_waits_for_running_io_and_clears_contexts():
+    prototype, _journal = runner(workers=1)
+    started, release, finished = Event(), Event(), Event()
+
+    def slow_io():
+        started.set()
+        release.wait(timeout=3)
+        finished.set()
+
+    class Importer:
+        def __init__(self, context):
+            self.context = context
+
+        async def run_workspace(self, _workspace):
+            await self.context.io.call(slow_io)
+
+    task = asyncio.create_task(
+        prototype.run(workspaces(1), Importer),
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished.is_set()
     assert prototype._router._contexts == {}
 
 
