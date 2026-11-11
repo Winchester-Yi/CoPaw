@@ -8,6 +8,8 @@ from contextvars import Context
 from dataclasses import dataclass
 from functools import partial
 
+HEALTH_CHECK_INTERVAL = 15.0
+
 
 async def _drain(task, *, propagate_cancel=False):
     """Observe real completion despite repeated cancellation of the caller."""
@@ -98,7 +100,7 @@ class MigrationCoordinator:
     its complete transaction and must not wait for work done by a worker.
     """
 
-    def __init__(self, handlers, *, workers=4):
+    def __init__(self, handlers, *, workers=4, health_check=None):
         if not 1 <= workers <= 32:
             raise ValueError("workers must be between 1 and 32")
         self._handlers = dict(handlers)
@@ -108,6 +110,8 @@ class MigrationCoordinator:
         self._wake = asyncio.Event()
         self._stopped = False
         self._started = False
+        self._health_check = health_check
+        self._next_health_check = 0.0
 
     async def request(self, name, *arguments):
         if name not in self._handlers:
@@ -169,6 +173,15 @@ class MigrationCoordinator:
                     task.result()
             if all(task.done() for task in tasks):
                 return
+            if self._health_check is not None:
+                now = asyncio.get_running_loop().time()
+                if now >= self._next_health_check:
+                    # Await directly: SQL health probes belong to this task too.
+                    await self._health_check()
+                    self._next_health_check = (
+                        asyncio.get_running_loop().time()
+                        + HEALTH_CHECK_INTERVAL
+                    )
             if self._commands:
                 command = self._commands.popleft()
                 try:
@@ -181,7 +194,18 @@ class MigrationCoordinator:
                 command.result.set_result(value)
                 continue
             self._wake.clear()
-            await self._wake.wait()
+            if self._health_check is None:
+                await self._wake.wait()
+            else:
+                remaining = max(
+                    0.0,
+                    self._next_health_check
+                    - asyncio.get_running_loop().time(),
+                )
+                try:
+                    await asyncio.wait_for(self._wake.wait(), remaining)
+                except asyncio.TimeoutError:
+                    pass
 
     def _reject_pending(self):
         while self._commands:
