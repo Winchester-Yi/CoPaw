@@ -2,14 +2,13 @@
 """Private owner-task routing prototype; not connected to the CLI importer."""
 
 from copy import deepcopy
+from functools import partial
+from pathlib import Path
 from types import MappingProxyType
 
+from ..bundle import BundleStore
 from .freshness import tenant_key
 from .parallel import MigrationCoordinator, MigrationIO
-
-
-class ParallelImportNotReady(RuntimeError):
-    """An import phase still needs an explicit split SQL/NAS adapter."""
 
 
 def _freeze(value):
@@ -19,6 +18,17 @@ def _freeze(value):
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
+    return deepcopy(value)
+
+
+def workspace_source_copy(value):
+    """Restore worker-private JSON containers for legacy extraction helpers."""
+    if isinstance(value, (dict, MappingProxyType)):
+        return {
+            key: workspace_source_copy(item) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [workspace_source_copy(item) for item in value]
     return deepcopy(value)
 
 
@@ -36,6 +46,13 @@ class MigrationDomainRouter:
             "get",
             "prepare_write_bundle",
             "commit_written_bundle",
+            "chat_session_id",
+            "prepare_verify_batch",
+            "prepare_verify_blocks",
+            "capture_verify_recovery",
+            "commit_verify_evidence",
+            "release_verify_recovery",
+            "finish_write_recovery",
         },
     )
 
@@ -43,11 +60,13 @@ class MigrationDomainRouter:
         self._store_factory = store_factory
         self._journal = journal
         self._contexts = {}
+        self.chat_ids = {}
 
     def handlers(self):
         return {
             "workspace.open": self._open,
             "workspace.close": self._close,
+            "workspace.complete": self._complete,
             **{
                 "journal." + name: self._journal_handler(name)
                 for name in self.JOURNAL
@@ -69,7 +88,22 @@ class MigrationDomainRouter:
         return key, _NASStages(store)
 
     async def _close(self, key):
+        store = self._contexts[key]
+        await store.close_migration_stages()
         self._contexts.pop(key)
+
+    async def _complete(self, key, chat_ids):
+        if key not in self._contexts:
+            raise KeyError("closed or foreign workspace context")
+        if self.chat_ids.keys() & chat_ids.keys():
+            raise ValueError("duplicate workspace Chat position")
+        self.chat_ids.update(deepcopy(chat_ids))
+
+    async def close(self):
+        stores = tuple(self._contexts.values())
+        self._contexts.clear()
+        for store in stores:
+            await store.close_migration_stages()
 
     def _journal_handler(self, name):
         async def handle(key, args, kwargs):
@@ -94,12 +128,24 @@ class MigrationDomainRouter:
 class _NASStages:
     """Narrow NAS capability; no worker-visible database or manifest."""
 
-    __slots__ = ("_confirm", "_read_commit", "_publish_write")
+    __slots__ = (
+        "_confirm",
+        "_read_commit",
+        "_publish_write",
+        "_bundle_root",
+        "_read_verify",
+        "_compare_recovery",
+        "_read_write_recovery",
+    )
 
     def __init__(self, store):
         self._confirm = store.confirm_bundle_nas
         self._read_commit = store.read_commit_evidence
         self._publish_write = store.publish_prepared_bundle
+        self._bundle_root = store.bundles.root
+        self._read_verify = store.read_verify_evidence
+        self._compare_recovery = store.compare_verify_recovery
+        self._read_write_recovery = store.read_write_recovery
 
     async def confirm(self, ticket, io):
         return await self._confirm(ticket, io)
@@ -110,15 +156,30 @@ class _NASStages:
     async def publish_write(self, ticket, blocks, io):
         return await self._publish_write(ticket, blocks, io)
 
+    async def bundle_exists(self, row, io):
+        relative_path = BundleStore.validate_publication_locator(row)
+        return await io.call(
+            partial(Path.exists, self._bundle_root / relative_path),
+        )
+
+    async def read_verify(self, ticket, io):
+        return await self._read_verify(ticket, io)
+
+    async def compare_recovery(self, capture, io):
+        return await self._compare_recovery(capture, io)
+
+    async def read_write_recovery(self, ticket, io):
+        return await self._read_write_recovery(ticket, io)
+
 
 class ParallelWorkspaceContext:
     """One worker's private identity maps, frozen inputs and domain calls."""
 
-    def __init__(self, manifest_data, key, request, nas, io, adapters):
+    def __init__(self, manifest_data, key, request, nas, io):
         self.manifest_data = manifest_data
         self.session_ids, self.chat_ids, self.turn_ids = {}, {}, {}
         self._key, self._request, self._nas = key, request, nas
-        self.io, self._adapters = io, adapters
+        self.io = io
 
     async def journal(self, command, *args, **kwargs):
         if command not in MigrationDomainRouter.JOURNAL:
@@ -140,37 +201,71 @@ class ParallelWorkspaceContext:
         receipt = await self._nas.confirm(ticket, self.io)
         return await self.store("commit_confirm_bundle", receipt)
 
-    async def commit(self, operation_key):
+    async def commit(self, operation_key, *, verification):
         ticket = await self.store("prepare_commit", operation_key)
         if isinstance(ticket, dict):
-            # prepare_commit's already-committed return still requires the
-            # separate original-bundle verification adapter.
-            return await self._adapt("verify_committed", ticket)
+            return await self.verify_batch(*verification)
         evidence = await self._nas.read_commit(ticket, self.io)
         return await self.store("commit_evidence", evidence)
 
-    async def _adapt(self, name, *args):
-        adapter = self._adapters.get(name)
-        if adapter is None:
-            raise ParallelImportNotReady(
-                "parallel import adapter required: " + name,
-            )
-        return await adapter(self, *args)
-
     async def write_bundle(self, operation_key, blocks):
-        ticket, prepared = await self.store(
+        from .offline_write import TurnRecoveryTicket
+
+        preparation = await self.store(
             "prepare_write_bundle",
             operation_key,
             blocks,
         )
+        if isinstance(preparation, TurnRecoveryTicket):
+            evidence = await self._nas.read_write_recovery(
+                preparation,
+                self.io,
+            )
+            preparation = await self.store(
+                "finish_write_recovery",
+                preparation,
+                evidence,
+            )
+        ticket, prepared = preparation
         receipt = await self._nas.publish_write(ticket, prepared, self.io)
         return await self.store("commit_written_bundle", receipt)
 
-    async def verify_batch(self, *args):
-        return await self._adapt("verify_batch", *args)
+    async def bundle_exists(self, row):
+        return await self._nas.bundle_exists(row, self.io)
 
-    async def verify_blocks(self, *args):
-        return await self._adapt("verify_blocks", *args)
+    async def _verify(self, ticket):
+        evidence = await self._nas.read_verify(ticket, self.io)
+        capture = await self.store("capture_verify_recovery", evidence)
+        if capture is not None:
+            await self._nas.compare_recovery(capture, self.io)
+        return await self.store("commit_verify_evidence", evidence)
+
+    async def verify_batch(
+        self,
+        request,
+        publication_id,
+        plan,
+        expected,
+        blocks,
+    ):
+        ticket = await self.store(
+            "prepare_verify_batch",
+            request,
+            publication_id,
+            plan,
+            expected,
+            [block for block in blocks if block.name != "import_plan"],
+        )
+        return await self._verify(ticket)
+
+    async def verify_blocks(self, row, blocks):
+        operation_key = row["operation_key"].decode()
+        ticket = await self.store(
+            "prepare_verify_blocks",
+            operation_key,
+            blocks,
+        )
+        return await self._verify(ticket)
 
 
 class ParallelImportPrototype:
@@ -189,16 +284,25 @@ class ParallelImportPrototype:
         manifest_data,
         *,
         workers=4,
+        io_workers=None,
         health_check=None,
-        adapters=None,
     ):
-        self._manifest_data = _freeze(manifest_data)
+        self._manifest_data = _freeze(
+            {
+                key: manifest_data[key]
+                for key in (
+                    "tenant_sync_started_at_ns",
+                    "source_boundary",
+                )
+                if key in manifest_data
+            },
+        )
         self._router = MigrationDomainRouter(store_factory, journal)
         self._workers, self._health_check = workers, health_check
-        self._adapters = dict(adapters or {})
+        self._io_workers = workers if io_workers is None else io_workers
 
     async def run(self, workspaces, importer_factory):
-        async with MigrationIO(self._workers) as io:
+        async with MigrationIO(self._io_workers) as io:
             coordinator = MigrationCoordinator(
                 self._router.handlers(),
                 workers=self._workers,
@@ -226,15 +330,16 @@ class ParallelImportPrototype:
                     request,
                     nas,
                     io,
-                    self._adapters,
                 )
                 try:
                     importer = importer_factory(context)
                     await importer.run_workspace(_freeze(workspace))
+                    await request("workspace.complete", key, importer.chat_ids)
                 finally:
                     await request("workspace.close", key)
 
             try:
                 await coordinator.run(workspaces, run_workspace)
             finally:
-                self._router._contexts.clear()
+                await self._router.close()
+        return deepcopy(self._router.chat_ids)

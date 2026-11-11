@@ -210,7 +210,15 @@ async def _inspect_job(db, journal):
 
 
 # pylint: disable-next=too-many-statements
-async def _execute(operation, manifest, inventory, output):
+async def _execute(
+    operation,
+    manifest,
+    inventory,
+    output,
+    *,
+    workers=4,
+    io_workers=4,
+):
     from swe.database.config import get_database_config
     from swe.database.connection import DatabaseConnection
 
@@ -276,13 +284,18 @@ async def _execute(operation, manifest, inventory, output):
                     "state": job["state"] if job else "planned",
                 }
             if operation in ("import", "resume"):
-                result = await DirectImporter(
+                importer = DirectImporter(
                     db,
                     bundles,
                     manifest,
                     target,
                     journal=journal,
-                ).run(inventory)
+                )
+                result = await importer.run_parallel(
+                    inventory,
+                    workers=workers,
+                    io_workers=io_workers,
+                )
             else:
                 if job is None or job["state"] not in (
                     "imported",
@@ -358,7 +371,14 @@ async def _execute(operation, manifest, inventory, output):
         await control.close()
 
 
-def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
+def run_v3_command(
+    operation,
+    manifest_path,
+    apply=False,
+    output_dir=None,
+    workers=4,
+    io_workers=4,
+):
     if operation not in (
         "inventory",
         "plan",
@@ -370,6 +390,8 @@ def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
         "finalize",
     ):
         raise ValueError("unsupported v3 command")
+    if not 1 <= workers <= 32 or not 1 <= io_workers <= 32:
+        raise ValueError("workers and io-workers must be between 1 and 32")
     manifest = V3Manifest.load(manifest_path)
     output = None
     if operation == "finalize":
@@ -429,7 +451,16 @@ def run_v3_command(operation, manifest_path, apply=False, output_dir=None):
             "apply": False,
             "ready": True,
         }
-    return asyncio.run(_execute(operation, manifest, inventory, output))
+    return asyncio.run(
+        _execute(
+            operation,
+            manifest,
+            inventory,
+            output,
+            workers=workers,
+            io_workers=io_workers,
+        ),
+    )
 
 
 def register_v3_commands(group):
@@ -449,6 +480,19 @@ def register_v3_commands(group):
         )(command)
         if operation in ("resume", "finalize"):
             command = click.option("--apply", is_flag=True)(command)
+        if operation == "resume":
+            command = click.option(
+                "--io-workers",
+                type=click.IntRange(1, 32),
+                default=4,
+                show_default=True,
+            )(command)
+            command = click.option(
+                "--workers",
+                type=click.IntRange(1, 32),
+                default=4,
+                show_default=True,
+            )(command)
         if operation == "finalize":
             command = click.option(
                 "--output-dir",

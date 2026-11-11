@@ -40,6 +40,15 @@ class DirectImportStore(OfflineImportStore):
         self.journal = journal
         self.batch_positions = {}
 
+    async def chat_session_id(self, chat_id):
+        row = await self.db.fetch_one(
+            "SELECT session_id FROM swe_conversation_chats WHERE id=%s",
+            (chat_id,),
+        )
+        if row is None:
+            raise IntegrityError("imported Chat is missing its Session")
+        return row["session_id"]
+
     async def reserve_batch(
         self,
         request,
@@ -258,5 +267,86 @@ class DirectImporter(ConversationImporter):
             await self.journal.mark_state("imported")
             self.manifest._persist()
             return result
+        finally:
+            self.journal.persist_updates = persist_updates
+
+    async def run_parallel(
+        self,
+        report,
+        *,
+        workers=4,
+        io_workers=4,
+        health_check=None,
+    ):
+        """Run workspace bodies concurrently with SQL in the calling task."""
+        from .importer import ParallelWorkspaceImporter, validate_inventory
+        from .parallel_import import ParallelImportPrototype
+
+        validate_inventory(report)
+        self._validate_source_binding(report)
+        from .freshness import tenant_key
+
+        cutoff_map = self.manifest.data.get("tenant_sync_started_at_ns", {})
+        tenants = {
+            (workspace["scope"][0], workspace["scope"][1])
+            for workspace in report["workspaces"]
+        }
+        tenants.update(
+            (share["service_unit_id"], share["record"]["tenant_id"])
+            for share in report["shares"]
+        )
+        if any(
+            type(cutoff_map.get(tenant_key(*scope))) is not int
+            or cutoff_map[tenant_key(*scope)] <= 0
+            for scope in tenants
+        ):
+            raise ValueError(
+                "tenant cutoffs must be fixed before parallel inventory",
+            )
+        self._assert_source_fresh(report)
+        self._validate_runtime_sources(report)
+        await self.journal.prepare()
+        await self.journal.mark_state("importing")
+        persist_updates = self.journal.persist_updates
+        self.journal.persist_updates = False
+        try:
+            await next(iter(self.stores.values())).validate_target()
+            await self._retain_source_artifacts(report)
+
+            def store_factory(workspace):
+                service = workspace["scope"][0]
+                return DirectImportStore(
+                    self.db,
+                    self.bundle_stores[service],
+                    self.target,
+                    service_unit_id=service,
+                    journal=self.journal,
+                )
+
+            runner = ParallelImportPrototype(
+                store_factory,
+                self.journal,
+                self.manifest.data,
+                workers=workers,
+                io_workers=io_workers,
+                health_check=health_check,
+            )
+            self.chat_ids = await runner.run(
+                report["workspaces"],
+                lambda context: ParallelWorkspaceImporter(
+                    context,
+                    self.target,
+                    batch_size=self.batch_size,
+                ),
+            )
+            await self._shares(report)
+            self._assert_source_fresh(report)
+            await self.journal.capture_retentions()
+            await self.journal.mark_state("imported")
+            self.manifest._persist()
+            return {
+                "migration_id": self.manifest.migration_id,
+                "batches": dict(self.manifest.data["batches"]),
+            }
         finally:
             self.journal.persist_updates = persist_updates

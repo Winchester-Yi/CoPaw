@@ -78,6 +78,7 @@ class OfflineVerifyStages:
         self.tickets = {}
         self.receipts = {}
         self.recoveries = {}
+        self._orphaned_snapshots = []
 
     def _ticket(self, ticket):
         known = self.tickets.get(id(ticket))
@@ -338,7 +339,10 @@ class OfflineVerifyStages:
             }
             return capture
         except BaseException:
-            await self._finish_snapshots(snapshots)
+            try:
+                await self._finish_snapshots(snapshots)
+            except (Exception, asyncio.CancelledError):
+                self._orphaned_snapshots.extend(snapshots)
             raise
 
     def _capture(self, capture):
@@ -481,6 +485,15 @@ class OfflineVerifyStages:
         if any(state["reading"] for state in self.recoveries.values()):
             raise IntegrityError("recovery comparison has not drained")
         error = None
+        pending = self._orphaned_snapshots
+        self._orphaned_snapshots = []
+        try:
+            await self._finish_snapshots(pending)
+        except (Exception, asyncio.CancelledError) as caught:
+            self._orphaned_snapshots.extend(
+                snapshot for snapshot in pending if snapshot.batch is not None
+            )
+            error = caught
         for state in list(self.recoveries.values()):
             try:
                 await self._finish_snapshots(state["snapshots"])

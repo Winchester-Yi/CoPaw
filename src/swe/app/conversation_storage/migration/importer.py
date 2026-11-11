@@ -1039,15 +1039,20 @@ class ConversationImporter:
             ),
         )
 
+    async def _chat_session_id(self, chat_id):
+        row = await self.db.fetch_one(
+            "SELECT session_id FROM swe_conversation_chats WHERE id=%s",
+            (chat_id,),
+        )
+        if row is None:
+            raise ValueError("imported Chat is missing its Session")
+        return row["session_id"]
+
     async def _archive(self, chat, scope):
         if not chat["archive"]["epochs"]:
             return
         cid = self.chat_ids[chat["position"]]
-        row = await self.db.fetch_one(
-            "SELECT session_id FROM swe_conversation_chats WHERE id=%s",
-            (cid,),
-        )
-        sid = row["session_id"]
+        sid = await self._chat_session_id(cid)
         archive_order = 0
         batches = archive_batches(chat["archive"])
         for order, batch in enumerate(batches, start=1):
@@ -1249,6 +1254,141 @@ class ConversationImporter:
                     },
                 ),
             )
+
+
+class ParallelWorkspaceImporter(ConversationImporter):
+    """Import identities, Sessions and archives for one isolated workspace."""
+
+    def __init__(self, context, target, *, batch_size=128):
+        from types import SimpleNamespace
+
+        if not 1 <= batch_size <= 512:
+            raise ValueError("migration batch size must be between 1 and 512")
+        self.context = context
+        self.db = None
+        self.bundle_stores = {}
+        self.bundles = None
+        self.manifest = SimpleNamespace(
+            data=context.manifest_data,
+            migration_id=target.migration_id,
+        )
+        self.target = target
+        self.batch_size = batch_size
+        self.stores = {}
+        self.store = None
+        self.session_ids = {}
+        self.chat_ids = {}
+        self.turn_ids = {}
+
+    async def _allocate(
+        self,
+        kind,
+        position,
+        *,
+        scope=None,
+        scope_kind="workspace",
+    ):
+        return await self.context.journal(
+            "allocate",
+            kind,
+            position,
+            scope=scope,
+            scope_kind=scope_kind,
+        )
+
+    async def _set_batch_state(self, position, state):
+        await self.context.journal("set_batch_state", position, state)
+
+    async def _batch_finished(self, position):
+        await self.context.journal("refresh_batch", position)
+
+    async def _publish(self, position, scope, rows, blocks, *, spec=None):
+        from ..publications import CommitPlan, PublicationRequest
+        from ..chat_mutations import load_metadata_json
+        from .install_records import plan_block
+
+        spec = spec or ImportBatch()
+        assignment = await self._allocate(
+            "publication",
+            position,
+            scope=scope,
+            scope_kind=spec.scope_kind,
+        )
+        request = PublicationRequest(
+            assignment["operation_key"],
+            scope,
+            spec.kind,
+            self.manifest.migration_id,
+            0,
+            session_id=spec.session_id,
+            chat_id=spec.chat_id,
+            turn_id=spec.turn_id,
+            scope_kind=spec.scope_kind,
+            epoch=spec.epoch,
+        )
+        plan = spec.commit_plan or CommitPlan(
+            result_ids=(assignment["target_id"],),
+        )
+        body = plan_block(self.target, rows, spec.updates, spec.locks)
+        expected = load_metadata_json(body.content)
+        expected_blocks = [body, *blocks]
+        current = await self.context.store(
+            "reserve_batch",
+            request,
+            assignment["target_id"],
+            plan,
+            position=position,
+        )
+        if current["state"] == "committed":
+            await self.context.verify_batch(
+                request,
+                assignment["target_id"],
+                plan,
+                expected,
+                expected_blocks,
+            )
+            await self._batch_finished(position)
+            return current
+        await self._set_batch_state(position, "importing")
+        if not current.get("durable_at"):
+            if await self.context.bundle_exists(current):
+                await self.context.confirm_bundle(request.operation_key)
+            else:
+                await self.context.write_bundle(
+                    request.operation_key,
+                    expected_blocks,
+                )
+        await self.context.verify_blocks(
+            await self.context.store("get", request.operation_key),
+            expected_blocks,
+        )
+        result = await self.context.commit(
+            request.operation_key,
+            verification=(
+                request,
+                assignment["target_id"],
+                plan,
+                expected,
+                expected_blocks,
+            ),
+        )
+        await self._batch_finished(position)
+        return result
+
+    async def _chat_session_id(self, chat_id):
+        return await self.context.store("chat_session_id", chat_id)
+
+    async def run_workspace(self, workspace):
+        from ..identity import WorkspaceScope
+        from .parallel_import import workspace_source_copy
+
+        workspace = workspace_source_copy(workspace)
+        scope = WorkspaceScope.from_values(workspace["scope"])
+        await self._identities(workspace, scope)
+        for session in workspace["sessions"]:
+            await self._session(session, workspace, scope)
+        for chat in workspace["chats"]:
+            await self._archive(chat, scope)
 
 
 def _json(value):

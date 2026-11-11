@@ -334,7 +334,7 @@ def _readonly_manifest(manifest):
     return ReadOnlyManifest(manifest.path, manifest.data)
 
 
-def _command(operation, path, apply=False):
+def _command(operation, path, apply=False, workers=4, io_workers=4):
     try:
         from swe.app.conversation_storage.chat_mutations import (
             load_metadata_json,
@@ -348,7 +348,13 @@ def _command(operation, path, apply=False):
         if migration_workflow(document) == "direct":
             from swe.cli.conversation_storage_v3_cmd import run_v3_command
 
-            result = run_v3_command(operation, path, apply=apply)
+            result = run_v3_command(
+                operation,
+                path,
+                apply=apply,
+                workers=workers,
+                io_workers=io_workers,
+            )
             click.echo(
                 json.dumps(
                     result,
@@ -363,6 +369,11 @@ def _command(operation, path, apply=False):
                 )
             return
         job = OfflineJob(path)
+        if operation == "import" and (workers, io_workers) != (4, 4):
+            raise ValueError(
+                "parallel worker options are supported only for "
+                "v3 direct migrations",
+            )
         report = job.inventory()
         if apply or operation == "verify":
             from swe.app.conversation_storage.migration.importer import (
@@ -418,13 +429,32 @@ def _register(operation, mutable=False):
         type=click.Path(exists=True, dir_okay=False, path_type=Path),
     )
     def command(manifest, **options):
-        _command(operation, manifest, options.get("apply", False))
+        _command(
+            operation,
+            manifest,
+            options.get("apply", False),
+            options.get("workers", 4),
+            options.get("io_workers", 4),
+        )
 
     if mutable:
         command = click.option(
             "--apply",
             is_flag=True,
             help="Apply the reviewed offline operation.",
+        )(command)
+    if operation == "import":
+        command = click.option(
+            "--io-workers",
+            type=click.IntRange(1, 32),
+            default=4,
+            show_default=True,
+        )(command)
+        command = click.option(
+            "--workers",
+            type=click.IntRange(1, 32),
+            default=4,
+            show_default=True,
         )(command)
     conversation_storage_group.add_command(command)
 

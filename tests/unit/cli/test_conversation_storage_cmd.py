@@ -146,6 +146,20 @@ def test_readonly_verification_cannot_update_manifest(migration):
     assert migration.data["batches"] == {}
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["conversation-storage", "import"],
+        ["conversation-storage", "resume"],
+    ],
+)
+def test_parallel_commands_expose_bounded_worker_options(command):
+    result = CliRunner().invoke(cli, [*command, "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--workers INTEGER RANGE" in result.output
+    assert "--io-workers INTEGER RANGE" in result.output
+
+
 def test_missing_fixed_source_boundary_rejected(migration):
     del migration.data["source_boundary"]["snapshot_id"]
     migration._persist()

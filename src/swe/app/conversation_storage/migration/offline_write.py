@@ -52,6 +52,7 @@ class OfflineWriteStages:
         self.recoveries = {}
         self.recovery_evidence = {}
         self._recovery_reads = set()
+        self._orphaned_readers = []
 
     async def prepare(self, operation_key, blocks):
         store = self.store
@@ -183,7 +184,10 @@ class OfflineWriteStages:
             return ticket
         except BaseException:
             if batch is not None:
-                await retentions.finish_reader(batch)
+                try:
+                    await retentions.finish_reader(batch)
+                except (Exception, asyncio.CancelledError):
+                    self._orphaned_readers.append((retentions, batch))
             raise
 
     def _recovery(self, ticket):
@@ -322,6 +326,15 @@ class OfflineWriteStages:
             )
         failure = None
         try:
+            pending = list(self._orphaned_readers)
+            self._orphaned_readers.clear()
+            for retentions, batch in pending:
+                try:
+                    await retentions.finish_reader(batch)
+                except (Exception, asyncio.CancelledError) as error:
+                    self._orphaned_readers.append((retentions, batch))
+                    if failure is None:
+                        failure = error
             for known in tuple(self.recoveries.values()):
                 try:
                     await self.finish_recovery(known[0], None)
