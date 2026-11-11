@@ -9,6 +9,8 @@ from agentscope.message import Msg
 
 
 def validate_inventory(report):
+    from .spool_report import WorkspaceRecords
+
     if (
         report.get("version") != 2
         or report.get("blockers")
@@ -17,7 +19,10 @@ def validate_inventory(report):
         raise ValueError(
             "migration inventory contains blockers or is incomplete",
         )
-    if not isinstance(report.get("workspaces"), list) or not isinstance(
+    if not isinstance(
+        report.get("workspaces"),
+        (list, WorkspaceRecords),
+    ) or not isinstance(
         report.get("shares"),
         list,
     ):
