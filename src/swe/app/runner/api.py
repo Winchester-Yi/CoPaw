@@ -1477,13 +1477,23 @@ async def batch_delete_chats(
 
     """
     authorized_ids: list[str] = []
+    expected_chats = {}
     for chat_id in chat_ids:
         chat = await mgr.get_chat(chat_id)
         if chat is None:
             continue
         _authorize_chat(request, chat, None)
         authorized_ids.append(chat_id)
-    deleted = await mgr.delete_chats(chat_ids=authorized_ids)
+        expected_chats[chat_id] = chat
+    from ..conversation_storage.errors import ConflictError
+
+    try:
+        deleted = await mgr.delete_chats(
+            chat_ids=authorized_ids,
+            expected_chats=expected_chats,
+        )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"deleted": deleted}
 
 

@@ -42,6 +42,7 @@
 | [会话迁移手册子代理代码核对](../../docs/superpowers/reports/2026-11-11-conversation-runbook-code-audit.md) | 三路代码复核、文档纠错、验证证据与未关闭的生产放行条件 |
 | [会话元数据迁移及上线全流程](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) | 2026-11-11 核对：v3 DML 导入/续跑、历史正文仍复制 bundle、分享删除门禁、Kubernetes 上线与成套恢复；含修复后1087项回归及剩余现场验收边界 |
 | [已有 NAS 迁移操作单（历史）](../../docs/superpowers/plans/2026-11-02-conversation-migration-operation-guide.md) | 881ab1764 的 v2 staging 操作记录，已由 v3 方案替代 |
+| [conversation-concurrency-validation.md](conversation-concurrency-validation.md) | 共享历史可见性、批量授权快照与自动标题条件写入的根因和回归入口 |
 | [conversation-storage-entry-inventory.md](conversation-storage-entry-inventory.md) | SQL authority 全入口分支、legacy reader 的离线边界及正文治理/备份旁路保护 |
 | [python-memory-hotspots.md](python-memory-hotspots.md) | Python 后端前五内存热点、引用持有链、运行时验证与第一阶段生命周期及临时缓存设计入口 |
 | [python-installation-denial.md](python-installation-denial.md) | Shell pip 安装平台拒绝、语法识别边界、Hook 改写与前后台执行入口 |

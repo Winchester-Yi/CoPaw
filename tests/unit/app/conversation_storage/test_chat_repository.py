@@ -267,7 +267,7 @@ async def test_manager_rename_does_not_upsert_deleted_chat(tmp_path):
         session_id="session",
         user_id="",
     )
-    repo.update_chat_if_exists.return_value = None
+    repo.update_chat_if_unchanged.return_value = None
     manager = ChatManager(repo=repo)
     assert await manager.update_chat_name("chat", "new title") is False
     repo.upsert_chat.assert_not_called()

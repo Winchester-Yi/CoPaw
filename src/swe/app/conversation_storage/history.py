@@ -354,6 +354,19 @@ class HistoryStore:
             ):
                 raise ConflictError("Session history changed while reading")
 
+        online_ids = {
+            row["id"] for row in snapshot.rows if row["layer"] != "archive"
+        }
+        if online_ids:
+            visible = await query_collection(
+                self.db,
+                CollectionQuery.VISIBLE_OCCURRENCES,
+                online_ids,
+                (self.scope.sql_values[0], snapshot.chat["session_id"]),
+            )
+            if {row["id"] for row in visible} != online_ids:
+                raise ConflictError("Session history changed while reading")
+
     async def _payloads(self, snapshot):
         publications = {
             row["id"]: (row, batch)

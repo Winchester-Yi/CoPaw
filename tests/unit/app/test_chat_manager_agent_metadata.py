@@ -337,3 +337,44 @@ async def test_get_or_create_scenario_chat_cleans_private_resources_on_failure(
 
     assert await repo.get_chat_by_id("session-1", "user-1", "console") is None
     assert not resource_root.exists() or list(resource_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("entry", ["manager", "runner"])
+async def test_automatic_title_rejects_concurrent_metadata_change(entry):
+    from src.swe.app.conversation_storage.errors import ConflictError
+
+    class ConcurrentRepo(_InMemoryChatRepo):
+        async def update_chat_if_unchanged(self, spec, expected_chat):
+            current = await self.get_chat(spec.id)
+            current.meta["concurrent"] = "preserve"
+            await self.upsert_chat(current)
+            assert expected_chat.name == "hello"
+            assert "session_title_generated" not in expected_chat.meta
+            raise ConflictError("Chat changed since patch was read")
+
+    repo = ConcurrentRepo()
+    manager = ChatManager(repo=repo)
+    chat = await manager.get_or_create_chat("session", "user", name="hello")
+    if entry == "manager":
+        with pytest.raises(ConflictError):
+            await manager.update_chat_name(
+                chat.id,
+                "generated",
+                meta={"session_title_generated": True},
+            )
+    else:
+        from types import SimpleNamespace
+        from src.swe.app.runner.runner import AgentRunner
+
+        request = SimpleNamespace(channel_meta={"session_title": "generated"})
+        await AgentRunner._persist_session_title(
+            SimpleNamespace(_chat_manager=manager),
+            request=request,
+            title="generated",
+            trace_id="trace",
+            chat_id=chat.id,
+        )
+        assert "session_title" not in request.channel_meta
+    stored = await repo.get_chat(chat.id)
+    assert stored.name == "hello"
+    assert stored.meta["concurrent"] == "preserve"

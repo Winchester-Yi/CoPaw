@@ -289,3 +289,81 @@ async def test_shared_session_reset_during_payload_read(
     with pytest.raises(ConflictError, match="Session history changed"):
         await store._assemble(snapshot, tracing=tracing)
     store._finish.assert_awaited_once_with(snapshot)
+
+
+@pytest.mark.parametrize("tracing", [False, True])
+@pytest.mark.parametrize("mutation", ["compact", "recovery_prune"])
+async def test_shared_session_prune_during_payload_read(
+    tmp_path,
+    monkeypatch,
+    tracing,
+    mutation,
+):
+    from swe.app.conversation_storage import history as history_module
+    from swe.app.conversation_storage import archive as archive_module
+    from swe.app.conversation_storage.history import HistorySnapshot
+    from swe.app.conversation_storage.errors import ConflictError
+
+    store = history(tmp_path)
+    visible = True
+
+    async def query(database, query, ids, params):
+        assert list(ids) == [12]
+        return [{"id": 12}] if visible else []
+
+    monkeypatch.setattr(history_module, "query_collection", query)
+    store.db = SimpleNamespace(
+        fetch_one=AsyncMock(return_value={"context_epoch": 4}),
+    )
+    store._validate_chat_row = AsyncMock()
+    store.chats._hydrate = AsyncMock(
+        return_value=[ChatSpec(id="B", session_id="shared", user_id="bob")],
+    )
+
+    async def prune_update(*args):
+        nonlocal visible
+        visible = False
+
+    monkeypatch.setattr(
+        archive_module,
+        "fetch_reference_rows",
+        AsyncMock(
+            return_value={
+                12: {
+                    "service_unit_key": store.scope.sql_values[0],
+                    "session_id": 1,
+                    "layer": "memory",
+                    "context_epoch": 4,
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(archive_module, "update_collection", prune_update)
+
+    async def read_then_prune(snapshot):
+        await archive_module._prune(
+            store.db,
+            SimpleNamespace(scope=store.scope, session_id=1),
+            (12,),
+            context_epoch=4 if mutation == "compact" else None,
+        )
+        return []
+
+    store._payloads = read_then_prune
+    store._convert = AsyncMock(return_value=[])
+    store._finish = AsyncMock()
+    monkeypatch.setattr(
+        api,
+        "_annotate_approval_action_statuses",
+        AsyncMock(return_value=[]),
+    )
+    snapshot = HistorySnapshot(
+        {"id": 2, "session_id": 1},
+        [{"id": 12, "layer": "memory"}],
+        [],
+        [],
+        context_epoch=4,
+    )
+    with pytest.raises(ConflictError, match="Session history changed"):
+        await store._assemble(snapshot, tracing=tracing)
+    store._finish.assert_awaited_once_with(snapshot)

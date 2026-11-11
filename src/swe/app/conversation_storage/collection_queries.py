@@ -72,6 +72,13 @@ class CollectionQuery(Enum):
         ") ORDER BY m.archive_order,m.session_order,m.id",
         256,
     )
+    VISIBLE_OCCURRENCES = (
+        "SELECT id FROM swe_conversation_messages "
+        "WHERE service_unit_key=%s AND session_id=%s "
+        "AND current_visible=1 AND deleted_at IS NULL AND id IN (",
+        ")",
+        None,
+    )
     PRUNE = (
         "UPDATE swe_conversation_messages SET in_context=0,current_visible=0 "
         "WHERE service_unit_key=%s AND id IN (",

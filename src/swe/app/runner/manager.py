@@ -475,6 +475,7 @@ class ChatManager:
                     chat_id,
                 )
                 return False
+            expected_chat = spec.model_copy(deep=True)
             spec.name = name
             if meta:
                 spec.meta = {
@@ -482,6 +483,15 @@ class ChatManager:
                     **meta,
                 }
             spec.updated_at = datetime.now(timezone.utc)
+            conditional_update = getattr(
+                self._repo,
+                "update_chat_if_unchanged",
+                None,
+            )
+            if conditional_update is not None:
+                return (
+                    await conditional_update(spec, expected_chat) is not None
+                )
             return await self._repo.update_chat_if_exists(spec) is not None
 
     async def delete_chats(
