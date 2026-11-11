@@ -76,7 +76,7 @@ def _inventory_shares(data, report):
         )
 
 
-def inventory_discovery(data):
+def inventory_discovery(data, *, workspace_offset=0):
     """Parse source semantics without manufacturing a frozen source boundary."""
     if (
         data.get("fingerprints")
@@ -186,7 +186,11 @@ def inventory_discovery(data):
                     "chats": [],
                 }
             else:
-                workspace = _workspace(mapping, report, index)
+                workspace = _workspace(
+                    mapping,
+                    report,
+                    index + workspace_offset,
+                )
         elif any(
             path.parts[0] in ("sessions", "dialog")
             or "turn-ledger" in path.parts
@@ -195,11 +199,11 @@ def inventory_discovery(data):
                 for path in safe_files(mapping.root)
             )
         ):
-            workspace = _workspace(mapping, report, index)
+            workspace = _workspace(mapping, report, index + workspace_offset)
         else:
             report["files"].extend(
                 {
-                    "workspace": index,
+                    "workspace": index + workspace_offset,
                     "path": str(path.relative_to(mapping.root)),
                     "bytes": path.stat().st_size,
                 }
@@ -262,3 +266,17 @@ def inventory_v3(manifest, *, begin_sync=False):
     report["source_boundary"] = manifest.data["source_boundary"]
     SourceBoundary(**report["source_boundary"])
     return report
+
+
+def inventory_workspace(data, index):
+    """Parse one workspace preserving its global artifact positions."""
+    return inventory_discovery(
+        {
+            **data,
+            "workspaces": [data["workspaces"][index]],
+            "shares": [],
+            # Global fingerprint checks belong to the coordinator barriers.
+            "fingerprints": [],
+        },
+        workspace_offset=index,
+    )
