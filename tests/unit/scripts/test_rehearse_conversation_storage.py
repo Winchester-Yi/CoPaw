@@ -344,3 +344,23 @@ def test_indexed_runner_rejects_mutable_image_before_any_nas_write(
     monkeypatch.setenv("JOB_COMPLETION_INDEX", "0")
     assert module.main() == 1
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("directory", [True, False])
+def test_fsync_fault_reconciles_only_a_published_bundle(tmp_path, directory):
+    module = load_script()
+    store = module.BundleStore(tmp_path)
+    assert module._fsync_fault(store, directory) == "passed"
+    bundles = list(tmp_path.rglob("*.bundle"))
+    assert len(bundles) == int(directory)
+    if directory:
+        index = store.inspect(str(bundles[0].relative_to(tmp_path)))
+        extent = index.blocks["body"]
+        assert (
+            store.read_extent(
+                index.relative_path,
+                extent.offset,
+                extent.length,
+            )
+            == b"synthetic verification body"
+        )

@@ -78,13 +78,11 @@ def _fsync_fault(store, directory):
     original = os.fsync
     key = new_operation_key()
     store.prepare_directory(key)
-    directory_calls = 0
+    final_path = store.root / store.path_for(key)
 
     def injected(descriptor):
-        nonlocal directory_calls
         is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
-        directory_calls += int(is_directory)
-        if (directory and is_directory and directory_calls == 3) or (
+        if (directory and is_directory and final_path.exists()) or (
             not directory and not is_directory
         ):
             raise OSError(errno.EIO, "injected fsync failure")
