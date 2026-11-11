@@ -284,8 +284,7 @@ def inventory_v3(manifest, *, begin_sync=False):
             (item["service_unit_id"], item["tenant_id"])
             for item in manifest.data.get("shares", [])
         )
-        for service_unit_id, tenant_id in sorted(tenants):
-            manifest.begin_tenant_sync(service_unit_id, tenant_id)
+        manifest.begin_tenant_syncs(tenants)
     report = inventory_discovery(manifest.data)
     for blocker in report["blockers"]:
         if blocker["code"] == "source_modified_after_sync_started":

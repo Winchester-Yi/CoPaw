@@ -108,13 +108,22 @@ class V3Manifest(MigrationManifest):
         from .freshness import tenant_key
 
         key = tenant_key(service_unit_id, tenant_id)
+        return self.begin_tenant_syncs([(service_unit_id, tenant_id)])[key]
+
+    def begin_tenant_syncs(self, tenants):
+        """Fix all tenant cutoffs in one durable manifest update before import."""
+        from .freshness import tenant_key
+
+        keys = [tenant_key(*scope) for scope in sorted(set(tenants))]
         with self._lock():
             self._refresh()
             timestamps = self.data.setdefault("tenant_sync_started_at_ns", {})
-            if key not in timestamps:
-                timestamps[key] = time.time_ns()
+            missing = [key for key in keys if key not in timestamps]
+            if missing:
+                started_at_ns = time.time_ns()
+                timestamps.update({key: started_at_ns for key in missing})
                 self._persist()
-            return timestamps[key]
+            return {key: timestamps[key] for key in keys}
 
     def record_source_change(self, blocker):
         with self._lock():
