@@ -4,20 +4,26 @@
 import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import Context
 from dataclasses import dataclass
 from functools import partial
 
 
-async def _drain(task):
+async def _drain(task, *, propagate_cancel=False):
     """Observe real completion despite repeated cancellation of the caller."""
+    cancelled = False
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
+            cancelled = True
             continue
         except Exception:
             break
-    return task.result()
+    result = task.result()
+    if cancelled and propagate_cancel:
+        raise asyncio.CancelledError
+    return result
 
 
 class MigrationStopped(RuntimeError):
@@ -45,6 +51,7 @@ class MigrationIO:
             # run_in_executor deliberately does not copy the SQL task context.
             future = asyncio.get_running_loop().run_in_executor(
                 self._executor,
+                Context().run,
                 partial(function, *args, **kwargs),
             )
             self._pending.add(future)
@@ -61,12 +68,13 @@ class MigrationIO:
 
     async def close(self):
         self._closed = True
-        for future in tuple(self._pending):
-            try:
-                await _drain(future)
-            except (Exception, asyncio.CancelledError):
-                pass
-        self._executor.shutdown(wait=True)
+        cleanup = asyncio.ensure_future(
+            asyncio.gather(*tuple(self._pending), return_exceptions=True),
+        )
+        try:
+            await _drain(cleanup, propagate_cancel=True)
+        finally:
+            self._executor.shutdown(wait=True)
 
     async def __aenter__(self):
         return self
@@ -143,7 +151,7 @@ class MigrationCoordinator:
             cleanup = asyncio.ensure_future(
                 asyncio.gather(*tasks, return_exceptions=True),
             )
-            await _drain(cleanup)
+            await _drain(cleanup, propagate_cancel=True)
 
     async def _worker(self, iterator, operation):
         while not self._stopped:

@@ -140,3 +140,38 @@ async def test_single_worker_preserves_order_and_rejects_unknown_command():
     assert values == list(range(20))
     with pytest.raises(ValueError, match="unknown migration command"):
         await coordinator.request("raw SQL", "DROP TABLE")
+
+
+async def test_reused_io_thread_has_fresh_context_for_each_call():
+    binding = ContextVar("thread-state", default=None)
+    async with MigrationIO(1) as io:
+        await io.call(binding.set, "must not leak to next job")
+        assert await io.call(binding.get) is None
+
+
+async def test_close_drains_thread_then_propagates_repeated_cancel():
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def write():
+        started.set()
+        assert release.wait(timeout=3)
+        finished.set()
+
+    io = MigrationIO(1)
+    writer = asyncio.create_task(io.call(write))
+    while not started.is_set():
+        await asyncio.sleep(0)
+    closing = asyncio.create_task(io.close())
+    await asyncio.sleep(0)
+    closing.cancel()
+    await asyncio.sleep(0)
+    closing.cancel()
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    await writer
+    assert finished.is_set()
