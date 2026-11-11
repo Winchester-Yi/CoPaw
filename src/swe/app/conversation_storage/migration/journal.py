@@ -7,6 +7,7 @@ from ..identity import WorkspaceScope
 
 JOBS = "swe_conversation_migration_jobs"
 ENTRIES = "swe_conversation_migration_entries"
+HYDRATE_PAGE_SIZE = 1000
 TICKET_KINDS = frozenset({"session", "chat", "turn", "message", "publication"})
 ENTITY_TABLES = {
     kind: "swe_conversation_" + kind + "s" for kind in TICKET_KINDS
@@ -465,13 +466,26 @@ class MigrationJournal:
                     )
         return expected
 
+    async def _hydration_entries(self):
+        last_id = 0
+        while True:
+            rows = await self.db.fetch_all(
+                "SELECT * FROM "
+                + ENTRIES
+                + " WHERE migration_id=%s AND id>%s ORDER BY id LIMIT %s",
+                (self.migration_id, last_id, HYDRATE_PAGE_SIZE),
+            )
+            if not rows:
+                return
+            for row in rows:
+                yield row
+            last_id = rows[-1]["id"]
+            if len(rows) < HYDRATE_PAGE_SIZE:
+                return
+
     async def hydrate(self, *, persist=True):
-        rows = await self.db.fetch_all(
-            "SELECT * FROM " + ENTRIES + " WHERE migration_id=%s ORDER BY id",
-            (self.migration_id,),
-        )
         assignments, batches = {}, {}
-        for row in rows:
+        async for row in self._hydration_entries():
             kind, key = _text(row["entry_kind"]), _text(row["source_key"])
             if kind in TICKET_KINDS:
                 persisted = (

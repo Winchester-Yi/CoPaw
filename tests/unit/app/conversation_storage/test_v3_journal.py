@@ -29,6 +29,7 @@ class Database:
         self.commits = 0
         self.depth = 0
         self.queries = []
+        self.hydration_pages = []
         self.rows = {}
 
     @asynccontextmanager
@@ -61,6 +62,19 @@ class Database:
 
     async def fetch_all(self, query, params=None):
         self.queries.append(query)
+        if "migration_entries" in query and "id>%s" in query:
+            migration_id, last_id, limit = params
+            rows = sorted(
+                (
+                    row
+                    for row in self.entries
+                    if row["migration_id"] == migration_id
+                    and row["id"] > last_id
+                ),
+                key=lambda row: row["id"],
+            )[:limit]
+            self.hydration_pages.append((last_id, limit, len(rows)))
+            return deepcopy(rows)
         return deepcopy(self.entries) if "migration_entries" in query else []
 
     async def insert(self, query, params):
@@ -126,6 +140,84 @@ async def test_hydrate_rebuilds_lost_external_mirror():
     frozen.data["assignments"] = {}
     await MigrationJournal(db, frozen).hydrate()
     assert frozen.data["assignments"]["publication"]["svc/body"] == assigned
+
+
+@pytest.mark.parametrize(
+    ("count", "page_lengths"),
+    [(0, [0]), (2, [2, 0]), (4, [2, 2, 0]), (5, [2, 2, 1])],
+)
+async def test_hydrate_reads_ordered_keyset_pages(
+    monkeypatch,
+    count,
+    page_lengths,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.migration import journal
+
+    monkeypatch.setattr(journal, "HYDRATE_PAGE_SIZE", 2)
+    db, frozen = Database(), manifest()
+    frozen._persist = Mock()
+    migration_id = frozen.migration_id.encode()
+    # Gaps and reversed storage order require an id cursor, not row offsets.
+    db.entries = [
+        {
+            "id": 10 * (index + 1),
+            "migration_id": migration_id,
+            "entry_kind": "session" if index % 2 == 0 else "batch",
+            "source_key": "position-" + str(index),
+            "state": "mapped" if index % 2 == 0 else "prepared",
+            "target_id": 10 * (index + 1),
+            "operation_key": "a" * 64,
+            "details_text": None,
+        }
+        for index in reversed(range(count))
+    ]
+    db.entries.append(
+        dict(
+            id=1,
+            migration_id=b"other-migration",
+            entry_kind="session",
+            source_key="foreign",
+        ),
+    )
+
+    await journal.MigrationJournal(db, frozen).hydrate()
+
+    assert list(frozen.data["assignments"].get("session", {})) == [
+        "position-" + str(index) for index in range(0, count, 2)
+    ]
+    assert frozen.data["batches"] == {
+        "position-" + str(index): "importing" for index in range(1, count, 2)
+    }
+    assert [length for _, _, length in db.hydration_pages] == page_lengths
+    assert [cursor for cursor, _, _ in db.hydration_pages] == [
+        20 * index for index in range(len(page_lengths))
+    ]
+    assert all("ORDER BY id LIMIT %s" in query for query in db.queries)
+    frozen._persist.assert_called_once_with()
+
+
+async def test_hydrate_checks_mirror_after_all_pages_before_replacing_it(
+    monkeypatch,
+):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.migration import journal
+
+    monkeypatch.setattr(journal, "HYDRATE_PAGE_SIZE", 2)
+    db, frozen = Database(), manifest()
+    sql_journal = journal.MigrationJournal(db, frozen)
+    for position in ("first", "second", "last-page"):
+        await sql_journal.allocate("session", position)
+    frozen.data["assignments"]["session"]["last-page"]["target_id"] += 1
+    before = deepcopy(frozen.data)
+    frozen._persist = Mock()
+
+    with pytest.raises(ValueError, match="matching durable SQL ticket"):
+        await sql_journal.hydrate()
+
+    assert frozen.data == before
+    assert [length for _, _, length in db.hydration_pages] == [2, 1]
+    frozen._persist.assert_not_called()
 
 
 async def test_hydrate_backfills_ticket_scope_from_manifest_assignment():
