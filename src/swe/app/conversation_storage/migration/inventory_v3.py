@@ -29,6 +29,12 @@ def _source_change(position, scope, paths, cutoff):
 
 
 def _inventory_shares(data, report):
+    ownership = {}
+    for workspace in report["workspaces"] if data["shares"] else ():
+        for chat in workspace["chats"]:
+            key = (*workspace["scope"][:2], chat["spec"]["id"])
+            count, _position = ownership.get(key, (0, None))
+            ownership[key] = (count + 1, chat["position"])
     for source in data["shares"]:
         snapshot_path = Path(source["snapshot_path"])
         if snapshot_path.stat().st_size > MAX_READ_BYTES:
@@ -56,15 +62,15 @@ def _inventory_shares(data, report):
         record = {
             key: source[key] for key in (*SHARE_FIELDS, "service_unit_id")
         }
-        matches = [
-            chat
-            for workspace in report["workspaces"]
-            if workspace["scope"][0] == source["service_unit_id"]
-            and workspace["scope"][1] == source["tenant_id"]
-            for chat in workspace["chats"]
-            if chat["spec"]["id"] == source["chat_id"]
-        ]
-        if len(matches) > 1:
+        matches, chat_position = ownership.get(
+            (
+                source["service_unit_id"],
+                source["tenant_id"],
+                source["chat_id"],
+            ),
+            (0, None),
+        )
+        if matches > 1:
             report["blockers"].append(
                 {
                     "code": "share_invalid",
@@ -78,7 +84,7 @@ def _inventory_shares(data, report):
                 "position": source["position"],
                 "service_unit_id": source["service_unit_id"],
                 "scope_kind": "workspace" if matches else "legacy_share",
-                "chat_position": matches[0]["position"] if matches else None,
+                "chat_position": chat_position,
                 "record": record,
                 "snapshot": load_metadata_json(snapshot_path.read_bytes()),
                 "snapshot_path": source["snapshot_path"],
