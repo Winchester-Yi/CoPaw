@@ -316,6 +316,18 @@ class OfflineImportStore(PublicationStore):
         self._reservation_ids = {}
         self._confirm_tickets = {}
         self._confirm_receipts = {}
+        from .offline_commit import OfflineCommitStages
+
+        self._commit_stages = OfflineCommitStages(self)
+
+    async def prepare_commit(self, operation_key):
+        return await self._commit_stages.prepare(operation_key)
+
+    async def read_commit_evidence(self, ticket, io):
+        return await self._commit_stages.read(ticket, io)
+
+    async def commit_evidence(self, evidence):
+        return await self._commit_stages.commit(evidence)
 
     def _check_confirm_ticket(self, ticket):
         if self._confirm_tickets.get(id(ticket)) is not ticket:
