@@ -1047,3 +1047,40 @@ async def test_expired_heartbeat_terminal_still_honors_stop(tmp_path):
     with pytest.raises(ConflictError, match="Stop"):
         await service.commit(operation.operation_key)
     assert db.rows[operation.operation_key.encode()]["state"] == "prepared"
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+async def test_durable_recovery_installs_usage_with_root(tmp_path, invalid):
+    import json
+    from tests.unit.app.conversation_storage.test_context_usage import SNAPSHOT
+
+    class UsageDatabase(PublicationDatabase):
+        async def execute(self, query, params=None):
+            if "context_usage_text=COALESCE" in query:
+                if params[0] is not None:
+                    self.session["context_usage_text"] = params[0]
+                self.session["context_usage_invalid"] = params[1]
+                return 1
+            return await super().execute(query, params)
+
+    db = UsageDatabase()
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    operation = request()
+    await service.reserve(operation, CommitPlan(recovery_block="root"))
+    state = {"context_usage": SNAPSHOT, "context_usage_invalid": invalid}
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("root", "recovery", json.dumps(state).encode())],
+    )
+    assert "context_usage_text" not in db.session
+    await service.commit(operation.operation_key)
+    assert (
+        json.loads(db.session["context_usage_text"])["used_tokens"]
+        == SNAPSHOT["used_tokens"]
+    )
+    assert db.session["context_usage_invalid"] == invalid
+    assert db.session["state_revision"] == 1

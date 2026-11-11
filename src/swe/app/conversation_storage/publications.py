@@ -768,6 +768,14 @@ class PublicationStore(PublicationAssociations):
                 raise IntegrityError(
                     "publication recovery block is missing or invalid",
                 )
+            if plan.context_usage_projection is not None:
+                usage, invalid = plan.context_usage_projection
+                await self.db.execute(
+                    "UPDATE swe_conversation_sessions SET "
+                    "context_usage_text=COALESCE(%s,context_usage_text),"
+                    "context_usage_invalid=%s WHERE id=%s",
+                    (usage, int(invalid), row["session_id"]),
+                )
             await self.db.execute(
                 "UPDATE swe_conversation_sessions SET recovery_publication_id=%s,"
                 "recovery_offset=%s,recovery_length=%s,state_revision=state_revision+1,"

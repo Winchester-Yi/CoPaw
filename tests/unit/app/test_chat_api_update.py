@@ -27,7 +27,12 @@ class _FakeChatManager:
             return self.chat
         return None
 
-    async def update_chat(self, spec: ChatSpec) -> ChatSpec:
+    async def update_chat(
+        self,
+        spec: ChatSpec,
+        *,
+        expected_chat=None,
+    ) -> ChatSpec:
         self.updated_chat = spec
         self.chat = spec
         return spec
@@ -150,3 +155,21 @@ def test_update_chat_rejects_another_authenticated_users_chat() -> None:
 
     assert response.status_code == 404
     assert manager.updated_chat is None
+
+
+def test_update_chat_reports_concurrent_patch_conflict() -> None:
+    from src.swe.app.conversation_storage.errors import ConflictError
+
+    class ConcurrentManager(_FakeChatManager):
+        async def update_chat(self, spec, *, expected_chat=None):
+            assert expected_chat.meta == {"existing": "value"}
+            self.chat.meta["concurrent"] = "preserve"
+            raise ConflictError("Chat changed since patch was read")
+
+    manager = ConcurrentManager()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_chat_manager] = lambda: manager
+    response = TestClient(app).put("/chats/chat-1", json={"name": "new"})
+    assert response.status_code == 409
+    assert manager.chat.meta["concurrent"] == "preserve"

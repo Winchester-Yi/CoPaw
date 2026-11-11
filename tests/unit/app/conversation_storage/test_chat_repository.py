@@ -350,3 +350,91 @@ async def test_all_reader_batches_finish_when_one_cleanup_is_cancelled(
     with pytest.raises(asyncio.CancelledError):
         await repo._finish_batches(["first", "second"])
     assert repo.retentions.finish_reader.await_count == 2
+
+
+async def test_patch_rejects_api_snapshot_stale_before_repository_read(
+    tmp_path,
+):
+    repo = MySQLChatRepository(
+        ReadDatabase([chat_row()]),
+        WorkspaceScope("t", "s", "a", service_unit_id="schema-test-service"),
+        BundleStore(tmp_path),
+    )
+    original = await repo.get_chat("chat")
+    incoming = original.model_copy(deep=True)
+    incoming.name = "new title"
+    concurrent = original.model_copy(deep=True)
+    concurrent.meta["concurrent"] = "preserve"
+    repo._raw_chat = AsyncMock(return_value=chat_row(metadata_revision=1))
+    repo.get_chat = AsyncMock(return_value=concurrent)
+    repo._publish_metadata = AsyncMock()
+    with pytest.raises(ConflictError, match="changed"):
+        await repo.update_chat_if_exists(incoming, expected_chat=original)
+    repo._publish_metadata.assert_not_awaited()
+
+
+async def test_two_api_patches_cannot_overwrite_concurrent_metadata(tmp_path):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from swe.app.runner.api import update_chat, ChatUpdateRequest
+
+    repo = repository(ReadDatabase([chat_row()]), tmp_path)
+    current = await repo.get_chat("chat")
+    revision = 0
+    captured, resume = asyncio.Event(), asyncio.Event()
+
+    class InterleavedManager(ChatManager):
+        async def get_chat(self, chat_id):
+            snapshot = current.model_copy(deep=True)
+            if asyncio.current_task().get_name() == "old-patch":
+                captured.set()
+                await resume.wait()
+            return snapshot
+
+    repo.get_chat = AsyncMock(
+        side_effect=lambda key: current.model_copy(deep=True),
+    )
+    repo._raw_chat = AsyncMock(
+        side_effect=lambda key: chat_row(metadata_revision=revision),
+    )
+    repo._session_for = AsyncMock(return_value={"id": 1})
+
+    async def publish(spec, session, row):
+        nonlocal current, revision
+        assert row["metadata_revision"] == revision
+        current = spec.model_copy(deep=True)
+        revision += 1
+
+    repo._publish_metadata = publish
+    manager = InterleavedManager(repo=repo)
+    request = Request({"type": "http", "headers": []})
+    old = asyncio.create_task(
+        update_chat(
+            "chat",
+            request,
+            ChatUpdateRequest(meta={"a": 1}),
+            manager,
+        ),
+        name="old-patch",
+    )
+    await captured.wait()
+    try:
+        await update_chat(
+            "chat",
+            request,
+            ChatUpdateRequest(meta={"b": 2}),
+            manager,
+        )
+    finally:
+        resume.set()
+    with pytest.raises(HTTPException) as error:
+        await old
+    assert error.value.status_code == 409
+    assert current.meta == {"b": 2}
+    await update_chat(
+        "chat",
+        request,
+        ChatUpdateRequest(meta={"a": 1}),
+        manager,
+    )
+    assert current.meta == {"b": 2, "a": 1}

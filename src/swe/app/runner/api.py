@@ -2015,10 +2015,14 @@ async def update_chat(
         _authorize_requested_user(request, patch.user_id)
 
     spec = _merge_chat_update(existing, patch)
+    from ..conversation_storage.errors import ConflictError
+
     try:
-        updated = await mgr.update_chat(spec)
+        updated = await mgr.update_chat(spec, expected_chat=existing)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Chat not found") from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return updated
 
 

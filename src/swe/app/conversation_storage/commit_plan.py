@@ -35,6 +35,8 @@ class CommitPlan:
     reset: ContextReset | None = None
     prune_ids: tuple[int, ...] = ()
     share: ShareInstall | None = None
+    # Derived from the durable recovery body during commit, never persisted.
+    context_usage_projection: tuple[str | None, bool] | None = None
 
     def serialize(self):
         self._validate_share_plan()

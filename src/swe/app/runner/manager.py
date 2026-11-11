@@ -399,7 +399,12 @@ class ChatManager:
         async with self._lock:
             return await self._repo.create_chat_if_absent_by_session(spec)
 
-    async def update_chat(self, spec: ChatSpec) -> ChatSpec:
+    async def update_chat(
+        self,
+        spec: ChatSpec,
+        *,
+        expected_chat: ChatSpec | None = None,
+    ) -> ChatSpec:
         """Update an existing chat spec.
 
         Args:
@@ -410,6 +415,12 @@ class ChatManager:
         """
         async with self._lock:
             existing = await self._repo.get_chat(spec.id)
+            if existing is None:
+                raise KeyError(spec.id)
+            if expected_chat is not None and existing != expected_chat:
+                from ..conversation_storage.errors import ConflictError
+
+                raise ConflictError("Chat changed since patch was read")
             if existing is not None and _should_keep_generated_title(
                 existing=existing,
                 incoming=spec,
@@ -423,7 +434,18 @@ class ChatManager:
                 await self._repo.upsert_chat(spec)
                 updated = await self._repo.get_chat(spec.id)
             else:
-                updated = await update(spec)
+                conditional_update = getattr(
+                    self._repo,
+                    "update_chat_if_unchanged",
+                    None,
+                )
+                if (
+                    expected_chat is not None
+                    and conditional_update is not None
+                ):
+                    updated = await conditional_update(spec, expected_chat)
+                else:
+                    updated = await update(spec)
             if updated is None:
                 raise KeyError(spec.id)
             return updated

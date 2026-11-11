@@ -791,10 +791,22 @@ class MySQLChatRepository(BaseChatRepository):
         session = await self._session_for(spec)
         await self._publish_metadata(spec, session, None)
 
-    async def update_chat_if_exists(self, spec):
+    async def update_chat_if_unchanged(self, spec, expected_chat):
+        return await self.update_chat_if_exists(
+            spec,
+            expected_chat=expected_chat,
+        )
+
+    async def update_chat_if_exists(self, spec, *, expected_chat=None):
         row = await self._raw_chat(spec.id)
         if row is None or row["deleted_at"] is not None:
             return None
+        if expected_chat is not None:
+            current = await self.get_chat(spec.id)
+            if current is None:
+                return None
+            if current != expected_chat:
+                raise ConflictError("Chat changed since patch was read")
         _, content = split_metadata(spec.meta)
         if not content:
             session = await self._session_for(spec)

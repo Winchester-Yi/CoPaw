@@ -191,3 +191,16 @@ bound-long-session-memory是旧NAS格式优化，不能用其已勾选项冒充�
 
 分享扩展SQL仅修订头部执行说明为连续停机后的staging副本扩展/回填及七表安装，
 未改DDL语句、未执行数据库操作。新增计划复选框保持未完成，后续按真实测试与现场证据更新。
+
+## 2026-11-11 在线投影与 Chat patch 并发修正
+
+Context usage 轻查询只读 SQL；不能仅检查 Runner state 中存在快照。
+排查应跟踪 Session 保存、durable recovery 正文解析、publication 安装事务，
+确认 usage 与 recovery locator/state revision 原子更新。无有效快照时保留旧值并标 invalid；
+成功快照须能清除 invalid，未知提交重试复用原耐久正文派生投影。
+
+Chat API 的 patch 若在锁外合并，必须把原读取快照贯穿 manager 与 MySQL repository；
+repository 在读取 metadata revision 后核对快照，再以该 revision 执行已有 CAS。
+仅在 repository 临写前获取新 revision 无法识别上游旧对象覆盖。
+当前并发变更返回 HTTP 409，客户端应重新读取后重试 patch。
+回归入口：test_publications.py、test_chat_repository.py、test_chat_api_update.py。

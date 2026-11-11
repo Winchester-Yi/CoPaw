@@ -335,6 +335,26 @@ def _validate_additions(additions, existing_names, request):
         raise IntegrityError("projection delta block names repeat")
 
 
+def _context_usage_projection(envelope, plan):
+    state = envelope["state"] if is_projection(envelope) else envelope
+    from ..runner.context_usage import ContextUsageSnapshot
+
+    usage = state.get("context_usage") if isinstance(state, dict) else None
+    invalid = bool(
+        plan.reset is not None
+        or (
+            isinstance(state, dict)
+            and state.get("context_usage_invalid", False)
+        ),
+    )
+    try:
+        snapshot = ContextUsageSnapshot.model_validate(usage)
+        usage_text = snapshot.model_dump_json()
+    except (ValueError, TypeError):
+        usage_text, invalid = None, True
+    return usage_text, invalid
+
+
 async def effective_recovery_plan(service, request, row, plan, index):
     if plan.recovery_block is None:
         return plan, None
@@ -350,6 +370,10 @@ async def effective_recovery_plan(service, request, row, plan, index):
         expected_length=index.byte_length,
     )
     envelope = load_metadata_json(raw)
+    plan = replace(
+        plan,
+        context_usage_projection=_context_usage_projection(envelope, plan),
+    )
     if not is_projection(envelope):
         return plan, None
     if envelope.get("identity") != identity(row):
