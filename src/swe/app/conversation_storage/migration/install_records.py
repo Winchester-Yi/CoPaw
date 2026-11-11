@@ -11,7 +11,7 @@ import re
 
 from ..bundle import BundleBlock, BundleIndex, BundleStore
 from ..chat_mutations import load_metadata_json
-from ..errors import ConflictError, IntegrityError, UnknownCommit
+from ..errors import ConflictError, IntegrityError, StorageError, UnknownCommit
 from ..publications import (
     CommitPlan,
     PublicationStore,
@@ -380,24 +380,35 @@ class OfflineImportStore(PublicationStore):
             )
         ticket = receipt.ticket
         self._check_confirm_ticket(ticket)
-        async with self.db.transaction():
-            row = await self.get(ticket.request.operation_key)
-            if row is None or row["state"] != "prepared":
-                raise ConflictError(
-                    "publication ended during NAS confirmation",
+        try:
+            async with self.db.transaction():
+                row = await self.get(ticket.request.operation_key)
+                if row is None or row["state"] != "prepared":
+                    raise ConflictError(
+                        "publication ended during NAS confirmation",
+                    )
+                await self._validate_prepared_references(row)
+                current = await self.get(
+                    ticket.request.operation_key,
+                    lock=True,
                 )
-            await self._validate_prepared_references(row)
-            current = await self.get(ticket.request.operation_key, lock=True)
-            self._matches(current, ticket.request, ticket.plan_text)
-            if (
-                current["id"] != ticket.publication_id
-                or BundleStore.validate_publication_locator(current)
-                != ticket.relative_path
-            ):
-                raise IntegrityError(
-                    "offline confirmation publication changed",
+                self._matches(current, ticket.request, ticket.plan_text)
+                if (
+                    current["id"] != ticket.publication_id
+                    or BundleStore.validate_publication_locator(current)
+                    != ticket.relative_path
+                ):
+                    raise IntegrityError(
+                        "offline confirmation publication changed",
+                    )
+                await self._mark_durable(
+                    ticket.request.operation_key,
+                    known[1],
                 )
-            await self._mark_durable(ticket.request.operation_key, known[1])
+        except StorageError:
+            raise
+        except (Exception, asyncio.CancelledError) as error:
+            raise UnknownCommit(ticket.request.operation_key) from error
         self._confirm_receipts.pop(id(receipt))
         self._confirm_tickets.pop(id(ticket))
         return receipt.index

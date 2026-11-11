@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -6,7 +8,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from swe.app.conversation_storage.bundle import BundleBlock, BundleStore
-from swe.app.conversation_storage.errors import ConflictError, IntegrityError
+from swe.app.conversation_storage.errors import (
+    ConflictError,
+    IntegrityError,
+    UnknownCommit,
+)
 from swe.app.conversation_storage.migration.install_records import (
     OfflineImportStore,
 )
@@ -174,3 +180,61 @@ async def test_final_sql_revalidates_reference_ownership(
     assert not store.db.rows[operation.operation_key.encode()].get(
         "durable_at",
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ConnectionError("commit response lost"), asyncio.CancelledError()],
+)
+async def test_final_transaction_exit_failure_preserves_unknown_outcome(
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    store, operation, _ = await prepared_store(tmp_path)
+    ticket = await store.prepare_confirm_bundle(operation.operation_key)
+    async with MigrationIO(workers=1) as io:
+        receipt = await store.confirm_bundle_nas(ticket, io)
+    transaction = store.db.transaction
+
+    @asynccontextmanager
+    async def lose_outer_commit_response():
+        async with transaction() as session:
+            yield session
+        # Only the outermost exit actually commits on DatabaseConnection.
+        if store.db.transaction_depth == 0:
+            raise failure
+
+    monkeypatch.setattr(store.db, "transaction", lose_outer_commit_response)
+    with pytest.raises(UnknownCommit) as raised:
+        await store.commit_confirm_bundle(receipt)
+
+    assert raised.value.operation_key == operation.operation_key
+    assert raised.value.__cause__ is failure
+    assert store.db.rows[operation.operation_key.encode()]["durable_at"]
+    assert id(ticket) in store._confirm_tickets
+    assert id(receipt) in store._confirm_receipts
+
+
+async def test_final_transaction_exit_preserves_storage_error(
+    tmp_path,
+    monkeypatch,
+):
+    store, operation, _ = await prepared_store(tmp_path)
+    ticket = await store.prepare_confirm_bundle(operation.operation_key)
+    async with MigrationIO(workers=1) as io:
+        receipt = await store.confirm_bundle_nas(ticket, io)
+    transaction = store.db.transaction
+    failure = IntegrityError("final transaction failed")
+
+    @asynccontextmanager
+    async def fail_outer_exit():
+        async with transaction() as session:
+            yield session
+        if store.db.transaction_depth == 0:
+            raise failure
+
+    monkeypatch.setattr(store.db, "transaction", fail_outer_exit)
+    with pytest.raises(IntegrityError) as raised:
+        await store.commit_confirm_bundle(receipt)
+    assert raised.value is failure
