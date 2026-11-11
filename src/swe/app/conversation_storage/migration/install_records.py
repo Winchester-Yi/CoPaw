@@ -2,21 +2,25 @@
 """Offline-only typed installs through the normal publication commit protocol."""
 
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import asyncio
 import json
 import re
 
-from ..bundle import BundleBlock, BundleStore
+from ..bundle import BundleBlock, BundleIndex, BundleStore
 from ..chat_mutations import load_metadata_json
-from ..errors import ConflictError, IntegrityError
+from ..errors import ConflictError, IntegrityError, UnknownCommit
 from ..publications import (
     CommitPlan,
     PublicationStore,
+    PublicationRequest,
     _request as PublicationRequestFrom,
 )
 from ..retention import RetentionStore
 from ..publication_associations import PublicationAssociations
+from .parallel import MigrationIO
 
 COLUMNS = {
     "sessions": {
@@ -272,6 +276,20 @@ class OfflineTarget:
             raise ValueError("migration identity is required")
 
 
+@dataclass(frozen=True)
+class OfflineConfirmTicket:
+    request: PublicationRequest
+    publication_id: int
+    relative_path: str
+    plan_text: str
+
+
+@dataclass(frozen=True)
+class OfflineConfirmReceipt:
+    ticket: OfflineConfirmTicket
+    index: BundleIndex
+
+
 def _table(name):
     if name not in TABLES:
         raise IntegrityError("unknown offline import table")
@@ -296,6 +314,99 @@ class OfflineImportStore(PublicationStore):
         super().__init__(database, bundles, service_unit_id=service_unit_id)
         self.target = target
         self._reservation_ids = {}
+        self._confirm_tickets = {}
+        self._confirm_receipts = {}
+
+    def _check_confirm_ticket(self, ticket):
+        if self._confirm_tickets.get(id(ticket)) is not ticket:
+            raise IntegrityError("unknown offline confirmation ticket")
+        self._validate_service(ticket.request)
+        if ticket.relative_path != BundleStore.path_for(
+            ticket.request.operation_key,
+            ticket.request.scope,
+            scope_kind=ticket.request.scope_kind,
+        ):
+            raise IntegrityError("offline confirmation ticket path mismatch")
+
+    async def prepare_confirm_bundle(self, operation_key):
+        """SQL-only admission for confirming an existing migration bundle."""
+        row = await self.get(operation_key)
+        if row is None or row["state"] != "prepared":
+            raise ConflictError(
+                "publication must be prepared before confirmation",
+            )
+        await self._validate_prepared_references(row)
+        request = PublicationRequestFrom(row)
+        self._validate_service(request)
+        ticket = OfflineConfirmTicket(
+            request,
+            row["id"],
+            BundleStore.validate_publication_locator(row),
+            row["result_metadata_text"],
+        )
+        self._confirm_tickets[id(ticket)] = ticket
+        return ticket
+
+    async def confirm_bundle_nas(self, ticket, io):
+        """NAS-only confirmation; never access a database from an IO worker."""
+        self._check_confirm_ticket(ticket)
+        try:
+            index = await io.call(
+                self.bundles.confirm_durable,
+                ticket.relative_path,
+            )
+        except asyncio.CancelledError as error:
+            raise UnknownCommit(ticket.request.operation_key) from error
+        if (
+            index.relative_path != ticket.relative_path
+            or index.metadata.get("operation_key")
+            != ticket.request.operation_key
+        ):
+            raise IntegrityError("bundle operation identity or path mismatch")
+        receipt = OfflineConfirmReceipt(ticket, index)
+        self._confirm_receipts[id(receipt)] = (receipt, deepcopy(index))
+        return receipt
+
+    async def commit_confirm_bundle(self, receipt):
+        """SQL-only durable update after revalidating the frozen NAS receipt."""
+        known = self._confirm_receipts.get(id(receipt))
+        if (
+            known is None
+            or known[0] is not receipt
+            or known[1] != receipt.index
+        ):
+            raise IntegrityError(
+                "unknown or altered offline confirmation receipt",
+            )
+        ticket = receipt.ticket
+        self._check_confirm_ticket(ticket)
+        async with self.db.transaction():
+            row = await self.get(ticket.request.operation_key)
+            if row is None or row["state"] != "prepared":
+                raise ConflictError(
+                    "publication ended during NAS confirmation",
+                )
+            await self._validate_prepared_references(row)
+            current = await self.get(ticket.request.operation_key, lock=True)
+            self._matches(current, ticket.request, ticket.plan_text)
+            if (
+                current["id"] != ticket.publication_id
+                or BundleStore.validate_publication_locator(current)
+                != ticket.relative_path
+            ):
+                raise IntegrityError(
+                    "offline confirmation publication changed",
+                )
+            await self._mark_durable(ticket.request.operation_key, known[1])
+        self._confirm_receipts.pop(id(receipt))
+        self._confirm_tickets.pop(id(ticket))
+        return receipt.index
+
+    async def confirm_bundle(self, operation_key):
+        ticket = await self.prepare_confirm_bundle(operation_key)
+        async with MigrationIO(workers=1) as io:
+            receipt = await self.confirm_bundle_nas(ticket, io)
+        return await self.commit_confirm_bundle(receipt)
 
     async def _validate_reference_ownership(self, request, plan):
         # Import rows may be created by this batch. The typed import plan is
