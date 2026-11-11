@@ -484,7 +484,12 @@ class ChatManager:
             spec.updated_at = datetime.now(timezone.utc)
             return await self._repo.update_chat_if_exists(spec) is not None
 
-    async def delete_chats(self, chat_ids: list[str]) -> bool:
+    async def delete_chats(
+        self,
+        chat_ids: list[str],
+        *,
+        expected_chats=None,
+    ) -> bool:
         """Delete a chat spec.
 
         Note: This only deletes the spec. Redis session state is NOT deleted.
@@ -497,7 +502,19 @@ class ChatManager:
         """
         async with self._lock:
             if getattr(self._repo, "deferred_resource_cleanup", False) is True:
+                if expected_chats is not None:
+                    return await self._repo.delete_chats(
+                        chat_ids,
+                        expected_chats=expected_chats,
+                    )
                 return await self._repo.delete_chats(chat_ids)
+            if expected_chats is not None:
+                from ..conversation_storage.errors import ConflictError
+
+                for chat_id in chat_ids:
+                    current = await self._repo.get_chat(chat_id)
+                    if current != expected_chats.get(chat_id):
+                        raise ConflictError("Chat changed since authorization")
             existing_ids = {
                 chat.id
                 for chat in await self._repo.list_chats()

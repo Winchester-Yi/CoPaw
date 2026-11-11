@@ -45,7 +45,7 @@ class CollectionQuery(Enum):
         None,
     )
     CHAT_LOCK = (
-        "SELECT id,session_id FROM swe_conversation_chats WHERE service_unit_key=%s AND id IN (",
+        "SELECT id,session_id,external_chat_key,external_session_key,user_key,channel_key FROM swe_conversation_chats WHERE service_unit_key=%s AND id IN (",
         ") ORDER BY id FOR UPDATE",
         None,
     )

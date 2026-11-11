@@ -43,6 +43,7 @@ class HistorySnapshot:
     boundaries: list
     batches: list
     turn_status: str | None = None
+    context_epoch: int | None = None
 
 
 class HistoryStore:
@@ -279,7 +280,7 @@ class HistoryStore:
         async with self.db.transaction():
             chat = await self._chat(chat_id)
             session = await self.db.fetch_one(
-                "SELECT history_high FROM swe_conversation_sessions "
+                "SELECT history_high,context_epoch FROM swe_conversation_sessions "
                 "WHERE id=%s",
                 (chat["session_id"],),
             )
@@ -305,7 +306,13 @@ class HistoryStore:
                 else []
             )
             batches = await self._pins(chat, rows, boundaries)
-            return HistorySnapshot(chat, rows, boundaries, batches)
+            return HistorySnapshot(
+                chat,
+                rows,
+                boundaries,
+                batches,
+                context_epoch=session["context_epoch"],
+            )
 
     async def _validate_chat_row(self, chat):
         chat_fields = (
@@ -332,6 +339,20 @@ class HistoryStore:
             current[field] != chat[field] for field in chat_fields
         ):
             raise ConflictError("Chat history changed while reading")
+
+    async def _validate_snapshot(self, snapshot):
+        await self._validate_chat_row(snapshot.chat)
+        if snapshot.context_epoch is not None:
+            current = await self.db.fetch_one(
+                "SELECT context_epoch FROM swe_conversation_sessions "
+                "WHERE id=%s AND service_unit_key=%s",
+                (snapshot.chat["session_id"], self.scope.sql_values[0]),
+            )
+            if (
+                current is None
+                or current["context_epoch"] != snapshot.context_epoch
+            ):
+                raise ConflictError("Session history changed while reading")
 
     async def _payloads(self, snapshot):
         publications = {
@@ -414,7 +435,7 @@ class HistoryStore:
         from ..runner import api
 
         try:
-            await self._validate_chat_row(snapshot.chat)
+            await self._validate_snapshot(snapshot)
             spec = (
                 await self.chats._hydrate([snapshot.chat], snapshot.batches)
             )[0]
@@ -461,7 +482,7 @@ class HistoryStore:
                 )
             if not tracing:
                 messages = api._redact_hidden_context_messages(messages)
-            await self._validate_chat_row(snapshot.chat)
+            await self._validate_snapshot(snapshot)
             if authorize is not None:
                 authorize(spec)
             archive = ChatArchiveMetadata(
@@ -638,7 +659,7 @@ class HistoryStore:
                 )
             typed_turn = turn is not None and anchor["turn_id"] == turn["id"]
             high = await self.db.fetch_one(
-                "SELECT history_high FROM swe_conversation_sessions "
+                "SELECT history_high,context_epoch FROM swe_conversation_sessions "
                 "WHERE id=%s",
                 (chat["session_id"],),
             )
@@ -688,6 +709,7 @@ class HistoryStore:
                 [],
                 batches,
                 turn["history_status"] if turn else None,
+                context_epoch=high["context_epoch"],
             )
 
     async def answer_turn(

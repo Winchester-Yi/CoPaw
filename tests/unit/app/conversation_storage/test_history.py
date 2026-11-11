@@ -243,3 +243,49 @@ async def test_target_approval_overlay_uses_actual_scope_filter(
         result.messages[0].metadata["metadata"]["approval_action"]["status"]
         == "approved"
     )
+
+
+@pytest.mark.parametrize("tracing", [False, True])
+async def test_shared_session_reset_during_payload_read(
+    tmp_path,
+    monkeypatch,
+    tracing,
+):
+    from swe.app.conversation_storage.history import HistorySnapshot
+    from swe.app.conversation_storage.errors import ConflictError
+
+    store = history(tmp_path)
+    epoch = 4
+
+    async def session_row(*args):
+        return {"context_epoch": epoch}
+
+    store.db = SimpleNamespace(fetch_one=session_row)
+    store._validate_chat_row = AsyncMock()
+    store.chats._hydrate = AsyncMock(
+        return_value=[
+            ChatSpec(
+                id="B",
+                session_id="shared",
+                user_id="bob",
+            ),
+        ],
+    )
+
+    async def read_then_reset(snapshot):
+        nonlocal epoch
+        epoch += 1  # A commits reset while B reads its pinned body.
+        return []
+
+    store._payloads = read_then_reset
+    store._finish = AsyncMock()
+    monkeypatch.setattr(
+        api,
+        "_annotate_approval_action_statuses",
+        AsyncMock(return_value=[]),
+    )
+    snapshot = HistorySnapshot({"session_id": 1}, [], [], [])
+    snapshot.context_epoch = 4
+    with pytest.raises(ConflictError, match="Session history changed"):
+        await store._assemble(snapshot, tracing=tracing)
+    store._finish.assert_awaited_once_with(snapshot)

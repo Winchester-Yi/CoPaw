@@ -592,7 +592,7 @@ class MySQLChatRepository(BaseChatRepository):
             )
             return bool(changed)
 
-    async def delete_chats(self, chat_ids):
+    async def delete_chats(self, chat_ids, *, expected_chats=None):
         keys = sorted({chat_key_bytes(value) for value in chat_ids})
         if not keys:
             return False
@@ -628,6 +628,22 @@ class MySQLChatRepository(BaseChatRepository):
                 for row in rows
             ):
                 raise ConflictError("Chat Session association changed")
+            if expected_chats is not None:
+                for row in current:
+                    expected = expected_chats.get(
+                        _text(row["external_chat_key"]),
+                    )
+                    if expected is None or any(
+                        _text(row[field]) != getattr(expected, attr)
+                        for field, attr in (
+                            ("user_key", "user_id"),
+                            ("channel_key", "channel"),
+                            ("external_session_key", "session_id"),
+                        )
+                    ):
+                        raise ConflictError(
+                            "Chat ownership changed since authorization",
+                        )
             changed = await update_collection(
                 self.db,
                 CollectionQuery.DELETE_CHATS,

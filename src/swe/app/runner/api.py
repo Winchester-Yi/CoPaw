@@ -2054,7 +2054,15 @@ async def delete_chat(
             detail=f"Chat not found: {chat_id}",
         )
     _authorize_chat(request, existing, None)
-    deleted = await mgr.delete_chats(chat_ids=[chat_id])
+    from ..conversation_storage.errors import ConflictError
+
+    try:
+        deleted = await mgr.delete_chats(
+            chat_ids=[chat_id],
+            expected_chats={chat_id: existing},
+        )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(
             status_code=404,

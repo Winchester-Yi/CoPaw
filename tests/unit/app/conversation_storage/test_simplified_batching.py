@@ -72,7 +72,9 @@ async def test_history_capture_does_not_lock_or_requery_messages(tmp_path):
 
     store.db = SimpleNamespace(
         transaction=transaction,
-        fetch_one=AsyncMock(return_value={"history_high": 0}),
+        fetch_one=AsyncMock(
+            return_value={"history_high": 0, "context_epoch": 0},
+        ),
         fetch_all=AsyncMock(return_value=[]),
     )
     store._chat = AsyncMock(return_value={"id": 1, "session_id": 2})
@@ -83,6 +85,7 @@ async def test_history_capture_does_not_lock_or_requery_messages(tmp_path):
     )
     snapshot = await store._snapshot("chat")
     assert snapshot.rows == []
+    assert snapshot.context_epoch == 0
     assert store.db.fetch_all.await_count == 1
 
 

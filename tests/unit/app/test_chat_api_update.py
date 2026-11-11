@@ -173,3 +173,21 @@ def test_update_chat_reports_concurrent_patch_conflict() -> None:
     response = TestClient(app).put("/chats/chat-1", json={"name": "new"})
     assert response.status_code == 409
     assert manager.chat.meta["concurrent"] == "preserve"
+
+
+def test_delete_passes_authorized_snapshot_and_maps_conflict():
+    from src.swe.app.conversation_storage.errors import ConflictError
+
+    manager = _FakeChatManager()
+
+    async def delete_chats(chat_ids, *, expected_chats):
+        assert chat_ids == ["chat-1"]
+        assert expected_chats == {"chat-1": manager.chat}
+        raise ConflictError("Chat ownership changed since authorization")
+
+    manager.delete_chats = delete_chats
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_chat_manager] = lambda: manager
+    response = TestClient(app).delete("/chats/chat-1")
+    assert response.status_code == 409

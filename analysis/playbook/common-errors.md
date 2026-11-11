@@ -924,3 +924,8 @@
 - **处理**：SQL 详情改为目标 workspace 的 `current`，归档显式调用 `archive_page`；两者共享 chat/user/source/agent 对象校验回调。首次 metadata hydrate 也经过存储错误包装，故障明确返回 503，不回退文件历史。
 - **排查入口**：`src/swe/app/routers/tracing.py`，先检查详情的 `chat`、`archive.has_more/boundaries`，再检查 history 请求及其 cursor；页级 `has_more` 与详情归档可用性含义不同。
 - **回归入口**：`tests/unit/routers/test_tracing_chat_history_parity.py`、`tests/integrated/conversation_storage/test_api_mysql.py` 和 `ReadOnlySessionChat.archive.test.tsx`。本地替身测试不能替代真实 SQL/NAS 验收，见[修复报告](../../docs/superpowers/reports/2026-11-04-tracing-history-parity-fix.md)。
+
+
+### 共享 Session reset 与并发删除授权
+
+历史正文 pin 只保护物理数据，在线历史返回前还须核对 Session.context_epoch；仅核对发起读取的 Chat 版本会漏掉另一 Chat 的 reset。删除授权时读取的归属必须传到持有 Chat 行锁的 tombstone 事务内重验，候选查询后的 Session 关联检查不能覆盖授权到候选查询之间的合法所有权转移。参见 `docs/superpowers/reports/2026-11-11-conversation-storage-fix-and-crud-review.md`。

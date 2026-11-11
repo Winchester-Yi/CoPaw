@@ -438,3 +438,44 @@ async def test_two_api_patches_cannot_overwrite_concurrent_metadata(tmp_path):
         manager,
     )
     assert current.meta == {"b": 2, "a": 1}
+
+
+@pytest.mark.parametrize("transferred", [False, True])
+async def test_delete_rejects_ownership_transfer_before_candidate_read(
+    tmp_path,
+    transferred,
+):
+    row = chat_row(user_key=b"bob", external_session_key=b"bob-session")
+    db = ReadDatabase([row])
+    db.execute = AsyncMock(return_value=1)
+    db._in_transaction = True
+    repo = MySQLChatRepository(
+        db,
+        WorkspaceScope(
+            "t",
+            "s",
+            "a",
+            service_unit_id="schema-test-service",
+        ),
+        BundleStore(tmp_path),
+    )
+    repo.retentions.assert_writes_allowed = AsyncMock()
+    expected = ChatSpec(
+        id="chat",
+        user_id="alice" if transferred else "bob",
+        session_id="alice-session" if transferred else "bob-session",
+        channel="console",
+    )
+    if transferred:
+        with pytest.raises(ConflictError, match="ownership changed"):
+            await repo.delete_chats(
+                ["chat"],
+                expected_chats={"chat": expected},
+            )
+        db.execute.assert_not_awaited()
+    else:
+        assert await repo.delete_chats(
+            ["chat"],
+            expected_chats={"chat": expected},
+        )
+        db.execute.assert_awaited_once()
