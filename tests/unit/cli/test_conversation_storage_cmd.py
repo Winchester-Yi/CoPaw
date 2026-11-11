@@ -278,3 +278,47 @@ def test_legacy_apply_is_denied_before_database_access(
     result = invoke(migration, command, "--apply")
     assert result.exit_code != 0
     assert "legacy v2" in result.output
+
+
+@pytest.mark.parametrize("marked", [True, False])
+def test_offline_factory_manifest_routes_to_offline_preview(migration, marked):
+    assert migration.data["version"] == 3
+    if marked:
+        assert migration.data["workflow"] == "offline"
+    else:
+        migration.data.pop("workflow", None)
+        migration._persist()
+    result = invoke(migration, "plan")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["staging_schema"].startswith(
+        "conversation_staging_",
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow,extra,expected",
+    [
+        ("unknown", {}, "unsupported migration workflow"),
+        ("offline", {"discovery_version": 1}, "conflicts"),
+        ("direct", {}, "services"),
+    ],
+)
+def test_invalid_workflow_is_rejected_before_database_access(
+    migration,
+    monkeypatch,
+    workflow,
+    extra,
+    expected,
+):
+    from swe.database.connection import DatabaseConnection
+
+    async def forbidden(*_args):
+        pytest.fail("invalid workflow connected to database")
+
+    monkeypatch.setattr(DatabaseConnection, "connect", forbidden)
+    data = dict(migration.data, workflow=workflow, **extra)
+    migration.path.write_text(json.dumps(data))
+    result = invoke(migration, "import", "--apply")
+    assert result.exit_code != 0
+    assert expected in result.output
+    assert "Error: 'services'" not in result.output

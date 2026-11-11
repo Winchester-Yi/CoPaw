@@ -340,8 +340,12 @@ def _command(operation, path, apply=False):
             load_metadata_json,
         )
 
-        version = load_metadata_json(path.read_bytes()).get("version")
-        if version == 3:
+        from swe.app.conversation_storage.migration.manifest import (
+            migration_workflow,
+        )
+
+        document = load_metadata_json(path.read_bytes())
+        if migration_workflow(document) == "direct":
             from swe.cli.conversation_storage_v3_cmd import run_v3_command
 
             result = run_v3_command(operation, path, apply=apply)

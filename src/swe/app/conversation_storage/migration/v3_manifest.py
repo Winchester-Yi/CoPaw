@@ -7,7 +7,13 @@ import time
 from uuid import UUID
 
 from ..identity import WorkspaceScope, service_unit_bytes
-from .manifest import MigrationManifest, SourceBoundary, KINDS, TRANSITIONS
+from .manifest import (
+    MigrationManifest,
+    SourceBoundary,
+    KINDS,
+    TRANSITIONS,
+    migration_workflow,
+)
 
 
 class V3Manifest(MigrationManifest):
@@ -16,10 +22,14 @@ class V3Manifest(MigrationManifest):
     def _validate(self):
         if self.data.get("version") != 3:
             raise ValueError("unsupported direct migration manifest version")
+        if migration_workflow(self.data) != "direct":
+            raise ValueError("direct manifest requires direct workflow")
         if str(UUID(self.migration_id)) != self.migration_id:
             raise ValueError("invalid migration identity")
         SourceBoundary(**self.data["source_boundary"])
-        services = self.data["services"]
+        services = self.data.get("services")
+        if not isinstance(services, list) or not services:
+            raise ValueError("direct manifest requires nonempty services")
         names = [item["service_unit_id"] for item in services]
         if not names or len(set(names)) != len(names):
             raise ValueError("unique explicit migration services are required")

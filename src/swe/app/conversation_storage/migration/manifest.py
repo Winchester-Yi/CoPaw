@@ -67,6 +67,19 @@ class SourceBoundary:
             )
 
 
+def migration_workflow(data):
+    """Distinguish workflow from format version, including unmarked journals."""
+    direct = any(key in data for key in ("services", "discovery_version"))
+    workflow = data.get("workflow")
+    if workflow is None:
+        return "direct" if direct else "offline"
+    if workflow not in ("offline", "direct"):
+        raise ValueError("unsupported migration workflow")
+    if workflow == "offline" and direct:
+        raise ValueError("offline workflow conflicts with discovery manifest")
+    return workflow
+
+
 class MigrationManifest:
     def __init__(self, path, data):
         self.path = Path(path)
@@ -80,6 +93,8 @@ class MigrationManifest:
     def _validate(self):
         if self.data.get("version") != 3:
             raise ValueError("unsupported migration manifest version")
+        if migration_workflow(self.data) != "offline":
+            raise ValueError("offline manifest requires offline workflow")
         if str(UUID(self.data["migration_id"])) != self.data["migration_id"]:
             raise ValueError("invalid migration identity")
         SourceBoundary(**self.data["source_boundary"])
@@ -163,6 +178,7 @@ class MigrationManifest:
     def create(cls, path, boundary, workspaces):
         data = {
             "version": 3,
+            "workflow": "offline",
             "migration_id": str(uuid4()),
             "source_boundary": {
                 **asdict(boundary),
@@ -194,7 +210,8 @@ class MigrationManifest:
     def _refresh(self):
         current = self.load(self.path)
         if (
-            current.migration_id != self.migration_id
+            migration_workflow(current.data) != migration_workflow(self.data)
+            or current.migration_id != self.migration_id
             or current.data["source_boundary"] != self.data["source_boundary"]
         ):
             raise ValueError("migration identity or source boundary changed")

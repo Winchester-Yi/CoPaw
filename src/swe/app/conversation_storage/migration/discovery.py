@@ -646,6 +646,7 @@ def freeze_discovery(report, path, boundary, application_schema):
     data = {
         **deepcopy(report),
         "version": 3,
+        "workflow": "direct",
         "migration_id": str(uuid4()),
         "source_boundary": {
             **asdict(boundary),

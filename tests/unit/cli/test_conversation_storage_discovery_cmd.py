@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import click
+import pytest
 from click.testing import CliRunner
 
 
@@ -47,7 +48,8 @@ def inputs(tmp_path):
     return services, shares, source
 
 
-def test_discover_and_freeze_existing_roots(tmp_path):
+@pytest.mark.parametrize("marked", [True, False])
+def test_discover_and_freeze_existing_roots(tmp_path, marked):
     services, shares, _ = inputs(tmp_path)
     output = tmp_path / "report.json"
     result = CliRunner().invoke(
@@ -91,7 +93,12 @@ def test_discover_and_freeze_existing_roots(tmp_path):
         ],
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(manifest.read_text())["version"] == 3
+    data = json.loads(manifest.read_text())
+    assert data["version"] == 3
+    assert data["workflow"] == "direct"
+    if not marked:
+        del data["workflow"]
+        manifest.write_text(json.dumps(data))
     from swe.cli.conversation_storage_cmd import conversation_storage_group
 
     for operation in ("inventory", "plan", "inspect"):
