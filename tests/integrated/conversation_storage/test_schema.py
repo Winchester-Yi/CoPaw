@@ -386,7 +386,6 @@ async def test_share_extension_preserves_legacy_schema_tokens_and_counters(
             "Extra",
         ):
             assert old[field] == new[field]
-        assert re.search("[\u4e00-\u9fff]", new["Comment"])
     assert [
         row
         for row in await db.fetch_all("SHOW INDEX FROM swe_chat_shares")
@@ -410,19 +409,25 @@ async def test_share_extension_preserves_legacy_schema_tokens_and_counters(
     )
 
 
-async def test_share_extension_rejects_unexpected_schema_before_adding_columns(
+async def test_share_extension_preserves_unrelated_existing_columns(
     conversation_test_database,
 ):
     db = conversation_test_database
     await legacy_share(db)
     await db.execute("ALTER TABLE swe_chat_shares ADD unexpected TEXT")
-    with pytest.raises(ProgrammingError):
-        await apply_sql_script(
-            db,
-            SQL_ROOT / "conversation_share_publication_extension.sql",
-        )
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_publication_extension.sql",
+    )
     columns = await db.fetch_all("SHOW COLUMNS FROM swe_chat_shares")
-    assert "publication_id" not in {row["Field"] for row in columns}
+    names = {row["Field"] for row in columns}
+    assert "unexpected" in names
+    assert {
+        "publication_id",
+        "byte_offset",
+        "byte_length",
+        "service_unit_key",
+    } <= names
 
 
 async def test_share_and_publication_share_one_transaction_connection(

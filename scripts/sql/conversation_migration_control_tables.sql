@@ -1,5 +1,6 @@
--- DESIGN DRAFT / NOT APPLIED, 2026-11-02. Pending v3 importer, not yet implemented.
--- Spec: docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md
+-- Final pre-cutover DDL for the offline v3 migration journal.
+-- Validated by isolated integration tests on MySQL 8.0.46; verify compatibility
+-- against the actual target MySQL/TDSQL service before production execution.
 -- DBA applies once to the selected application schema. CLI never executes this file.
 -- Operational journals are outside the seven-table business backup/restore set.
 -- No IF NOT EXISTS, DROP, foreign keys or SQL JSON. Times are explicit UTC.
@@ -29,7 +30,7 @@ CREATE TABLE swe_conversation_migration_entries (
     state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT 'planned/mapped/prepared/committed/verified/blocked，按种类校验',
     target_id BIGINT UNSIGNED NULL COMMENT '五类预分配实体等于本行id；Retention保存实际ID；token或纯批次可NULL',
     operation_key VARBINARY(64) NULL COMMENT 'publication首次预留时固定的操作身份',
-    details_text MEDIUMTEXT NULL COMMENT '受限计划、分享扩展列回填前值及对账证据，不存正文或凭据',
+    details_text MEDIUMTEXT NULL COMMENT 'publication scope/path locator、受限计划、分享扩展列回填前值及对账证据，不存正文或凭据',
     created_at DATETIME(6) NOT NULL COMMENT '创建UTC时间',
     updated_at DATETIME(6) NOT NULL COMMENT '最近变更UTC时间',
     PRIMARY KEY (id),

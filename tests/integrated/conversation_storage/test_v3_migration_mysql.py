@@ -42,6 +42,11 @@ async def test_v3_discovery_import_resume_verify_finalize(
     from agentscope.message import Msg
     from swe.app.runner.models import ChatSpec, ChatsFile
 
+    chat_ids = (
+        "71b9d38d-8e8e-4f7c-b32d-99d75a2e0491",
+        "b62164c2-a066-4ab8-b1b4-9068d817252d",
+    )
+
     for index in range(2):
         agent = f"agent{index}"
         session = f"session{index}"
@@ -55,23 +60,31 @@ async def test_v3_discovery_import_resume_verify_finalize(
             "enabled": True,
         }
         (workspace / "agent.json").write_text(json.dumps({"id": agent}))
-        chat = ChatSpec(
-            id=f"chat{index}",
-            session_id=session,
-            user_id="alice",
-            channel="console",
-        )
+        chats = [
+            ChatSpec(
+                id=chat_ids[index],
+                session_id=session,
+                user_id="alice",
+                channel="console",
+            ),
+        ]
         (workspace / "chats.json").write_text(
-            ChatsFile(chats=[chat]).model_dump_json(),
+            ChatsFile(chats=chats).model_dump_json(),
         )
+        content = [
+            Msg(
+                "user" if message_index % 2 == 0 else "assistant",
+                f"question {index} message {message_index}: " + "x" * 256,
+                "user" if message_index % 2 == 0 else "assistant",
+            ).to_dict()
+            for message_index in range(8 if index == 0 else 1)
+        ]
         state = {
             "schema_version": 2,
             "revision": 1,
             "agent": {
                 "memory": {
-                    "content": [
-                        Msg("user", f"question {index}", "user").to_dict(),
-                    ],
+                    "content": content,
                 },
             },
         }
@@ -110,17 +123,42 @@ async def test_v3_discovery_import_resume_verify_finalize(
             },
         ),
     )
+    orphan_snapshot = (
+        source / "retired-tenant" / "chat_shares" / "orphan-token.json"
+    )
+    orphan_snapshot.parent.mkdir(parents=True)
+    orphan_snapshot.write_text(
+        json.dumps(
+            {
+                "chat_name": "orphaned share",
+                "messages": [{"role": "user", "content": "orphan body"}],
+            },
+        ),
+    )
     await db.execute(
         "INSERT INTO swe_chat_shares (token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             "share-token",
-            "chat0",
+            chat_ids[0],
             "alice",
             "default",
             "default/chat_shares/share-token.json",
             "2026-11-01 00:00:00",
             17,
             None,
+        ),
+    )
+    await db.execute(
+        "INSERT INTO swe_chat_shares (token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (
+            "orphan-token",
+            "deleted-chat",
+            "former-user",
+            "retired-tenant",
+            "retired-tenant/chat_shares/orphan-token.json",
+            "2026-10-01 12:30:00",
+            3,
+            "2026-11-01 08:15:00",
         ),
     )
     shares = await db.fetch_all(
@@ -163,6 +201,14 @@ async def test_v3_discovery_import_resume_verify_finalize(
     assert len(inventory["workspaces"]) == 3
     assert sum(len(item["chats"]) for item in inventory["workspaces"]) == 3
     assert sum(len(item["sessions"]) for item in inventory["workspaces"]) == 3
+    assert (
+        sum(
+            len(session["legacy"]["state"]["agent"]["memory"]["content"])
+            for workspace in inventory["workspaces"]
+            for session in workspace["sessions"]
+        )
+        == 17
+    )
     monkeypatch.setattr(
         "swe.database.config.get_database_config",
         lambda: db.config,

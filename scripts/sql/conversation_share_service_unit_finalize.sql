@@ -1,13 +1,30 @@
--- DESIGN DRAFT / NOT APPLIED TO PRODUCTION, updated 2026-11-02.
+-- Final post-import cleanup and DDL for share service ownership.
+-- Validated by isolated integration tests on MySQL 8.0.46; verify compatibility
+-- against the actual target MySQL/TDSQL service before production execution.
 -- Spec: docs/superpowers/specs/2026-11-02-conversation-service-unit-isolation-design.md
--- DBA runs once ONLY after extension and verified ownership backfill, with writers stopped.
--- Pending v3 uses precreated application tables; current v2 uses staging.
--- Pending v3 spec: docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md
+-- DBA runs once after import, with share writers stopped and a pre-DDL backup.
+-- The v3 importer writes to precreated application tables; this runs only after
+-- import verification and share ownership/locator backfill.
 -- Source ownership must come from the coordinated migration inventory, never a DB default.
 -- This guard verifies share ownership/locator completeness, not the full NAS/semantic closure.
 -- Full importer validation must also reject invalid service identities and check all extents.
--- No backfill DML, no token/legacy-field changes, no production startup DDL.
+-- Rows with all four new locator fields NULL are expired legacy shares and are deleted.
+-- Partially populated or mismatched rows are retained and cause this script to fail.
+-- This intentionally invalidates historical share links; inspect the deletion count first.
 -- DDL implicitly commits. Run with a fail-fast client; do not continue on errors.
+SELECT COUNT(*) AS legacy_shares_to_expire
+FROM swe_chat_shares
+WHERE publication_id IS NULL
+  AND byte_offset IS NULL
+  AND byte_length IS NULL
+  AND service_unit_key IS NULL;
+
+DELETE FROM swe_chat_shares
+WHERE publication_id IS NULL
+  AND byte_offset IS NULL
+  AND byte_length IS NULL
+  AND service_unit_key IS NULL;
+
 SELECT CASE WHEN NOT EXISTS (
     SELECT 1
     FROM swe_chat_shares AS s

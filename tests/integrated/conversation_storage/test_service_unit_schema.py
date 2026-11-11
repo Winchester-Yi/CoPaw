@@ -219,3 +219,24 @@ async def test_share_finalize_preserves_token_and_counters(
             "byte_offset,byte_length,%s FROM swe_chat_shares WHERE token='token'",
             (SERVICE_B,),
         )
+
+
+async def test_share_finalize_expires_legacy_rows_without_locators(
+    conversation_test_database,
+):
+    db = conversation_test_database
+    await legacy_share(db)
+    await apply_sql_script(
+        db,
+        SQL_ROOT / "conversation_share_publication_extension.sql",
+    )
+
+    await apply_sql_script(db, FINALIZE)
+
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS n FROM swe_chat_shares",
+    ) == {"n": 0}
+    column = await db.fetch_one(
+        "SHOW COLUMNS FROM swe_chat_shares LIKE 'service_unit_key'",
+    )
+    assert column["Null"] == "NO"

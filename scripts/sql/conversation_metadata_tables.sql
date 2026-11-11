@@ -1,15 +1,14 @@
--- DESIGN DRAFT / NOT APPLIED TO PRODUCTION, updated 2026-11-02.
+-- Final pre-cutover CREATE DDL for the MySQL conversation storage runtime.
+-- Validated by isolated integration tests on MySQL 8.0.46; verify compatibility
+-- against the actual target MySQL/TDSQL service before production execution.
 -- Spec: docs/superpowers/specs/2026-10-29-db-nas-conversation-storage-design.md
 -- Service-unit amendment: docs/superpowers/specs/2026-11-02-conversation-service-unit-isolation-design.md
--- Target DDL only: the current three-dimensional runtime schema contract is incompatible.
+-- Target DDL only: this is not an ALTER/backfill procedure for existing tables.
 -- Deploy only with service-aware adapters, schema readiness and migration tooling.
 -- Six NEW tables. Existing swe_chat_shares uses the separate extension script.
 -- Finalize share service ownership after verified backfill with conversation_share_service_unit_finalize.sql.
--- Pending v3 direct-import amendment (not implemented):
--- docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md
 -- DBA precreates these six tables in the application schema; v3 CLI uses DML only.
 -- DBA separately applies conversation_migration_control_tables.sql for v3 journals.
--- Current v2 CLI still requires staging; do not use it against precreated targets.
 -- Proposed target: MySQL 8.0.21+, InnoDB DYNAMIC, page size >= 16 KiB, strict mode.
 -- Confirm actual MySQL/TDSQL compatibility; no automatic startup DDL.
 -- Explicitly select the reviewed schema. These six table names must not exist.
