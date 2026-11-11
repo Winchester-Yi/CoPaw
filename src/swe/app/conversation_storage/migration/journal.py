@@ -467,13 +467,22 @@ class MigrationJournal:
         return expected
 
     async def _hydration_entries(self):
-        last_id = 0
+        last_id = None
         while True:
+            # Include zero in the first page so invalid integer tickets still
+            # reach the mapping validator instead of disappearing from recovery.
+            if last_id is None:
+                condition = " WHERE migration_id=%s"
+                params = (self.migration_id, HYDRATE_PAGE_SIZE)
+            else:
+                condition = " WHERE migration_id=%s AND id>%s"
+                params = (self.migration_id, last_id, HYDRATE_PAGE_SIZE)
             rows = await self.db.fetch_all(
                 "SELECT * FROM "
                 + ENTRIES
-                + " WHERE migration_id=%s AND id>%s ORDER BY id LIMIT %s",
-                (self.migration_id, last_id, HYDRATE_PAGE_SIZE),
+                + condition
+                + " ORDER BY id LIMIT %s",
+                params,
             )
             if not rows:
                 return

@@ -62,14 +62,18 @@ class Database:
 
     async def fetch_all(self, query, params=None):
         self.queries.append(query)
-        if "migration_entries" in query and "id>%s" in query:
-            migration_id, last_id, limit = params
+        if "migration_entries" in query and "ORDER BY id LIMIT %s" in query:
+            if "id>%s" in query:
+                migration_id, last_id, limit = params
+            else:
+                migration_id, limit = params
+                last_id = None
             rows = sorted(
                 (
                     row
                     for row in self.entries
                     if row["migration_id"] == migration_id
-                    and row["id"] > last_id
+                    and (last_id is None or row["id"] > last_id)
                 ),
                 key=lambda row: row["id"],
             )[:limit]
@@ -191,10 +195,40 @@ async def test_hydrate_reads_ordered_keyset_pages(
     }
     assert [length for _, _, length in db.hydration_pages] == page_lengths
     assert [cursor for cursor, _, _ in db.hydration_pages] == [
-        20 * index for index in range(len(page_lengths))
+        None if index == 0 else 20 * index
+        for index in range(len(page_lengths))
     ]
     assert all("ORDER BY id LIMIT %s" in query for query in db.queries)
     frozen._persist.assert_called_once_with()
+
+
+async def test_hydrate_rejects_zero_integer_ticket_in_first_page(monkeypatch):
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.migration import journal
+
+    monkeypatch.setattr(journal, "HYDRATE_PAGE_SIZE", 2)
+    db, frozen = Database(), manifest()
+    frozen._persist = Mock()
+    db.entries = [
+        {
+            "id": 0,
+            "migration_id": frozen.migration_id.encode(),
+            "entry_kind": "session",
+            "source_key": "invalid-zero",
+            "state": "mapped",
+            "target_id": 0,
+            "operation_key": "a" * 64,
+            "details_text": None,
+        },
+    ]
+    before = deepcopy(frozen.data)
+
+    with pytest.raises(ValueError, match="integer ticket mapping is invalid"):
+        await journal.MigrationJournal(db, frozen).hydrate()
+
+    assert db.hydration_pages == [(None, 2, 1)]
+    assert frozen.data == before
+    frozen._persist.assert_not_called()
 
 
 async def test_hydrate_checks_mirror_after_all_pages_before_replacing_it(
