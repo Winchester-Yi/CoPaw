@@ -443,6 +443,13 @@ class ConversationImporter:
     def _record_source_change(self, blocker):
         self.manifest.record_source_change(blocker)
 
+    async def _reserve_batch(self, position, request, assignment, plan):
+        return await self.store.reserve_batch(
+            request,
+            assignment["target_id"],
+            plan,
+        )
+
     async def _publish(self, position, scope, rows, blocks, *, spec=None):
         self.bundles = self.bundle_stores[scope.service_unit_id]
         self.store = self.stores[scope.service_unit_id]
@@ -478,9 +485,10 @@ class ConversationImporter:
         )
         plan = commit_plan or CommitPlan(result_ids=(assignment["target_id"],))
         body = plan_block(self.target, rows, updates, locks)
-        current = await self.store.reserve_batch(
+        current = await self._reserve_batch(
+            position,
             request,
-            assignment["target_id"],
+            assignment,
             plan,
         )
         if current["state"] == "committed":

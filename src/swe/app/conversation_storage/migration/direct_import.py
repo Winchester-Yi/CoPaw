@@ -40,19 +40,33 @@ class DirectImportStore(OfflineImportStore):
         self.journal = journal
         self.batch_positions = {}
 
-    async def reserve_batch(self, request, publication_id, plan=None):
+    async def reserve_batch(
+        self,
+        request,
+        publication_id,
+        plan=None,
+        *,
+        position=None,
+    ):
         assignment = self.journal.manifest.data["assignments"]["publication"]
-        positions = [
-            key
-            for key, value in assignment.items()
-            if value["target_id"] == publication_id
-            and value["operation_key"] == request.operation_key
-        ]
-        if len(positions) != 1:
+        if position is None:
+            positions = [
+                key
+                for key, value in assignment.items()
+                if value["target_id"] == publication_id
+                and value["operation_key"] == request.operation_key
+            ]
+            position = positions[0] if len(positions) == 1 else None
+        ticket = assignment.get(position)
+        if (
+            ticket is None
+            or ticket["target_id"] != publication_id
+            or ticket["operation_key"] != request.operation_key
+        ):
             raise IntegrityError(
                 "publication reservation has no durable SQL ticket",
             )
-        self.batch_positions[request.operation_key] = positions[0]
+        self.batch_positions[request.operation_key] = position
         return await super().reserve_batch(request, publication_id, plan)
 
     async def verify_batch(self, request, publication_id, plan, expected):
@@ -217,6 +231,14 @@ class DirectImporter(ConversationImporter):
     async def _batch_finished(self, position):
         # SQL completion was persisted with publication commit; mirror only now.
         await self.journal.refresh_batch(position)
+
+    async def _reserve_batch(self, position, request, assignment, plan):
+        return await self.store.reserve_batch(
+            request,
+            assignment["target_id"],
+            plan,
+            position=position,
+        )
 
     def _record_source_change(self, blocker):
         if not self.journal.persist_updates:
