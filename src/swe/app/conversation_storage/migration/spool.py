@@ -95,6 +95,7 @@ class InventorySpool:
         self._records = {}
         self._closed = False
         self._lock = threading.RLock()
+        self._readers = 0
 
     @property
     def used_bytes(self):
@@ -177,20 +178,27 @@ class InventorySpool:
                 raise ValueError(
                     "inventory record does not belong to this spool",
                 )
-        path = self.root / (str(record.index) + ".json")
-        with path.open("rb") as handle:
-            raw = handle.read(record.byte_length + 1)
-        if (
-            len(raw) != record.byte_length
-            or sha256(raw).hexdigest() != record.digest
-        ):
-            raise ValueError("temporary inventory record changed")
-        return load_metadata_json(raw)
+            self._readers += 1
+        try:
+            path = self.root / (str(record.index) + ".json")
+            with path.open("rb") as handle:
+                raw = handle.read(record.byte_length + 1)
+            if (
+                len(raw) != record.byte_length
+                or sha256(raw).hexdigest() != record.digest
+            ):
+                raise ValueError("temporary inventory record changed")
+            return load_metadata_json(raw)
+        finally:
+            with self._lock:
+                self._readers -= 1
 
     def close(self):
         with self._lock:
-            if any(value is None for value in self._records.values()):
-                raise RuntimeError("inventory writes must drain before close")
+            if self._readers or any(
+                value is None for value in self._records.values()
+            ):
+                raise RuntimeError("inventory IO must drain before close")
             if not self._closed:
                 shutil.rmtree(self.root)
                 self._closed = True

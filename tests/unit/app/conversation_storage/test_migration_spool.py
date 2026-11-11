@@ -121,3 +121,37 @@ async def test_concurrent_writes_reserve_capacity_and_unique_indexes(tmp_path):
         assert sum(not isinstance(item, Exception) for item in results) == 2
         assert spool.used_bytes == 44
         assert len(list(spool.root.iterdir())) == 2
+
+
+async def test_close_rejects_active_reader_without_deleting_record(
+    tmp_path,
+    monkeypatch,
+):
+    from pathlib import Path
+    import threading
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    entered = threading.Event()
+    release = threading.Event()
+    original = Path.open
+    with InventorySpool(tmp_path, max_bytes=128, record_limit=128) as spool:
+        record = spool.write(0, [1])
+
+        def blocked(path, *args, **kwargs):
+            if path.name == "0.json":
+                entered.set()
+                assert release.wait(timeout=3)
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", blocked)
+        async with MigrationIO(1) as io:
+            reading = asyncio.create_task(io.call(spool.read, record))
+            while not entered.is_set():
+                await asyncio.sleep(0)
+            try:
+                with pytest.raises(RuntimeError, match="drain"):
+                    spool.close()
+                assert spool.root.exists()
+            finally:
+                release.set()
+            assert await reading == [1]
