@@ -63,7 +63,12 @@ async def test_summary_query_uses_one_sql_and_no_nas(tmp_path):
     )
     assert "c.deleted_at IS NULL" in query
     assert "c.user_key=%s" in query and "c.channel_key=%s" in query
-    assert "JOIN" not in query
+    assert (
+        "LEFT JOIN swe_conversation_turns t ON t.id=s.active_turn_id" in query
+    )
+    assert "t.state='stopping'" in query
+    assert "t.state IN ('reserved','admitted','running','settling')" in query
+    assert "s.active_turn_id" in query
     assert "c.metadata_text" in query
     assert "meta" not in page.items[0].model_dump()
     assert "total" not in page.model_dump() and "page" not in page.model_dump()
