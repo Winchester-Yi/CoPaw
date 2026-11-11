@@ -924,54 +924,17 @@ class PublicationStore(PublicationAssociations):
                 index,
                 sources=sources,
             )
-            archive_turns = sources.include_turns(
-                await self._archive_turns(request, plan),
+            existing = await self._commit_install(
+                request,
+                initial,
+                plan,
+                index,
+                sources,
+                archive_payloads,
+                settlement_generation=_settlement_generation,
             )
-            async with self.db.transaction():
-                await self._assert_writes_allowed(request)
-                associations, target_session = (
-                    await self._lock_commit_associations(
-                        request,
-                        plan,
-                        archive_turns,
-                    )
-                )
-                row, locked_publications = await sources.lock_current(
-                    self,
-                    initial,
-                    operation_key,
-                )
-                self._matches(row, request, initial["result_metadata_text"])
-                if row["state"] == "committed":
-                    return row
-                if row["state"] != "prepared":
-                    raise ConflictError("publication operation is aborted")
-                await self._validate_commit_mode(
-                    request,
-                    plan,
-                    associations,
-                    _settlement_generation,
-                )
-                archive_payloads.validate_chat(associations[1])
-                await sources.install_dependencies(
-                    self,
-                    request,
-                    row,
-                    locked_publications=locked_publications,
-                )
-                await self._install(
-                    row,
-                    plan,
-                    index,
-                    associations=associations,
-                    target_session=target_session,
-                    sources=sources,
-                )
-                await self.db.execute(
-                    f"UPDATE {TABLE} SET state='committed',committed_at=COALESCE(committed_at,UTC_TIMESTAMP(6)) "
-                    "WHERE state='prepared' AND id=%s",
-                    (row["id"],),
-                )
+            if existing is not None:
+                return existing
             return await self._committed_projection(
                 operation_key,
                 projection,
@@ -989,6 +952,71 @@ class PublicationStore(PublicationAssociations):
                     await projected_refs.finish(
                         RetentionStore(self.db, request.scope),
                     )
+
+    async def _commit_install(
+        self,
+        request,
+        initial,
+        plan,
+        index,
+        sources,
+        archive_payloads,
+        *,
+        settlement_generation=None,
+    ):
+        """Install validated evidence atomically; return an existing commit.
+
+        A None result means this call installed the publication. The caller
+        owns outcome translation, projection refresh and source-pin cleanup.
+        """
+        archive_turns = sources.include_turns(
+            await self._archive_turns(request, plan),
+        )
+        async with self.db.transaction():
+            await self._assert_writes_allowed(request)
+            associations, target_session = (
+                await self._lock_commit_associations(
+                    request,
+                    plan,
+                    archive_turns,
+                )
+            )
+            row, locked_publications = await sources.lock_current(
+                self,
+                initial,
+                request.operation_key,
+            )
+            self._matches(row, request, initial["result_metadata_text"])
+            if row["state"] == "committed":
+                return row
+            if row["state"] != "prepared":
+                raise ConflictError("publication operation is aborted")
+            await self._validate_commit_mode(
+                request,
+                plan,
+                associations,
+                settlement_generation,
+            )
+            archive_payloads.validate_chat(associations[1])
+            await sources.install_dependencies(
+                self,
+                request,
+                row,
+                locked_publications=locked_publications,
+            )
+            await self._install(
+                row,
+                plan,
+                index,
+                associations=associations,
+                target_session=target_session,
+                sources=sources,
+            )
+            await self.db.execute(
+                f"UPDATE {TABLE} SET state='committed',committed_at=COALESCE(committed_at,UTC_TIMESTAMP(6)) "
+                "WHERE state='prepared' AND id=%s",
+                (row["id"],),
+            )
 
     async def _committed_projection(
         self,

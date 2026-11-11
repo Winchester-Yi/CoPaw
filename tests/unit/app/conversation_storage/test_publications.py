@@ -468,6 +468,53 @@ async def test_commit_locks_guard_session_chat_turn_publication_in_order(
     ] * 2
 
 
+async def test_commit_found_under_lock_returns_without_install_or_refresh(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+    from swe.app.conversation_storage.source_messages import SourceMessages
+    from swe.app.conversation_storage.projection_references import (
+        ProjectionReferences,
+    )
+
+    db = PublicationDatabase()
+    service = PublicationStore(
+        db,
+        BundleStore(tmp_path),
+        service_unit_id="schema-test-service",
+    )
+    operation = request()
+    await service.reserve(operation, CommitPlan())
+    await service.write_bundle(
+        operation.operation_key,
+        [BundleBlock("root", "recovery", b"{}")],
+    )
+    lock_current = SourceMessages.lock_current
+
+    async def concurrently_committed(sources, store, initial, operation_key):
+        db.rows[operation_key.encode()]["state"] = "committed"
+        return await lock_current(sources, store, initial, operation_key)
+
+    monkeypatch.setattr(SourceMessages, "lock_current", concurrently_committed)
+    install = AsyncMock(side_effect=AssertionError("must not reinstall"))
+    refresh = AsyncMock(side_effect=AssertionError("must not refresh"))
+    sources_finish, projection_finish = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(service, "_install", install)
+    monkeypatch.setattr(service, "_committed_projection", refresh)
+    monkeypatch.setattr(SourceMessages, "finish", sources_finish)
+    monkeypatch.setattr(ProjectionReferences, "finish", projection_finish)
+
+    committed = await service.commit(operation.operation_key)
+
+    assert committed["state"] == "committed"
+    assert db.transaction_depth == 0
+    install.assert_not_awaited()
+    refresh.assert_not_awaited()
+    sources_finish.assert_awaited_once()
+    projection_finish.assert_awaited_once()
+
+
 async def test_existing_bundle_needs_explicit_durability_confirmation(
     tmp_path,
 ):
