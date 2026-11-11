@@ -1,7 +1,55 @@
 # 会话元数据迁移及上线全流程操作方案
 
-日期：2026-11-02。核对代码：`436a105056ecb9ca3c692958a0b914859584c2aa`。
+更新日期：2026-11-11。核对工作树：`.worktrees/conversation-mysql-nas`，HEAD `9b72c860bc5b73135b8102c5ee6190663dffbf32`，并包含核对时已有的 SQL 与测试未提交修改。
+正式执行前须固定审核后的完整发布版本；仅记录 HEAD 不能代表本次工作树内容。
 本文只交付方案，没有操作生产数据库、NAS 或 Kubernetes。
+
+## 0. 当前实现分析与执行适用范围（2026-11-11）
+
+本手册适用于**旧 JSON/NAS 权威首次整体迁移到 MySQL 权威**。以下三个概念必须区分：
+
+1. 元数据入库：已实现；六张会话表保存身份、索引、执行状态、正文定位及引用关系。
+2. 旧文件不搬动：可直接读取冻结原目录，但源与新正文根必须真正分离。
+3. 历史正文零复制：**未实现**。`DirectImporter` 继承 `ConversationImporter`，仍生成不可变 bundle，保留必要旧格式材料；没有已接入运行时的 immutable legacy-source 注册/解析路径。不要按“只增 SQL、不增 NAS”申请容量。
+
+### 0.1 代码链路及一致性边界
+
+`discover → freeze → inventory/plan → preflight → import/resume → verify → DBA share finalize → finalize → mysql authority 启动`。
+
+- `discovery.py` 用配置和磁盘证据确定服务/租户/source/Agent/workspace，读取全库旧分享，异常阻断；不是仅扫描 chats.json。
+- `v3_manifest.py` 固定源、目标应用库及每服务正文根；`inventory_v3.py` 重新解析输入，并按已记录的租户同步起点做 mtime 变化检查。当前新 discovery 不持久化全源内容哈希，不能证明从 discovery 起字节始终不变；强冻结须由停写和存储措施保证。
+- `conversation_storage_v3_cmd.py` 连接配置指定的**原应用库**，校验 `DATABASE()` 与 `@@server_uuid`，取得逻辑名 `conversation-migration:<schema>` 对应的命名锁（连接层默认哈希为实际锁 key，不能直接把逻辑名用于 IS_USED_LOCK 排查）；`DMLDatabase` 限定迁移 SQL。无 staging、无 RENAME、无自动 DDL。
+- `journal.py` 两张控制表持久化 ID 分配、批次票据及来源/目标绑定；导入是多批提交，不是全库一个事务。中断使用同作业续跑。
+- `direct_import.py` / `importer.py` 为各服务向 NAS 发布 bundle 并提交 SQL 定位。不可变正文与 SQL 发布协议配合，不能单独删除 SQL 行或正文“重置进度”。
+- `verify.py` 做全量语义及引用核对；`finalize` 再验一次，SQL 作业置 ready，原子写出完成证明及每服务运行时文件。`verify` 本身不等于 ready。
+- `authority.py` 与运行时启动检查凭证、服务、路径、库身份及最终 schema；SQL ready 后文件输出失败可以在仍冻结且未试写时重跑 finalize。
+
+### 0.2 首次迁移与已有 MySQL 部署升级
+
+| 现场状态 | 执行路线 |
+| --- | --- |
+| 六张会话表不存在、旧分享表存在 | 执行本文首次迁移流程 |
+| 六张表已按当前定义预建且为空 | 核对结构后跳过已完成 DDL，不重放 CREATE |
+| 同 migration_id 半完成导入 | 保留清单/库/NAS，核对绑定后 resume |
+| 已有其他作业或已有正常新版会话 | 不执行首次迁移；需要专项增量/升级方案 |
+| 旧版六表缺 Chat.external_session_key 等当前字段 | 不重放 CREATE；先取得现场 SHOW CREATE TABLE、行数与索引，再制定停写 ALTER/backfill/验证方案；当前仓库没有通用现网升级脚本 |
+
+Chat 新增投影列 `external_session_key`、40 KiB 的九字段显示元数据投影及状态维护已接入当前实现。不能将更新后的 CREATE 文件当成已部署数据库的增量升级 SQL。
+
+### 0.3 当前分享 DDL 的额外执行门禁
+
+核对时 `conversation_share_publication_extension.sql` 是直接 ALTER，没有旧八列结构的自动 guard；必须先人工审核原表并确认没有同名新增列/索引。
+`conversation_share_service_unit_finalize.sql` 会先 **DELETE 四个新增定位字段全部为空的行**，然后收紧服务字段。该行为可能使旧链接失效，并与 v3 的“原分享八字段集合保持不变”检查冲突。
+
+本手册选择保留全部旧分享的迁移路线：第 10 节执行前必须确认 all-null、部分回填、服务不匹配、缺失 publication 均为零。非零时停止，先调查导入和原始分享正文，不能靠 SQL 删除绕过全量校验。即使业务批准废弃旧分享，也必须另行修订发现清单/保留策略与校验契约，不能在已冻结作业中直接删记录。
+
+### 0.4 本次核对结论
+
+本次仅做源码、SQL、文档及本地测试分析；未操作数据库、NAS、Kubernetes。当前工作树还存在未提交 SQL/测试变更，未改动这些实现文件。
+修复前迁移契约回归为 **81 passed、13 failed**，失败全部在 `tests/unit/cli/test_conversation_storage_cmd.py`，主要表现为旧清单测试进入 v3 分派后缺少 `services`，以及不支持的旧命令/报错断言不匹配。不能将旧手册的 88 passed 当成本版本验收。后续诊断已确认这些失败源于旧清单工厂与 direct-v3 路由共用 version=3 的冲突，不能简单归为旧测试过时；见[13项CLI失败专项分析](../reports/2026-11-11-conversation-cli-contract-failure-analysis.md)。
+本地实际执行 `PYTHONPATH=src ../../venv/bin/python -m swe conversation-storage finalize --help` 另因缺少 `trace_sdk` 导致命令加载失败（退出 2）；pytest 的依赖替身不能证明完整 CLI 可运行。执行镜像必须按项目依赖/内部包发布流程补齐该模块，并先让第 4 节全部 help 命令退出 0，不能在此状态开始停机迁移。
+
+这些契约差异随后已通过独立 workflow 标识和向后兼容路由修复；扩大回归 **1087 passed、0 failed**，见第17节。正式放行前仍须补齐发布依赖，使用专用 MySQL 和实际 NAS 完整演练；本手册描述可执行流程，不宣称当前分支已经具备生产放行证据。
 
 ## 1. 先把结论讲清楚
 
@@ -41,6 +89,8 @@
 
 不复制迁移输入也仍会产生新正文及保留恢复材料，不能按“原文件都在，所以不增加 NAS 空间”估算。
 在完整演练中测量新 bundle 实际总量、文件数、备份/快照占用和临时余量，再确认容量；不假设固定一倍或两倍空间足够。
+
+还需预留迁移执行机/Pod 的临时盘：`migration/legacy.py` 会通过 `tempfile.TemporaryDirectory` 和 `shutil.copyfile` 为旧格式解析建立工作副本。为 `TMPDIR` 指定独立可写临时卷并配置足够 ephemeral-storage/卷容量，在大 Session 和归档样本上实测峰值、失败清理及运行内存；“不复制源 NAS”不代表不使用临时空间。临时卷不得与冻结输入或正文根重叠。
 
 同一服务的多个实例使用同一稳定 `CMB_CAAS_SERVICEUNITID` 和同一正文 NAS 根；
 不同服务可以共用 MySQL，但正文 NAS 根必须隔离。所有服务使用同一个迁移作业、同一份 manifest 协调全局 ID。
@@ -123,6 +173,7 @@ CLI 从现有环境读取 `SWE_DB_HOST`、`SWE_DB_PORT`、`SWE_DB_USER`、`SWE_D
 由 Secret 注入迁移账号，`SWE_DB_NAME` 必须等于 `APP_SCHEMA`，不要指向临时库。
 当前 `SWE_DB_ACCESS` 读取逻辑会去掉前四个字符，沿用部署已有前缀约定，不要直接塞裸密码。
 mysql 客户端的 cnf 使用真实密码，不使用这个前缀规则。两种配置须指向同一个目标。
+应用配置另有启动限制：`SWE_DB_HOST` 不能是字面值 `localhost`，因为 `_app.py` 会在此值下禁用数据库连接，mysql authority 随后会启动失败。使用已验证的数据库服务 DNS/地址；CLI 能连接 localhost 不代表应用能启动。
 不要开 `set -x`，不要把密码或原始分享 token 输出到公共日志。
 
 ```bash
@@ -158,9 +209,9 @@ db_dba < scripts/sql/conversation_share_publication_extension.sql \
   > "$AUDIT_DIR/ddl-share-extension.log" 2>&1
 ```
 
-分享扩列脚本只接受审核过的原八列结构；不符就停，不要删列或建一个空分享表绕过。
+分享扩列脚本直接执行 ALTER，不会自动验证原八列结构；DBA 必须依据 SHOW CREATE TABLE 人工审核原结构和新增列/索引均符合预期。不符就停，不要删列或建一个空分享表绕过。
 扩列涉及原业务表，可在演练证明旧版本兼容及锁影响可接受后提前执行；否则放到正式停写后做。
-六表和控制表可以提前准备。分享表的最后一步 NOT NULL 收紧必须等导入和校验通过后，见第 10 节。
+六表和控制表可以提前准备。`preflight` 会精确核对列、默认值、编码和索引，九表要求 InnoDB/DYNAMIC；分享表只接受旧八字段加四个指定定位字段，额外字段也会失败。建表成功不代表预检通过；现场差异应专项处理，不删除业务列绕过。分享表的最后一步 NOT NULL 收紧必须等导入和校验通过后，见第 10 节。
 mysql 不加 `--force`，任何 SQL 失败立即停止；DDL 不能靠外层事务回滚。
 
 ## 6. 关闭旧写入并建立同一批数据的备份
@@ -233,7 +284,7 @@ test -s "$AUDIT_DIR/database-stopped.sql"
 mkdir -p /mnt/service-a/conversation-body /mnt/service-b/conversation-body
 ```
 
-原输入的所有文件和目录必须没有写权限位；仅将挂载设置为 readOnly，而 mode 仍是 0755/0644，当前检查也会拒绝。
+正式输入必须通过不可变快照、只读挂载或可靠权限控制实现强冻结。当前新 discovery 的 fingerprints 为空，不执行其中的全源 mode/哈希检查；不能声称 0755/0644 一定会被 CLI 拒绝，也不能把 CLI 通过当作已冻结的证明。
 在所有 writer 已停、已备份的前提下，若 NAS 支持 POSIX ACL 且已演练恢复，可以先保存权限再临时去掉写权限。
 以下对每个服务实际的源/配置/分享根执行；相互包含的根只处理最外层一次：
 
@@ -257,7 +308,7 @@ chmod --recursive a-w "$ORIGINAL_INPUT_ROOT"
 
 这是正式停写窗口内的权限调整，不是工具自动修改原业务文件。NAS 不支持可靠的 ACL 导出/恢复时，不照抄这一段；
 改用经存储平台验证的冻结方式，或先补充权限保存恢复工具。不得让应用带着只读配置目录上线。
-冻结从首次正式 discovery 持续到 finalize 成功，期间不要恢复权限、修改配置或启动任何旧 writer。
+首次 import/resume --apply 才记录各租户同步起点，其后检查文件/目录 mtime 是否晚于该起点；这不是字节哈希校验，禁止用保留/回写 mtime 的工具修改输入。discovery 到首次导入之间的内容一致性尤其依赖运维冻结。冻结从首次正式 discovery 持续到 finalize 成功，期间不要恢复权限、修改配置或启动任何旧 writer。
 
 ### 7.2 旧数据本来就在整个 NAS 根里的布局
 
@@ -266,7 +317,7 @@ chmod --recursive a-w "$ORIGINAL_INPUT_ROOT"
 
 此时有两种实际选择：
 
-1. 存储平台提供独立冻结快照输入，挂到 `/mnt/frozen/service-a`；不必做应用层全量复制，但快照是否满足 mode 检查须实际验证。
+1. 存储平台提供独立冻结快照输入，挂到 `/mnt/frozen/service-a`；不必做应用层全量复制，但需实际验证迁移账号只能读取、快照不能被其他 writer 改写。
 2. 提供真实独立的正文目标根，且不破坏原业务 workspace 绑定。做不到就需要先修改目录扫描边界，再安排上线。
 
 使用冻结快照时：`source_root=/mnt/frozen/service-a`，`original_root` 仍填原业务根，
@@ -338,6 +389,31 @@ run_cs 01b-discover discover --services "$AUDIT_DIR/services.json" \
 填写 `discovery_version=1`、真实 tenant/source/agent、原因和证据引用；必要时填写真实 Session 三元身份和相对路径。
 不能修改现有报告中的 ready/blockers，不能删掉失败数据只迁移成功子集。
 
+需要例外 Session 路径时，可按以下结构准备 overrides.json；值全部取可信证据，position 原样复制发现报告候选键，不自行拼接：
+
+```json
+{
+  "overrides": [{
+    "position": "REPLACE_POSITION_FROM_DISCOVERY",
+    "discovery_version": 1,
+    "tenant_id": "REPLACE_REAL_TENANT",
+    "source_id": "REPLACE_REAL_SOURCE",
+    "agent_id": "REPLACE_REAL_AGENT",
+    "reason": "REPLACE_REVIEWED_REASON",
+    "evidence_refs": ["REPLACE_IDENTITY_EVIDENCE_REFERENCE"],
+    "session_paths": [{
+      "user_id": "REPLACE_REAL_USER",
+      "channel": "console",
+      "session_id": "REPLACE_REAL_SESSION",
+      "path": "sessions/REPLACE_ACTUAL_FILE.json"
+    }]
+  }]
+}
+```
+
+Session path 相对于对应 workspace，不能越界。已登记 workspace 的 override 不得改变 tenant/source/agent，且必须有非空的例外 session_paths；不要为正常 workspace 批量添加空 override。
+
+
 ## 9. 固定清单、预检、导入、续跑和全量校验
 
 记录真实停写边界。即使不退旧版，当前数据结构仍要求真实旧镜像 digest，作用是记录解析来源；不要伪造。
@@ -404,7 +480,13 @@ db_read -e "SELECT entry_kind,state,COUNT(*) AS n FROM swe_conversation_migratio
 
 ## 10. DBA 收紧分享归属，再生成上线凭证
 
-全量 verify 通过后，DBA 先检查分享定位缺失和服务错误必须为 0：
+全量 verify 通过后，DBA 先检查分享定位缺失和服务错误必须为 0。当前 finalize SQL 含 DELETE，执行前额外核对 all-null 行数为 0，确保不会删除任何历史分享：
+
+```bash
+db_read -e "SELECT COUNT(*) AS must_be_zero FROM swe_chat_shares WHERE publication_id IS NULL AND byte_offset IS NULL AND byte_length IS NULL AND service_unit_key IS NULL;"
+```
+
+上述结果不是 0 时立即停止，不执行下面的 SQL。保存导入前后分享行数和八个旧字段的完整受限导出，不能仅用总数证明 token/计数不变。
 
 ```bash
 db_read -e "SELECT COUNT(*) AS invalid_shares FROM swe_chat_shares s LEFT JOIN swe_conversation_publications p ON p.id=s.publication_id WHERE s.service_unit_key IS NULL OR OCTET_LENGTH(s.service_unit_key)=0 OR p.id IS NULL OR s.service_unit_key<>p.service_unit_key OR s.byte_offset IS NULL OR s.byte_length IS NULL;"
@@ -517,7 +599,7 @@ kubectl -n "$NAMESPACE" logs "deployment/$DEPLOYMENT" -c "$APP_CONTAINER" --sinc
 启动会核对 ready 作业、完整完成集合、数据库身份、服务和 NAS/原 workspace 绑定以及最终表结构。
 默认 authority 是 legacy，必须明确设置 mysql；不能通过移除完成证明来绕过启动失败。
 当前完成证明绑定 `@@server_uuid`：数据库切换实例/恢复到新服务器时可能拒绝启动，
-上线前必须演练实际高可用切换与受控重绑定流程，不能临时 UPDATE 控制表伪造成功。
+上线前必须演练实际高可用切换。当前没有独立的生产原库 server_uuid 原地重绑定入口；不能临时 UPDATE 控制表伪造成功，也不能把隔离恢复 API 当作 HA 原地修复工具。现场缺少实际可执行的恢复/发布切换方案时，不满足放行条件。
 
 逐项做真实操作并保留结果：
 
@@ -565,7 +647,7 @@ kubectl -n "$NAMESPACE" logs "deployment/$DEPLOYMENT" -c "$APP_CONTAINER" --sinc
 - 备份须覆盖所有服务的七张业务表对应范围、被引用 NAS 正文及最小完成证明；两张控制表不属于原七表行集，但 jobs.ready 不能随意删除。
 - 当前代码有备份/恢复 API 及完成证明处理，没有 `conversation-storage backup/restore` 子命令；不要凭空运行这样的命令。
 - 暂无成熟自动备份接入时，安排一次维护停写，将应用库备份、各服务 NAS 一致快照和运行时文件成套保存；不能只定时 mysqldump，放任正文/GC 同时变化。
-- 在隔离目标库和 NAS 实际恢复验证。数据库服务器/根路径变更要走已验证的恢复 API 重绑定及凭证生成；缺少可执行恢复脚本时，这是上线前需完成的工作，不能靠“原库直接重放”替代。
+- 在隔离目标库和 NAS 实际恢复验证。数据库服务器/根路径变更须区分第 16.2 节两条恢复路线；现有 API 仅支持隔离目标，不能为生产原库做 HA 原地重绑定。缺少实际恢复驱动和发布切换操作单时，这是上线前需完成的工作，不能靠“原库直接重放”替代。
 
 ## 14. 放行清单和本次核对证据
 
@@ -582,15 +664,7 @@ kubectl -n "$NAMESPACE" logs "deployment/$DEPLOYMENT" -c "$APP_CONTAINER" --sinc
 - [ ] 高可用数据库身份切换和成套恢复流程已实际验证；新增数据保护措施明确。
 - [ ] 流量开关、值守负责人和失败时关入口的操作明确。
 
-本次亲自执行的本地核对：
-
-1. 当前 v3 命令帮助已核对，确认 `discover/freeze/preflight/import/resume/verify/finalize` 的实际参数。
-2. v3 discovery、preflight、journal、orchestration、authority 及 CLI 相关测试 **88 passed，0.60 秒**；
-   XML：`/private/tmp/conversation-v3-runbook-contracts.xml`。
-3. 使用临时合成的空 workspace 验证“不复制原目录 + 独立正文根”布局，实际运行 discover、freeze、inventory、plan、inspect 全部退出 0；
-   原文件哈希和原 runtime workspace 路径不变。证据：`/private/tmp/conversation-v3-original-layout-check.json`。
-   初次合成运行因 macOS 临时目录别名不规范被拒绝，改用规范绝对路径后通过；这也说明不能在生产忽略路径规范检查。
-4. 本轮未连接生产或其他真实 MySQL，未运行生产数据导入；新增真实 MySQL 测试的代码已阅读，不把“存在测试”冒充本轮实库通过。
+2026-11-11 本轮核对使用第 0 节的当前工作树内容。修复前下述命令结果为 **81 passed、13 failed**；后续修复及扩围回归已 **1087 passed、0 failed**，范围见第17节。原失败原因见第0.4节。未配置/执行实库与集群 NAS 验收，历史合成扫描记录不视为本轮重跑结果。
 
 此前三份交付报告能证明历史功能和样本流程的验证范围，但不能直接作为当前版本全量上线凭据：
 
@@ -632,3 +706,70 @@ PYTHONPATH=src ../../venv/bin/python -m pytest \
 
 本方案替代此前按 v2 staging/换表流程编写的迁移操作单。`install --apply` 不用于本次上线，
 v2 import/install 写入口已经拒绝执行；以 v3 的 `finalize --apply` 完成离线验收和上线凭证生成。
+
+清单的格式版本与工作流已分离：新 freeze 文件含 `workflow=direct`，旧工厂文件含 `workflow=offline`，格式版本均为3。已有无workflow文件按services/discovery_version结构识别；无需手工改版本号或重建迁移ID。旧预览/导出兼容不代表允许旧import/install写入。
+
+## 16. 作业状态、执行交接与恢复操作单
+
+正常持久状态链为 `planned → importing → imported → verified → ready`；`blocked` 需要查明原因。只读 verify 通常不会把 SQL 状态推进到 verified，finalize 才负责最终推进；不要手工 UPDATE state。
+
+每个阶段交接必须保存：执行人/复核人、开始结束时间、命令退出码、报告路径、实际发布 digest、DB server_uuid/schema、服务和 NAS 映射、备份恢复点、下一步是否允许执行。每服务另记录旧副本数、镜像、挂载、ConfigMap、Secret 引用、HPA/Cron/GitOps 状态及入口开关负责人。
+
+正式停写前，由 DBA 和存储负责人完成一次成套恢复演练，实际记录以下值，而不是只写“已有备份”：
+
+| 恢复要素 | 必填内容 |
+| --- | --- |
+| 数据库 | 实际恢复平台任务/命令、备份 ID、binlog 截点、表范围、目标 schema/server_uuid |
+| NAS | 每服务快照 ID、恢复任务/命令、目标绝对根、权限/UID/GID、bundle 完整性结果 |
+| 配置 | 对应镜像 digest、runtime/completion、manifest、稳定游标 Secret 的保管引用 |
+| 校验 | 恢复后结构/引用/内容验证报告，单实例启动及读写验收，RPO/RTO 实测 |
+
+故障恢复按以下顺序执行：
+
+1. 关闭入口，停止全部受影响 writer 和 GC，阻止自动拉起；记录故障后的数据库和 NAS 恢复点，保护新增数据。
+2. 判断是可续跑的离线导入、尚未试写的准备失败，还是已有新版写入。仅第一种使用原 manifest 的 resume；SQL ready 后不再 import。
+3. 尚未试写且决定放弃迁移：由 DBA/存储按已演练操作恢复停写边界的相关表与全部服务 NAS，恢复原权限和部署配置；在隔离环境核对后再决定恢复服务。保留失败作业证据，不手工 TRUNCATE 清场。
+4. 已有试写/生产新写：先保存新增 SQL、被引用正文和工具副作用记录，按批准的恢复点和数据补偿方案恢复新版。不能只退镜像、切回 legacy 或仅恢复旧数据库。
+5. 恢复到不同 server_uuid/schema/NAS 根时，当前权威绑定可能拒绝启动；必须使用已演练的隔离恢复与发布切换工具和生成的凭证；当前无生产原库原地 HA 重绑定入口。仓库没有通用 backup/restore CLI；若现场尚无审核过的可执行恢复工具及平台操作单，则本次上线条件尚不满足，不得手改控制表伪造凭证。
+6. 保持流量关闭，完成结构与引用核对、历史/新会话/分享/隔离/重启验证，再恢复流量；记录恢复点导致的数据损失范围及已处理的外部工具副作用。
+
+### 16.1 实库验收执行入口
+
+在独立测试实例创建符合测试约束的空测试库，配置 `SWE_TEST_DB_HOST`、`SWE_TEST_DB_PORT`、`SWE_TEST_DB_USER`、`SWE_TEST_DB_PASSWORD`（裸密码）和 `SWE_TEST_DB_NAME`。库名须匹配 `test_*` 或 `*_test`，不得与应用库相同；fixture 会创建并删除自身随机子库，账号须具备对应测试权限。测试凭据与生产迁移 DML 账号分离。
+
+```bash
+PYTHONPATH=src ../../venv/bin/python -m pytest \
+  tests/integrated/conversation_storage/test_v3_migration_mysql.py \
+  tests/integrated/conversation_storage/test_schema.py \
+  tests/integrated/conversation_storage/test_service_unit_schema.py -q
+```
+
+生产镜像中将 Python 路径替换为真实 venv。任何 skip 仅表示未执行，不能作为通过；集成测试通过后仍须按第 3、12 节在生产等价 NAS/Kubernetes 环境验收。DDL 与运行时必须来自同一冻结发布包，归档四份 SQL 的校验和及源码 diff；不得用本地 HEAD 号掩盖未提交 SQL 差异。
+
+### 16.2 恢复路线必须分开验收
+
+| 路线 | 输入和限制 | 执行与验收 |
+| --- | --- | --- |
+| 平台整套恢复 | mysqldump/备份平台恢复点 + 同边界各服务 NAS 快照 + 配置/凭证；不能直接传给应用 restore_backup | 由现场 DBA/存储平台执行；原库覆盖前保护其他业务及新增写入。恢复后须核对数据库身份绑定，身份变化没有现成原地重绑定入口 |
+| 应用格式隔离恢复 | ConversationBackup.capture 生成的 metadata.json/正文备份集合；不是 mysqldump | 用独立恢复驱动调用 restore_backup，在空隔离库及全新 NAS 恢复，验证后另行发布切换 |
+
+应用格式隔离恢复驱动需落实以下步骤，目前仓库没有覆盖整条链的通用运维 CLI；这份列表不能代替现场已审核脚本：
+
+1. 停止源 writer 并保存证据，准备 `RestoreEvidence(source_writers_stopped_ref=..., isolated_target_ref=...)`，两项须为非空、真实可审计的停写/隔离目标引用；保管完整应用格式备份集合。
+2. 生成 `conversation_staging_<32位小写十六进制>` 或 `test_conversation_restore_<32位小写十六进制>` 隔离 schema，既不能等于备份源 schema，也不能等于恢复进程环境当前应用 schema。用当前发布 SQL 预建六张会话表及两张控制表。仓库分享脚本只有 ALTER，空隔离库不能直接执行：须额外按备份源审核后的 `SHOW CREATE TABLE swe_chat_shares` 创建最终分享表，或先创建审核后的旧八列表再执行 extension 和空表 finalize，确保最终列集合与备份一致。七业务表全部为空。各服务新 NAS 目标须为空的新目录、规范绝对路径、无软链接，彼此以及与备份根互不包含/重叠。多服务传入 `bundles={service_unit_id: BundleStore(new_empty_root)}`，服务集合精确覆盖备份；`workspace_roots` 的键为 `(service_unit_id, tenant_id, source_id, agent_id)` 四元元组，值为真实存在的规范绝对 workspace 目录。
+3. 调用 `restore_backup` 并保存完整返回报告。必须 `passed=true`、`complete_metadata_and_readers=true`、`restore_ready=true`、`needs_settlement=[]`，元数据、正文及 reader 校验通过；若有待结算项，先按 ended-owner 证据处理并重新验收，不能开放流量。
+4. API 返回 `runtime_manifests` 字典，不会替你写文件或更新 Kubernetes。由恢复驱动安全落盘每服务 runtime manifest，保留返回的 migration_authority，再按第 11 节发布对应配置。
+5. 发布切换须显式修改应用数据库 Secret/连接目标、NAS 挂载、scope manifest 和镜像，禁止只替换正文目录。恢复进程与应用切换后的环境角色不同，不能为通过 _restore_target 检查伪装源身份。
+6. 全服务仍保持入口关闭，按第 12 节完成单/多实例、历史与新写、分享/隔离/重启验收，记录切换和回退的实际平台命令后才开放。
+
+**完整性结论：首次迁移步骤可按本文逐阶段演练；当前恢复与 HA 仍依赖现场未交付的执行驱动/平台操作单，不能将本文视作已验证的生产应急恢复脚本。**
+
+## 17. 独立子代理复核记录（2026-11-11）
+
+三个子代理分别审计 CLI/源发现、SQL/数据完整性、运行时/恢复链路，均显式指定本工作树。发现并修正：源 mode 检查及哈希保证的错误描述、租户 mtime 截止边界、override 示例缺失、临时盘预算遗漏、localhost 应用启动限制、schema 精确匹配限制、HA/隔离恢复概念混淆及恢复输出落盘遗漏。
+
+复核时目标 HEAD 为 `9b72c860bc5b73135b8102c5ee6190663dffbf32`，SQL 存在未提交修改；最终分享收紧 SQL SHA256 为 `d878ce2105d501d2aae58ddbac01185408eb6af90fa8728c0a54992adb853724`，含 DELETE，保留第 10 节零删除门禁。实际执行前重新固定发布包和校验和，禁止以 HEAD 替代未提交文件版本。
+
+本轮本地验证：discovery/CLI discovery/preflight/journal/orchestration/authority 六组 **77 passed**；子代理定向三组 **42 passed**（与前者重叠，不能相加）；手册 25 个 Bash 代码块语法检查通过。随后已修复旧CLI工作流版本冲突，保留原13项用例并补有/无workflow、未知/冲突/缺字段路由回归；扩围发现并修复演练脚本目录fsync故障注入时机，最终 **1087 passed、0 failed（53.58秒）**。范围为整个 `tests/unit/app/conversation_storage`，两个迁移CLI测试文件及演练/语义基准脚本测试；Black、Flake8和diff空白检查通过。缺 trace_sdk 的完整发布CLI加载问题未处理，真实 MySQL、NAS、Kubernetes 和恢复演练未执行。
+
+审计不等于生产验收。第 0.4、14、16 节中的未满足条件全部关闭并保存证据前，结论仍为“不放行生产迁移”。

@@ -35,7 +35,9 @@
 | [NAS 数据与 CRUD 迁移方案](../../docs/superpowers/specs/2026-10-30-nas-conversation-migration-plan.md) | 多格式离线导入、统一读写适配、一次连续停机整体切换及固定镜像回退 |
 | [会话数据库迁移实施计划](../../docs/superpowers/plans/2026-10-30-conversation-mysql-nas-implementation.md) | 15 项代码/工具任务、文件职责、故障回归、七表安装及目标环境验收 |
 | [conversation-storage-cutover.md](conversation-storage-cutover.md) | 离线 CLI、七表原子安装、一次连续停机审计、未知 RENAME 对账及保留新写的回退步骤 |
-| [会话元数据迁移及上线全流程](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) | 当前 v3 自动发现、预建表 DML 导入、续跑、全量验收、目录边界与 Kubernetes 上线操作 |
+| [会话CLI清单版本冲突诊断](../../docs/superpowers/reports/2026-11-11-conversation-cli-contract-failure-analysis.md) | 旧工厂与direct-v3版本冲突已用workflow修复；含兼容路由、故障注入纠错及1087项回归 |
+| [会话迁移手册子代理代码核对](../../docs/superpowers/reports/2026-11-11-conversation-runbook-code-audit.md) | 三路代码复核、文档纠错、验证证据与未关闭的生产放行条件 |
+| [会话元数据迁移及上线全流程](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) | 2026-11-11 核对：v3 DML 导入/续跑、历史正文仍复制 bundle、分享删除门禁、Kubernetes 上线与成套恢复；含修复后1087项回归及剩余现场验收边界 |
 | [已有 NAS 迁移操作单（历史）](../../docs/superpowers/plans/2026-11-02-conversation-migration-operation-guide.md) | 881ab1764 的 v2 staging 操作记录，已由 v3 方案替代 |
 | [conversation-storage-entry-inventory.md](conversation-storage-entry-inventory.md) | SQL authority 全入口分支、legacy reader 的离线边界及正文治理/备份旁路保护 |
 | [python-memory-hotspots.md](python-memory-hotspots.md) | Python 后端前五内存热点、引用持有链、运行时验证与第一阶段生命周期及临时缓存设计入口 |
