@@ -49,11 +49,29 @@ def make_readonly(root):
     root.chmod(0o555)
 
 
-def test_inventory_blocks_oversized_native_artifact_before_import(tmp_path):
+@pytest.mark.parametrize(
+    "artifact",
+    ["large-native.bin", "chats.json", "sessions/large.json"],
+)
+def test_inventory_blocks_oversized_native_artifact_before_import(
+    tmp_path,
+    monkeypatch,
+    artifact,
+):
+    import importlib
     from swe.app.conversation_storage.bundle import MAX_READ_BYTES
 
+    module = importlib.import_module(
+        "swe.app.conversation_storage.migration.inventory",
+    )
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("oversized workspace must not enter metadata readers")
+
+    for name in ("load_metadata_json", "read_session", "read_archive"):
+        monkeypatch.setattr(module, name, unexpected_read)
     root, _ = source(tmp_path)
-    with (root / "large-native.bin").open("wb") as stream:
+    with (root / artifact).open("wb") as stream:
         stream.truncate(MAX_READ_BYTES + 1)
     make_readonly(root)
     report = inventory(
@@ -75,6 +93,54 @@ def test_inventory_blocks_oversized_native_artifact_before_import(tmp_path):
         item["code"] == "source_artifact_oversized"
         for item in report["blockers"]
     )
+    workspace = report["workspaces"][0]
+    assert workspace["sessions"] == workspace["chats"] == []
+    assert workspace["position"] == "service:schema-test-service/workspace:0"
+    assert any(item["path"] == artifact for item in report["files"])
+
+
+def test_v3_oversized_registry_is_rejected_before_metadata_read(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.bundle import MAX_READ_BYTES
+    from swe.app.conversation_storage.migration import inventory_v3
+
+    root, _ = source(tmp_path)
+    with (root / "chats.json").open("wb") as stream:
+        stream.truncate(MAX_READ_BYTES + 1)
+    make_readonly(root)
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("oversized registry must not be read")
+
+    monkeypatch.setattr(inventory_v3, "load_metadata_json", unexpected_read)
+    report = inventory_v3.inventory_discovery(
+        {
+            "workspaces": [
+                {
+                    "service_unit_id": "service",
+                    "tenant_id": "tenant",
+                    "source_id": "source",
+                    "agent_id": "agent",
+                    "root": str(root),
+                    "position": "frozen-workspace-position",
+                },
+            ],
+            "shares": [],
+            "fingerprints": [],
+        },
+        workspace_offset=7,
+    )
+    assert not report["ready"]
+    assert [item["code"] for item in report["blockers"]] == [
+        "source_artifact_oversized",
+    ]
+    assert report["blockers"][0]["position"] == "service:service/workspace:7"
+    workspace = report["workspaces"][0]
+    assert workspace["position"] == "frozen-workspace-position"
+    assert workspace["sessions"] == workspace["chats"] == []
+    assert {item["workspace"] for item in report["files"]} == {7}
 
 
 def test_inventory_uses_trusted_mapping_and_forward_filename_only(tmp_path):

@@ -184,6 +184,18 @@ def _workspace(mapping, report, index):
         "service:" + mapping.scope.service_unit_id + "/workspace:" + str(index)
     )
     root = Path(mapping.root).resolve(strict=True)
+    empty_workspace = {
+        "position": position,
+        "root": str(root),
+        "scope": [
+            mapping.scope.service_unit_id,
+            mapping.scope.tenant_id,
+            mapping.scope.source_id,
+            mapping.scope.agent_id,
+        ],
+        "sessions": [],
+        "chats": [],
+    }
     files = _source_files(mapping)
     report["files"].extend(
         {
@@ -193,8 +205,10 @@ def _workspace(mapping, report, index):
         }
         for path in files
     )
+    oversized = False
     for path in files:
         if path.stat().st_size > MAX_READ_BYTES:
+            oversized = True
             _block(
                 report,
                 "source_artifact_oversized",
@@ -209,6 +223,8 @@ def _workspace(mapping, report, index):
                 position,
                 str(path.relative_to(root)),
             )
+    if oversized:
+        return empty_workspace
     try:
         value = load_metadata_json(
             mapping.path(mapping.registry_path).read_text(encoding="utf-8"),
@@ -220,18 +236,7 @@ def _workspace(mapping, report, index):
             raise ValueError("duplicate Chat external identity")
     except (OSError, ValueError, KeyError, TypeError) as error:
         _block(report, "registry_invalid", position, error)
-        return {
-            "position": position,
-            "root": str(root),
-            "scope": [
-                mapping.scope.service_unit_id,
-                mapping.scope.tenant_id,
-                mapping.scope.source_id,
-                mapping.scope.agent_id,
-            ],
-            "sessions": [],
-            "chats": [],
-        }
+        return empty_workspace
     try:
         sessions = _sessions(mapping, chats, report, position)
     except (ValueError, TypeError) as error:

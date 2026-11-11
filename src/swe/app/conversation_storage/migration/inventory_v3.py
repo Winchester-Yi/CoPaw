@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from ..chat_mutations import load_metadata_json
+from ..bundle import MAX_READ_BYTES
 from ..identity import WorkspaceScope
 from .discovery import fingerprints, source_key, SHARE_FIELDS
 from .freshness import changed_source, tenant_key
@@ -146,7 +147,9 @@ def inventory_discovery(data, *, workspace_offset=0):
                 report["workspaces"].append(workspace)
                 continue
         registry = mapping.path(mapping.registry_path)
-        if registry.exists():
+        if registry.exists() and registry.stat().st_size > MAX_READ_BYTES:
+            workspace = _workspace(mapping, report, index + workspace_offset)
+        elif registry.exists():
             try:
                 raw = load_metadata_json(registry.read_bytes())
             except (OSError, ValueError, UnicodeError):
