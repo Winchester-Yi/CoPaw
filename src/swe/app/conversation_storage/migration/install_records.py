@@ -316,6 +316,9 @@ class OfflineImportStore(PublicationStore):
         self._reservation_ids = {}
         self._confirm_tickets = {}
         self._confirm_receipts = {}
+        from .offline_write import OfflineWriteStages
+
+        self._write_stages = OfflineWriteStages(self)
         from .offline_commit import OfflineCommitStages
 
         self._commit_stages = OfflineCommitStages(self)
@@ -359,6 +362,18 @@ class OfflineImportStore(PublicationStore):
         self._confirm_tickets[id(ticket)] = ticket
         return ticket
 
+    async def prepare_write_bundle(self, operation_key, blocks):
+        """Prepare recovery blocks and issue a ticket for a later NAS write."""
+        return await self._write_stages.prepare(operation_key, blocks)
+
+    async def publish_prepared_bundle(self, ticket, prepared_blocks, io):
+        """Publish prepared blocks on NAS without accessing SQL."""
+        return await self._write_stages.publish(ticket, prepared_blocks, io)
+
+    async def commit_written_bundle(self, receipt):
+        """Mark a written bundle durable after SQL row revalidation."""
+        return await self._write_stages.commit(receipt)
+
     async def confirm_bundle_nas(self, ticket, io):
         """NAS-only confirmation; never access a database from an IO worker."""
         self._check_confirm_ticket(ticket)
@@ -381,6 +396,9 @@ class OfflineImportStore(PublicationStore):
 
     async def commit_confirm_bundle(self, receipt):
         """SQL-only durable update after revalidating the frozen NAS receipt."""
+        return await self._commit_bundle_receipt(receipt)
+
+    async def _commit_bundle_receipt(self, receipt):
         known = self._confirm_receipts.get(id(receipt))
         if (
             known is None
@@ -423,6 +441,7 @@ class OfflineImportStore(PublicationStore):
             raise UnknownCommit(ticket.request.operation_key) from error
         self._confirm_receipts.pop(id(receipt))
         self._confirm_tickets.pop(id(ticket))
+        self._write_stages.prepared.pop(id(ticket), None)
         return receipt.index
 
     async def confirm_bundle(self, operation_key):
@@ -513,6 +532,9 @@ class OfflineImportStore(PublicationStore):
             BundleStore.validate_publication_locator(publication),
             expected_length=publication["byte_length"],
         )
+        await self._verify_records_sql(publication, plan, index)
+
+    async def _verify_records_sql(self, publication, plan, index):
         for item in [*plan["rows"], *plan["updates"]]:
             table = item["table"]
             values = self._resolve(item["values"], publication, index)
