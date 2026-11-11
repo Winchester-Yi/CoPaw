@@ -100,55 +100,83 @@ class InventorySpool:
     def used_bytes(self):
         return self._used
 
-    def write(self, index, value):
-        with self._lock:
-            return self._write(index, value)
+    def _encoded_chunks(self, value):
+        # iterencode emits an entire string token. Reject large source strings
+        # before asking it to allocate an escaped copy of an oversized value.
+        remaining = self._record_limit
+        pending = [iter((value,))]
+        while pending:
+            try:
+                item = next(pending[-1])
+            except StopIteration:
+                pending.pop()
+                continue
+            if isinstance(item, str):
+                remaining -= len(item)
+                if remaining < 0:
+                    raise MigrationCapacityError("inventory record too large")
+            elif isinstance(item, dict):
+                pending.append(iter(item.keys()))
+                pending.append(iter(item.values()))
+            elif isinstance(item, (list, tuple)):
+                pending.append(iter(item))
+        encoder = json.JSONEncoder(
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        for chunk in encoder.iterencode(value):
+            yield chunk.encode("utf-8")
 
-    def _write(self, index, value):
-        if self._closed:
-            raise ValueError("inventory spool is closed")
-        if type(index) is not int or index < 0 or index in self._records:
-            raise ValueError("inventory record index must be unique")
+    def write(self, index, value):
+        size = 0
+        for raw in self._encoded_chunks(value):
+            size += len(raw)
+            if size > self._record_limit:
+                raise MigrationCapacityError("inventory record too large")
+        with self._lock:
+            if self._closed:
+                raise ValueError("inventory spool is closed")
+            if type(index) is not int or index < 0 or index in self._records:
+                raise ValueError("inventory record index must be unique")
+            if self._used + size > self._max_bytes:
+                raise MigrationCapacityError("inventory disk limit exceeded")
+            self._records[index] = None
+            self._used += size
         destination = self.root / (str(index) + ".json")
         temporary = self.root / (str(index) + ".tmp")
         digest = sha256()
-        size = 0
+        written = 0
         try:
             with temporary.open("xb") as handle:
                 os.chmod(temporary, 0o600)
-                encoder = json.JSONEncoder(
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                )
-                for chunk in encoder.iterencode(value):
-                    raw = chunk.encode("utf-8")
-                    size += len(raw)
-                    if (
-                        size > self._record_limit
-                        or self._used + size > self._max_bytes
-                    ):
-                        raise MigrationCapacityError(
-                            "inventory exceeds configured temporary disk limit",
-                        )
+                for raw in self._encoded_chunks(value):
+                    written += len(raw)
+                    if written > size:
+                        raise ValueError("inventory changed during encoding")
                     handle.write(raw)
                     digest.update(raw)
-            # These are disposable records, not durable SQL completion receipts.
+            if written != size:
+                raise ValueError("inventory changed during encoding")
             os.replace(temporary, destination)
+            record = SpoolRecord(index, size, digest.hexdigest())
+            with self._lock:
+                self._records[index] = record
+            return record
+        except BaseException:
+            with self._lock:
+                del self._records[index]
+                self._used -= size
+            raise
         finally:
             temporary.unlink(missing_ok=True)
-        record = SpoolRecord(index, size, digest.hexdigest())
-        self._records[index] = record
-        self._used += size
-        return record
 
     def read(self, record):
         with self._lock:
-            return self._read(record)
-
-    def _read(self, record):
-        if self._closed or self._records.get(record.index) != record:
-            raise ValueError("inventory record does not belong to this spool")
+            if self._closed or self._records.get(record.index) != record:
+                raise ValueError(
+                    "inventory record does not belong to this spool",
+                )
         path = self.root / (str(record.index) + ".json")
         with path.open("rb") as handle:
             raw = handle.read(record.byte_length + 1)
@@ -161,6 +189,8 @@ class InventorySpool:
 
     def close(self):
         with self._lock:
+            if any(value is None for value in self._records.values()):
+                raise RuntimeError("inventory writes must drain before close")
             if not self._closed:
                 shutil.rmtree(self.root)
                 self._closed = True

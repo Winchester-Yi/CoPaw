@@ -92,3 +92,32 @@ def test_protected_root_and_symlink_rejected(tmp_path):
     alias.symlink_to(source, target_is_directory=True)
     with pytest.raises(ValueError, match="canonical"):
         InventorySpool(alias, max_bytes=10, record_limit=10)
+
+
+def test_huge_string_is_rejected_without_large_encoding_copy(tmp_path):
+    import tracemalloc
+
+    value = "x" * (16 * 1024 * 1024)
+    with InventorySpool(tmp_path, max_bytes=2048, record_limit=1024) as spool:
+        tracemalloc.start()
+        try:
+            with pytest.raises(MigrationCapacityError):
+                spool.write(0, {"body": value})
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 1024 * 1024
+
+
+async def test_concurrent_writes_reserve_capacity_and_unique_indexes(tmp_path):
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    with InventorySpool(tmp_path, max_bytes=64, record_limit=32) as spool:
+        async with MigrationIO(4) as io:
+            results = await asyncio.gather(
+                *(io.call(spool.write, index, "x" * 20) for index in range(8)),
+                return_exceptions=True,
+            )
+        assert sum(not isinstance(item, Exception) for item in results) == 2
+        assert spool.used_bytes == 44
+        assert len(list(spool.root.iterdir())) == 2
