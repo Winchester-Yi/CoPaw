@@ -108,6 +108,42 @@ async def test_workspace_context_is_closed_after_import_failure():
     assert prototype._router._contexts == {}
 
 
+async def test_router_close_attempts_every_store_and_keeps_failed_context():
+    from swe.app.conversation_storage.migration.parallel_import import (
+        MigrationDomainRouter,
+    )
+
+    calls = []
+    fail_first = True
+
+    class TrackedStore:
+        def __init__(self, name):
+            self.name = name
+
+        async def close_migration_stages(self):
+            nonlocal fail_first
+            calls.append(self.name)
+            if self.name == "first" and fail_first:
+                raise OSError("temporary cleanup failure")
+
+    router = MigrationDomainRouter(lambda _workspace: None, Journal())
+    router._contexts = {
+        "first": TrackedStore("first"),
+        "second": TrackedStore("second"),
+    }
+
+    with pytest.raises(OSError, match="cleanup failure"):
+        await router.close()
+
+    assert calls == ["first", "second"]
+    assert set(router._contexts) == {"first"}
+
+    fail_first = False
+    await router.close()
+    assert calls == ["first", "second", "first"]
+    assert router._contexts == {}
+
+
 async def test_cancel_waits_for_running_io_and_clears_contexts():
     prototype, _journal = runner(workers=1)
     started, release, finished = Event(), Event(), Event()

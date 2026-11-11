@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Private owner-task routing prototype; not connected to the CLI importer."""
 
+import asyncio
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -100,10 +101,17 @@ class MigrationDomainRouter:
         self.chat_ids.update(deepcopy(chat_ids))
 
     async def close(self):
-        stores = tuple(self._contexts.values())
-        self._contexts.clear()
-        for store in stores:
-            await store.close_migration_stages()
+        failure = None
+        for key, store in tuple(self._contexts.items()):
+            try:
+                await store.close_migration_stages()
+            except (Exception, asyncio.CancelledError) as error:
+                if failure is None:
+                    failure = error
+            else:
+                self._contexts.pop(key, None)
+        if failure is not None:
+            raise failure
 
     def _journal_handler(self, name):
         async def handle(key, args, kwargs):
