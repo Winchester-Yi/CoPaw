@@ -34,6 +34,8 @@ async def spool_workspaces(
     Each parser gets one equal share of the memory budget. The old reader still
     needs a separate preflight size check before this API is used by the CLI.
     """
+    if not 1 <= workers <= 32:
+        raise ValueError("workers must be between 1 and 32")
     budget = ByteBudget(memory_bytes)
     allowance = memory_bytes // workers
     if allowance < 1:
