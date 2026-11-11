@@ -251,6 +251,71 @@ def test_source_change_blocker_survives_manifest_reload(tmp_path):
     )
 
 
+def test_deferred_journal_mirror_preserves_source_change_error(
+    tmp_path,
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from swe.app.conversation_storage.migration import freshness
+    from swe.app.conversation_storage.migration.direct_import import (
+        DirectImporter,
+    )
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+        freeze_discovery,
+    )
+    from swe.app.conversation_storage.migration.v3_manifest import V3Manifest
+
+    service = fixture_service(tmp_path)
+    discovered = discover_services([service])
+    frozen = freeze_discovery(
+        discovered,
+        tmp_path / "manifest.json",
+        SourceBoundary(
+            "snapshot",
+            "2026-11-02T00:00:00Z",
+            "old@sha256:" + "a" * 64,
+            ("stop", "readonly"),
+        ),
+        "business",
+    )
+    cutoff = frozen.begin_tenant_sync("SERVICE", "default")
+    # Simulate a SQL-confirmed ticket whose disk mirror is deferred.
+    frozen.data["assignments"]["session"] = {
+        "new-session": {
+            "target_id": 84,
+            "operation_key": "a" * 64,
+            "relative_path": None,
+        },
+    }
+    importer = object.__new__(DirectImporter)
+    importer.manifest = frozen
+    importer.journal = SimpleNamespace(persist_updates=False)
+    monkeypatch.setattr(
+        freshness,
+        "changed_source",
+        lambda paths, timestamp: (paths[0], timestamp + 1),
+    )
+    workspace = discovered["workspaces"][0]
+    report = {
+        "workspaces": [
+            {
+                "scope": ["SERVICE", "default", "SRC", "agent"],
+                "position": workspace["position"],
+                "source_paths": [service["source_root"]],
+            },
+        ],
+        "shares": [],
+    }
+    with pytest.raises(ValueError, match="tenant source changed"):
+        importer._assert_source_fresh(report)
+    reloaded = V3Manifest.load(frozen.path)
+    assert reloaded.data["assignments"] == frozen.data["assignments"]
+    blocker = reloaded.data["source_change_blockers"][0]
+    assert blocker["cutoff_ns"] == cutoff
+    assert blocker["position"] == workspace["position"]
+
+
 def test_freeze_rejects_modified_discovery_identity(tmp_path):
     from swe.app.conversation_storage.migration.discovery import (
         discover_services,

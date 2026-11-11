@@ -406,7 +406,7 @@ class ConversationImporter:
                     "mtime_ns": modified_at_ns,
                     "cutoff_ns": cutoff,
                 }
-                self.manifest.record_source_change(blocker)
+                self._record_source_change(blocker)
                 raise ValueError(
                     "tenant source changed after synchronization started: "
                     + str(path),
@@ -434,11 +434,14 @@ class ConversationImporter:
                     "mtime_ns": modified_at_ns,
                     "cutoff_ns": cutoff,
                 }
-                self.manifest.record_source_change(blocker)
+                self._record_source_change(blocker)
                 raise ValueError(
                     "tenant source changed after synchronization started: "
                     + str(path),
                 )
+
+    def _record_source_change(self, blocker):
+        self.manifest.record_source_change(blocker)
 
     async def _publish(self, position, scope, rows, blocks, *, spec=None):
         self.bundles = self.bundle_stores[scope.service_unit_id]

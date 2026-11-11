@@ -218,6 +218,13 @@ class DirectImporter(ConversationImporter):
         # SQL completion was persisted with publication commit; mirror only now.
         await self.journal.refresh_batch(position)
 
+    def _record_source_change(self, blocker):
+        if not self.journal.persist_updates:
+            # The SQL-confirmed mirror may lag on disk during import. Flush it
+            # before record_source_change refreshes and validates assignments.
+            self.manifest._persist()
+        super()._record_source_change(blocker)
+
     async def run(self, report):
         await self.journal.prepare()
         await self.journal.mark_state("importing")
