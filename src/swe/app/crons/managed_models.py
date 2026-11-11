@@ -23,7 +23,19 @@ class ManagedScheduleSpec(ScheduleSpec):
         if len(parts) == 6:
             _validate_year(parts[5])
             base += " " + parts[5]
-        if not croniter.is_valid("0 " + base, second_at_beginning=True):
+        candidate = base.split()
+        if re.fullmatch(
+            r"(?:LW|(?:[1-9]|[12][0-9]|3[01])W)",
+            candidate[2],
+            re.I,
+        ):
+            if candidate[4] not in {"*", "?"}:
+                raise ValueError("invalid_cron_schedule")
+            candidate[2] = "*"
+        if not croniter.is_valid(
+            "0 " + " ".join(candidate),
+            second_at_beginning=True,
+        ):
             raise ValueError("invalid_cron_schedule")
         return base
 

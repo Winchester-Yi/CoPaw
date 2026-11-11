@@ -66,10 +66,15 @@ class SkillReadinessRunner:
             return None
         self._owner_refresh_tasks.add(key)
         task = asyncio.create_task(
-            self.refresh_owner_snapshot(source_id=source_id, skill_id=skill_id),
+            self.refresh_owner_snapshot(
+                source_id=source_id,
+                skill_id=skill_id,
+            ),
             name=f"skill-readiness-owner-refresh-{source_id}-{skill_id}",
         )
-        task.add_done_callback(lambda _task: self._owner_refresh_tasks.discard(key))
+        task.add_done_callback(
+            lambda _task: self._owner_refresh_tasks.discard(key),
+        )
         return task
 
     def schedule(
@@ -110,7 +115,11 @@ class SkillReadinessRunner:
             if owners is None:
                 await self.store.mark_owner_lookup_running(source_id, skill_id)
                 owner_lookup = await self._resolve_owners(source_id, skill_id)
-                await self._record_owner_snapshot(source_id, skill_id, owner_lookup)
+                await self._record_owner_snapshot(
+                    source_id,
+                    skill_id,
+                    owner_lookup,
+                )
                 owners = owner_lookup.owners
                 partial_failure_summary = _join_failure_summaries(
                     partial_failure_summary,
@@ -167,9 +176,7 @@ class SkillReadinessRunner:
                 status=(
                     "failed"
                     if task_failures
-                    else "partial"
-                    if partial_failure_summary
-                    else "completed"
+                    else "partial" if partial_failure_summary else "completed"
                 ),
                 failure_summary=failure_summary,
                 completed_at=_utc_now(),
@@ -198,7 +205,11 @@ class SkillReadinessRunner:
             if not claimed:
                 return
             owner_lookup = await self._resolve_owners(source_id, skill_id)
-            await self._record_owner_snapshot(source_id, skill_id, owner_lookup)
+            await self._record_owner_snapshot(
+                source_id,
+                skill_id,
+                owner_lookup,
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "skill readiness owner refresh failed: %s/%s",
@@ -219,7 +230,10 @@ class SkillReadinessRunner:
                 failures=["owner resolver unavailable"],
             )
         try:
-            return await self.owner_resolver.resolve_owners(source_id, skill_id)
+            return await self.owner_resolver.resolve_owners(
+                source_id,
+                skill_id,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "skill readiness owner lookup failed: %s/%s",
@@ -289,7 +303,9 @@ class SkillReadinessRunner:
         checks: list[SkillReadinessCheckResult] = []
         enabled_checks = config.enabled_checks()
         context = await self._build_context(source_id, skill_id, owner)
-        deadline = asyncio.get_running_loop().time() + self.user_timeout_seconds
+        deadline = (
+            asyncio.get_running_loop().time() + self.user_timeout_seconds
+        )
 
         for index, check_config in enumerate(enabled_checks):
             remaining = deadline - asyncio.get_running_loop().time()
@@ -354,7 +370,6 @@ class SkillReadinessRunner:
             source_id=source_id,
             skill_id=skill_id,
             owner=owner,
-            cron_manager=getattr(workspace, "cron_manager", None),
             workspace=workspace,
             passthrough_headers=dict(get_current_passthrough_headers() or {}),
         )

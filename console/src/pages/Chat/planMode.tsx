@@ -81,6 +81,7 @@ export function buildPlanModeMeta(
     Object.entries(meta || {}).filter(
       ([key]) =>
         key !== "goal_draft_subagent_delegation_enabled" &&
+        key !== "multi_agent_mode_enabled" &&
         key !== "expert_main_binding",
     ),
   );

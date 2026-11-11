@@ -23,7 +23,13 @@
  */
 
 import { createContext, useContext, useEffect, useState } from "react";
-import { getBrandTheme, type BrandThemeConfig } from "../config/brandThemes";
+import { useLocation } from "react-router-dom";
+import { isChatSharePath } from "../access/consoleAccess";
+import {
+  BRAND_THEMES,
+  getBrandTheme,
+  type BrandThemeConfig,
+} from "../config/brandThemes";
 import { useIframeStore } from "../stores/iframeStore";
 
 /**
@@ -50,18 +56,27 @@ export function BrandThemeProvider({
   children: React.ReactNode;
 }) {
   const source = useIframeStore((state) => state.source);
+  const { pathname, search } = useLocation();
   const [theme, setTheme] = useState<BrandThemeConfig>(() =>
     getBrandTheme(source),
   );
+  const shareSource = isChatSharePath(pathname)
+    ? new URLSearchParams(search).get("source")
+    : null;
+  const shareTheme =
+    shareSource &&
+    Object.prototype.hasOwnProperty.call(BRAND_THEMES, shareSource)
+      ? BRAND_THEMES[shareSource]
+      : undefined;
+
+  useEffect(() => {
+    document.title = shareTheme?.brandName ?? getBrandTheme(source).brandName;
+  }, [shareTheme, source]);
 
   // 监听 source 变化，更新主题
   useEffect(() => {
     const newTheme = getBrandTheme(source);
     setTheme(newTheme);
-
-    // ==================== 动态更新页面标题 ====================
-    // 更新浏览器标签页标题
-    document.title = newTheme.brandName;
 
     // 更新 favicon
     if (newTheme.favicon) {
@@ -72,7 +87,6 @@ export function BrandThemeProvider({
         faviconLink.href = newTheme.favicon;
       }
     }
-    // ==================== 动态更新结束 ====================
   }, [source]);
 
   return (

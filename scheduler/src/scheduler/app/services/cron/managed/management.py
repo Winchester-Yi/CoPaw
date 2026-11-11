@@ -4,6 +4,7 @@
 import json
 import logging
 from .date_policy import platform_window_open
+from .migration_policy import imported_binding
 
 from .diagnostics import format_management_error
 from .operations import (
@@ -58,6 +59,8 @@ class ManagementService:
     async def retry(self, caller, job_id, operation_id):
         if self.store.grant is None:
             existing = await self.store.get(caller, job_id, operation_id)
+            if existing["action"] == "migrate":
+                raise ManagementConflict("cron_migration_requires_group_retry")
             if json.loads(existing["payload_json"]).get("broadcast_context"):
                 raise ManagementConflict("cron_broadcast_requires_new_round")
         operation = await self.store.claim(caller, job_id, operation_id)
@@ -260,6 +263,23 @@ class ManagementService:
             )
             return False
         if not progress.get("cleaned"):
+            if await imported_binding(
+                self.store.db,
+                tuple(
+                    operation[name]
+                    for name in (
+                        "tenant_id",
+                        "source_id",
+                        "agent_id",
+                        "job_id",
+                    )
+                ),
+                state,
+            ):
+                progress["cleaned"] = True
+                progress["original_resources_preserved"] = True
+                await self.store.checkpoint(operation, "cleanup", progress)
+                return True
             response = await self.resources.cleanup(operation, caller)
             if response.get("deferred"):
                 await self.store.checkpoint(

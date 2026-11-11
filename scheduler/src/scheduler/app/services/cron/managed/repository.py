@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import (
@@ -13,7 +14,9 @@ from .contracts import (
     QueryOptions,
 )
 from .identity import CallerIdentity, identity_value
-from .views import STATE_COLUMNS, child_item, job_view, list_item
+from .views import STATE_COLUMNS, child_item, list_item
+from .calendar_views import render_rows
+from ..workday_calendar import CalendarService, CalendarStore
 
 IDENTITY_FIELDS = ("tenant_id", "source_id", "agent_id", "job_id")
 _JOIN = " AND ".join(
@@ -109,8 +112,10 @@ def _encode_cursor(row: dict, context: dict) -> str:
 
 
 class ManagedCronRepository:
-    def __init__(self, db: Any):
+    def __init__(self, db: Any, *, calendar=None, clock=None):
         self.db = db
+        self.calendar = calendar or CalendarService(store=CalendarStore(db))
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def _rows(
         self,
@@ -165,9 +170,60 @@ class ManagedCronRepository:
         include_deleted: bool = False,
     ) -> dict:
         row = await self._authorized_row(caller, job_id, include_deleted)
-        return job_view(row, caller.actor_id)
+        return (
+            await render_rows(
+                [row],
+                caller.actor_id,
+                self.calendar,
+                self.clock(),
+            )
+        )[0]
 
     async def page(
+        self,
+        caller: CallerIdentity,
+        options: QueryOptions,
+        *,
+        parent_id: str | None = None,
+    ) -> dict:
+        result = await self.page_rows(caller, options, parent_id=parent_id)
+        if parent_id is None:
+            await self._mark_distributed_parents(result["items"])
+        result["items"] = await render_rows(
+            result["items"],
+            caller.actor_id,
+            self.calendar,
+            self.clock(),
+            child_item if parent_id is not None else list_item,
+        )
+        return result
+
+    async def _mark_distributed_parents(self, rows):
+        keys = [_key(row) for row in rows if _parent_key(row) is None]
+        parents = set()
+        if keys:
+            fields = ", ".join(f"parent_{key}" for key in IDENTITY_FIELDS)
+            columns = ", ".join(
+                f"parent_{key} COLLATE utf8mb4_bin AS parent_{key}"
+                for key in IDENTITY_FIELDS
+            )
+            markers = ", ".join(["(%s,%s,%s,%s)"] * len(keys))
+            try:
+                matches = await self.db.fetch_all(
+                    f"SELECT DISTINCT {columns} FROM swe_cron_jobs_v2 "
+                    f"WHERE ({fields}) IN ({markers}) "
+                    "AND management_owner='scheduler'",
+                    tuple(value for key in keys for value in key),
+                )
+            except Exception as exc:
+                raise ManagedCronUnavailable(
+                    "cron_database_unavailable",
+                ) from exc
+            parents = {_parent_key(row) for row in matches}
+        for row in rows:
+            row["has_distributed_children"] = _key(row) in parents
+
+    async def page_rows(
         self,
         caller: CallerIdentity,
         options: QueryOptions,
@@ -211,9 +267,8 @@ class ManagedCronRepository:
         rows = await self._rows(clauses, tuple(params), limit=limit + 1)
         more = len(rows) > limit
         rows = rows[:limit]
-        mapper = child_item if parent else list_item
         result = {
-            "items": [mapper(row, caller.actor_id) for row in rows],
+            "items": rows,
             "next_cursor": _encode_cursor(rows[-1], context) if more else None,
         }
         if parent:

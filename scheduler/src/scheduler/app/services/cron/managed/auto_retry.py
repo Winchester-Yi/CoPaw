@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """仅对已登记的新版批成员续跑失败尝试，不扫描定义补生触发。"""
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
+
+from .....config.constant import CRON_BATCH_MAX_ATTEMPTS
 
 from .batch_failures import display_error_messages, member_rows
 from .batch_members import MEMBERS, RECEIPTS, BatchRelationUnavailable
 from .batch_retry import BatchRetryGrant, BatchRetryService, _utc
 from .definition import request_hash
-from .dispatch_events import append_run_event, failure_type
+from .dispatch_events import append_run_event
+from .failure_policy import is_model_failure
 from .executions import ExecutionConflict, JOB_WHERE, RUN_TABLE
 from .identity import CallerIdentity
 from .operations import IDENTITY_FIELDS, utc_now
@@ -17,14 +19,8 @@ from .settlement import PROTOCOL, _history_matches
 from .storage import transaction, update
 
 logger = logging.getLogger(__name__)
-MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 300
 SUBTASK_TIMEOUT_SECONDS = 7800
-STOP_ERRORS = (
-    "cron auth user_info is expired",
-    "workflow sapid does not match target user",
-    "技能任务结果不可用",
-)
 
 
 def _naive(value):
@@ -72,7 +68,7 @@ class AutoBatchRetry:
             "ORDER BY r.queue_order LIMIT %s",
             (
                 after,
-                MAX_ATTEMPTS,
+                CRON_BATCH_MAX_ATTEMPTS,
                 self.clock() - timedelta(seconds=SUBTASK_TIMEOUT_SECONDS),
                 self.limit,
             ),
@@ -93,7 +89,7 @@ class AutoBatchRetry:
             # 与人工重试保持父定义→回执→目标定义→执行→成员的锁顺序。
             await self._lock_definition(tx, receipt)
             receipt = await self._receipt(tx, receipt["batch_id"], lock=True)
-            if receipt is None:
+            if receipt is None or receipt["batch_paused"]:
                 return False
             await self._lock_definition(tx, candidate)
             await tx.fetch_one(
@@ -134,7 +130,8 @@ class AutoBatchRetry:
         if row["status"] != "success" or row["settled_status"] is not None:
             return False
         history = await tx.fetch_one(
-            "SELECT job_id,tenant_id,status,async_status,meta FROM swe_cron_executions WHERE id=%s FOR UPDATE",
+            "SELECT id,job_id,tenant_id,status,async_status,error_type,error_message,meta "
+            "FROM swe_cron_executions WHERE id=%s FOR UPDATE",
             (row["history_execution_id"],),
         )
         if not _history_matches(row, history) or history["async_status"] in {
@@ -170,25 +167,10 @@ class AutoBatchRetry:
         failed = row["status"] == "error" or (
             row["status"] == "success" and row["settled_status"] == "error"
         )
-        if (
-            not failed
-            or row["business_attempt"] >= MAX_ATTEMPTS
-            or failure_type(row) == "auth_expired"
-        ):
+        if not failed or row["business_attempt"] >= CRON_BATCH_MAX_ATTEMPTS:
             return False
         await display_error_messages(tx, [row])
-        try:
-            metadata = json.loads(row.get("result_json") or "{}")
-        except (ValueError, TypeError):
-            metadata = {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        details = [
-            row.get("display_error_message", ""),
-            metadata.get("error_detail", ""),
-        ]
-        text = " ".join(str(value) for value in details).casefold()
-        return not any(error in text for error in STOP_ERRORS)
+        return is_model_failure(row, row.get("_history"))
 
     async def _enqueue(self, tx, receipt, row, timed_out):
         key = tuple(row[name] for name in IDENTITY_FIELDS)

@@ -10,6 +10,7 @@ import { request } from "../../../api/request";
 import { useIframeStore } from "../../../stores/iframeStore";
 import { fetchBootstrap } from "../api";
 import { useWealthStore } from "../store";
+import { resetInstitutionCache } from "../distribution/institutionCache";
 import { TargetPicker } from "./TargetPicker";
 
 vi.mock("../../../api/request", () => ({ request: vi.fn() }));
@@ -28,7 +29,16 @@ const planView = {
 };
 
 beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
   mockRequest.mockReset();
+  resetInstitutionCache();
   vi.stubGlobal(
     "fetch",
     vi.fn(
@@ -39,7 +49,7 @@ beforeEach(() => {
     ),
   );
   useIframeStore.getState().setContext({
-    bbk: "755",
+    bbk: "110",
     orgCode: "755480",
     orgLvl: "70",
     sysId: "retail",
@@ -77,17 +87,22 @@ describe("修改规划分发人员回显", () => {
       code: "200",
       message: "ok",
       success: true,
-      data: [],
+      data: {
+        mOrgCode: "110",
+        mOrgName: "北京分行",
+        mOrgLvl: 30,
+        children: [],
+      },
     });
     render(<TargetPicker />);
     expect(
-      screen.getByRole("button", { name: "移除张三" }),
+      await screen.findByRole("button", { name: "移除张三" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "移除李四" }),
     ).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByText("当前分行暂无可选支行")).toBeInTheDocument(),
+      expect(screen.getByText("未匹配机构")).toBeInTheDocument(),
     );
     expect(useWealthStore.getState().targetSapIds).toEqual(["0001", "0002"]);
     fireEvent.click(screen.getByRole("button", { name: "移除张三" }));
@@ -135,11 +150,16 @@ describe("修改规划分发人员回显", () => {
       code: "200",
       message: "ok",
       success: true,
-      data: [],
+      data: {
+        mOrgCode: "110",
+        mOrgName: "北京分行",
+        mOrgLvl: 30,
+        children: [],
+      },
     });
     render(<TargetPicker />);
     expect(
-      screen.getByRole("button", { name: "移除0003" }),
+      await screen.findByRole("button", { name: "移除0003" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "移除张三" }),

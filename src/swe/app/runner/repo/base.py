@@ -41,6 +41,15 @@ class BaseChatRepository(ABC):
         """Release whichever expert is current as one storage transaction."""
         raise NotImplementedError("Repository must implement atomic bindings")
 
+    async def set_multi_agent_mode(
+        self,
+        chat_id: str,
+        enabled: bool,
+        expected_revision: int,
+    ):
+        """Atomically change delegation mode and expert identity."""
+        raise NotImplementedError("Repository must implement atomic modes")
+
     async def update_chat_if_exists(
         self,
         spec: ChatSpec,

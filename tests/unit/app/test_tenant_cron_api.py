@@ -341,6 +341,50 @@ def _build_client(
     return TestClient(app)
 
 
+def test_legacy_management_list_hides_only_completed_migration_on_request():
+    from unittest.mock import AsyncMock
+
+    def bound_job(job_id):
+        return CronJobSpec.model_validate(
+            {
+                **_job_spec(job_id),
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_chat_id": "chat-" + job_id,
+                    "task_session_id": "session-" + job_id,
+                },
+            },
+        )
+
+    manager = _Manager(
+        {job_id: bound_job(job_id) for job_id in ("migrated", "remaining")},
+    )
+    manager.refresh_next_run_at = AsyncMock()
+    manager.build_task_view = lambda _job, _user: None
+    database = _AsyncTaskDb()
+    database.fetch_all = AsyncMock(
+        return_value=[
+            {
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+                "agent_id": "default",
+                "job_id": "migrated",
+            },
+        ],
+    )
+    with _build_client(manager) as client:
+        client.app.state.db_connection = database
+        ordinary = client.get("/cron/jobs")
+        assert [job["id"] for job in ordinary.json()] == [
+            "migrated",
+            "remaining",
+        ]
+        database.fetch_all.assert_not_awaited()
+        management = client.get("/cron/jobs?exclude_migrated=true")
+        assert [job["id"] for job in management.json()] == ["remaining"]
+        assert set(manager.jobs_by_id) == {"migrated", "remaining"}
+
+
 @pytest.mark.parametrize("plan_id", [None, "plan-001"])
 def test_create_and_broadcast_preserve_plan_id(plan_id):
     manager = _Manager()

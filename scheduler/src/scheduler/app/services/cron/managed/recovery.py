@@ -21,6 +21,7 @@ from .async_batch_delete import AsyncBatchDelete
 from .daily_retry_service import DailyFailureRetry
 from .auto_retry import AutoBatchRetry
 from .pause_group import PauseGroupService
+from .recheck_worker import RecheckWorker, TABLE as RECHECK_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class ManagedRecoveryWorker:
         *,
         limit=32,
         capacity=None,
+        rechecks_enabled=False,
     ):
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("invalid_managed_recovery_limit")
@@ -55,9 +57,19 @@ class ManagedRecoveryWorker:
         self.daily_retry = DailyFailureRetry(db, page_size=min(limit, 100))
         self.auto_retry = AutoBatchRetry(db, limit=limit)
         self.pause_groups = PauseGroupService(db, platform)
+        self.rechecks = (
+            RecheckWorker(db, execution_client, limit)
+            if rechecks_enabled
+            else None
+        )
 
     async def tick(self):
         """执行一次恢复巡检，分开报告各类已有工作的处理数量。"""
+        rechecks = (
+            (self._isolated("rechecks", self.rechecks.tick),)
+            if self.rechecks
+            else ()
+        )
         return dict(
             await asyncio.gather(
                 self._isolated("auto_pause", self.auto_pause.tick),
@@ -71,6 +83,7 @@ class ManagedRecoveryWorker:
                 self._isolated("dispatched", self._dispatch),
                 self._isolated("recovered", self._recover),
                 self._isolated("daily_failure_retry", self.daily_retry.tick),
+                *rechecks,
             ),
         )
 
@@ -131,12 +144,17 @@ class ManagedRecoveryWorker:
 
     async def _cleanup(self):
         joins = " AND ".join(f"r.{key}=j.{key}" for key in IDENTITY_FIELDS)
+        rechecks = (
+            f"AND NOT EXISTS (SELECT 1 FROM {RECHECK_TABLE} r WHERE {joins} AND r.status='running') "
+            if self.rechecks
+            else ""
+        )
         rows = await self.db.fetch_all(
             f"SELECT j.* FROM {JOURNAL} j WHERE j.action='delete' "
             "AND j.status='pending' AND j.stage='cleanup_waiting' "
             "AND (j.lease_until IS NULL OR j.lease_until<=%s) "
             f"AND NOT EXISTS (SELECT 1 FROM {RUN_TABLE} r WHERE {joins} AND {occupied_run_sql('r')}) "
-            "ORDER BY j.updated_at, j.operation_id LIMIT %s",
+            f"{rechecks}ORDER BY j.updated_at, j.operation_id LIMIT %s",
             (utc_now().isoformat(" "), self.limit),
         )
         for row in rows:
@@ -210,6 +228,8 @@ class ManagedRecoveryWorker:
             self._recover,
             self.daily_retry.tick,
         )
+        if self.rechecks:
+            lanes += (self.rechecks.tick,)
         tasks = [
             asyncio.create_task(
                 self._run_lane(lane, stop_event, interval_seconds),

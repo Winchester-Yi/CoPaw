@@ -2135,7 +2135,7 @@ class TestSourceSystemConfigApi:
         kwargs = refresh.await_args.kwargs
         identity = kwargs["identity"]
         assert kwargs["source_id"] == "portal"
-        assert kwargs["config"].source_id == "portal"
+        assert kwargs["config"] is None
         assert identity.tenant_id == "tenant-a"
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "alice"
@@ -2144,7 +2144,7 @@ class TestSourceSystemConfigApi:
         archive_kwargs = archive_refresh.await_args.kwargs
         archive_identity = archive_kwargs["identity"]
         assert archive_kwargs["source_id"] == "portal"
-        assert archive_kwargs["config"].source_id == "portal"
+        assert archive_kwargs["config"] is None
         assert archive_identity.tenant_id == "tenant-a"
         assert archive_identity.from_id == "tenant-a"
         assert archive_identity.updated_by == "alice"
@@ -2185,7 +2185,7 @@ class TestSourceSystemConfigApi:
         kwargs = refresh.await_args.kwargs
         identity = kwargs["identity"]
         assert kwargs["source_id"] == "target-source"
-        assert kwargs["config"].source_id == "target-source"
+        assert kwargs["config"] is None
         assert identity.tenant_id == "tenant-a"
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "alice"
@@ -2194,7 +2194,7 @@ class TestSourceSystemConfigApi:
         archive_kwargs = archive_refresh.await_args.kwargs
         archive_identity = archive_kwargs["identity"]
         assert archive_kwargs["source_id"] == "target-source"
-        assert archive_kwargs["config"].source_id == "target-source"
+        assert archive_kwargs["config"] is None
         assert archive_identity.tenant_id == "tenant-a"
         assert archive_identity.from_id == "tenant-a"
         assert archive_identity.updated_by == "alice"
@@ -2289,7 +2289,11 @@ class TestSourceSystemConfigApi:
         )
 
         assert delete_response.status_code == 200
-        assert delete_response.json() == {"deleted": True}
+        assert delete_response.json()["deleted"] is True
+        assert (
+            delete_response.json()["scheduler_sync"]["submission_status"]
+            == "failed"
+        )
         assert read_response.status_code == 200
         assert read_response.json()["config"] == {}
         assert read_response.json()["is_default"] is True
@@ -2335,8 +2339,7 @@ class TestSourceSystemConfigApi:
         kwargs = refresh.await_args.kwargs
         identity = kwargs["identity"]
         assert kwargs["source_id"] == "target-source"
-        assert kwargs["config"].source_id == "target-source"
-        assert kwargs["config"].is_default is True
+        assert kwargs["config"] is None
         assert identity.tenant_id == "tenant-a"
         assert identity.from_id == "tenant-a"
         assert identity.updated_by == "bob"
@@ -2345,8 +2348,7 @@ class TestSourceSystemConfigApi:
         archive_kwargs = archive_refresh.await_args.kwargs
         archive_identity = archive_kwargs["identity"]
         assert archive_kwargs["source_id"] == "target-source"
-        assert archive_kwargs["config"].source_id == "target-source"
-        assert archive_kwargs["config"].is_default is True
+        assert archive_kwargs["config"] is None
         assert archive_identity.tenant_id == "tenant-a"
         assert archive_identity.from_id == "tenant-a"
         assert archive_identity.updated_by == "bob"
@@ -2518,7 +2520,11 @@ class TestSourceSystemConfigApi:
         )
 
         assert delete_response.status_code == 200
-        assert delete_response.json() == {"deleted": True}
+        assert delete_response.json()["deleted"] is True
+        assert (
+            delete_response.json()["scheduler_sync"]["submission_status"]
+            == "failed"
+        )
         assert store.deleted == ["portal"]
         assert effective_response.status_code == 200
         assert effective_response.json()["is_default"] is True

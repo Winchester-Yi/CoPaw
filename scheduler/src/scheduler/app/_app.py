@@ -35,6 +35,7 @@ from .services.cron.managed.runtime import (
     managed_lifespan,
     prepare_managed_runtime,
 )
+from .services.cron.system.runtime import system_lifespan
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -125,7 +126,8 @@ async def application_lifespan(fastapi_app: FastAPI):
     """共用已有数据库生命周期，新后台先停止，随后关闭旧循环和连接池。"""
     async with lifespan(fastapi_app):
         async with managed_lifespan(fastapi_app):
-            yield
+            async with system_lifespan(fastapi_app):
+                yield
 
 
 app = FastAPI(

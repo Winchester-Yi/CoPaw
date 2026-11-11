@@ -59,6 +59,16 @@ describe("ChatActionGroup share URL", () => {
       }),
     ).toBe("https://example.test/console/chat-share/token-1");
   });
+
+  it("includes the sender's source in the public link", () => {
+    expect(
+      buildChatShareUrl(
+        "/chat-share/token-1",
+        { origin: "https://example.test", pathname: "/console/chat/abc" },
+        "pfmind",
+      ),
+    ).toBe("https://example.test/console/chat-share/token-1?source=pfmind");
+  });
 });
 
 describe("ChatActionGroup placement", () => {

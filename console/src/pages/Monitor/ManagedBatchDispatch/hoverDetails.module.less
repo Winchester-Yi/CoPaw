@@ -1,0 +1,84 @@
+.failureCount {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: help;
+
+  &:focus-visible {
+    outline: 2px solid #1677ff;
+    outline-offset: 3px;
+  }
+}
+
+.failureDetails {
+  width: 420px;
+  max-width: calc(100vw - 56px);
+  max-height: 420px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  user-select: text;
+}
+
+.summaryHeader {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.failureGroup {
+  margin-bottom: 12px;
+
+  ul {
+    padding: 0;
+    margin: 6px 0 0;
+    list-style: none;
+  }
+  li {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 4px 0;
+  }
+  li span {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  li strong {
+    flex: none;
+    color: #d92d20;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.hint {
+  color: #667085;
+  font-size: 11px;
+  margin-top: 8px;
+}
+
+.eventTooltip {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  user-select: text;
+  font:
+    12px/1.6 Consolas,
+    monospace;
+}
+
+.failureDetails::-webkit-scrollbar,
+.eventTooltip::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.failureDetails::-webkit-scrollbar-thumb,
+.eventTooltip::-webkit-scrollbar-thumb {
+  background: #98a2b3;
+  border-radius: 3px;
+}

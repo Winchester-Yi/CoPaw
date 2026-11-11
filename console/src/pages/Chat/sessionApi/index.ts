@@ -1325,7 +1325,27 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
    * Called when a new session is created.
    * Consumers can register here to update the URL with the new session id.
    */
-  onSessionCreated: ((sessionId: string) => void) | null = null;
+  onSessionCreated: ((sessionId: string, fromSubmit: boolean) => void) | null =
+    null;
+
+  attachDraftChat(sessionId: string, logicalId: string, chatId: string): void {
+    const local = this.sessionList.find((item) => item.id === sessionId) as
+      | ExtendedSession
+      | undefined;
+    if (!local) return;
+    const existing = this.sessionList.find((item) => item.id === chatId) as
+      | ExtendedSession
+      | undefined;
+    const resolved = existing
+      ? mergeResolvedSession(existing, { ...local, sessionId: logicalId })
+      : { ...local, realId: chatId, sessionId: logicalId };
+    this.sessionList = [
+      resolved,
+      ...this.sessionList.filter((item) => item !== local && item !== existing),
+    ];
+    rememberResolvedChatId(sessionId, chatId);
+    this.updateWindowVariables(resolved);
+  }
 
   /**
    * When reconnecting to a running conversation, the backend history may not
@@ -2195,14 +2215,19 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     return this.projectSessionView(this.sessionList);
   }
 
-  async createSession(session: Partial<IAgentScopeRuntimeWebUISession>) {
+  async createSession(
+    session: Partial<IAgentScopeRuntimeWebUISession> & {
+      __fromSubmit?: boolean;
+    },
+  ) {
     // 生成临时时间戳ID（只在内存中使用，不添加到历史列表）
     session.id = createLocalSessionId();
+    const { __fromSubmit, ...sessionData } = session;
 
     // ==================== userId 统一整改 (Kun He) ====================
     // 使用 getUserId() 获取用户 ID
     const extended: ExtendedSession = {
-      ...session,
+      ...sessionData,
       sessionId: session.id,
       userId: getUserId(),
       channel: getChannel(),
@@ -2220,7 +2245,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.sessionList = mergePendingSession(this.sessionList, extended);
 
     // 触发回调（URL 清空，不导航到临时ID）
-    this.onSessionCreated?.(session.id);
+    this.onSessionCreated?.(session.id, __fromSubmit === true);
 
     // 返回当前列表（不包含临时会话）
     return this.projectSessionView(this.sessionList);

@@ -13,7 +13,9 @@ import dayjs from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import { useTranslation } from "react-i18next";
 import api from "../../../api";
-import { useAgentStore } from "../../../stores/agentStore";
+import { getCurrentCronContext, useCronContext } from "@/hooks/useCronContext";
+import { SystemCronSyncStatus } from "@/components/SystemCronSyncStatus";
+import type { SystemSyncSubmission } from "@/api/types/systemCron";
 import type { HeartbeatConfig } from "../../../api/types/heartbeat";
 import { parseEvery, serializeEvery, type EveryUnit } from "./parseEvery";
 import { PageHeader } from "@/components/PageHeader";
@@ -70,7 +72,12 @@ const EVERY_UNIT_OPTIONS: { value: EveryUnit; labelKey: string }[] = [
 
 function HeartbeatPage() {
   const { t } = useTranslation();
-  const { selectedAgent } = useAgentStore();
+  const syncContext = useCronContext();
+  const scopeKey = JSON.stringify(syncContext);
+  const [syncReceipt, setSyncReceipt] = useState<{
+    scope: string;
+    value: SystemSyncSubmission;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<HeartbeatFormValues>();
@@ -78,8 +85,10 @@ function HeartbeatPage() {
 
   const fetchConfig = async () => {
     setLoading(true);
+    setSaving(false);
     try {
       const data = await api.getHeartbeatConfig();
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
       const everyParts = parseEvery(data.every ?? "6h");
       form.setFieldsValue({
         enabled: data.enabled ?? false,
@@ -91,17 +100,19 @@ function HeartbeatPage() {
         activeHoursEnd: data.activeHours?.end ?? "22:00",
       });
     } catch (e) {
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
       console.error("Failed to load heartbeat config:", e);
       message.error(t("heartbeat.loadFailed"));
     } finally {
-      setLoading(false);
+      if (JSON.stringify(getCurrentCronContext()) === scopeKey)
+        setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAgent]);
+  }, [scopeKey]);
 
   const onFinish = async (values: HeartbeatFormValues) => {
     const every =
@@ -127,13 +138,23 @@ function HeartbeatPage() {
     };
     setSaving(true);
     try {
-      await api.updateHeartbeatConfig(body);
-      message.success(t("heartbeat.saveSuccess"));
+      const saved = await api.updateHeartbeatConfig(body);
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
+      const submission = saved?.scheduler_sync ?? {
+        submission_status: "failed" as const,
+        error_code: "system_sync_receipt_unavailable",
+      };
+      setSyncReceipt({ scope: scopeKey, value: submission });
+      if (submission.submission_status === "accepted")
+        message.success("配置已保存，平台同步已受理");
+      else message.warning?.("配置已保存，但平台同步未受理，请查看同步状态");
     } catch (e) {
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
       console.error("Failed to save heartbeat config:", e);
       message.error(t("heartbeat.saveFailed"));
     } finally {
-      setSaving(false);
+      if (JSON.stringify(getCurrentCronContext()) === scopeKey)
+        setSaving(false);
     }
   };
 
@@ -141,7 +162,10 @@ function HeartbeatPage() {
     return (
       <div className={styles.heartbeatPage}>
         <PageHeader
-          items={[{ title: t("nav.runCenter") }, { title: t("heartbeat.title") }]}
+          items={[
+            { title: t("nav.runCenter") },
+            { title: t("heartbeat.title") },
+          ]}
         />
         <span className={styles.description}>{t("common.loading")}</span>
       </div>
@@ -262,6 +286,14 @@ function HeartbeatPage() {
               </Button>
             </Form.Item>
           </Form>
+          <SystemCronSyncStatus
+            context={syncContext}
+            scope="agent"
+            taskTypes={["heartbeat"]}
+            submission={
+              syncReceipt?.scope === scopeKey ? syncReceipt.value : undefined
+            }
+          />
         </Card>
       </div>
     </div>

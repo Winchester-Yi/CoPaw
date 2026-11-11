@@ -29,11 +29,11 @@ When a persisted chat detail is restored, the Conversation Workspace SHALL initi
 - **AND** the next upward scroll goes directly to the new top
 - **THEN** the next batch is available without first scrolling downward
 
-#### Scenario: Automatic continuation is bounded
+#### Scenario: Automatic continuation seeks the preceding user message
 - **WHEN** one upward-reading action starts history progression
-- **THEN** at most three local batches or archive pages are advanced automatically
-- **AND** each step waits for message layout and anchor restoration before checking the current position
-- **AND** moving downward, leaving the preload region, an error, or exhaustion stops continuation
+- **THEN** local batches and archive pages advance until a newly visible user message is found
+- **AND** each local batch waits for message layout and anchor restoration
+- **AND** moving downward, an error, or exhaustion stops continuation
 - **AND** a later upward scroll or the accessible “加载更早消息” action can continue
 - **AND** mounting a scrollable list alone does not initiate history requests
 
@@ -51,7 +51,7 @@ When a persisted chat detail is restored, the Conversation Workspace SHALL initi
 
 ### Requirement: Archive requests SHALL follow local exhaustion
 
-The Conversation Workspace SHALL request compacted archive history only after every current-memory historical card is visible. Each archive request SHALL use the current cursor with `limit=20`, and every unseen card converted from the returned archive page SHALL be rendered as one complete page without an additional frontend visibility cursor.
+The Conversation Workspace SHALL request compacted archive history only after every current-memory historical card is visible. Each archive request SHALL use the current cursor with `limit=20`. During an upward-reading action, unseen cards SHALL be accumulated until a newly visible user message is found, history is exhausted, or the reader stops; the accumulated cards SHALL then be rendered together.
 
 #### Scenario: Hidden local cards prevent an archive request
 - **WHEN** the user enters the history preload region
@@ -64,10 +64,11 @@ The Conversation Workspace SHALL request compacted archive history only after ev
 - **AND** the user remains near the top after the local batch commits and its reading anchor is restored, or later scrolls upward into that region
 - **THEN** the Console requests `/chats/{chat_id}/history` with the current cursor and `limit=20`
 
-#### Scenario: Archive page renders in full
-- **WHEN** an archive request returns unseen raw messages and optional compaction boundaries
-- **THEN** all cards converted from that response are inserted and rendered together
-- **AND** the next cursor is retained for a later upward-scroll trigger or bounded post-layout continuation
+#### Scenario: Archive pages render together
+- **WHEN** archive pages contain no new visible user message
+- **THEN** the Console continues reading earlier pages and keeps their converted cards staged
+- **AND** it renders the accumulated cards together when a user message is found or the archive is exhausted
+- **AND** it retains the next cursor for later history progression
 
 #### Scenario: Archive page does not duplicate existing cards
 - **WHEN** an archive response contains a message or boundary already present in the chat detail
@@ -100,7 +101,7 @@ Revealing local cards or inserting an archive page SHALL preserve the reader's v
 
 ### Requirement: Archive feedback SHALL be truthful, recoverable, and accessible
 
-The Conversation Workspace SHALL show loading feedback only while an archive network request is active. A failed request SHALL preserve existing messages and cursor and SHALL expose an accessible retry action. When a response reports `has_more=false`, the workspace SHALL render that response and immediately show the terminal conversation-start state without issuing a later empty confirmation request.
+The Conversation Workspace SHALL show continuous loading feedback throughout an archive loading action, including between its page requests. A failed request SHALL preserve existing messages, staged pages and the failed request cursor and SHALL expose an accessible retry action. When a response reports `has_more=false`, the workspace SHALL render the accumulated pages and immediately show the terminal conversation-start state without issuing a later empty confirmation request.
 
 #### Scenario: Archive request displays loading feedback
 - **WHEN** the Console is waiting for an archive response
@@ -118,7 +119,7 @@ The Conversation Workspace SHALL show loading feedback only while an archive net
 
 #### Scenario: Empty visible page can advance
 - **WHEN** a page adds no unseen cards but its cursor advances
-- **THEN** another page may be fetched within the same three-step budget after layout settles
+- **THEN** another page may be fetched in the same loading action
 
 #### Scenario: Archive failure offers retry
 - **WHEN** an archive request fails

@@ -2,18 +2,25 @@
 """Capacity reservation on the existing model-scope lease row."""
 
 from typing import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from .managed.run_accounting import occupied_run_sql
 
 # 仅由新版后台在完整表结构校验后启用，不是新增运维配置。
 # 旧部署没有新表时沿用原统计，不探测或自动创建业务表。
 MANAGED_CAPACITY_ACCOUNTING = False
+# 仅后台就绪时为待运行任务让位；启动失败仍必须统计已有执行的真实占用。
+MANAGED_PRIORITY_ENABLED = False
 
 
 def enable_managed_capacity_accounting():
     """新运行时已就绪后，将其持久在途占位纳入共用模型池。"""
     global MANAGED_CAPACITY_ACCOUNTING
     MANAGED_CAPACITY_ACCOUNTING = True
+
+
+def set_managed_priority(enabled):
+    global MANAGED_PRIORITY_ENABLED
+    MANAGED_PRIORITY_ENABLED = enabled
 
 
 async def _managed_occupants(cur, scope, exclude_execution_id=None):
@@ -93,6 +100,43 @@ async def available_capacity(
         else 0
     )
     return max(0, capacity - legacy - managed)
+
+
+async def legacy_available_capacity(cur, scope, owner, now, policy):
+    """同一 scope 锁内先给可执行新版留位，旧队列只领取剩余容量。"""
+    available = await available_capacity(cur, scope, owner, now, policy)
+    if (
+        available <= 0
+        or not MANAGED_CAPACITY_ACCOUNTING
+        or not MANAGED_PRIORITY_ENABLED
+    ):
+        return available
+    from .managed.date_policy import BEIJING
+    from .managed.operations import IDENTITY_FIELDS
+    from .managed.work_query import priority_candidates
+
+    moment = (
+        now.replace(tzinfo=BEIJING)
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+    await cur.execute(*priority_candidates(scope, moment))
+    rows = await cur.fetchall()
+    reserved = {}
+    remaining = available
+    for row in rows:
+        values = row_values(
+            row,
+            (*IDENTITY_FIELDS, "occupied_count", "max_concurrency"),
+        )
+        key = tuple(values[:4])
+        used = reserved.get(key, 0)
+        if int(values[4]) + used < int(values[5]):
+            reserved[key] = used + 1
+            remaining -= 1
+            if remaining == 0:
+                break
+    return remaining
 
 
 async def write_capacity(db, sql, params):

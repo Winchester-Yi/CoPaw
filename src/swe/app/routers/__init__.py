@@ -17,8 +17,10 @@ _ROUTER_MODULES = (
     ("..crons.auth_migration_api", "router"),
     (".external_jobs", "router"),
     ("..crons.managed_api", "router"),
+    ("..crons.selected_migration_api", "router"),
     ("..crons.managed_model_api", "router"),
     ("..crons.managed_execution_api", "router"),
+    ("..crons.system_api", "router"),
     ("..crons.skill_job_lookup", "router"),
     ("..crons.batch_operations", "router"),
     (".local_models", "router"),
@@ -64,7 +66,6 @@ _ROUTER_MODULES = (
     ("..scenario_preset", "scenario_preset_router"),
     ("..wplus_sop.router", "router"),
     ("..asset_upload_record", "router"),
-    ("..wealth_plans.router", "router"),
 )
 
 _MODULE_EXPORTS = {

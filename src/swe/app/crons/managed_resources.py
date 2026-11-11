@@ -71,10 +71,18 @@ class ResourcePreparer:
         )
         chat = await self.chats.get_chat(chat_id)
         if chat is not None:
-            self._verify(chat, spec, session, owner)
+            self._verify(
+                chat,
+                spec,
+                session,
+                owner,
+                migrated=bool(binding.get("_migration")),
+            )
             chat.name = spec.name
             await self.chats.update_chat(chat)
         else:
+            if binding.get("_migration"):
+                raise ValueError("cron_migration_chat_missing")
             chat = await self._create_chat(chat_id, spec, session, owner)
         meta = {
             **spec.meta,
@@ -151,8 +159,12 @@ class ResourcePreparer:
             "task_agent_id": self.agent_id,
         }
 
-    def _verify(self, chat, spec, session, owner):
+    def _verify(self, chat, spec, session, owner, *, migrated=False):
         expected = self._route(spec, owner)
+        if migrated:
+            expected.pop("management_owner")
+            if "task_agent_id" not in (chat.meta or {}):
+                expected.pop("task_agent_id")
         if chat.user_id != owner or chat.session_id != session:
             raise ValueError("cron_resource_binding_conflict")
         if any(
@@ -175,6 +187,8 @@ class ResourcePreparer:
         )
 
     async def cleanup(self, raw_spec, binding):
+        if binding.get("_migration"):
+            return {"cleaned": True, "original_resources_preserved": True}
         spec = load_managed_spec(raw_spec)
         logger.info(
             "开始清理新任务执行资源 job_id=%s agent_id=%s",

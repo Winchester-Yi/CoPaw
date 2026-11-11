@@ -297,6 +297,19 @@ export const chatApi = {
       `/chats/${encodeURIComponent(chatId)}/expert-binding`,
     ),
 
+  updateMultiAgentMode: (
+    chatId: string,
+    enabled: boolean,
+    expectedRevision: number,
+  ) =>
+    request<import("../types/chat").MultiAgentModeView>(
+      `/chats/${encodeURIComponent(chatId)}/multi-agent-mode`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled, expected_revision: expectedRevision }),
+      },
+    ),
+
   updateExpertBinding: (chatId: string, update: ExpertBindingUpdate) =>
     request<ExpertBindingView>(
       `/chats/${encodeURIComponent(chatId)}/expert-binding`,

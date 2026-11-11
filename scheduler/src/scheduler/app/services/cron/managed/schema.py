@@ -64,7 +64,7 @@ REQUIRED_COLUMNS = {
     "swe_cron_managed_trigger_receipts": (
         "receipt_id callback_key tenant_id source_id agent_id job_id "
         "external_job_id operation_id kind trigger_id logical_fire_at "
-        "physical_fire_at batch_id status response_json members_json "
+        "physical_fire_at batch_id status batch_paused response_json members_json "
         "created_at"
     ),
     "swe_cron_jobs": (
@@ -77,7 +77,7 @@ REQUIRED_COLUMNS = {
     ),
     "swe_cron_executions": (
         "id job_id job_name tenant_id scheduled_time actual_time end_time "
-        "duration_ms status async_status error_message instance_id executor_leader "
+        "duration_ms status async_status error_type error_message instance_id executor_leader "
         "is_manual trace_id session_id input_snapshot output_preview meta "
         "notification_status notification_due_at notification_timezone "
         "is_read read_at created_at"

@@ -68,6 +68,7 @@ const TASK = {
 const NAME_LIST_FIXTURE = [
   {
     custUid: "CUST001",
+    traced: 0,
     custNm: "张三",
     sapId: "10086",
     filename: "http://example/cust001",
@@ -75,6 +76,7 @@ const NAME_LIST_FIXTURE = [
   },
   {
     custUid: "CUST002",
+    traced: 1,
     custNm: "李四",
     sapId: "10086",
     filename: "http://example/cust002",
@@ -241,6 +243,9 @@ describe("WealthWorkbench api", () => {
           ? await api.fetchDoneCustomers([TASK], "10086")
           : await api.fetchTodayCustomers([TASK], "10086", view);
       expect(result.customers).toHaveLength(2);
+      expect(result.customers.map((customer) => customer.traced)).toEqual([
+        0, 1,
+      ]);
       expect(result.counts).toEqual(counts);
     },
   );

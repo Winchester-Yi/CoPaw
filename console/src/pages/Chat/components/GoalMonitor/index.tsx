@@ -65,6 +65,12 @@ export default function GoalMonitor({
   }, [refresh]);
 
   useEffect(() => {
+    window.addEventListener("goal-authorization-changed", refresh);
+    return () =>
+      window.removeEventListener("goal-authorization-changed", refresh);
+  }, [refresh]);
+
+  useEffect(() => {
     if (!goal || !ACTIVE_STATES.has(goal.state)) return undefined;
     const timer = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
@@ -167,6 +173,14 @@ export default function GoalMonitor({
             </strong>
             <span className={styles.progress}>
               已通过 {passedCount} / {goal.criteria.length} 项条件
+            </span>
+            <span className={styles.progress}>
+              子代理委派：
+              {goal.subagent_delegation_enabled === undefined
+                ? "状态未知"
+                : goal.subagent_delegation_enabled
+                ? "已授权"
+                : "未授权"}
             </span>
             <div
               className={styles.progressTrack}

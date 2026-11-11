@@ -2,7 +2,7 @@
 """补跑从队列进入 SWE 后的新历史、最终标识和运行态集成验证。"""
 
 import json
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -27,6 +27,10 @@ def key(row):
     return tuple(
         row[name] for name in ("tenant_id", "source_id", "agent_id", "job_id")
     )
+
+
+def advance_to_retry_due(scenario, row):
+    scenario.now[0] = datetime.fromisoformat(row["not_before_at"])
 
 
 @pytest.mark.asyncio
@@ -78,6 +82,7 @@ async def test_history_update_failure_rolls_back_insert_and_state(
 ):
     await scenario.run()
     row, _ = await retry_row(scenario)
+    advance_to_retry_due(scenario, row)
     writer = ExecutionWriter(scenario.db)
     await writer.accept(row["execution_id"], key(row))
     assert await writer.start(row["execution_id"], key(row), "owner")
@@ -114,6 +119,7 @@ async def test_newer_scheduled_success_skips_waiting_retry_without_overwriting_s
     original = await scenario.run()
     row, _ = await retry_row(scenario)
     await scenario.run(job_id=original["job_id"], status="success")
+    advance_to_retry_due(scenario, row)
     writer = ExecutionWriter(scenario.db)
     await writer.accept(row["execution_id"], key(row))
     assert await writer.start(row["execution_id"], key(row), "owner") is None
@@ -136,6 +142,7 @@ async def test_manual_success_does_not_skip_waiting_retry(scenario):
         kind="manual",
         status="success",
     )
+    advance_to_retry_due(scenario, row)
     writer = ExecutionWriter(scenario.db)
     await writer.accept(row["execution_id"], key(row))
     assert await writer.start(row["execution_id"], key(row), "owner")
@@ -199,6 +206,7 @@ async def test_started_retry_is_not_interrupted_or_overwrites_newer_success(
 ):
     original = await scenario.run()
     row, _ = await retry_row(scenario)
+    advance_to_retry_due(scenario, row)
     writer = ExecutionWriter(scenario.db)
     await writer.accept(row["execution_id"], key(row))
     assert await writer.start(row["execution_id"], key(row), "owner")

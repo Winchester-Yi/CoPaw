@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from tests.unit.app.test_managed_cron_execution import Engine
+from tests.fakes.managed_source_config import ManagedSourceConfigService
 from tests.unit.scheduler.test_managed_cron_executions import (
     enqueue,
     execution_setup,
@@ -44,6 +45,7 @@ async def test_internal_execution_accepts_shared_record_then_runs_once(
     )
     app = FastAPI()
     app.state.db_connection = db
+    app.state.source_system_config_service = ManagedSourceConfigService()
     app.include_router(managed_execution_api.router, prefix="/api")
     body = {
         "execution_id": row["execution_id"],

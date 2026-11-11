@@ -147,3 +147,13 @@ async def test_workflow_store_startup_does_not_access_schema(
     db.fetch_one.assert_not_awaited()
     pool.set_workflow_config_store.assert_called_once_with(store)
     manager.set_workflow_config_store.assert_called_once_with(store)
+
+
+def test_legacy_wealth_routes_are_retired_without_removing_shared_routes():
+    paths = app_module.app.openapi()["paths"]
+
+    assert not any(path.startswith("/api/wealth/") for path in paths)
+    assert "/api/cron/jobs" in paths
+    assert "/api/cron/workflow-bindings/{skill_id}" in paths
+    assert "/api/user-info/positions/by-branch" in paths
+    assert "/api/user-info/branches/by-branch" in paths

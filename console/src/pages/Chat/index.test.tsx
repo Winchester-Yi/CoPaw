@@ -12,11 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./index";
 import { schedulerCronApi } from "@/api/modules/schedulerCron";
 import type { ManagedJob } from "@/api/types/schedulerCron";
-import type { ExpertBindingView } from "@/api/types/chat";
+import type { ExpertBindingView, GoalSnapshot } from "@/api/types/chat";
 
 type MockSessionApi = {
   preferredChatId: string;
-  onSessionCreated: ((sessionId: string) => void) | null;
+  onSessionCreated: ((sessionId: string, fromSubmit?: boolean) => void) | null;
+  attachDraftChat: ReturnType<typeof vi.fn>;
   onSessionIdResolved: ((tempId: string, realId: string) => void) | null;
   onSessionRemoved: ((removedId: string) => void) | null;
   onSessionSelected:
@@ -54,6 +55,9 @@ const mocks = vi.hoisted(() => {
     })),
     getExpertBinding: vi.fn(),
     updateExpertBinding: vi.fn(),
+    updateMultiAgentMode: vi.fn(),
+    getRecentGoal: vi.fn(async (): Promise<GoalSnapshot | null> => null),
+    enqueueGoalSteering: vi.fn(async () => ({})),
     expertSelectorProps: null as Record<string, unknown> | null,
     listCronJobs: vi.fn(async () => []),
     listExperts: vi.fn(async () => []),
@@ -346,6 +350,7 @@ vi.mock("../../api/modules/chat", () => ({
     createChat: mocks.createChat,
     getExpertBinding: mocks.getExpertBinding,
     updateExpertBinding: mocks.updateExpertBinding,
+    updateMultiAgentMode: mocks.updateMultiAgentMode,
     getSubAgentRuns: vi.fn(async () => ({
       chat_id: "chat-1",
       session_id: "chat-1",
@@ -353,7 +358,8 @@ vi.mock("../../api/modules/chat", () => ({
     })),
     cancelSubAgentRun: vi.fn(async () => undefined),
     filePreviewUrl: vi.fn((filename: string) => `/preview/${filename}`),
-    getRecentGoal: vi.fn(async () => null),
+    getRecentGoal: mocks.getRecentGoal,
+    enqueueGoalSteering: mocks.enqueueGoalSteering,
     getContextUsage: mocks.getContextUsage,
     stopChat: vi.fn(async () => undefined),
     updateChat: mocks.updateChat,
@@ -433,6 +439,7 @@ vi.mock("./sessionApi", () => {
     getSessionList: vi.fn(async () => []),
     getLoadedSessionView: () => [],
     projectSessionView: (sessions: unknown[]) => sessions,
+    attachDraftChat: vi.fn(),
     setLastUserMessage: vi.fn(),
     updateSession: mocks.updateSession,
   };
@@ -739,6 +746,21 @@ describe("ChatPage plan mode wiring", () => {
       reason: null,
     });
     mocks.updateExpertBinding.mockReset();
+    mocks.updateMultiAgentMode.mockReset();
+    mocks.getRecentGoal.mockReset();
+    mocks.getRecentGoal.mockResolvedValue(null);
+    mocks.enqueueGoalSteering.mockClear();
+    mocks.updateMultiAgentMode.mockResolvedValue({
+      enabled: true,
+      expert_binding: {
+        revision: 1,
+        expert_id: null,
+        enabled: false,
+        available: true,
+        expert_name: null,
+        reason: null,
+      },
+    });
     mocks.setLoading.mockReset();
     mocks.getLoading.mockReset();
     mocks.getLoading.mockReturnValue(false);
@@ -757,11 +779,13 @@ describe("ChatPage plan mode wiring", () => {
       mocks.sessionApi.onSessionRemoved = null;
       mocks.sessionApi.onSessionSelected = null;
       mocks.sessionApi.getSessionList.mockClear();
+      mocks.sessionApi.attachDraftChat.mockReset();
     }
   });
 
   afterEach(() => {
     cleanup();
+    (window as Window & { currentSessionId?: string }).currentSessionId = "";
     vi.restoreAllMocks();
   });
 
@@ -1682,6 +1706,208 @@ describe("ChatPage plan mode wiring", () => {
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
   });
 
+  it("shows the multi-agent mode switch in the mode menu", () => {
+    render(<ChatPage />);
+    expect(
+      screen.getByRole("switch", { name: "多智能体模式" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not write multi-agent mode when entering a chat", async () => {
+    mocks.inputDisabled = false;
+    render(<ChatPage />);
+    await waitFor(() => expect(mocks.getExpertBinding).toHaveBeenCalled());
+    await act(async () => Promise.resolve());
+    expect(mocks.updateMultiAgentMode).not.toHaveBeenCalled();
+  });
+
+  it("creates a new chat for multi-agent mode despite a stale global session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    (window as Window & { currentSessionId?: string }).currentSessionId =
+      "old-chat";
+    render(<ChatPage />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+
+    expect(mocks.createChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: expect.not.stringMatching(/^old-chat$/),
+      }),
+    );
+    expect(mocks.updateMultiAgentMode).toHaveBeenCalledWith(
+      "chat-real-created",
+      true,
+      0,
+    );
+    expect(mocks.navigate).toHaveBeenCalledWith("/chat/chat-real-created", {
+      replace: true,
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+    expect(mocks.createChat).toHaveBeenCalledTimes(1);
+    expect(mocks.updateMultiAgentMode).toHaveBeenLastCalledWith(
+      "chat-real-created",
+      false,
+      1,
+    );
+  });
+
+  it("keeps multi-agent mode off when the server rejects a change", async () => {
+    mocks.inputDisabled = false;
+    mocks.updateMultiAgentMode.mockRejectedValueOnce(new Error("offline"));
+    render(<ChatPage />);
+    await waitFor(() => expect(mocks.getExpertBinding).toHaveBeenCalled());
+    const toggle = screen.getByRole("switch", { name: "多智能体模式" });
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+    await waitFor(() => expect(mocks.updateMultiAgentMode).toHaveBeenCalled());
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("persists multi-agent mode and submits explicit intent", async () => {
+    mocks.inputDisabled = false;
+    mocks.sessions[0].meta.plan_mode_enabled = false;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 200 }));
+    render(<ChatPage />);
+    await waitFor(() => expect(mocks.getExpertBinding).toHaveBeenCalled());
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+    await waitFor(() =>
+      expect(mocks.updateMultiAgentMode).toHaveBeenCalledWith(
+        "chat-1",
+        true,
+        0,
+      ),
+    );
+    const prepared = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "分析",
+      fileList: [],
+    });
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [{ role: "user", content: [{ type: "text", text: "分析" }] }],
+        session_id: "chat-1",
+        biz_params: prepared.biz_params,
+      });
+    });
+    const body = JSON.parse(
+      fetchMock.mock.calls[fetchMock.mock.calls.length - 1]?.[1]
+        ?.body as string,
+    );
+    expect(body.enable_subagents).toBe(true);
+    expect(body.input[0].content[0].text).toBe("分析");
+  });
+
+  it("keeps a successful multi-agent mode change when a draft resolves to its chat id", async () => {
+    mocks.inputDisabled = false;
+    mocks.currentSessionId = "1780000000000";
+    mocks.pathname = "/chat";
+    mocks.sessions = [
+      {
+        id: "1780000000000",
+        realId: "",
+        sessionId: "1780000000000",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    let resolvedChatId: string | null = null;
+    mocks.getChatIdForSession.mockImplementation((sessionId: string) =>
+      sessionId === "1780000000000" ? resolvedChatId : sessionId,
+    );
+    let rerenderChat: (() => void) | undefined;
+    mocks.updateMultiAgentMode.mockImplementation(async () => {
+      resolvedChatId = "chat-real-created";
+      rerenderChat?.();
+      return {
+        enabled: true,
+        expert_binding: {
+          revision: 1,
+          expert_id: null,
+          enabled: false,
+          available: true,
+          expert_name: null,
+          reason: null,
+        },
+      };
+    });
+    const view = render(<ChatPage />);
+    rerenderChat = () => view.rerender(<ChatPage />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "多智能体模式" }),
+      ).toHaveAttribute("aria-checked", "true"),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+    expect(mocks.updateMultiAgentMode).toHaveBeenLastCalledWith(
+      "chat-real-created",
+      false,
+      1,
+    );
+  });
+
+  it("passes captured intent to Goal steering", async () => {
+    mocks.inputDisabled = false;
+    mocks.sessions[0].meta.plan_mode_enabled = false;
+    mocks.getRecentGoal.mockResolvedValue({
+      goal_id: "goal-1",
+      state: "ACTIVE",
+      revision: 1,
+      turn_budget: 1,
+      budget_cycle: 1,
+      turns_used: 0,
+      criteria: [],
+      contract: {
+        objective: "目标",
+        completion_criteria: [],
+        constraints: { must_preserve: [], must_not_do: [] },
+        autonomy_boundary: "",
+      },
+    });
+    render(<ChatPage />);
+    await waitFor(() => expect(mocks.getExpertBinding).toHaveBeenCalled());
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "多智能体模式" }));
+    });
+    await waitFor(() => expect(mocks.updateMultiAgentMode).toHaveBeenCalled());
+    const prepared = await mocks.capturedOptions?.sender?.beforeSubmit({
+      query: "继续分析",
+      fileList: [],
+    });
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [
+          { role: "user", content: [{ type: "text", text: "继续分析" }] },
+        ],
+        session_id: "chat-1",
+        biz_params: prepared.biz_params,
+      });
+    });
+    expect(mocks.enqueueGoalSteering).toHaveBeenCalledWith(
+      "goal-1",
+      "chat-1",
+      "继续分析",
+      true,
+    );
+  });
+
   it("renders Plan Mode as compact text inside the Mode submenu", () => {
     mocks.sessions = [
       {
@@ -1922,6 +2148,149 @@ describe("ChatPage plan mode wiring", () => {
     );
     expect(mocks.updateChat).toHaveBeenCalledWith("chat-real-created", {
       meta: { plan_mode_enabled: true },
+    });
+  });
+
+  it("attaches the blank Plan Mode draft to the first submitted session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    render(<ChatPage />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    });
+    const logicalId = mocks.createChat.mock.calls[0][0]?.session_id;
+    expect(mocks.updateChat).toHaveBeenCalledWith(
+      "chat-real-created",
+      expect.objectContaining({ meta: { plan_mode_enabled: true } }),
+    );
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", true);
+    });
+    expect(mocks.sessionApi?.attachDraftChat).toHaveBeenCalledWith(
+      "1780458341751000",
+      logicalId,
+      "chat-real-created",
+    );
+  });
+
+  it("routes a first /plan message to the chat created during preparation", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 200 }));
+    render(<ChatPage />);
+    let prepared: any;
+    await act(async () => {
+      prepared = await mocks.capturedOptions?.sender?.beforeSubmit({
+        query: "/plan 制定方案",
+        fileList: [],
+      });
+    });
+    const logicalId = mocks.createChat.mock.calls[0][0]?.session_id as string;
+    mocks.sessionApi!.attachDraftChat.mockImplementation(() => {
+      mocks.getChatIdForSession.mockReturnValue("chat-real-created");
+      mocks.getLogicalSessionId.mockReturnValue(logicalId);
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", true);
+    });
+    await act(async () => {
+      await mocks.capturedOptions?.api.fetch({
+        input: [
+          { role: "user", content: [{ type: "text", text: prepared.query }] },
+        ],
+        session_id: "1780458341751000",
+        biz_params: prepared.biz_params,
+      });
+    });
+    const request = fetchMock.mock.calls.find(
+      ([url]) => url === "/console/chat",
+    );
+    expect(JSON.parse(request?.[1]?.body as string)).toMatchObject({
+      chat_id: "chat-real-created",
+      session_id: logicalId,
+      mode: "plan",
+    });
+  });
+
+  it("does not attach a Plan Mode draft when manually creating another session", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    render(<ChatPage />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", false);
+    });
+    expect(mocks.sessionApi?.attachDraftChat).not.toHaveBeenCalled();
+  });
+
+  it("does not attach a draft after switching chats during Plan Mode persistence", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    let finishUpdate!: (value: { meta: Record<string, unknown> }) => void;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishUpdate = resolve;
+        }),
+    );
+    const view = render(<ChatPage />);
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    await waitFor(() => expect(mocks.updateChat).toHaveBeenCalled());
+    mocks.pathname = "/chat/other-chat";
+    mocks.currentSessionId = "other-chat";
+    view.rerender(<ChatPage />);
+    await act(async () => {
+      finishUpdate({ meta: { plan_mode_enabled: true } });
+    });
+    act(() => {
+      mocks.sessionApi?.onSessionCreated?.("1780458341751000", true);
+    });
+    expect(mocks.sessionApi?.attachDraftChat).not.toHaveBeenCalled();
+  });
+
+  it("keeps the first message pending while blank Plan Mode is saving", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.sessions = [];
+    mocks.getChatIdForSession.mockReturnValue(null);
+    let finishUpdate!: (value: { meta: Record<string, unknown> }) => void;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishUpdate = resolve;
+        }),
+    );
+    render(<ChatPage />);
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+    await waitFor(() => expect(mocks.updateChat).toHaveBeenCalled());
+    await act(async () => {
+      expect(
+        await mocks.capturedOptions?.sender.beforeSubmit({
+          query: "第一条消息",
+          fileList: [],
+        }),
+      ).toBe(false);
+    });
+    await act(async () => {
+      finishUpdate({ meta: { plan_mode_enabled: true } });
     });
   });
 

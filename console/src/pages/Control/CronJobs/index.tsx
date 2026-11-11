@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Button,
   Card,
@@ -47,6 +47,7 @@ import {
 import styles from "./index.module.less";
 import BatchPriorityEditor from "./components/BatchPriorityEditor";
 import BatchRunStateControl from "./components/BatchRunStateControl";
+import SelectedMigration from "./components/SelectedMigration";
 
 type CronJob = CronJobSpecOutput;
 type BroadcastDispatchMode = "normal" | "batch";
@@ -85,6 +86,11 @@ function CronJobsPage() {
     executeNow,
   } = useCronJobs();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [migrationSelection, setMigrationSelection] = useState<string[]>([]);
+  const clearMigrationSelection = useCallback(
+    () => setMigrationSelection([]),
+    [],
+  );
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [broadcastingJob, setBroadcastingJob] = useState<CronJob | null>(null);
   const [batchConfigJobId, setBatchConfigJobId] = useState<string | null>(null);
@@ -442,9 +448,16 @@ function CronJobsPage() {
       <PageHeader
         items={[{ title: t("nav.runCenter") }, { title: t("cronJobs.title") }]}
         extra={
-          <Button type="primary" onClick={handleCreate}>
-            + {t("cronJobs.createJob")}
-          </Button>
+          <>
+            <SelectedMigration
+              selectedIds={migrationSelection}
+              clearSelection={clearMigrationSelection}
+              refreshJobs={fetchJobs}
+            />
+            <Button type="primary" onClick={handleCreate}>
+              + {t("cronJobs.createJob")}
+            </Button>
+          </>
         }
       />
 
@@ -454,6 +467,11 @@ function CronJobsPage() {
           dataSource={jobs}
           loading={loading}
           rowKey="id"
+          rowSelection={{
+            selectedRowKeys: migrationSelection,
+            onChange: (keys) => setMigrationSelection(keys.map(String)),
+            getCheckboxProps: (job) => ({ disabled: isBroadcastChildJob(job) }),
+          }}
           scroll={{ x: 3010 }}
           pagination={{
             current: tablePage,

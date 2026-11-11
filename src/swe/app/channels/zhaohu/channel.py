@@ -1442,7 +1442,7 @@ class ZhaohuChannel(BaseChannel):
     ) -> bool:
         """Query scheduled task progress for the user and send card (Template 2).
 
-        Queries all tasks for the user on today's date from CronManager.
+        Queries Scheduler-managed tasks for the user on today's date.
 
         Args:
             user_id: User's sapId
@@ -1458,26 +1458,27 @@ class ZhaohuChannel(BaseChannel):
             user_id,
         )
 
-        # Get today's date in UTC (scheduler uses UTC timezone)
+        # 客户端统一转换为北京时间业务日，由 Scheduler 计算排程。
         today = datetime.now(timezone.utc)
 
-        # Query tasks from CronManager
+        # 任务定义和状态只从 Scheduler 新接口读取。
         tasks: list = []
-        logger.info(
-            "zhaohu _query_task_progress: workspace=%s, cron_manager=%s, "
-            "workspace_dir=%s, user_id=%s",
-            self._workspace is not None,
-            self._workspace.cron_manager if self._workspace else None,
-            self._workspace.workspace_dir if self._workspace else None,
-            user_id,
-        )
-        if self._workspace and self._workspace.cron_manager:
+        if self._workspace is not None:
             try:
-                raw_tasks = await self._workspace.cron_manager.query_user_tasks_by_date(
+                from ....config.context import resolve_runtime_identity
+                from ...crons.managed_query_client import (
+                    ManagedCronQueryClient,
+                )
+
+                _, source_id, _ = resolve_runtime_identity(
+                    self._workspace.tenant_id,
+                )
+                raw_tasks = await ManagedCronQueryClient().query_progress(
                     user_id,
+                    source_id,
+                    self._workspace.agent_id,
                     today,
                 )
-                # Convert to format expected by _build_task_progress_card
                 for raw_task in raw_tasks:
                     task_meta = raw_task.get("meta") or {}
                     tasks.append(
@@ -1493,16 +1494,14 @@ class ZhaohuChannel(BaseChannel):
                             "job_id": raw_task.get("job_id", ""),
                         },
                     )
-                logger.info(
-                    "zhaohu _query_task_progress: found %d tasks for user_id=%s",
-                    len(tasks),
-                    user_id,
-                )
             except Exception:
                 logger.exception(
-                    "zhaohu _query_task_progress: failed to query tasks for user_id=%s",
+                    "zhaohu task progress query failed user_id=%s",
                     user_id,
                 )
+                return False
+        else:
+            return False
 
         # Build and send card using Template 2 (task progress card)
         include_link = await self._should_include_link(user_id)

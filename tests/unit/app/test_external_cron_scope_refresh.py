@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from swe.app.crons.manager import CronManager
 from swe.app.crons.api import _build_broadcast_job
@@ -461,20 +462,18 @@ async def test_callback_runs_source_cleanup_without_using_tenant_scope() -> (
         ),
     )
 
-    response = await internal_router.internal_cron_callback(
-        request=request,
-        body={
-            "jobParam": base64.urlsafe_b64encode(
-                json.dumps(params).encode(),
-            ).decode(),
-        },
-    )
-
-    assert response == {
-        "status": "ok",
-        "task_type": "cleanup",
-    }
-    assert observed == {"source_id": "source-a"}
+    # 迁移后旧系统入口停止，不能再直接执行来源清理。
+    with pytest.raises(HTTPException) as error:
+        await internal_router.internal_cron_callback(
+            request=request,
+            body={
+                "jobParam": base64.urlsafe_b64encode(
+                    json.dumps(params).encode(),
+                ).decode(),
+            },
+        )
+    assert error.value.status_code == 410
+    assert observed == {}
 
 
 @pytest.mark.asyncio
@@ -505,20 +504,18 @@ async def test_callback_runs_source_archive_maintenance_without_tenant_scope() -
         ),
     )
 
-    response = await internal_router.internal_cron_callback(
-        request=request,
-        body={
-            "jobParam": base64.urlsafe_b64encode(
-                json.dumps(params).encode(),
-            ).decode(),
-        },
-    )
-
-    assert response == {
-        "status": "ok",
-        "task_type": "archive_maintenance",
-    }
-    assert observed == {"source_id": "source-a"}
+    # 新系统回调只从Scheduler进入，旧入口不能产生归档副作用。
+    with pytest.raises(HTTPException) as error:
+        await internal_router.internal_cron_callback(
+            request=request,
+            body={
+                "jobParam": base64.urlsafe_b64encode(
+                    json.dumps(params).encode(),
+                ).decode(),
+            },
+        )
+    assert error.value.status_code == 410
+    assert observed == {}
 
 
 @pytest.mark.asyncio
@@ -622,7 +619,9 @@ async def test_enable_batch_dispatch_registers_separate_scheduler_job(
     from swe.app.crons import batch_run_state_client
 
     monkeypatch.setattr(
-        batch_run_state_client, "initialize_run_state", AsyncMock()
+        batch_run_state_client,
+        "initialize_run_state",
+        AsyncMock(),
     )
     monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
     monkeypatch.setenv("SWE_SCHEDULER_API_URL", "http://scheduler.local/api")

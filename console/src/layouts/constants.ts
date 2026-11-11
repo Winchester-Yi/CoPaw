@@ -38,6 +38,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   channels: "/channels",
   sessions: "/sessions",
   "cron-jobs": "/cron-jobs",
+  "channel-cron-migration": "/channel-cron-migration",
   "scheduler-cron-jobs": "/scheduler-cron-jobs",
   heartbeat: "/heartbeat",
   "cases-management": "/cases-management",

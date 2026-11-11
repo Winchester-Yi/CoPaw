@@ -6,6 +6,7 @@ from .date_policy import reason as date_reason
 
 from .definition import BROADCAST_RELATION_META_FIELDS, canonical
 from .storage import insert, update
+from .migration_policy import imported_binding
 
 
 def _request_preview(value):
@@ -33,6 +34,7 @@ def _meta_preview(meta):
             "creator_user_id",
             "pause_reason",
             "model_slot",
+            "calendar_schedule",
         }
     }
     core["compat_meta_truncated"] = True
@@ -49,6 +51,9 @@ async def write_projection(
     deleted=False,
     expect_new=False,
 ):
+    key = (spec["tenant_id"], spec["source_id"], agent_id, spec["id"])
+    if await imported_binding(db, key, state):
+        return
     existing = await db.fetch_one(
         "SELECT * FROM swe_cron_jobs WHERE id = %s FOR UPDATE",
         (spec["id"],),
@@ -103,6 +108,7 @@ def _values(spec, state, agent_id, now, deleted):
         model_slot=spec.get("model_slot"),
         scope_id=spec["scope_id"],
         job_origin=spec.get("meta", {}).get("job_origin", "manual"),
+        calendar_schedule=spec["schedule"],
     )
     for key, column in {
         "task_chat_id": "task_chat_id",

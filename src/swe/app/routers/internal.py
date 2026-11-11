@@ -363,48 +363,14 @@ def _require_cron_callback_params(
         )
 
 
-def _require_source_scheduler(
-    request: Request,
-    task_type: str,
-    source_id: Any,
-) -> Any:
-    if not source_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"source_id required for task_type={task_type}",
-        )
-    source_scheduler = getattr(
-        request.app.state,
-        "source_system_task_scheduler",
-        None,
-    )
-    if source_scheduler is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Source system task scheduler not available",
-        )
-    return source_scheduler
-
-
 async def _run_source_callback(
     request: Request,
     task_type: str,
     source_id: Any,
 ) -> bool:
-    if task_type not in {"cleanup", "archive_maintenance"}:
-        return False
-    source_scheduler = _require_source_scheduler(request, task_type, source_id)
-    if task_type == "cleanup":
-        result = await source_scheduler.run_task_session_cleanup(
-            source_id=source_id,
-        )
-        logger.info("Source task session cleanup result: %s", result)
-    else:
-        result = await source_scheduler.run_archive_maintenance(
-            source_id=source_id,
-        )
-        logger.info("Source archive maintenance result: %s", result)
-    return True
+    if task_type in {"cleanup", "task_session_cleanup", "archive_maintenance"}:
+        raise HTTPException(410, "legacy_system_cron_callback_disabled")
+    return False
 
 
 async def _require_callback_cron_manager(
@@ -533,18 +499,14 @@ async def _run_agent_callback(
     task_type: str,
     job_id: str,
 ) -> dict[str, str] | None:
+    if task_type in {"heartbeat", "dream"}:
+        raise HTTPException(410, "legacy_system_cron_callback_disabled")
     mgr = await _require_callback_cron_manager(
         request,
         tenant_id,
         source_id,
         agent_id,
     )
-    if task_type == "heartbeat":
-        await mgr.run_heartbeat()
-        return None
-    if task_type == "dream":
-        await mgr.run_dream()
-        return None
     return await _run_job_callback(
         request,
         mgr,

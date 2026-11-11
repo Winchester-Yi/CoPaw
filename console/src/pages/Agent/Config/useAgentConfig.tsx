@@ -6,10 +6,18 @@ import type { AgentsRunningConfig } from "../../../api/types";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import { getUserId } from "../../../utils/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
+import { getCurrentCronContext, useCronContext } from "@/hooks/useCronContext";
+import type { SystemSyncSubmission } from "@/api/types/systemCron";
 
 export function useAgentConfig() {
   const { t } = useTranslation();
   const { message } = useAppMessage();
+  const syncContext = useCronContext();
+  const scopeKey = JSON.stringify(syncContext);
+  const [syncReceipt, setSyncReceipt] = useState<{
+    scope: string;
+    value: SystemSyncSubmission;
+  } | null>(null);
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -21,6 +29,7 @@ export function useAgentConfig() {
 
   const fetchConfig = useCallback(async () => {
     setLoading(true);
+    setSaving(false);
     setError(null);
     try {
       const [config, langResp, tzResp] = await Promise.all([
@@ -28,17 +37,20 @@ export function useAgentConfig() {
         api.getAgentLanguage(),
         api.getUserTimezone(),
       ]);
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
       form.setFieldsValue(config);
       setLanguage(langResp.language);
       setTimezone(tzResp.timezone || "UTC");
     } catch (err) {
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
       const errMsg =
         err instanceof Error ? err.message : t("agentConfig.loadFailed");
       setError(errMsg);
     } finally {
-      setLoading(false);
+      if (JSON.stringify(getCurrentCronContext()) === scopeKey)
+        setLoading(false);
     }
-  }, [form, t]);
+  }, [form, t, scopeKey]);
 
   useEffect(() => {
     fetchConfig();
@@ -48,17 +60,29 @@ export function useAgentConfig() {
     try {
       const values = await form.validateFields();
       setSaving(true);
-      await api.updateAgentRunningConfig(values as AgentsRunningConfig);
-      message.success(t("agentConfig.saveSuccess"));
+      const saved = await api.updateAgentRunningConfig(
+        values as AgentsRunningConfig,
+      );
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
+      const submission = saved?.scheduler_sync ?? {
+        submission_status: "failed" as const,
+        error_code: "system_sync_receipt_unavailable",
+      };
+      setSyncReceipt({ scope: scopeKey, value: submission });
+      if (submission.submission_status === "accepted")
+        message.success("配置已保存，平台同步已受理");
+      else message.warning?.("配置已保存，但平台同步未受理，请查看同步状态");
     } catch (err) {
+      if (JSON.stringify(getCurrentCronContext()) !== scopeKey) return;
       if (err instanceof Error && "errorFields" in err) return;
       const errMsg =
         err instanceof Error ? err.message : t("agentConfig.saveFailed");
       message.error(errMsg);
     } finally {
-      setSaving(false);
+      if (JSON.stringify(getCurrentCronContext()) === scopeKey)
+        setSaving(false);
     }
-  }, [form, t]);
+  }, [form, t, scopeKey, message]);
 
   const handleLanguageChange = useCallback(
     (value: string): void => {
@@ -147,6 +171,9 @@ export function useAgentConfig() {
   const canDistribute = manager || currentTenantId === "default";
 
   return {
+    syncContext,
+    syncSubmission:
+      syncReceipt?.scope === scopeKey ? syncReceipt.value : undefined,
     form,
     loading,
     saving,

@@ -5,8 +5,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from croniter import croniter
 from .cron_syntax import matches
+from .calendar_policy import timer_expression
+
 
 from .distribution import TASKS
 from .operations import JOURNAL, IDENTITY_FIELDS
@@ -17,7 +18,7 @@ PROTOCOL = "scheduler_managed_v1"
 
 
 def parse_time(value, zone):
-    if isinstance(value, (int, float)):
+    if type(value) in {int, float}:
         return datetime.fromtimestamp(
             value / 1000 if value > 100000000000 else value,
             timezone.utc,
@@ -26,8 +27,16 @@ def parse_time(value, zone):
         raise ValueError("cron_trigger_time_invalid")
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo(zone))
+        raise ValueError("cron_trigger_time_requires_timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _trusted_time(value, zone):
+    """无效或无时区值不是可恢复的原周期，不能按实例本地时区猜测。"""
+    try:
+        return parse_time(value, zone)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
 
 
 async def binding_context(db, row, body, kind):
@@ -108,6 +117,7 @@ def _unfinished_crud_binding(operation, row):
         "create": {"creating", "create_failed"},
         "update": {"updating", "update_failed"},
         "delete": {"deleting", "delete_failed"},
+        "migrate": {"migrating"},
     }.get(operation["action"], ())
     return (
         row.get("state_management_status") in expected
@@ -175,7 +185,7 @@ def _reference_kind(operation, payload, kind):
         return kind == "batch"
     if action == "mode_sync":
         return kind == "ordinary"
-    if action not in {"create", "update"}:
+    if action not in {"create", "update", "migrate"}:
         return False
     expected = (
         "ordinary" if payload.get("dispatch_state") == "ordinary" else "batch"
@@ -231,28 +241,32 @@ def trigger_times(body, binding, now):
         ),
         None,
     )
+    logical = _trusted_time(logical, zone)
+    physical = _trusted_time(physical, zone)
     if logical is not None:
-        logical_time = parse_time(logical, zone).replace(
+        logical_time = logical.replace(
             second=0,
             microsecond=0,
         )
         physical_time = logical_time - advance
+        basis = "platform_scheduled_at"
     elif physical is not None:
-        physical_time = parse_time(physical, zone).replace(
+        physical_time = physical.replace(
             second=0,
             microsecond=0,
         )
         logical_time = physical_time + advance
+        basis = "platform_fire_at"
     else:
         # 平台只传注册时的固定 Body，不能推测它的日志或计划期。
-        # 接收时间是本次触发事实；批提前量仍用于计算成员等待时间。
-        return now + advance, now
+        # 接收时间是本次触发事实，提前量仅恢复原业务时间，不用于成员二次等待。
+        return now + advance, now, "callback_received_at"
     if not matches(
-        binding["spec"]["schedule"]["cron"],
+        timer_expression(binding["spec"]),
         physical_time.astimezone(ZoneInfo(zone)),
     ):
         raise ValueError("cron_trigger_schedule_mismatch")
-    return logical_time, physical_time
+    return logical_time, physical_time, basis
 
 
 def trigger_id(body):

@@ -82,6 +82,7 @@ export const dynamicRenderApi = {
     platformSource: string;
     actvId?: string;
     actvTyp?: string;
+    headBbk?: boolean;
   }) =>
     request<ClawFilePlanResponse>("/wpclaw/get-all-claw-file-plan", {
       method: "POST",

@@ -1,6 +1,6 @@
 -- 智能财富工作台 · 规划三表
 -- 需手动导入 MySQL；应用启动不自动建表。
--- 对应代码：src/swe/app/wealth_plans/store.py
+-- 保留规划表结构供 Java 服务及数据库运维参考。
 
 CREATE TABLE IF NOT EXISTS swe_wealth_plans (
   id VARCHAR(64) NOT NULL COMMENT '规划ID（后端生成）',

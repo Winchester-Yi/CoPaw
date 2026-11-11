@@ -10,42 +10,58 @@ import click
 
 from .http import client, print_json
 from ..app.channels.schema import DEFAULT_CHANNEL
-from ..config.context import get_current_source_id, get_current_tenant_id
+from .cron_client import (
+    SchedulerCronClient,
+    scheduler_base_url,
+    scheduler_headers,
+)
 from ..config.utils import load_config
 
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
+SCHEDULER_BASE_HELP = "Scheduler URL override; otherwise explicit global host/port, SWE_SCHEDULER_API_URL, or localhost:9100/api."
 
 
 def _base_url(ctx: click.Context, base_url: Optional[str]) -> str:
-    """Resolve base_url with priority:
-    1) command --base-url
-    2) global --host/--port
-        (already resolved in main.py, may come from config.json)
-    """
-    if base_url:
-        return base_url.rstrip("/")
-    host = (ctx.obj or {}).get("host", "127.0.0.1")
-    port = (ctx.obj or {}).get("port", 8088)
-    return f"http://{host}:{port}"
+    return scheduler_base_url(ctx, base_url)
+
+
+def _scheduler(ctx, http, headers):
+    return SchedulerCronClient(
+        http,
+        headers,
+        (ctx.obj or {}).get("cron_request_id"),
+    )
 
 
 @click.group("cron")
-def cron_group() -> None:
-    """Manage scheduled cron jobs via the HTTP API (/cron).
+@click.option(
+    "--user-id",
+    default=None,
+    help="Actual caller forwarded as X-User-Id; defaults to runtime identity.",
+)
+@click.option(
+    "--request-id",
+    default=None,
+    help="Stable ID for this write; preserve it when a create response is lost.",
+)
+@click.pass_context
+def cron_group(ctx, user_id, request_id) -> None:
+    """Manage Scheduler jobs (/scheduler/cron/jobs), never old SWE jobs.
 
     Use list/get/state to inspect jobs; create/update/delete to add, replace,
     or remove; pause/resume to toggle execution; run to trigger a one-off run.
+    Scheduler URL defaults to SWE_SCHEDULER_API_URL or localhost:9100/api.
+    operation/retry inspect and resume management; execution inspects a run.
     """
+    ctx.ensure_object(dict)
+    ctx.obj.update(cron_user_id=user_id, cron_request_id=request_id)
 
 
 @cron_group.command("list")
 @click.option(
     "--base-url",
     default=None,
-    help=(
-        "Override the API base URL (e.g. http://127.0.0.1:8088). "
-        "If omitted, uses global --host and --port from config."
-    ),
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -70,13 +86,11 @@ def list_jobs(
     tenant_id: Optional[str],
     source_id: Optional[str],
 ) -> None:
-    """List all cron jobs. Output is JSON from GET /cron/jobs."""
+    """List all Scheduler jobs, following every page."""
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.get("/cron/jobs", headers=headers)
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).list_jobs())
 
 
 @cron_group.command("get")
@@ -84,7 +98,7 @@ def list_jobs(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -110,15 +124,11 @@ def get_job(
     tenant_id: Optional[str],
     source_id: Optional[str],
 ) -> None:
-    """Fetch a cron job by ID. Returns JSON from GET /cron/jobs/<id>."""
+    """Fetch Scheduler detail, state, resource binding and versions."""
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.get(f"/cron/jobs/{job_id}", headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).detail(job_id))
 
 
 @cron_group.command("state")
@@ -126,7 +136,7 @@ def get_job(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -156,11 +166,7 @@ def job_state(
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.get(f"/cron/jobs/{job_id}/state", headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).state(job_id))
 
 
 def _build_headers(
@@ -169,16 +175,7 @@ def _build_headers(
     user_id: Optional[str] = None,
     source_id: Optional[str] = None,
 ) -> dict[str, str]:
-    resolved_source_id = source_id or get_current_source_id()
-    headers = {
-        "X-Agent-Id": agent_id,
-        "X-Tenant-Id": tenant_id or get_current_tenant_id() or "default",
-    }
-    if user_id:
-        headers["X-User-Id"] = user_id
-    if resolved_source_id:
-        headers["X-Source-Id"] = resolved_source_id
-    return headers
+    return scheduler_headers(agent_id, tenant_id, user_id, source_id)
 
 
 def _build_spec_from_cli(
@@ -324,8 +321,6 @@ def _build_payload_from_args(
         (name, "--name"),
         (cron, "--cron"),
         (channel, "--channel"),
-        (target_user, "--target-user"),
-        (target_session, "--target-session"),
     ]:
         if not value or (isinstance(value, str) and not value.strip()):
             raise click.UsageError(
@@ -370,26 +365,6 @@ def _infer_effective_user_id(
         if isinstance(target, dict):
             effective_user_id = target.get("user_id")
     return effective_user_id
-
-
-def _load_existing_job_spec(
-    http_client,
-    job_id: str,
-    agent_id: str,
-    tenant_id: Optional[str],
-    source_id: Optional[str],
-) -> dict:
-    headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-    response = http_client.get(f"/cron/jobs/{job_id}", headers=headers)
-    if response.status_code == 404:
-        raise click.ClickException("Job not found.")
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, dict) and isinstance(data.get("spec"), dict):
-        return copy.deepcopy(data["spec"])
-    if isinstance(data, dict):
-        return copy.deepcopy(data)
-    raise click.ClickException("Invalid response when loading existing job.")
 
 
 def _normalize_extracted_text(text: str) -> Optional[str]:
@@ -580,18 +555,21 @@ def _merge_update_payload(
 
     payload["meta"] = _merge_meta(payload.get("meta"), creator_user)
 
-    effective_task_type = _resolve_update_task_type(payload, task_type)
-    effective_text = _resolve_update_text(
-        payload,
-        text,
-        effective_task_type,
-    )
-    payload = _apply_task_payload(
-        payload,
-        effective_task_type,
-        effective_text,
-        target,
-    )
+    effective_task_type = task_type or payload.get("task_type")
+    # 元信息编辑不重建执行内容，避免丢失工作流配置或多模态输入。
+    if task_type is not None or text is not None:
+        effective_task_type = _resolve_update_task_type(payload, task_type)
+        effective_text = _resolve_update_text(
+            payload,
+            text,
+            effective_task_type,
+        )
+        payload = _apply_task_payload(
+            payload,
+            effective_task_type,
+            effective_text,
+            target,
+        )
     model_slot = _resolve_model_slot(model_provider, model)
     if model_slot is not None and effective_task_type == "agent":
         payload["model_slot"] = model_slot
@@ -645,18 +623,12 @@ def _merge_update_payload(
 @click.option(
     "--target-user",
     default=None,
-    help=(
-        "Target user_id for the channel (recipient identifier). "
-        "Required when not using -f/--file."
-    ),
+    help="Legacy caller hint; Scheduler uses the actual caller as task owner.",
 )
 @click.option(
     "--target-session",
     default=None,
-    help=(
-        "Target session_id for the channel. "
-        "Required when not using -f/--file."
-    ),
+    help="Legacy input only; Scheduler prepares the new task session binding.",
 )
 @click.option(
     "--creator-user",
@@ -718,7 +690,7 @@ def _merge_update_payload(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -761,8 +733,8 @@ def create_job(
     """Create a cron job.
 
     Either pass -f/--file with a JSON spec, or use --type, --name, --cron,
-    --channel, --target-user, --target-session and --text to define the job
-    inline.
+    --channel and --text to define the job inline. Scheduler assigns the job
+    ID and session binding; the returned operation may still be pending.
     """
     if timezone is None:
         timezone = load_config().user_timezone or "UTC"
@@ -793,9 +765,7 @@ def create_job(
             effective_user_id,
             source_id,
         )
-        r = c.post("/cron/jobs", json=payload, headers=headers)
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).create(payload))
 
 
 def _update_job_impl(
@@ -822,6 +792,9 @@ def _update_job_impl(
 ) -> None:
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
+        headers = _build_headers(agent_id, tenant_id, creator_user, source_id)
+        scheduler = _scheduler(ctx, c, headers)
+        current = scheduler.detail(job_id)
         if file_ is not None:
             payload = _build_payload_from_args(
                 file_=file_,
@@ -842,15 +815,8 @@ def _update_job_impl(
                 job_id=job_id,
             )
         else:
-            existing_spec = _load_existing_job_spec(
-                c,
-                job_id,
-                agent_id,
-                tenant_id,
-                source_id,
-            )
             payload = _merge_update_payload(
-                existing_spec,
+                current["spec"],
                 job_id=job_id,
                 task_type=task_type,
                 name=name,
@@ -867,18 +833,7 @@ def _update_job_impl(
                 model=model,
                 tenant_id=tenant_id,
             )
-        effective_user_id = _infer_effective_user_id(payload, creator_user)
-        headers = _build_headers(
-            agent_id,
-            tenant_id,
-            effective_user_id,
-            source_id,
-        )
-        r = c.put(f"/cron/jobs/{job_id}", json=payload, headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(scheduler.update(job_id, payload, current))
 
 
 @cron_group.command("update")
@@ -919,12 +874,12 @@ def _update_job_impl(
 @click.option(
     "--target-user",
     default=None,
-    help="Target user_id for the replacement job when not using -f/--file.",
+    help="Existing target user only; update cannot transfer task ownership.",
 )
 @click.option(
     "--target-session",
     default=None,
-    help="Target session_id for the replacement job when not using -f/--file.",
+    help="Existing target session only; update cannot replace its binding.",
 )
 @click.option(
     "--creator-user",
@@ -945,7 +900,7 @@ def _update_job_impl(
 @click.option(
     "--enabled/--no-enabled",
     default=None,
-    help="Override enabled state only when this flag is provided.",
+    help="Must match current state; use pause/resume to change enabled.",
 )
 @click.option(
     "--mode",
@@ -966,7 +921,7 @@ def _update_job_impl(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -1036,7 +991,7 @@ def update_job(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -1062,15 +1017,11 @@ def delete_job(
     tenant_id: Optional[str],
     source_id: Optional[str],
 ) -> None:
-    """Permanently delete a cron job. The job is removed from the server."""
+    """Logically delete a Scheduler job; cleanup may remain pending."""
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.delete(f"/cron/jobs/{job_id}", headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).delete(job_id))
 
 
 @cron_group.command("pause")
@@ -1078,7 +1029,7 @@ def delete_job(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -1110,11 +1061,7 @@ def pause_job(
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.post(f"/cron/jobs/{job_id}/pause", headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).set_enabled(job_id, False))
 
 
 @cron_group.command("resume")
@@ -1122,7 +1069,7 @@ def pause_job(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -1152,11 +1099,7 @@ def resume_job(
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.post(f"/cron/jobs/{job_id}/resume", headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).set_enabled(job_id, True))
 
 
 @cron_group.command("run")
@@ -1164,7 +1107,7 @@ def resume_job(
 @click.option(
     "--base-url",
     default=None,
-    help="Override the API base URL. Defaults to global --host/--port.",
+    help=SCHEDULER_BASE_HELP,
 )
 @click.option(
     "--agent-id",
@@ -1194,8 +1137,74 @@ def run_job(
     base_url = _base_url(ctx, base_url)
     with client(base_url) as c:
         headers = _build_headers(agent_id, tenant_id, source_id=source_id)
-        r = c.post(f"/cron/jobs/{job_id}/run", headers=headers)
-        if r.status_code == 404:
-            raise click.ClickException("Job not found.")
-        r.raise_for_status()
-        print_json(r.json())
+        print_json(_scheduler(ctx, c, headers).run(job_id))
+
+
+def _query_options(function):
+    for name in ("source-id", "tenant-id", "base-url"):
+        function = click.option("--" + name, default=None)(function)
+    return click.option("--agent-id", default="default")(function)
+
+
+@cron_group.command("operation")
+@click.argument("job_id")
+@click.argument("operation_id", required=False)
+@_query_options
+@click.pass_context
+def operation(
+    ctx,
+    job_id,
+    operation_id,
+    agent_id,
+    tenant_id,
+    source_id,
+    base_url,
+):
+    """Inspect a management operation, or the pending one when ID is omitted."""
+    headers = _build_headers(agent_id, tenant_id, source_id=source_id)
+    with client(_base_url(ctx, base_url)) as http:
+        print_json(
+            _scheduler(ctx, http, headers).operation(job_id, operation_id),
+        )
+
+
+@cron_group.command("retry")
+@click.argument("job_id")
+@click.argument("operation_id")
+@_query_options
+@click.pass_context
+def retry_operation(
+    ctx,
+    job_id,
+    operation_id,
+    agent_id,
+    tenant_id,
+    source_id,
+    base_url,
+):
+    """Resume this exact operation, without recreating the task."""
+    headers = _build_headers(agent_id, tenant_id, source_id=source_id)
+    with client(_base_url(ctx, base_url)) as http:
+        print_json(_scheduler(ctx, http, headers).retry(job_id, operation_id))
+
+
+@cron_group.command("execution")
+@click.argument("job_id")
+@click.argument("execution_id")
+@_query_options
+@click.pass_context
+def execution(
+    ctx,
+    job_id,
+    execution_id,
+    agent_id,
+    tenant_id,
+    source_id,
+    base_url,
+):
+    """Inspect the execution ID returned by run; accepted is not completed."""
+    headers = _build_headers(agent_id, tenant_id, source_id=source_id)
+    with client(_base_url(ctx, base_url)) as http:
+        print_json(
+            _scheduler(ctx, http, headers).execution(job_id, execution_id),
+        )

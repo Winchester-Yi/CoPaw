@@ -143,11 +143,16 @@ def _next_run_times(row, *, now=None):
         raise ManagedCronUnavailable("cron_data_unavailable") from exc
 
 
-def job_view(row: dict, actor_id: str) -> dict:
+def job_view(row: dict, actor_id: str, *, next_times=None) -> dict:
     if row.get("spec_json") is None:
         raise ManagedCronUnavailable("cron_data_unavailable")
     spec = public_spec(_json(row.get("spec_json"), dict, {}))
     spec.setdefault("run_date_range", None)
+    run_on_non_workday = spec.get("schedule", {}).get(
+        "run_on_non_workday",
+        False,
+    )
+
     spec.update(
         {
             "id": row["job_id"],
@@ -161,6 +166,7 @@ def job_view(row: dict, actor_id: str) -> dict:
                 "type": "cron",
                 "cron": row["cron_expr"],
                 "timezone": row["timezone"],
+                "run_on_non_workday": run_on_non_workday,
             },
         },
     )
@@ -173,9 +179,10 @@ def job_view(row: dict, actor_id: str) -> dict:
             "last_error",
         )
     }
-    next_times = (
-        _next_run_times(row) if row.get("state_job_id") is not None else []
-    )
+    if next_times is None:
+        next_times = (
+            _next_run_times(row) if row.get("state_job_id") is not None else []
+        )
     state["next_run_times"] = next_times
     state["next_run_at"] = next_times[0] if next_times else None
     return {
@@ -200,13 +207,17 @@ def job_view(row: dict, actor_id: str) -> dict:
     }
 
 
-def list_item(row: dict, actor_id: str) -> dict:
-    view = job_view(row, actor_id)
-    return {**view.pop("spec"), **view}
+def list_item(row: dict, actor_id: str, *, next_times=None) -> dict:
+    view = job_view(row, actor_id, next_times=next_times)
+    return {
+        **view.pop("spec"),
+        **view,
+        "has_distributed_children": bool(row.get("has_distributed_children")),
+    }
 
 
-def child_item(row: dict, actor_id: str) -> dict:
-    item = list_item(row, actor_id)
+def child_item(row: dict, actor_id: str, *, next_times=None) -> dict:
+    item = list_item(row, actor_id, next_times=next_times)
     # 源管理者可查看关联元数据，但轻量列表不返回其他用户的完整任务正文。
     return {
         key: item[key]

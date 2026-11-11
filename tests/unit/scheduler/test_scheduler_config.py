@@ -6,7 +6,6 @@ from __future__ import annotations
 import importlib
 import os
 
-
 _CONFIG_ENV_KEYS = (
     "SCHEDULER_ENV",
     "SCHEDULER_OPENAPI_DOCS",
@@ -21,6 +20,7 @@ _CONFIG_ENV_KEYS = (
     "SCHEDULER_DB_MAX_CONN",
     "SCHEDULER_DB_INIT_TABLES",
     "SCHEDULER_SWE_API_BASE_URL",
+    "SCHEDULER_CRON_BATCH_MAX_ATTEMPTS",
     "OTHER_ENV",
     "OTHER_OPENAPI_DOCS",
     "OTHER_DB_HOST",
@@ -62,6 +62,7 @@ def test_scheduler_config_prefers_scheduler_namespace(monkeypatch) -> None:
         SCHEDULER_DB_MAX_CONN="9",
         SCHEDULER_DB_INIT_TABLES="false",
         SCHEDULER_SWE_API_BASE_URL="http://scheduler-swe",
+        SCHEDULER_CRON_BATCH_MAX_ATTEMPTS="5",
         OTHER_DB_HOST="other-db",
         OTHER_SWE_API_BASE_URL="http://other-swe",
     )
@@ -79,10 +80,15 @@ def test_scheduler_config_prefers_scheduler_namespace(monkeypatch) -> None:
     assert config.DB_MAX_CONN == 9
     assert config.DB_INIT_TABLES is False
     assert config.SWE_API_BASE_URL == "http://scheduler-swe"
+    assert config.CRON_BATCH_MAX_ATTEMPTS == 5
 
     db_config = config.get_scheduler_database_config()
     assert db_config.host == "scheduler-db"
     assert db_config.password == "scheduler-secret"
+
+
+def test_batch_max_attempts_defaults_to_three(monkeypatch) -> None:
+    assert _reload_scheduler_config(monkeypatch).CRON_BATCH_MAX_ATTEMPTS == 3
 
 
 def test_scheduler_config_ignores_non_scheduler_namespace(

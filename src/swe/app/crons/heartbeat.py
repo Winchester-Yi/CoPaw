@@ -127,6 +127,20 @@ def resolve_heartbeat_path(workspace_dir: Optional[Path] = None) -> Path:
     return get_heartbeat_query_path()
 
 
+async def _heartbeat_events(runner, request, managed_execution):
+    """完整消费业务流后报告失败，不能提前退出而跳过运行器收尾。"""
+    failed = False
+    async for event in runner.stream_query(request):
+        if managed_execution:
+            from .executor import CronExecutor
+
+            failed = failed or CronExecutor._is_failed_message_event(event)
+            failed = failed or CronExecutor._is_failed_response_event(event)
+        yield event
+    if failed:
+        raise RuntimeError("system_heartbeat_failed")
+
+
 async def run_heartbeat_once(
     *,
     runner: Any,
@@ -134,6 +148,7 @@ async def run_heartbeat_once(
     agent_id: Optional[str] = None,
     tenant_id: str | None = None,
     workspace_dir: Optional[Path] = None,
+    managed_execution: bool = False,
 ) -> None:
     """
     Run one heartbeat: read HEARTBEAT.md from workspace, run agent,
@@ -199,7 +214,11 @@ async def run_heartbeat_once(
         if ld.channel and (ld.user_id or ld.session_id):
 
             async def _run_and_dispatch() -> None:
-                async for event in runner.stream_query(req):
+                async for event in _heartbeat_events(
+                    runner,
+                    req,
+                    managed_execution,
+                ):
                     await channel_manager.send_event(
                         channel=ld.channel,
                         user_id=ld.user_id,
@@ -216,11 +235,13 @@ async def run_heartbeat_once(
                     )
             except asyncio.TimeoutError:
                 logger.warning("heartbeat run timed out")
+                if managed_execution:
+                    raise
             return
 
     # target main or no last_dispatch: run agent only, no dispatch
     async def _run_only() -> None:
-        async for _ in runner.stream_query(req):
+        async for _ in _heartbeat_events(runner, req, managed_execution):
             pass
 
     try:
@@ -231,3 +252,5 @@ async def run_heartbeat_once(
             )
     except asyncio.TimeoutError:
         logger.warning("heartbeat run timed out")
+        if managed_execution:
+            raise

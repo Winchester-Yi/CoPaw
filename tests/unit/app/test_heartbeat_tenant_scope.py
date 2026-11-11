@@ -184,13 +184,9 @@ async def test_cron_manager_register_heartbeat_uses_runtime_tenant(
 ) -> None:
     observed: dict[str, Any] = {}
 
-    def fake_get_heartbeat_config(
-        agent_id: str | None = None,
-        *,
-        tenant_id: str | None = None,
-    ) -> SimpleNamespace:
-        observed["heartbeat_lookup"] = (agent_id, tenant_id)
-        return SimpleNamespace(enabled=True, every="5m")
+    async def submit(tenant, source, agent, kind):
+        observed["submission"] = (tenant, source, agent, kind)
+        return {"submission_status": "accepted"}
 
     class FakeSchedulerAdapter:
         async def register_job(self, **kwargs):
@@ -208,23 +204,24 @@ async def test_cron_manager_register_heartbeat_uses_runtime_tenant(
         runner=object(),
         channel_manager=object(),
         agent_id="default",
-        tenant_id="tenant-a",
+        tenant_id=encode_scope_id("tenant-a", "source-a"),
         scheduler_adapter=FakeSchedulerAdapter(),
     )
 
     monkeypatch.setattr(
-        "swe.config.utils.get_heartbeat_config",
-        fake_get_heartbeat_config,
+        "swe.app.crons.system_bridge.submit_agent_refresh",
+        submit,
     )
 
     await manager.register_heartbeat()
 
-    assert observed["heartbeat_lookup"] == ("default", "tenant-a")
-    assert observed["register_job"]["tenant_id"] == "tenant-a"
-    assert observed["register_job"]["agent_id"] == "default"
-    assert observed["register_job"]["task_type"] == "heartbeat"
-    assert observed["register_job"]["job_id"] == "_heartbeat"
-    assert observed["register_job"]["cron"] == "0/5 * * * *"
+    assert observed["submission"] == (
+        "tenant-a",
+        "source-a",
+        "default",
+        "heartbeat",
+    )
+    assert "register_job" not in observed
     assert observed.get("resume_job") is None
 
 

@@ -48,7 +48,7 @@ class ExecutionDatabase(ManagementDatabase):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id TEXT, job_name TEXT, tenant_id TEXT,
                 scheduled_time TEXT, actual_time TEXT, end_time TEXT,
-                duration_ms INTEGER, status TEXT, async_status TEXT, error_message TEXT,
+                duration_ms INTEGER, status TEXT, async_status TEXT, error_type TEXT, error_message TEXT,
                 instance_id TEXT, executor_leader TEXT, is_manual INTEGER,
                 trace_id TEXT, session_id TEXT, input_snapshot TEXT,
                 output_preview TEXT, meta TEXT, notification_status TEXT,

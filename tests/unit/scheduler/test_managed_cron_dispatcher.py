@@ -177,6 +177,7 @@ async def test_actual_http_client_and_swe_route_share_one_execution_record(
     from swe.app.crons.managed_execution import ManagedExecutionService
     from swe.app.crons.managed_results import ExecutionWriter
     from tests.unit.app.test_managed_cron_execution import Engine
+    from tests.fakes.managed_source_config import ManagedSourceConfigService
 
     db, caller, _ = execution_setup
     row, _ = await enqueue(execution_setup)
@@ -192,6 +193,7 @@ async def test_actual_http_client_and_swe_route_share_one_execution_record(
     )
     app = FastAPI()
     app.state.db_connection = db
+    app.state.source_system_config_service = ManagedSourceConfigService()
     app.include_router(managed_execution_api.router, prefix="/api")
     async with AsyncClient(
         transport=ASGITransport(app=app),

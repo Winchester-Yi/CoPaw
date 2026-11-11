@@ -21,6 +21,8 @@ class SessionResultReceipts:
 
     async def save(self, run, outcome):
         session, user = _binding(run)
+        outcome_values = asdict(outcome)
+        recheck_output = outcome_values.pop("recheck_output")
         value = {
             "execution_id": run["execution_id"],
             "run_owner": run["run_owner"],
@@ -30,12 +32,14 @@ class SessionResultReceipts:
             ],
             "outcome": json.loads(
                 json.dumps(
-                    safe_metadata(asdict(outcome)),
+                    safe_metadata(outcome_values),
                     ensure_ascii=False,
                     default=str,
                 ),
             ),
         }
+        if recheck_output is not None:
+            value["recheck_output"] = recheck_output
 
         def merge(state):
             updated = dict(state)
@@ -67,7 +71,10 @@ class SessionResultReceipts:
         ]
         if value["identity"] != key or value["run_owner"] != run["run_owner"]:
             raise ValueError("cron_result_receipt_identity_conflict")
-        return ExecutionOutcome(**value["outcome"])
+        return ExecutionOutcome(
+            **value["outcome"],
+            recheck_output=value.get("recheck_output"),
+        )
 
     async def clear(self, run):
         session, user = _binding(run)

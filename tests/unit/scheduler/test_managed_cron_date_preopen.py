@@ -547,13 +547,16 @@ async def test_expired_batch_child_cannot_close_shared_parent_timer(
 
 
 @pytest.mark.asyncio
-async def test_headerless_maintenance_returns_today_and_next_day(
+async def test_headerless_maintenance_logs_today_and_next_day_after_acceptance(
     mode_setup,
     monkeypatch,
+    caplog,
 ):
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from scheduler.app.routers import managed_cron_date_ranges
+
+    caplog.set_level("INFO", logger=managed_cron_date_ranges.__name__)
 
     freeze_date_policy(monkeypatch, datetime(2026, 11, 2, 23, tzinfo=BEIJING))
     db, caller, management = mode_setup
@@ -578,10 +581,23 @@ async def test_headerless_maintenance_returns_today_and_next_day(
             "/api/scheduler/cron/date-ranges/apply",
             json={"source_id": "bank"},
         )
-    assert response.status_code == 200
-    assert response.json()["evaluated_date"] == "2026-11-02"
-    assert response.json().get("preopen_date") == "2026-11-03"
-    assert response.json()["failed_count"] == 0
+    assert response.status_code == 202
+    assert response.json() == {"accepted": True, "source_id": "bank"}
+    completed = next(
+        item
+        for item in caplog.records
+        if item.name == managed_cron_date_ranges.__name__
+        and "日期维护后台执行完成" in item.getMessage()
+    )
+    summary = completed.args[1]
+    assert summary["evaluated_date"] == "2026-11-02"
+    assert summary["preopen_date"] == "2026-11-03"
+    assert summary["failed_count"] == 0
+    external_id = db.conn.execute(
+        "SELECT ordinary_external_job_id FROM swe_cron_job_states WHERE job_id=?",
+        (root,),
+    ).fetchone()[0]
+    assert (external_id, True) in management.platform.trace
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,9 @@
 import { PlusOutlined, RightOutlined } from "@ant-design/icons";
 import classNames from "classnames";
 import React, {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -10,6 +12,10 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import styles from "./index.module.less";
+
+const ParentMenuPositionContext = createContext<React.CSSProperties | null>(
+  null,
+);
 
 export interface ComposerQuickMenuProps {
   children?: React.ReactNode;
@@ -92,6 +98,7 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
   const [submenuPanelStyle, setSubmenuPanelStyle] =
     useState<React.CSSProperties | null>(null);
   const [submenuOpensLeft, setSubmenuOpensLeft] = useState(false);
+  const parentPosition = useContext(ParentMenuPositionContext);
   const items = useMemo(
     () => React.Children.toArray(children).filter(Boolean),
     [children],
@@ -138,13 +145,27 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
         width: `${Math.min(panelRect.width, availableWidth)}px`,
         left: opensLeft ? "auto" : `calc(100% + ${gap}px)`,
         right: opensLeft ? `calc(100% + ${gap}px)` : "auto",
+        top: `${Math.max(
+          viewportPadding - submenuRect.top,
+          Math.min(
+            0,
+            window.innerHeight -
+              viewportPadding -
+              submenuRect.top -
+              panelRect.height,
+          ),
+        )}px`,
       });
     };
 
     updateSubmenuPosition();
     window.addEventListener("resize", updateSubmenuPosition);
-    return () => window.removeEventListener("resize", updateSubmenuPosition);
-  }, [expanded, panelWidth]);
+    window.addEventListener("scroll", updateSubmenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateSubmenuPosition);
+      window.removeEventListener("scroll", updateSubmenuPosition, true);
+    };
+  }, [expanded, panelWidth, parentPosition?.left, parentPosition?.top]);
 
   if (items.length === 0) {
     return (
@@ -226,14 +247,16 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
             (panelWidth ? { width: panelWidth } : undefined)
           }
         >
-          {items.map((item, index) => (
-            <div
-              key={(React.isValidElement(item) && item.key) || index}
-              className={styles.itemWrap}
-            >
-              {item}
-            </div>
-          ))}
+          <div className={styles.submenuContent}>
+            {items.map((item, index) => (
+              <div
+                key={(React.isValidElement(item) && item.key) || index}
+                className={styles.itemWrap}
+              >
+                {item}
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>
@@ -350,14 +373,16 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
                 window.setTimeout(() => setOpen(false), 0);
               }}
             >
-              {items.map((item, index) => (
-                <div
-                  key={(React.isValidElement(item) && item.key) || index}
-                  className={styles.itemWrap}
-                >
-                  {item}
-                </div>
-              ))}
+              <ParentMenuPositionContext.Provider value={panelStyle}>
+                {items.map((item, index) => (
+                  <div
+                    key={(React.isValidElement(item) && item.key) || index}
+                    className={styles.itemWrap}
+                  >
+                    {item}
+                  </div>
+                ))}
+              </ParentMenuPositionContext.Provider>
             </div>
           </div>,
           document.body,

@@ -60,7 +60,7 @@ export interface PlanItem {
   cycle: string;
   start?: string;
   end?: string;
-  /** 执行排程：与控制台定时任务同一模型（hourly/daily/weekly/custom） */
+  /** 执行频率：与控制台定时任务同一模型（hourly/daily/weekly/custom） */
   schedule: CronParts;
   /** 行长督办策略，随规划接口保存和回显。 */
   monitoring?: SceneMonitoring;
@@ -103,12 +103,14 @@ export interface SkillStat {
   generatedTaskCount: number;
 }
 
-/** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */ export interface DistributeTarget {
+/** 分发目标用户（行长/中台发布规划时选择的下属客户经理） */
+export interface DistributeTarget {
   /** 发布目标 SAP ID（机构岗位人员接口返回的 sapID） */
   sapId: string;
   name: string;
   /** 所属机构名称（可能为空） */
   orgName: string;
+  branchName?: string;
   /** 接收人所属分行编码，人员接口 branchID。 */
   bbkId?: string;
   /** 接收人所属支行编码，人员接口 subBranchID。 */
@@ -140,6 +142,8 @@ export interface Customer {
   skillNames?: string[];
   /** 接口原始接触状态：0 未接触、1 已接触，其余或缺失为未知。 */
   touched?: number | null;
+  /** 保险客户跟踪状态：0 未追踪、1 已追踪；缺失时不允许发起新增。 */
+  traced?: number | null;
   done: boolean;
   channel: string;
   time: string;

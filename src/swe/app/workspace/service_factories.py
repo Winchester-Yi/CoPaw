@@ -165,6 +165,19 @@ async def create_channel_service(ws: "Workspace", service):
     # pylint: enable=protected-access
 
 
+async def refresh_system_cron(ws: "Workspace", _):
+    """系统刷新独立于旧任务管理器；同步异常不阻塞工作区启动。"""
+    from ..crons.system_bridge import submit_workspace_refresh
+
+    try:
+        await submit_workspace_refresh(ws, None)
+    except Exception:
+        logger.warning(
+            "Failed to submit workspace system cron refresh",
+            exc_info=True,
+        )
+
+
 async def create_agent_config_watcher(ws: "Workspace", _):
     """Create agent config watcher if channel/cron exists.
 

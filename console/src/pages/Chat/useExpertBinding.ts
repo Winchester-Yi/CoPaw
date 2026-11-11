@@ -214,6 +214,14 @@ export function useExpertBinding(options: {
   }, [publish]);
 
   const getSnapshot = useCallback(() => ownerRef.current, []);
+  const applyView = useCallback(
+    (view: ExpertBindingView) => {
+      const owner = ownerRef.current;
+      owner.view = view;
+      publish(owner);
+    },
+    [publish],
+  );
   const owner = ownerRef.current;
   return {
     view: owner.view,
@@ -223,5 +231,6 @@ export function useExpertBinding(options: {
     syncConflict,
     getSnapshot,
     refresh,
+    applyView,
   };
 }

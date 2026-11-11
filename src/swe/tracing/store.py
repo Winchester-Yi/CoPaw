@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from .config import TracingConfig
+from .sanitizer import _truncate_trace_text
 from ..database import DatabaseConnection
 from ..database.prepared import PreparedInsert
 from ..utils.bbk import normalize_bbk_id_to_primary
@@ -42,6 +43,13 @@ logger = logging.getLogger(__name__)
 
 # 需要从统计中排除的 source_id（测试平台等）
 EXCLUDED_SOURCE_IDS = ["default"]
+_ERROR_MAX_BYTES = 4096
+
+
+def _error_for_storage(error: Optional[str]) -> Optional[str]:
+    if error is None:
+        return None
+    return _truncate_trace_text(error, _ERROR_MAX_BYTES)[0]
 
 
 _SPAN_INSERT = PreparedInsert(
@@ -88,7 +96,7 @@ def _span_insert_rows(spans):
             span.mcp_server,
             json.dumps(span.tool_input) if span.tool_input else None,
             span.tool_output,
-            span.error,
+            _error_for_storage(span.error),
             span.user_name,
             normalize_bbk_id_to_primary(span.bbk_id),
         )
@@ -203,7 +211,7 @@ class TraceStore:
                 if isinstance(trace.status, TraceStatus)
                 else trace.status
             ),
-            trace.error,
+            _error_for_storage(trace.error),
             trace.user_message,
             trace.user_name,
             normalize_bbk_id_to_primary(trace.bbk_id),
@@ -247,7 +255,7 @@ class TraceStore:
                 if isinstance(trace.status, TraceStatus)
                 else trace.status
             ),
-            trace.error,
+            _error_for_storage(trace.error),
             trace.trace_id,
         )
         await self.db.execute(query, params)
@@ -439,7 +447,7 @@ class TraceStore:
             span.mcp_server,
             json.dumps(span.tool_input) if span.tool_input else None,
             span.tool_output,
-            span.error,
+            _error_for_storage(span.error),
             span.user_name,
             normalize_bbk_id_to_primary(span.bbk_id),
         )
@@ -471,7 +479,7 @@ class TraceStore:
             span.input_tokens,
             span.output_tokens,
             span.tool_output,
-            span.error,
+            _error_for_storage(span.error),
             (
                 span.event_type.value
                 if hasattr(span.event_type, "value")

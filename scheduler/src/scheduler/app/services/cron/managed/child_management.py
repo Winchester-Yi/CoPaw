@@ -166,6 +166,10 @@ def child_payload(task, item, current_spec=None):
         "type": "cron",
         "cron": item["cron_expr"],
         "timezone": item["timezone"],
+        "run_on_non_workday": spec.get("schedule", {}).get(
+            "run_on_non_workday",
+            False,
+        ),
     }
     payload = {
         "request_id": f"{task['task_id']}:{item['index_no']}",

@@ -45,6 +45,8 @@ function AgentConfigPage() {
     openDistributeModal,
     closeDistributeModal,
     canDistribute,
+    syncContext,
+    syncSubmission,
   } = useAgentConfig();
 
   const llmRetryEnabled = Form.useWatch("llm_retry_enabled", form) ?? true;
@@ -194,6 +196,8 @@ function AgentConfigPage() {
             />
 
             <MemorySummaryCard
+              syncContext={syncContext}
+              syncSubmission={syncSubmission}
               extra={
                 canDistribute ? (
                   <Tooltip title={t("agentConfig.distributeTooltip")}>

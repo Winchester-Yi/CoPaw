@@ -6,6 +6,7 @@
 
 | 文档 | 摘要 |
 |------|------|
+| [智拓入口 JS 加载隔离](location-paths.md#智拓入口-js-加载隔离) | 智拓与 Console 的加载边界、首屏 JS 统计口径与构建复核方式 |
 | [ai-coding-session-retrospective.md](ai-coding-session-retrospective.md) | 近一周 AI Coding 会话复盘：返工原因、异步验收矩阵、测试选择与跨会话交接 |
 | [agent-config-read-consistency.md](agent-config-read-consistency.md) | agent 控制面读写一致性边界、排查入口和与 console agent switching 的职责分界 |
 | [agent-config-file-overwrite.md](agent-config-file-overwrite.md) | agent.json 手改后覆盖：回复整文件写回、模型规范化、引导自愈重建与并发丢失更新 |
@@ -21,6 +22,8 @@
 | [database-pool-disposal.md](database-pool-disposal.md) | MySQL 故障连接强制关闭、健康空闲关闭、容量隔离及反复修复的测试盲区 |
 | [event-loop-worker-boundaries.md](event-loop-worker-boundaries.md) | 五项事件循环热点的 worker 入口、取消与并发规则、回归及性能测量边界 |
 | [managed-execution-model-identity.md](managed-execution-model-identity.md) | 新版批调度的任务 ID、默认模型解析与实际模型落库 |
+| [新版批调度看板查询缓慢](location-paths.md#新版批调度看板查询缓慢) | 大清单重复解析、单次聚合、MySQL 执行计划及规模验证 |
+| [新任务工作日与通知](location-paths.md#新任务工作日与通知) | 年份及日期区间适配、SWE 来源配置绑定、通知状态过滤与系统排程边界 |
 | [external-job-list.md](external-job-list.md) | 外部 jobs 列表的无初始化接口、原接口契约及任务绑定的只读边界 |
 | [hook-distribution-activation.md](hook-distribution-activation.md) | Hook 分发成功但目标未启用的根因、复现证据与事务内启用方案 |
 | [location-paths.md](location-paths.md) | 按问题类型给出代码、配置与命令入口，包含财富任务动态指标与经营分组 |

@@ -153,6 +153,9 @@ class DispatchStateService:
             if shifted.error:
                 raise ValueError("batch_timer_cron_not_shiftable")
             spec["schedule"]["cron"] = shifted.cron
+        spec.setdefault("meta", {})[
+            "_scheduler_calendar_advance_minutes"
+        ] = advance
         progress["batch_spec"] = spec
         progress["batch_advance_minutes"] = advance
         await self.store.checkpoint(operation, progress)

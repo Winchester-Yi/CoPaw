@@ -14,7 +14,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from scheduler.app.database import get_db_connection
 from .batch_priority import priority_key, priority_snapshot
-from .capacity_claim import available_capacity, write_capacity
+from .managed.failure_policy import (
+    MAIN_ERROR_EXCLUSIONS,
+    MODEL_ERROR_TYPE,
+    is_model_failure,
+)
+from .capacity_claim import legacy_available_capacity, write_capacity
 from .batch_operations import refresh_batch_counts
 from .dispatch_gate import (
     lock_batch_control,
@@ -33,8 +38,7 @@ EXECUTION_SCAN_LIMIT = 200
 SUBTASK_EXECUTION_FAILED = "子任务执行失败"
 SUBTASK_STATUS_TIMEOUT = "获取子任务状态超时"
 CRON_AUTH_EXPIRED_ERROR = (
-    "cron auth user_info is expired; "
-    "please refresh cron auth configuration"
+    "cron auth user_info is expired; " "please refresh cron auth configuration"
 )
 CRON_AUTH_EXPIRED_FAILURE_MESSAGE = f"鉴权过期: {CRON_AUTH_EXPIRED_ERROR}"
 DISPATCH_OUTCOME_UNKNOWN = "dispatch outcome unknown past stale timeout"
@@ -50,6 +54,18 @@ _CURRENT_EXECUTION_IDENTITY_SQL = """
     AND e.job_id = swe_cron_dispatch_intents.job_id
     AND e.tenant_id = swe_cron_dispatch_intents.tenant_id
 """
+_MAIN_NON_MODEL_ERROR_SQL = " OR ".join(
+    f"INSTR(LOWER(COALESCE(e.error_message,'')), '{error}')>0"
+    for error in MAIN_ERROR_EXCLUSIONS
+)
+_MODEL_FAILURE_EXECUTION_SQL = f"""EXISTS (
+    SELECT 1 FROM swe_cron_executions e
+    WHERE {_CURRENT_EXECUTION_IDENTITY_SQL}
+      AND ((e.status IN ('error','failed','timeout')
+            AND NOT ({_MAIN_NON_MODEL_ERROR_SQL}))
+           OR (e.async_status='error'
+               AND INSTR(COALESCE(e.error_type,'') COLLATE utf8mb4_bin,'Prompt')>0))
+)"""
 _TERMINAL_EXECUTION_SQL = """
     (
         e.status IN ('error', 'failed', 'cancelled', 'timeout', 'skipped')
@@ -253,7 +269,8 @@ def _build_execution_row(
     now: datetime,
     policy: Mapping[str, Any],
     definitions_by_key: Mapping[
-        tuple[str, str, str], Mapping[str, Any]
+        tuple[str, str, str],
+        Mapping[str, Any],
     ],
     heat_by_job_id: Mapping[str, Decimal],
 ) -> dict[str, Any] | None:
@@ -292,7 +309,12 @@ class CronDispatchIntentService:
     """Durable queue service for cron dispatch intents."""
 
     async def create_batch_with_intents(
-        self, *, batch, jobs, due_at, scheduled_fire_at
+        self,
+        *,
+        batch,
+        jobs,
+        due_at,
+        scheduled_fire_at,
     ):
         db = get_db_connection()
         identity = tuple(
@@ -305,23 +327,25 @@ class CronDispatchIntentService:
             jobs=jobs,
             due_at=due_at,
             priority_policy=batch["callback_metadata"].get(
-                "batch_dispatch_priority", {}
+                "batch_dispatch_priority",
+                {},
             ),
         )
         batch = {
             **batch,
             "scheduled_fire_at": _to_beijing_naive(scheduled_fire_at),
             "callback_received_at": _to_beijing_naive(
-                batch["callback_received_at"]
+                batch["callback_received_at"],
             ),
         }
         offset = max(
             0,
             int(
                 parse_meta(parent.get("meta")).get(
-                    "batch_dispatch_offset_minutes", 0
+                    "batch_dispatch_offset_minutes",
+                    0,
                 )
-                or 0
+                or 0,
             ),
         )
         return await admit_batch(
@@ -334,7 +358,10 @@ class CronDispatchIntentService:
 
     async def prepare_handoff(self, row, worker_id, now_utc):
         result = await prepare_handoff(
-            get_db_connection(), row, worker_id, _to_beijing_naive(now_utc)
+            get_db_connection(),
+            row,
+            worker_id,
+            _to_beijing_naive(now_utc),
         )
         if result in {"skipped", "paused"}:
             batch_id = (
@@ -343,13 +370,17 @@ class CronDispatchIntentService:
                 else row.batch_id
             )
             await self.update_batch_counts(
-                batch_id=batch_id, updated_at=now_utc
+                batch_id=batch_id,
+                updated_at=now_utc,
             )
         return result
 
     async def settle_callback_skip(self, row, worker_id, now_utc):
         changed = await settle_callback_skip(
-            get_db_connection(), row, worker_id, _to_beijing_naive(now_utc)
+            get_db_connection(),
+            row,
+            worker_id,
+            _to_beijing_naive(now_utc),
         )
         if changed:
             batch_id = (
@@ -358,7 +389,8 @@ class CronDispatchIntentService:
                 else row.batch_id
             )
             await self.update_batch_counts(
-                batch_id=batch_id, updated_at=now_utc
+                batch_id=batch_id,
+                updated_at=now_utc,
             )
         return changed
 
@@ -537,7 +569,8 @@ class CronDispatchIntentService:
             for d in definitions
         }
         parent = next(
-            (j for j in jobs if j.get("job_id") == parent_job_id), {}
+            (j for j in jobs if j.get("job_id") == parent_job_id),
+            {},
         )
         parent_definition = definitions_by_key.get(
             (
@@ -860,7 +893,7 @@ class CronDispatchIntentService:
                    swe_cron_dispatch_intents.source_id,
                    swe_cron_dispatch_intents.attempt_count,
                    e.id AS execution_id, e.status AS agent_status,
-                   e.async_status, e.error_message
+                   e.async_status, e.error_type, e.error_message
             FROM swe_cron_dispatch_intents
             JOIN swe_cron_executions e ON {_CURRENT_EXECUTION_IDENTITY_SQL}
             WHERE swe_cron_dispatch_intents.status IN ('claimed', 'acknowledged', 'dispatched')
@@ -880,6 +913,18 @@ class CronDispatchIntentService:
             seen.add(intent_id)
             status = str(row["agent_status"]).lower()
             error = str(row.get("error_message") or "")
+            model_failed = (
+                status in {"error", "failed", "timeout"}
+                and is_model_failure(
+                    {
+                        "status": "error",
+                        "result_json": json.dumps({"error_detail": error}),
+                    },
+                )
+            ) or (
+                row["async_status"] == "error"
+                and MODEL_ERROR_TYPE in (row.get("error_type") or "")
+            )
             if status == "success" and row["async_status"] == "error":
                 status, error = "error", SUBTASK_EXECUTION_FAILED
             if await self.complete_from_execution(
@@ -889,6 +934,7 @@ class CronDispatchIntentService:
                 completed_at=now_utc,
                 error=error,
                 retry_delay_seconds=retry_delay_seconds,
+                model_failure=model_failed,
                 expected_batch_id=row["batch_id"],
                 expected_job_id=row["job_id"],
                 expected_tenant_id=row["tenant_id"],
@@ -1096,7 +1142,7 @@ class CronDispatchIntentService:
                         )
                         limit = min(
                             limit,
-                            await available_capacity(
+                            await legacy_available_capacity(
                                 cur,
                                 scope,
                                 lock_owner,
@@ -1115,8 +1161,8 @@ class CronDispatchIntentService:
                                             "model_id",
                                         ),
                                         scope,
-                                    )
-                                )
+                                    ),
+                                ),
                             )
                         )
                         if limit <= 0:
@@ -1272,7 +1318,10 @@ class CronDispatchIntentService:
             return []
         batch_source = str(_row_value(batch_rows[0], 0, "source_id") or "")
         control = await lock_batch_control(
-            cur, candidate_batch_id, batch_source, skip_locked=True
+            cur,
+            candidate_batch_id,
+            batch_source,
+            skip_locked=True,
         )
         if control is None or control["paused"]:
             return []
@@ -1640,6 +1689,7 @@ class CronDispatchIntentService:
         expected_tenant_id: str = "",
         expected_source_id: str | None = None,
         expected_attempt_count: int | None = None,
+        model_failure: bool = True,
     ) -> bool:
         """Update a dispatched child intent from the final SWE execution row."""
         db = get_db_connection()
@@ -1673,6 +1723,7 @@ class CronDispatchIntentService:
             completed_at=completed_at_value,
             error=error,
             retry_delay_seconds=retry_delay_seconds,
+            model_failure=model_failure,
         )
         updated = await _update_execution_intent_row(
             db,
@@ -1694,6 +1745,7 @@ class CronDispatchIntentService:
                 "execution_id": execution_id,
                 "execution_status": status,
                 "retry": transition.retry,
+                "model_failure": int(model_failure and status != "success"),
             },
         )
         return True
@@ -1732,11 +1784,11 @@ class CronDispatchIntentService:
         completion_row = await db.fetch_one(
             f"""
             SELECT
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)
+                SUM(CASE WHEN status = 'completed' OR (status='failed' AND NOT {_MODEL_FAILURE_EXECUTION_SQL}) THEN 1 ELSE 0 END)
                     AS success_count,
                 SUM(CASE
                     WHEN status = 'failed'
-                     AND COALESCE(error_message, '') <> %s
+                     AND {_MODEL_FAILURE_EXECUTION_SQL}
                     THEN 1 ELSE 0
                 END)
                     AS failure_count
@@ -1745,7 +1797,6 @@ class CronDispatchIntentService:
               {scope_clause}
             """,
             (
-                CRON_AUTH_EXPIRED_FAILURE_MESSAGE,
                 since_value,
                 since_value,
                 *scope_params,
@@ -1757,6 +1808,7 @@ class CronDispatchIntentService:
             FROM swe_cron_dispatch_events e
             LEFT JOIN swe_cron_dispatch_intents i ON e.intent_id = i.id
             WHERE e.event_type = 'retry_scheduled'
+              AND JSON_EXTRACT(e.details,'$.model_failure')=1
               AND e.created_at >= %s
               {event_scope_clause}
             """,
@@ -1951,7 +2003,7 @@ class CronDispatchIntentService:
         normalized_strategy_id = str(strategy_id or "")
         row = await db.fetch_one(
             """
-            SELECT effective_workers, created_at
+            SELECT effective_workers, created_at, strategy_id, decision_reason
             FROM swe_cron_dispatch_worker_capacity
             WHERE source_id = %s
               AND provider_id = %s
@@ -1969,6 +2021,14 @@ class CronDispatchIntentService:
             ),
         )
         return dict(row) if row else None
+
+    async def list_worker_scopes(self):
+        """只从每个模型池一条的租约表枚举已知模型池。"""
+        db = get_db_connection()
+        return await db.fetch_all(
+            "SELECT source_id,provider_id,model_id "
+            "FROM swe_cron_dispatch_scope_leases",
+        )
 
     async def record_worker_capacity(
         self,
@@ -2346,13 +2406,18 @@ def _build_execution_completion_transition(
     completed_at: datetime,
     error: str,
     retry_delay_seconds: int,
+    model_failure: bool = True,
 ) -> _ExecutionCompletionTransition:
     normalized_status = str(status or "").lower()
     success = normalized_status == "success"
     auth_expired = not success and _is_cron_auth_expired_error(error)
-    terminal_failure = auth_expired or (
-        int(row.get("attempt_count") or 0)
-        >= int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+    terminal_failure = (
+        not model_failure
+        or auth_expired
+        or (
+            int(row.get("attempt_count") or 0)
+            >= int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+        )
     )
     if success:
         next_status = "completed"

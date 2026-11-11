@@ -2,12 +2,21 @@ import { Form, Card, Switch, InputNumber, Input } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import { SliderWithValue } from "./SliderWithValue";
 import styles from "../index.module.less";
+import { SystemCronSyncStatus } from "@/components/SystemCronSyncStatus";
+import type { ManagedCronContext } from "@/api/types/schedulerCron";
+import type { SystemSyncSubmission } from "@/api/types/systemCron";
 
 interface MemorySummaryCardProps {
   extra?: React.ReactNode;
+  syncContext?: ManagedCronContext;
+  syncSubmission?: SystemSyncSubmission;
 }
 
-export function MemorySummaryCard({ extra }: MemorySummaryCardProps) {
+export function MemorySummaryCard({
+  extra,
+  syncContext,
+  syncSubmission,
+}: MemorySummaryCardProps) {
   const { t } = useTranslation();
 
   return (
@@ -33,6 +42,14 @@ export function MemorySummaryCard({ extra }: MemorySummaryCardProps) {
       >
         <Input placeholder={t("agentConfig.dreamCronPlaceholder")} />
       </Form.Item>
+      {syncContext && (
+        <SystemCronSyncStatus
+          context={syncContext}
+          scope="agent"
+          taskTypes={["dream"]}
+          submission={syncSubmission}
+        />
+      )}
 
       <Form.Item
         label={t("agentConfig.forceMemorySearch")}

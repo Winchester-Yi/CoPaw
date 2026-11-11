@@ -7,6 +7,7 @@ from .executions import RUN_TABLE
 from .operations import IDENTITY_FIELDS
 from .settlement import ExecutionSettlement, PROTOCOL
 from .run_accounting import occupied_run_sql
+from .failure_policy import worker_history_join_sql, worker_model_failure_sql
 
 METRICS = (
     "pending_count",
@@ -69,17 +70,18 @@ class ManagedCapacityFeedback:
     async def summarize(self, *, since, now_utc, scope=None):
         clause, params = _scope_filter(scope)
         start, now = _utc_text(since), _utc_text(now_utc)
+        model_failure = worker_model_failure_sql()
         row = await self.db.fetch_one(
             "SELECT SUM(CASE WHEN r.status IN ('queued','dispatch_failed') "
             "AND (r.not_before_at IS NULL OR r.not_before_at<=%s) THEN 1 ELSE 0 END) AS pending_count, "
             "SUM(CASE WHEN r.status='dispatching' THEN 1 ELSE 0 END) AS claimed_count, "
             "SUM(CASE WHEN r.status IN ('accepted','running') OR "
             "(r.status='success' AND r.settled_status IS NULL) THEN 1 ELSE 0 END) AS running_count, "
-            "SUM(CASE WHEN r.settled_status='success' AND r.settled_at>=%s "
+            f"SUM(CASE WHEN (r.settled_status='success' OR (r.settled_status='error' AND NOT {model_failure})) AND r.settled_at>=%s "
             "AND r.settled_at<=%s THEN 1 ELSE 0 END) AS success_count, "
-            "SUM(CASE WHEN r.settled_status IN ('error','cancelled') AND r.settled_at>=%s "
+            f"SUM(CASE WHEN r.settled_status='error' AND {model_failure} AND r.settled_at>=%s "
             "AND r.settled_at<=%s THEN 1 ELSE 0 END) AS failure_count "
-            f"FROM {RUN_TABLE} r WHERE {PROTOCOL} "
+            f"FROM {RUN_TABLE} r LEFT JOIN swe_cron_executions h ON {worker_history_join_sql()} WHERE {PROTOCOL} "
             f"AND (r.settled_status IS NULL OR r.settled_at>=%s){clause}",
             (now, start, now, start, now, start, *params),
         )

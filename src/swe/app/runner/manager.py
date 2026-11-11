@@ -108,6 +108,18 @@ class ChatManager:
         """Release the storage-current identity without a stale revision."""
         return await self._repo.release_current_expert_binding(chat_id)
 
+    async def set_multi_agent_mode(
+        self,
+        chat_id: str,
+        enabled: bool,
+        expected_revision: int,
+    ):
+        return await self._repo.set_multi_agent_mode(
+            chat_id,
+            enabled,
+            expected_revision,
+        )
+
     # ----- Read Operations -----
 
     async def list_chats(

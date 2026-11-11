@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Source 系统配置 HTTP API。"""
 
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import logging
 from fastapi import APIRouter, HTTPException, Request
@@ -106,6 +106,7 @@ def _get_scheduler_identity(
         tenant_id=tenant_id,
         from_id=tenant_id,
         updated_by=updated_by,
+        role=request.headers.get("X-User-Role"),
     )
 
 
@@ -114,8 +115,8 @@ async def _refresh_source_tasks(
     *,
     source_id: str,
     updated_by: str | None,
-) -> None:
-    """配置变更后刷新当前 source 的清理系统任务。"""
+) -> dict:
+    """只提交已保存配置的刷新意图，配置由Scheduler后台重新读取。"""
     scheduler = getattr(
         request.app.state,
         "source_system_task_scheduler",
@@ -123,16 +124,11 @@ async def _refresh_source_tasks(
     )
     if scheduler is None:
         logger.warning("Source system task scheduler is not initialized")
-        return
-
-    try:
-        config = await _get_service(request).resolve_config(
-            source_id,
-            force_refresh=True,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("刷新 source 定时任务配置解析失败")
-        return
+        return {
+            "submission_status": "failed",
+            "error_code": "system_sync_not_submitted",
+            "items": [],
+        }
 
     identity = _get_scheduler_identity(
         request,
@@ -142,15 +138,43 @@ async def _refresh_source_tasks(
         ("task_session_cleanup", scheduler.refresh_task_session_cleanup),
         ("archive_maintenance", scheduler.refresh_archive_maintenance),
     )
+    items = []
     for task_name, refresh in refreshers:
         try:
-            await refresh(
+            result = await refresh(
                 source_id=source_id,
-                config=config,
+                config=None,
                 identity=identity,
             )
-        except Exception:  # noqa: BLE001
-            logger.exception("刷新 source 定时任务失败: %s", task_name)
+            submission = getattr(result, "scheduler_sync", None)
+            if not isinstance(submission, dict):
+                submission = {
+                    "submission_status": "failed",
+                    "error_code": "system_sync_not_submitted",
+                }
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "配置已保存但系统同步未受理 task_type=%s error_type=%s",
+                task_name,
+                type(error).__name__,
+            )
+            submission = {
+                "submission_status": "failed",
+                "error_code": "system_sync_not_submitted",
+            }
+        items.append({"task_type": task_name, **submission})
+    accepted = all(item["submission_status"] == "accepted" for item in items)
+    return {
+        "submission_status": "accepted" if accepted else "failed",
+        "items": items,
+    }
+
+
+def _attach_sync(response, sync):
+    """不修改配置服务缓存对象，同步受理结果属于本次保存响应而非配置正文。"""
+    if isinstance(response, dict):
+        return {**response, "scheduler_sync": sync}
+    return response.model_copy(update={"scheduler_sync": sync})
 
 
 @router.get("/effective", response_model=EffectiveSourceSystemConfig)
@@ -199,12 +223,12 @@ async def upsert_current_source_system_config(
             payload.config,
             updated_by=updated_by,
         )
-        await _refresh_source_tasks(
+        sync = await _refresh_source_tasks(
             request,
             source_id=source_id,
             updated_by=updated_by,
         )
-        return response
+        return _attach_sync(response, sync)
     except SourceSystemConfigStoreUnavailable as exc:
         _raise_storage_unavailable(exc)
     except ValueError as exc:
@@ -214,7 +238,7 @@ async def upsert_current_source_system_config(
 @router.delete("/current")
 async def delete_current_source_system_config(
     request: Request,
-) -> dict[str, bool]:
+) -> dict[str, Any]:
     """删除当前请求 source_id 的原始配置。"""
     updated_by = _require_manager(request)
     source_id = _get_request_source_id(request)
@@ -225,12 +249,12 @@ async def delete_current_source_system_config(
         _raise_storage_unavailable(exc)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
-    await _refresh_source_tasks(
+    sync = await _refresh_source_tasks(
         request,
         source_id=source_id,
         updated_by=updated_by,
     )
-    return {"deleted": True}
+    return {"deleted": True, "scheduler_sync": sync}
 
 
 @router.get("/sources")
@@ -293,19 +317,19 @@ async def upsert_source_system_config(
     except ValueError as exc:
         _raise_invalid_storage_data(exc)
     service.invalidate(source_id)
-    await _refresh_source_tasks(
+    sync = await _refresh_source_tasks(
         request,
         source_id=source_id,
         updated_by=updated_by,
     )
-    return record
+    return _attach_sync(record, sync)
 
 
 @router.delete("/sources/{source_id}")
 async def delete_source_system_config(
     source_id: str,
     request: Request,
-) -> dict[str, bool]:
+) -> dict[str, Any]:
     """删除指定 source 的系统配置。"""
     updated_by = _require_manager(request)
     _validate_source_id(source_id)
@@ -317,9 +341,9 @@ async def delete_source_system_config(
     service.invalidate(source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Source config not found")
-    await _refresh_source_tasks(
+    sync = await _refresh_source_tasks(
         request,
         source_id=source_id,
         updated_by=updated_by,
     )
-    return {"deleted": True}
+    return {"deleted": True, "scheduler_sync": sync}

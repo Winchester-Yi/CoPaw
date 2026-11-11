@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Result contract shared by Cron execution engines."""
 
 from __future__ import annotations
@@ -14,3 +15,4 @@ class ExecutionResult:
     executor_leader: str = ""
     execution_meta: Optional[Dict[str, Any]] = None
     status: str = "success"
+    recheck_output: str | None = None

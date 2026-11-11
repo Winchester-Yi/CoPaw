@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 DISPATCH_CALLBACK_SOURCE = "dispatch_service"
 DEFAULT_CAPACITY_ADJUST_INTERVAL_SECONDS = 300
+IDLE_WORKER_RESET = timedelta(hours=2)
+BASELINE_DECISIONS = {"initial_capacity", "idle_reset", "baseline_start"}
 DEFAULT_RETRY_DELAY_SECONDS = 300
 DEFAULT_CALLBACK_TIMEOUT_SECONDS = 30.0
 DEFAULT_PROVIDER_ID = "default"
@@ -835,85 +837,137 @@ class CronSchedulingService:
     ) -> bool:
         """Adjust worker capacity when each scope's strategy interval elapsed."""
         now = _ensure_aware_utc(now_utc or datetime.now(timezone.utc))
-        adjusted = False
         if self._managed_feedback is not None:
             await self._managed_capacity_call("tick")
         scopes = await self._capacity_scopes(now)
+        adjusted = await self._reset_idle_worker_scopes(scopes, now)
         for scope in scopes:
-            strategy = await self._resolve_worker_strategy(scope, now)
-            latest = await self._dispatch_store.get_latest_worker_capacity(
-                scope=scope.model_dump(),
-                strategy_id=strategy.strategy_id,
-            )
-            if not _capacity_adjustment_is_due(latest, strategy, now):
-                continue
-            if not await self._acquire_scope_lease(scope, strategy, now):
-                continue
-            latest = await self._dispatch_store.get_latest_worker_capacity(
-                scope=scope.model_dump(),
-                strategy_id=strategy.strategy_id,
-            )
-            if not _capacity_adjustment_is_due(latest, strategy, now):
-                continue
-            previous = _capacity_effective_workers(latest, strategy)
-            since = now - timedelta(seconds=strategy.feedback_window_seconds)
-            feedback = await self._capacity_feedback(since, now, scope)
-            success_count = int(feedback.get("success_count") or 0)
-            failure_count = int(feedback.get("failure_count") or 0)
-            terminal_count = success_count + failure_count
-            error_rate = failure_count / max(1, terminal_count)
-            if terminal_count == 0:
-                next_workers = previous
-                reason = "no_terminal_feedback"
-                matched_rule: dict[str, Any] = {}
-            else:
-                matched_rule = _match_error_rate_rule(
-                    strategy.error_rate_rules,
-                    error_rate,
-                )
-                next_workers, reason = _apply_worker_rule(
-                    previous,
-                    matched_rule,
-                    strategy,
-                )
-            logger.info(
-                "scheduler_worker_adjustment source_id=%s provider_id=%s "
-                "model_id=%s strategy_id=%s previous=%s next=%s "
-                "error_rate=%.4f reason=%s",
-                scope.source_id,
-                scope.provider_id,
-                scope.model_id,
-                strategy.strategy_id,
-                previous,
-                next_workers,
-                error_rate,
-                reason,
-            )
-            await self._dispatch_store.record_worker_capacity(
-                worker_id=self._worker_id,
-                source_id=scope.source_id,
-                provider_id=scope.provider_id,
-                model_id=scope.model_id,
-                strategy_id=strategy.strategy_id,
-                previous_workers=previous,
-                baseline_workers=strategy.baseline_workers,
-                min_workers=strategy.min_workers,
-                max_workers=strategy.max_workers,
-                effective_workers=next_workers,
-                pending_count=int(feedback.get("pending_count") or 0),
-                claimed_count=int(feedback.get("claimed_count") or 0),
-                running_count=int(feedback.get("running_count") or 0),
-                success_count=success_count,
-                failure_count=failure_count,
-                error_rate=error_rate,
-                matched_rule=matched_rule,
-                avg_latency_ms=int(feedback.get("latency_p95_ms") or 0),
-                decision_reason=reason,
-                recorded_at=now,
-            )
-            self._last_effective_workers = next_workers
-            adjusted = True
+            adjusted = await self._adjust_worker_scope(scope, now) or adjusted
         return adjusted
+
+    async def _adjust_worker_scope(self, scope, now):
+        strategy = await self._resolve_worker_strategy(scope, now)
+        latest = await self._worker_capacity(scope, strategy)
+        if (latest or {}).get("decision_reason") == "idle_reset":
+            return False
+        if not _capacity_adjustment_is_due(latest, strategy, now):
+            return False
+        if not await self._acquire_scope_lease(scope, strategy, now):
+            return False
+        latest = await self._worker_capacity(scope, strategy)
+        if (latest or {}).get("decision_reason") == "idle_reset":
+            return False
+        if not _capacity_adjustment_is_due(latest, strategy, now):
+            return False
+        previous = _capacity_effective_workers(latest, strategy)
+        since = now - timedelta(seconds=strategy.feedback_window_seconds)
+        feedback = await self._capacity_feedback(since, now, scope)
+        success_count = _worker_count(feedback, "success_count")
+        failure_count = _worker_count(feedback, "failure_count")
+        terminal_count = success_count + failure_count
+        error_rate = failure_count / max(1, terminal_count)
+        if terminal_count == 0:
+            if (latest or {}).get("decision_reason") in BASELINE_DECISIONS:
+                return False
+            next_workers = previous
+            reason = "no_terminal_feedback"
+            matched_rule: dict[str, Any] = {}
+        else:
+            matched_rule = _match_error_rate_rule(
+                strategy.error_rate_rules,
+                error_rate,
+            )
+            next_workers, reason = _apply_worker_rule(
+                previous,
+                matched_rule,
+                strategy,
+            )
+        logger.info(
+            "scheduler_worker_adjustment source_id=%s provider_id=%s "
+            "model_id=%s strategy_id=%s previous=%s next=%s "
+            "error_rate=%.4f reason=%s",
+            scope.source_id,
+            scope.provider_id,
+            scope.model_id,
+            strategy.strategy_id,
+            previous,
+            next_workers,
+            error_rate,
+            reason,
+        )
+        await self._dispatch_store.record_worker_capacity(
+            worker_id=self._worker_id,
+            source_id=scope.source_id,
+            provider_id=scope.provider_id,
+            model_id=scope.model_id,
+            strategy_id=strategy.strategy_id,
+            previous_workers=previous,
+            baseline_workers=strategy.baseline_workers,
+            min_workers=strategy.min_workers,
+            max_workers=strategy.max_workers,
+            effective_workers=next_workers,
+            pending_count=_worker_count(feedback, "pending_count"),
+            claimed_count=_worker_count(feedback, "claimed_count"),
+            running_count=_worker_count(feedback, "running_count"),
+            success_count=success_count,
+            failure_count=failure_count,
+            error_rate=error_rate,
+            matched_rule=matched_rule,
+            avg_latency_ms=_worker_count(feedback, "latency_p95_ms"),
+            decision_reason=reason,
+            recorded_at=now,
+        )
+        self._last_effective_workers = next_workers
+        return True
+
+    async def _reset_idle_worker_scopes(self, active, now):
+        list_scopes = getattr(self._dispatch_store, "list_worker_scopes", None)
+        if list_scopes is None:
+            return False
+        since = now - IDLE_WORKER_RESET
+        adjusted = False
+        for raw in await list_scopes():
+            scope = WorkerScope.model_validate(raw)
+            if scope not in active and await self._reset_idle_pool(
+                scope,
+                since,
+                now,
+            ):
+                adjusted = True
+        return adjusted
+
+    async def _reset_idle_pool(self, scope, since, now):
+        read = self._dispatch_store.get_latest_worker_capacity
+        latest = await read(scope=scope.model_dump())
+        if not _idle_reset_candidate(latest, since):
+            return False
+        strategy = await self._resolve_worker_strategy(scope, now)
+        if not await self._acquire_scope_lease(scope, strategy, now):
+            return False
+        latest = await read(scope=scope.model_dump())
+        if not _idle_reset_candidate(latest, since):
+            return False
+        feedback = await self._capacity_feedback(since, now, scope)
+        if any(
+            feedback.get(key)
+            for key in (
+                "pending_count",
+                "claimed_count",
+                "running_count",
+                "success_count",
+                "failure_count",
+            )
+        ):
+            return False
+        await self._record_baseline(
+            scope,
+            strategy,
+            now,
+            _capacity_effective_workers(latest, strategy),
+            strategy.baseline_workers,
+            "idle_reset",
+        )
+        return True
 
     async def _list_dispatch_scopes(
         self,
@@ -979,12 +1033,25 @@ class CronSchedulingService:
         strategy: WorkerStrategy,
         now_utc: datetime,
     ) -> int:
-        latest = await self._dispatch_store.get_latest_worker_capacity(
-            scope=scope.model_dump(),
-            strategy_id=strategy.strategy_id,
-        )
+        latest = await self._worker_capacity(scope, strategy)
         if latest:
             effective = _capacity_effective_workers(latest, strategy)
+            if latest.get("decision_reason") in BASELINE_DECISIONS:
+                workers = max(effective, strategy.baseline_workers)
+                if (
+                    workers != effective
+                    or latest.get("decision_reason") == "idle_reset"
+                    or latest.get("strategy_id") != strategy.strategy_id
+                ):
+                    await self._record_baseline(
+                        scope,
+                        strategy,
+                        now_utc,
+                        effective,
+                        workers,
+                        "baseline_start",
+                    )
+                effective = workers
             self._last_effective_workers = effective
             return effective
         effective = strategy.baseline_workers
@@ -997,13 +1064,46 @@ class CronSchedulingService:
             strategy.strategy_id,
             effective,
         )
+        await self._record_baseline(
+            scope,
+            strategy,
+            now_utc,
+            effective,
+            effective,
+            "initial_capacity",
+        )
+        return effective
+
+    async def _worker_capacity(self, scope, strategy):
+        read = self._dispatch_store.get_latest_worker_capacity
+        latest = await read(scope=scope.model_dump())
+        if (
+            latest
+            and latest.get("strategy_id") not in (None, strategy.strategy_id)
+            and latest.get("decision_reason") not in BASELINE_DECISIONS
+        ):
+            return await read(
+                scope=scope.model_dump(),
+                strategy_id=strategy.strategy_id,
+            )
+        return latest
+
+    async def _record_baseline(
+        self,
+        scope,
+        strategy,
+        now,
+        previous,
+        effective,
+        reason,
+    ):
         await self._dispatch_store.record_worker_capacity(
             worker_id=self._worker_id,
             source_id=scope.source_id,
             provider_id=scope.provider_id,
             model_id=scope.model_id,
             strategy_id=strategy.strategy_id,
-            previous_workers=effective,
+            previous_workers=previous,
             baseline_workers=strategy.baseline_workers,
             min_workers=strategy.min_workers,
             max_workers=strategy.max_workers,
@@ -1016,11 +1116,10 @@ class CronSchedulingService:
             error_rate=0,
             matched_rule={},
             avg_latency_ms=0,
-            decision_reason="initial_capacity",
-            recorded_at=now_utc,
+            decision_reason=reason,
+            recorded_at=now,
         )
         self._last_effective_workers = effective
-        return effective
 
     async def _acquire_scope_lease(
         self,
@@ -1973,6 +2072,19 @@ def _capacity_adjustment_is_due(
         latest_at is None
         or (now - latest_at).total_seconds()
         >= strategy.adjust_interval_seconds
+    )
+
+
+def _worker_count(feedback, key):
+    return int(feedback.get(key) or 0)
+
+
+def _idle_reset_candidate(latest, since):
+    created = _capacity_created_at(latest)
+    return (
+        created is not None
+        and created <= since
+        and latest.get("decision_reason") != "idle_reset"
     )
 
 

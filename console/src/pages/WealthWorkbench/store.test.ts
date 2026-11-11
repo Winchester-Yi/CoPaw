@@ -794,6 +794,20 @@ describe("WealthWorkbench store", () => {
     expect(useWealthStore.getState().plans[0]?.targetSapIds).toEqual(["rm"]);
   });
 
+  it("中台人员查询未完成或待选失败时，发布入口本身也拒绝提交", async () => {
+    seedDraft();
+    useWealthStore.setState({
+      accountId: "middle",
+      distributionBlocked: true,
+      targetSapIds: ["selected-user"],
+    });
+    mockRequest.mockClear();
+    expect(await useWealthStore.getState().publishPlan()).toBe(false);
+    expect(mockRequest).not.toHaveBeenCalled();
+    expect(useWealthStore.getState().toastText).toContain("请等待人员查询完成");
+    useWealthStore.setState({ distributionBlocked: false });
+  });
+
   it("publishPlan 行长未选分发目标时校验失败", async () => {
     useWealthStore.setState({ accountId: "president" });
     seedDraft();
@@ -1141,6 +1155,41 @@ describe("WealthWorkbench store", () => {
     expect(s.draft.items.length).toBeGreaterThan(0);
   });
 
+  it("editPlan 按已选 ID 顺序回填详情，重复详情取第一条，缺失详情时保留 ID", () => {
+    const plan = useWealthStore
+      .getState()
+      .plans.find((p) => p.id === "plan-demo-2")!;
+    const first = {
+      sapId: "0001",
+      name: "第一条详情",
+      orgName: "朝阳支行",
+      bbkOrgId: "11001",
+    };
+    const second = {
+      sapId: "0002",
+      name: "另一人",
+      orgName: "浦东支行",
+      bbkOrgId: "12001",
+    };
+    useWealthStore.setState({
+      plans: [
+        {
+          ...plan,
+          targetSapIds: ["0002", "missing", "0001"],
+          targets: [first, second, { ...first, name: "重复详情" }],
+        },
+      ],
+    });
+
+    useWealthStore.getState().editPlan(plan.id);
+
+    expect(useWealthStore.getState().targets).toEqual([
+      second,
+      { sapId: "missing", name: "missing", orgName: "" },
+      first,
+    ]);
+  });
+
   it("removePlan 移除规划并提示", async () => {
     await useWealthStore.getState().removePlan("plan-demo-3");
     const s = useWealthStore.getState();
@@ -1247,4 +1296,50 @@ describe("WealthWorkbench store", () => {
     );
     expect(useWealthStore.getState().plans).toEqual([]);
   });
+});
+
+it("加入保险跟踪后同步同客户的保险技能，保留其他客户和产品状态", () => {
+  const original = useWealthStore.getState();
+  const base: Customer = {
+    id: "insurance-1|c1",
+    custUid: "c1",
+    skillId: "insurance-1",
+    name: "林芳",
+    category: "保险",
+    task: "保险技能",
+    label: "",
+    reason: "",
+    done: false,
+    channel: "",
+    time: "",
+    note: "",
+    traced: 0,
+  };
+  const rows = [
+    base,
+    { ...base, id: "insurance-2|c1", skillId: "insurance-2" },
+    { ...base, id: "finance|c1", category: "理财" },
+    { ...base, id: "insurance|c2", custUid: "c2" },
+  ];
+  try {
+    useWealthStore.setState({
+      customers: rows,
+      pendingCustomers: rows,
+      doneCustomers: rows,
+    });
+    useWealthStore.getState().markInsuranceCustomerTraced("c1");
+    for (const result of [
+      useWealthStore.getState().customers,
+      useWealthStore.getState().pendingCustomers,
+      useWealthStore.getState().doneCustomers,
+    ]) {
+      expect(result.map((customer) => customer.traced)).toEqual([1, 1, 0, 0]);
+    }
+  } finally {
+    useWealthStore.setState({
+      customers: original.customers,
+      pendingCustomers: original.pendingCustomers,
+      doneCustomers: original.doneCustomers,
+    });
+  }
 });

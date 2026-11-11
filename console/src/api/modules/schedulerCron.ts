@@ -15,6 +15,8 @@ import type {
   ManagedPage,
   ManagedSelectedChild,
   ManagedRunDateRange,
+  ManagedRecheck,
+  ManagedRecheckView,
 } from "../types/schedulerCron";
 
 const ROOT = "/scheduler/cron/jobs";
@@ -39,6 +41,7 @@ const SPEC_FIELDS = new Set([
   "bbk_id",
   "plan_id",
   "run_date_range",
+  "recheck",
 ]);
 
 function definitionOnly(spec: ManagedCronSpec): ManagedCronSpec {
@@ -117,6 +120,20 @@ async function allPages<T>(
 
 /** 新任务协议独立封装，失败只抛错，不调用 SWE 旧任务写接口。 */
 export const schedulerCronApi = {
+  listRechecks: (
+    context: ManagedCronContext,
+    view: ManagedRecheckView,
+    cursor?: string,
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({ view, limit: "20" });
+    if (cursor) query.set("cursor", cursor);
+    return call<ManagedPage<ManagedRecheck>>(
+      context,
+      `/scheduler/cron/rechecks?${query}`,
+      { signal },
+    );
+  },
   listAll: (
     context: ManagedCronContext,
     options: { includeDeleted?: boolean; signal?: AbortSignal } = {},
@@ -313,6 +330,11 @@ export const schedulerCronApi = {
         user_ids: users,
         branch_ids: branches,
       },
+    ),
+  childrenPreview: (context: ManagedCronContext, id: string) =>
+    call<ManagedPage<ManagedChild>>(
+      context,
+      `${jobPath(id)}/broadcast/children?include_deleted=false&limit=1`,
     ),
   childrenAll: (
     context: ManagedCronContext,

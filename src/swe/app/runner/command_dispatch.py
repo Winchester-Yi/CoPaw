@@ -250,6 +250,35 @@ def _bind_command_memory(runner, memory, context, session_execution):
     )
 
 
+async def _reset_multi_agent_mode(runner, chat_id: str, expected_revision):
+    from .expert_binding import ExpertBindingConflict, read_expert_binding
+
+    manager = getattr(runner, "_chat_manager", None)
+    if manager is None or not chat_id:
+        return
+    chat = await manager.get_chat(chat_id)
+    if chat is None or not chat.meta.get("multi_agent_mode_enabled"):
+        return
+    current = read_expert_binding(chat)
+    if expected_revision is not None and current.revision != expected_revision:
+        return
+    try:
+        await manager.set_multi_agent_mode(chat_id, False, current.revision)
+    except ExpertBindingConflict:
+        logger.info(
+            "Multi-agent mode changed during reset; preserving newer state",
+        )
+
+
+def _is_expert_conversation(request, runner: AgentRunner) -> bool:
+    return bool(
+        getattr(runner, "_get_expert_main_execution", lambda _: None)(request)
+        or (getattr(request, "channel_meta", None) or {}).get(
+            "_expert_main_reset",
+        ),
+    )
+
+
 async def _run_conversation_command(
     query: str,
     request,
@@ -272,12 +301,7 @@ async def _run_conversation_command(
     memory.load_state_dict(memory_state, strict=False)
     _bind_command_memory(runner, memory, context, session_execution)
 
-    expert = bool(
-        getattr(runner, "_get_expert_main_execution", lambda _: None)(request)
-        or (getattr(request, "channel_meta", None) or {}).get(
-            "_expert_main_reset",
-        ),
-    )
+    expert = _is_expert_conversation(request, runner)
     command = query.strip().split(maxsplit=1)[0]
     if expert and command in {
         "/long_term_memory",
@@ -305,6 +329,18 @@ async def _run_conversation_command(
     )
     try:
         response_msg = await conv_handler.handle_conversation_command(query)
+        text = response_msg.get_text_content()
+        if (
+            command in {"/new", "/clear"}
+            and "**Memory Manager Disabled**" not in text
+        ):
+            await _reset_multi_agent_mode(
+                runner,
+                context.chat_id,
+                (getattr(request, "channel_meta", None) or {}).get(
+                    "expert_binding_revision",
+                ),
+            )
     except asyncio.CancelledError:
         raise
     except StorageError:

@@ -34,6 +34,7 @@ def batch_item(row):
     )
     result = {name: row[name] for name in fields}
     result["dispatch_paused"] = bool(row["dispatch_paused"])
+    result["batch_paused"] = bool(row["batch_paused"])
     # 新协议没有批次级Owner；dispatch_owner是派发令牌，不能暴露。
     result["lock_owner"] = None
     result.update(
@@ -94,6 +95,7 @@ def member_item(row):
             "dispatch_priority": meta.get("dispatch_priority"),
             "viewer_heat_score": meta.get("viewer_heat_score"),
             "error_message": member_error_message(row),
+            "error_type": row.get("history_error_type"),
         },
     )
     return result
@@ -124,6 +126,11 @@ def member_error_message(row):
 
 
 class ManagedBoardQuery:
+    async def member_attempts(self, source, batch_id, member_id):
+        from .managed_board_attempts import member_attempts
+
+        return await member_attempts(self.db, source, batch_id, member_id)
+
     def __init__(self, db):
         self.db = db
 
@@ -133,6 +140,27 @@ class ManagedBoardQuery:
         )
         await self.db.fetch_all(
             f"SELECT member_id,current_execution_id,business_attempt FROM {sql.MEMBERS} LIMIT 0",
+        )
+
+    async def failure_summary(
+        self,
+        source,
+        *,
+        start=None,
+        end=None,
+        status=None,
+        query=None,
+    ):
+        from .managed_board_failures import failure_summary
+
+        await self._ready()
+        return await failure_summary(
+            self.db,
+            source,
+            start,
+            end,
+            status,
+            query,
         )
 
     async def batches(
@@ -148,31 +176,22 @@ class ManagedBoardQuery:
     ):
         await self._ready()
         where, params = sql.batch_where(source, start, end, query)
-        grouped = sql.aggregate_query(where)
-        state_filter = "WHERE status=%s" if status else ""
-        stats_filter = (
-            "WHERE status=%s OR status='unavailable'" if status else ""
-        )
-        bound = (*params, status) if status else params
-        stats = await self.db.fetch_one(
-            "SELECT COUNT(*) AS total_batches, SUM(member_count) AS total_members, SUM(done_count) AS done_members, SUM(failed_count) AS failed_members, "
-            "SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running_batches, SUM(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) AS unavailable_batches "
-            f"FROM ({grouped}) b {stats_filter}",
-            bound,
-        )
-        if stats["unavailable_batches"]:
-            raise ManagedBoardUnavailable("cron_batch_relation_incomplete")
+        bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(
-            f"SELECT * FROM ({grouped}) b {state_filter} ORDER BY logical_fire_at DESC,batch_id DESC LIMIT %s OFFSET %s",
+            sql.list_query(where, bool(status)),
             (*bound, page_size, (page - 1) * page_size),
         )
+        # 全局统计左联分页；即使当前页为空，仍返回一行统计。
+        stats = rows[0]
+        if stats["unavailable_batches"]:
+            raise ManagedBoardUnavailable("cron_batch_relation_incomplete")
         return {
-            "items": [batch_item(row) for row in rows],
+            "items": [
+                batch_item(row) for row in rows if row["batch_id"] is not None
+            ],
             "total": int(stats["total_batches"]),
             "stats": {
-                name: int(value or 0)
-                for name, value in stats.items()
-                if name != "unavailable_batches"
+                name: int(stats[name] or 0) for name in sql.STATS_FIELDS
             },
             "page": page,
             "page_size": page_size,
@@ -235,7 +254,7 @@ class ManagedBoardQuery:
             tuple(params),
         )
         rows = await self.db.fetch_all(
-            "SELECT r.*,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
+            "SELECT r.*,h.error_type AS history_error_type,h.error_message AS history_error_message,m.member_id,m.business_attempt,m.member_role,m.dispatch_order AS member_order,d.definition_version AS current_definition_version,s.management_status,s.dispatch_state "
             + sql.MEMBER_FROM
             + "LEFT JOIN swe_cron_executions h ON h.id=r.history_execution_id AND h.tenant_id=r.tenant_id AND h.tenant_id COLLATE utf8mb4_bin=r.tenant_id AND h.job_id=r.job_id AND h.job_id COLLATE utf8mb4_bin=r.job_id "
             + f" WHERE {where} ORDER BY m.dispatch_order,m.member_id LIMIT %s OFFSET %s",

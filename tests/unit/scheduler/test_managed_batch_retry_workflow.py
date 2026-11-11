@@ -64,3 +64,41 @@ async def test_business_retry_uses_current_workflow_version_while_batch_entry_pa
     assert (
         await db.fetch_one("SELECT dispatch_state FROM swe_cron_job_states")
     )["dispatch_state"] == "batch_paused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type,queued",
+    [("Prompt", 1), ("Business,Prompt", 1), ("Business", 0), (None, 0)],
+)
+async def test_manual_retry_requires_prompt_for_async_failure(
+    callback_setup,
+    error_type,
+    queued,
+):
+    from tests.unit.scheduler.test_managed_batch_retry import (
+        failed_batch,
+        retry_body,
+    )
+    from scheduler.app.services.cron.managed.batch_retry import (
+        BatchRetryService,
+    )
+
+    db = callback_setup[0]
+    caller, batch = await failed_batch(callback_setup)
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET status='success',settled_status='error',settled_error_code='cron_async_subtasks_failed'",
+    )
+    await db.execute(
+        "UPDATE swe_cron_executions SET status='success',async_status='error',error_type=%s",
+        (error_type,),
+    )
+    service = BatchRetryService(db)
+    result = await service.retry(
+        caller,
+        batch,
+        retry_body(await service.preview(caller, batch)),
+    )
+    assert result["queued"] == queued
+    if not queued:
+        assert result["results"][0]["reason"] == "cron_retry_non_model_failure"

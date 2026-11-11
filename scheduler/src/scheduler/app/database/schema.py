@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_executions (
     duration_ms INT DEFAULT 0 COMMENT 'duration in milliseconds',
     status VARCHAR(16) NOT NULL COMMENT 'success/error/cancelled/timeout/skipped',
     async_status VARCHAR(16) DEFAULT NULL COMMENT 'async execution status',
+    error_type VARCHAR(64) DEFAULT NULL COMMENT 'raw async failure type',
     error_message VARCHAR(2048) DEFAULT '' COMMENT 'error message',
     instance_id VARCHAR(64) DEFAULT '' COMMENT 'execution instance id',
     executor_leader VARCHAR(64) DEFAULT '' COMMENT 'executor leader id',

@@ -23,6 +23,7 @@ from .repository import IDENTITY_FIELDS, ManagedCronRepository
 from .storage import insert, transaction, update
 from .date_policy import normalize_range, platform_window_open
 from .group_policy import ensure_parent_not_pausing
+from .migration_policy import imported_binding
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +87,35 @@ async def _mark_histories_read(db, key, now):
         f"WHERE {WHERE_JOB} AND finished_at<=%s AND history_execution_id IS NOT NULL)",
         (beijing, *key, now),
     )
+    fact = await imported_binding(db, key)
+    if fact and fact["status"] == "completed":
+        await _mark_migrated_histories(db, key, beijing, fact)
+
+
+async def _mark_migrated_histories(db, key, now, fact):
+    ids = fact.get("history_read_ids", [])
+    if not isinstance(ids, list) or any(
+        type(value) is not int or value <= 0 or value > fact["history_max_id"]
+        for value in ids
+    ):
+        raise ValueError("cron_migration_fact_invalid")
+    for start in range(0, len(ids), 200):
+        page = ids[start : start + 200]
+        await db.execute(
+            "UPDATE swe_cron_executions SET is_read=1,read_at=%s WHERE is_read=0 "
+            "AND job_id=%s AND tenant_id=%s AND job_id COLLATE utf8mb4_bin=%s "
+            "AND tenant_id COLLATE utf8mb4_bin=%s AND id IN ("
+            + ",".join(["%s"] * len(page))
+            + ")",
+            (now, key[3], key[0], key[3], key[0], *page),
+        )
 
 
 def _validate_control(current, state, action, payload):
     if current["deleted_at"]:
         raise ManagementConflict("cron_job_deleted")
+    if state["management_status"] == "migrating":
+        raise ManagementConflict("cron_migration_in_progress")
     if action == "mark_read":
         return
     if payload["expected_management_version"] != state["management_version"]:

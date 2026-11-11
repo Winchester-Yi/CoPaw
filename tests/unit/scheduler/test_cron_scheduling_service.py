@@ -30,7 +30,12 @@ class _DispatchStore:
         return "ready"
 
     async def create_batch_with_intents(
-        self, *, batch, jobs, due_at, scheduled_fire_at
+        self,
+        *,
+        batch,
+        jobs,
+        due_at,
+        scheduled_fire_at,
     ):
         await self.upsert_dispatch_batch(**batch)
         ids = await self.enqueue_batch_execution_intents(
@@ -717,6 +722,49 @@ async def test_capacity_adjustment_is_interval_gated_and_separate() -> None:
     assert store.capacity[0]["decision_reason"] == "stable_success"
     assert callback.requests == []
     assert store.claims == []
+
+
+@pytest.mark.asyncio
+async def test_idle_worker_resets_then_restarts_at_base_without_undoing_tuning():
+    store = _DispatchStore([])
+    scope = store.scopes.pop()
+    now = datetime(2026, 7, 1, 22, tzinfo=timezone.utc)
+    store.strategy.baseline_workers = 10
+    store.strategy.max_workers = 30
+    store.latest_capacity = {
+        "strategy_id": "unit",
+        "effective_workers": 24,
+        "created_at": now - timedelta(hours=2),
+        "decision_reason": "model_adjustment",
+    }
+
+    async def known_scopes():
+        return [scope.model_dump()]
+
+    store.list_worker_scopes = known_scopes
+    service = CronSchedulingService(
+        dispatch_store=store,
+        callback_client=_CallbackClient(),
+    )
+    assert await service.adjust_worker_capacity_if_due(now_utc=now)
+    assert store.capacity[-1]["effective_workers"] == 10
+    assert store.capacity[-1]["decision_reason"] == "idle_reset"
+    store.latest_capacity.update(store.capacity[-1])
+    store.strategy.strategy_id = "midnight"
+    store.strategy.baseline_workers = 20
+    assert (
+        await service._effective_workers_for_scope(scope, store.strategy, now)
+        == 20
+    )
+    store.latest_capacity.update(
+        strategy_id="midnight",
+        effective_workers=8,
+        decision_reason="model_adjustment",
+    )
+    assert (
+        await service._effective_workers_for_scope(scope, store.strategy, now)
+        == 8
+    )
 
 
 @pytest.mark.asyncio

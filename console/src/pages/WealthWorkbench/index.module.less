@@ -1662,7 +1662,7 @@
   }
   .dialogBody {
     padding: 22px 24px;
-    max-height: 65vh;
+    max-height: 70vh;
     overflow: auto;
   }
   .dialogBody p {
@@ -4519,5 +4519,13 @@
     .main {
       padding-top: 17px;
     }
+  }
+}
+
+// 固定业务入口与技能场景并列，保持键盘焦点可见。
+.root .insuranceTreeItem {
+  &:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: -2px;
   }
 }

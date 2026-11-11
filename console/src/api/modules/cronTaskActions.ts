@@ -20,6 +20,8 @@ export function assertTaskWorkspace(task: CronJobSpecOutput): void {
   const origin = taskOrigin(task);
   if (!origin || origin.accessKey !== cronAccessKey())
     throw new Error("任务工作区或权限已变化，请刷新后重试");
+  if (origin.unavailable)
+    throw new Error("任务归属或状态暂不可用，请刷新后重试");
 }
 
 /** 版本与动作分别匹配；失败直接上抛，绝不尝试旧写接口。 */
@@ -75,6 +77,7 @@ export async function markTaskReferenceRead(
 ): Promise<unknown> {
   if (origin.accessKey !== cronAccessKey())
     throw new Error("报告工作区或权限已变化，未标记已读");
+  if (origin.unavailable) throw new Error("任务归属或状态暂不可用，未标记已读");
   if (origin.owner === "legacy") return cronJobApi.markTaskRead(id, markedRead);
   const result = await schedulerCronApi.markRead(origin.context, id, requestId);
   if (result.operation.status !== "completed")

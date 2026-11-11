@@ -75,7 +75,15 @@ export const BRAND_THEMES: Record<string, BrandThemeConfig> = {
     favicon: "/swe-symbol.png",
     avatar: "/logo.png",
   },
-
+  pfmind: {
+    source: "pfmind",
+    brandName: "业绩Claw",
+    logo: "/brands/rtauto/logo-rtauto.png",
+    darkLogo: "/brands/rtauto/logo-rtauto.png",
+    primaryColor: "#3769FC",
+    favicon: "/swe-symbol.png",
+    avatar: "/brands/rtauto/logo-rtauto.png",
+  },
   CMSJY: {
     source: "CMSJY",
     brandName: "远程Claw版",

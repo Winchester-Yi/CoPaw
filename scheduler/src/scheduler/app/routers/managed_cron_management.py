@@ -96,6 +96,17 @@ async def require_managed_runtime(
         raise HTTPException(503, "cron_managed_runtime_not_ready")
 
 
+def require_recheck_runtime(request: Request, spec):
+    state = request.app.state
+    worker = getattr(state, "managed_cron_worker", None)
+    if (
+        spec.get("recheck") is not None
+        and getattr(state, "managed_cron_runtime_prepared", False)
+        and getattr(worker, "rechecks", None) is None
+    ):
+        raise HTTPException(503, "cron_recheck_runtime_not_ready")
+
+
 def get_management_service(request: Request):
     try:
         db = get_db_connection()
@@ -141,6 +152,7 @@ def _response(result, *, created=False):
 )
 async def create_job(
     body: CreateRequest,
+    request: Request,
     caller: CallerIdentity = Depends(caller_identity),
     service: ManagementService = Depends(get_management_service),
 ):
@@ -149,6 +161,7 @@ async def create_job(
     身份沿用可信网关 Header：X-User-Id、X-Source-Id 必填，tenant、Agent 和 scope 按现有约定解析。
     Body 包含稳定 request_id、完整 spec 和初始 dispatch_state；完成返回 201，处理中 202，失败可能已保存操作，不能直接换 ID 重建。
     """
+    require_recheck_runtime(request, body.spec)
     try:
         result = await service.create(caller, body.model_dump())
         return _response(result, created=True)
@@ -164,6 +177,7 @@ async def create_job(
 async def update_job(
     job_id: str,
     body: UpdateRequest,
+    request: Request,
     caller: CallerIdentity = Depends(caller_identity),
     service: ManagementService = Depends(get_management_service),
 ):
@@ -172,6 +186,7 @@ async def update_job(
     身份沿用可信网关 Header：X-User-Id、X-Source-Id 必填，tenant、Agent 和 scope 按现有约定解析。
     不通过本接口启停、切换模式或重新分发；源仍有未删除子任务时拒绝正文更新。成功返回 operation，失败按原操作查询和续办。
     """
+    require_recheck_runtime(request, body.spec)
     try:
         return _response(
             await service.update(caller, job_id, body.model_dump()),
@@ -255,6 +270,8 @@ async def retry_operation(
     """
     try:
         operation = await service.store.get(caller, job_id, operation_id)
+        if operation["action"] == "migrate":
+            raise ManagementConflict("cron_migration_requires_group_retry")
         if operation["action"] == "batch_delete":
             raise ManagementConflict(
                 "cron_batch_delete_requires_original_request",

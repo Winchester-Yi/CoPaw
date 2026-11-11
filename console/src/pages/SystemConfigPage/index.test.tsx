@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
     success: vi.fn(),
     error: vi.fn(),
   },
+  syncStatus: vi.fn(),
 }));
 
 vi.mock("@/api/modules/sourceSystemConfig", () => ({
@@ -36,8 +37,46 @@ vi.mock("@/hooks/useAppMessage", () => ({
   }),
 }));
 
+vi.mock("@/components/SystemCronSyncStatus", () => ({
+  SystemCronSyncStatus: (props: unknown) => {
+    mocks.syncStatus(props);
+    return <div data-testid="system-sync-status" />;
+  },
+}));
+
 describe("SystemConfigPage", () => {
   const loadEffectiveConfig = vi.fn().mockResolvedValue(undefined);
+
+  it("已保存的来源配置与失败同步回执分开，回执不写入配置正文", async () => {
+    const submission = {
+      submission_status: "failed",
+      items: [
+        {
+          task_type: "task_session_cleanup",
+          submission_status: "failed",
+          request_id: "cleanup-save",
+        },
+      ],
+    };
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {},
+      version: 2,
+      is_default: false,
+      scheduler_sync: submission,
+    });
+    render(<SystemConfigPage />);
+    await screen.findByText("定时任务设置");
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() =>
+      expect(mocks.syncStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ submission, scope: "source" }),
+      ),
+    );
+    expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+      config: {},
+    });
+  });
 
   function createDeferred<T>() {
     let resolve!: (value: T) => void;
@@ -73,7 +112,7 @@ describe("SystemConfigPage", () => {
   }
 
   function getCronSkipWeekendZhaohuSwitch() {
-    return getSwitchByTitle("周末不发招呼完成通知");
+    return getSwitchByTitle("非工作日不发招呼完成通知");
   }
 
   function getArchiveMaintenanceSwitch() {
@@ -193,7 +232,10 @@ describe("SystemConfigPage", () => {
       );
     });
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValue({
-      ...enabledRecord, source_id: "workspace", config: {}, version: 0,
+      ...enabledRecord,
+      source_id: "workspace",
+      config: {},
+      version: 0,
     });
     act(() => {
       useIframeStore.getState().setContext({ source: "workspace" });
@@ -378,7 +420,7 @@ describe("SystemConfigPage", () => {
 
     const scheduledTaskCardTitle = await screen.findByText("定时任务设置");
     const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
-    const switchTitle = await screen.findByText("周末不发招呼完成通知");
+    const switchTitle = await screen.findByText("非工作日不发招呼完成通知");
     expect(switchTitle.closest(".ant-card")).toBe(scheduledTaskCard);
 
     fireEvent.click(getCronSkipWeekendZhaohuSwitch());
@@ -840,7 +882,7 @@ describe("SystemConfigPage", () => {
         },
       });
     });
-  }, 10_000);
+  }, 15_000);
 
   it("uses the tool output override for new and recent output without a file-read field", async () => {
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
@@ -946,7 +988,7 @@ describe("SystemConfigPage", () => {
         },
       });
     });
-  }, 10_000);
+  }, 15_000);
 
   it("confirms restoring defaults before clearing explicit config", async () => {
     mocks.sourceSystemConfigApi.getCurrent

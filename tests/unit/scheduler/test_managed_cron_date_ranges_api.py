@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""日期配置沿用用户 Header，维护入口只接受来源并同步返回当次结果。"""
+"""日期配置沿用用户 Header，维护入口只接受来源并返回异步受理。"""
 
 import pytest
 from fastapi import FastAPI
@@ -83,10 +83,26 @@ async def test_date_configuration_and_headerless_maintenance_http(mode_setup):
         app.dependency_overrides[managed_cron_date_ranges.date_service] = (
             lambda: DateMaintenanceService(db, management.platform)
         )
+        intent_query = (
+            "SELECT d.job_id,d.enabled,s.dispatch_state FROM swe_cron_jobs_v2 d "
+            "JOIN swe_cron_job_states s ON d.job_id=s.job_id ORDER BY d.job_id"
+        )
+        intent_before = [tuple(row) for row in db.conn.execute(intent_query)]
+        management.platform.trace.clear()
         applied = await client.post(
             "/api/scheduler/cron/date-ranges/apply",
             json={"source_id": "bank"},
         )
-        assert applied.status_code == 200
-        assert applied.json()["failed_count"] == 0
-        assert applied.json()["scanned_count"] > 1
+        assert applied.status_code == 202
+        assert applied.json() == {"accepted": True, "source_id": "bank"}
+        assert management.platform.trace
+        assert all(not enabled for _, enabled in management.platform.trace)
+        assert [
+            tuple(row) for row in db.conn.execute(intent_query)
+        ] == intent_before
+        assert all(
+            not row[0]
+            for row in db.conn.execute(
+                "SELECT date_window_sync_required FROM swe_cron_job_states",
+            )
+        )

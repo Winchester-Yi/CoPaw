@@ -1,0 +1,384 @@
+.root {
+  @media (min-width: 1800px) {
+    --tracking-execution-width: 264px;
+  }
+  min-width: 0;
+  .table .filterTrigger {
+    padding-left: 0;
+    padding-right: 0;
+    justify-content: flex-start;
+    text-align: left;
+  }
+  .sortTrigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: inherit;
+    cursor: pointer;
+    &:hover {
+      color: var(--blue);
+    }
+  }
+  th[aria-sort="ascending"] .sortTrigger,
+  th[aria-sort="descending"] .sortTrigger {
+    color: var(--blue);
+  }
+  input:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--blue);
+  }
+  .high {
+    color: var(--blue);
+  }
+  .toolbar {
+    flex-wrap: wrap;
+    color: var(--text);
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 312px;
+    max-width: 100%;
+  }
+  .tools > :first-child {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+  }
+  .tools input {
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+  }
+  .tableScroll {
+    // 共用名单边框和滚动样式，保留横向滚动条的 Chromium 108 回退。
+    scrollbar-width: thin;
+    scrollbar-color: #9aa8bb var(--wash);
+    &::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+      display: block;
+    }
+    &::-webkit-scrollbar-track {
+      background: var(--wash);
+    }
+    &::-webkit-scrollbar-thumb {
+      background: #9aa8bb;
+      border-radius: 5px;
+      border: 2px solid var(--wash);
+    }
+  }
+  .table {
+    min-width: calc(920px + var(--tracking-execution-width, 180px));
+    table-layout: fixed;
+    white-space: normal;
+    th {
+      text-align: left;
+      white-space: nowrap;
+    }
+    th,
+    td {
+      padding: 10px 8px;
+    }
+    td {
+      vertical-align: middle;
+      font-weight: 400;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    strong {
+      color: var(--ink);
+      font-weight: 600;
+    }
+    small {
+      display: block;
+      margin-top: 5px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 400;
+    }
+    p {
+      font: inherit;
+      color: inherit;
+      margin: 0;
+      white-space: pre-wrap;
+    }
+  }
+  .cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    gap: 12px;
+  }
+  .records {
+    min-height: calc(3em + 3px);
+    width: 100%;
+  }
+  .record + .record {
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .recordHead {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .recordHead > p {
+    flex: 1;
+    min-width: 0;
+  }
+  .recordLine {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    min-width: 0;
+    gap: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .recordTime {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+  .recordSummary {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .fullContent {
+    overflow-wrap: anywhere;
+  }
+  .recordActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    width: 100%;
+    gap: 6px;
+  }
+  .recordButton {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 4px 8px;
+    gap: 4px;
+    font-size: 12px;
+    line-height: 18px;
+    white-space: nowrap;
+  }
+  .manageButton {
+    color: #495566;
+    border-color: #d5dce5;
+    background: #fff;
+    &:hover:enabled {
+      color: var(--blue);
+      border-color: var(--blue);
+      background: #fff;
+    }
+  }
+  .history {
+    width: min(640px, calc(100vw - 32px));
+  }
+  .historyCount {
+    display: inline-block;
+    margin-left: 12px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text);
+  }
+  .historyBody {
+    .record {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--wash);
+      & + .record {
+        margin-top: 12px;
+      }
+    }
+    max-height: min(560px, calc(100vh - 200px));
+    overflow-y: auto;
+  }
+  .preview {
+    width: 100%;
+    height: calc(3em + 3px);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .date {
+    color: var(--text);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    margin-top: 4px;
+    span {
+      display: inline-block;
+      white-space: nowrap;
+    }
+  }
+  .secondary {
+    color: var(--text);
+  }
+  .edit {
+    flex-shrink: 0;
+    min-height: 30px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--blue);
+    border: 1px solid transparent;
+    background: transparent;
+    &:hover:enabled {
+      background: var(--wash);
+    }
+    &:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+  }
+  .saving {
+    display: block;
+    margin-top: 5px;
+    color: var(--blue);
+    font-size: 12px;
+    font-weight: 400;
+  }
+  .table .executionActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    button {
+      padding: 4px 12px;
+      min-width: 0;
+      font-size: 12px;
+      gap: 3px;
+      white-space: nowrap;
+    }
+    svg {
+      width: 13px;
+      height: 13px;
+    }
+    .remove {
+      color: var(--red);
+      border-color: #edc7c9;
+      background: #fff5f5;
+      &:hover:enabled {
+        background: #ffeded;
+      }
+    }
+  }
+  @media (min-width: 1600px) {
+    .table .executionActions button {
+      padding: 6px 12px;
+      font-size: 14px;
+    }
+  }
+  .saveFailure {
+    margin-bottom: 8px;
+    padding: 6px 12px;
+  }
+  .failureRow {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+  }
+  .failureText {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    line-height: 24px;
+  }
+  .retryActions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .retryActions button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .scheme {
+    white-space: nowrap;
+  }
+  .table td.contactPlan {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .table td.scheme {
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+  .intention {
+    width: 100%;
+  }
+  .empty {
+    padding: 32px 16px;
+    color: var(--text);
+  }
+  .initialEmpty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 260px;
+    padding: 40px 24px;
+    gap: 16px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    text-align: center;
+    h3 {
+      margin: 0;
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 600;
+    }
+    p {
+      font: inherit;
+      color: inherit;
+      margin: 0;
+      color: var(--text);
+      line-height: 1.6;
+    }
+  }
+  .error {
+    padding: 48px 20px;
+    text-align: center;
+    background: var(--wash);
+    border-radius: 6px;
+    p {
+      margin: 10px auto 20px;
+      color: var(--text);
+      max-width: 60ch;
+    }
+  }
+}

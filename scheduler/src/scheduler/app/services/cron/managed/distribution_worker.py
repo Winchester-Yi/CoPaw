@@ -250,6 +250,9 @@ class BroadcastProcessor:
             if shifted.error:
                 return "batch_timer_cron_not_shiftable"
             spec["schedule"]["cron"] = shifted.cron
+        spec.setdefault("meta", {})[
+            "_scheduler_calendar_advance_minutes"
+        ] = advance
         external_id = current.get("state_batch_external_job_id")
         if not external_id:
             return "batch_timer_binding_missing"

@@ -1,0 +1,77 @@
+.root {
+  margin-bottom: 16px;
+  h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .plan .content textarea {
+    min-height: 52px;
+    padding: 6px 8px;
+    font-size: 13px;
+    line-height: 20px;
+  }
+}
+.plan {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  strong {
+    font-size: 13px;
+    font-weight: 600;
+  }
+}
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.inlineField {
+  margin-bottom: 0;
+  min-width: 0;
+  label {
+    font-size: 13px;
+  }
+  input,
+  select {
+    height: 36px;
+    min-height: 36px;
+    padding: 4px 6px;
+    font-size: 13px;
+  }
+}
+.content {
+  margin-top: 8px;
+  margin-bottom: 12px;
+  label {
+    font-size: 13px;
+  }
+}
+.remove,
+.add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.remove {
+  font-size: 12px;
+  line-height: 24px;
+}
+@media (max-width: 420px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.add {
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--blue-weak, #edf5ff);
+}

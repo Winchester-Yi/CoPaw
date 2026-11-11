@@ -111,6 +111,7 @@ it("失败预览展示原始错误说明，而不只是公开错误码", async (
         failure_type: "configuration",
         error_code: "cron_execution_failed",
         error_message: "workflow secret value missing: auth_token",
+        error_type: "BusinessError",
       },
     ],
   });
@@ -132,4 +133,5 @@ it("失败预览展示原始错误说明，而不只是公开错误码", async (
     screen.getByRole("columnheader", { name: "重试次数" }),
   ).toBeInTheDocument();
   expect(screen.queryByRole("columnheader", { name: "业务尝试" })).toBeNull();
+  expect(screen.getByText("BusinessError")).toBeInTheDocument();
 });

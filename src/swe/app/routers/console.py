@@ -964,21 +964,42 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"]["goal_id"] = goal_id
     if _extract_goal_mode_enabled(request_data):
         native_payload["meta"]["goal_mode_enabled"] = True
+    enabled = (
+        request_data.get("enable_subagents")
+        if isinstance(request_data, dict)
+        else getattr(request_data, "enable_subagents", False)
+    )
+    if enabled is True:
+        native_payload["meta"]["enable_subagents"] = True
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
     _apply_expert_payload_metadata(native_payload["meta"], request_data)
+    _apply_console_optional_metadata(
+        native_payload["meta"],
+        request_data,
+        user_name,
+        bbk_id,
+    )
+    return native_payload
+
+
+def _apply_console_optional_metadata(
+    meta: dict[str, Any],
+    request_data: Any,
+    user_name: Any,
+    bbk_id: Any,
+) -> None:
     scenario_preset_id = _extract_scenario_preset_id(request_data)
     if scenario_preset_id is not None:
-        native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
+        meta["scenario_preset_id"] = scenario_preset_id
     memory_user_scope = _extract_wplus_user_scope(request_data)
     if memory_user_scope is not None:
-        native_payload["meta"]["wplus_user_scope"] = memory_user_scope
+        meta["wplus_user_scope"] = memory_user_scope
     if user_name:
-        native_payload["meta"]["user_name"] = user_name
+        meta["user_name"] = user_name
     if bbk_id:
-        native_payload["meta"]["bbk_id"] = bbk_id
-    return native_payload
+        meta["bbk_id"] = bbk_id
 
 
 def _apply_expert_payload_metadata(

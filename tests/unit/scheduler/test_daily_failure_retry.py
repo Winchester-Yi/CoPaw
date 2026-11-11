@@ -4,7 +4,7 @@
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -14,6 +14,9 @@ from tests.fakes.daily_failure_retry import (
 )
 from scheduler.app.services.cron.managed.daily_retry_service import (
     DailyFailureRetry,
+)
+from scheduler.app.services.cron.managed.daily_retry_enqueue import (
+    retry_not_before_at,
 )
 
 
@@ -59,6 +62,13 @@ async def test_new_execution_latest_definition_and_no_fake_history(scenario):
         (new_id,),
     )
     assert row["status"] == "queued"
+    expected_due = retry_not_before_at(result["call"], failed)
+    actual_due = datetime.fromisoformat(row["not_before_at"]).replace(
+        tzinfo=timezone.utc,
+    )
+    assert actual_due == expected_due
+    accepted_at = datetime.fromisoformat(result["call"]["cutoff_at"])
+    assert accepted_at <= expected_due < accepted_at + timedelta(hours=1)
     assert json.loads(row["spec_json"])["text"] == "updated content"
     marker = json.loads(row["dispatch_meta_json"])["daily_failure_retry"]
     assert marker["previous_execution_id"] == failed["execution_id"]
@@ -183,3 +193,28 @@ async def test_cutoff_and_queue_high_water_are_fixed_per_call(scenario):
         "scanned_count"
     ] == 0
     assert (await scan(scenario))["call"]["queued_count"] == 1
+
+
+def test_retry_spread_is_stable_and_uses_the_full_hour_window():
+    call = {
+        "call_id": "f4c08118-1ca8-47e5-a921-6f12b11f5ee5",
+        "cutoff_at": "2026-10-27T01:00:00+00:00",
+    }
+    rows = [
+        {
+            "tenant_id": "tenant",
+            "source_id": "bank",
+            "agent_id": "default",
+            "job_id": f"job-{index}",
+        }
+        for index in range(64)
+    ]
+    accepted_at = datetime.fromisoformat(call["cutoff_at"])
+    due_at = [retry_not_before_at(call, row) for row in rows]
+
+    assert due_at[0] == retry_not_before_at(call, rows[0])
+    assert all(
+        accepted_at <= value < accepted_at + timedelta(hours=1)
+        for value in due_at
+    )
+    assert len(set(due_at)) > 10

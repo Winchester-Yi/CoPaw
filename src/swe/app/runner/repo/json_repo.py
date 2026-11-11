@@ -413,6 +413,12 @@ class JsonChatRepository(BaseChatRepository):
             for index, existing in enumerate(chats_file.chats):
                 if existing.id == spec.id:
                     updated = spec.model_copy(deep=True)
+                    if "multi_agent_mode_enabled" in existing.meta:
+                        updated.meta["multi_agent_mode_enabled"] = (
+                            existing.meta["multi_agent_mode_enabled"]
+                        )
+                    else:
+                        updated.meta.pop("multi_agent_mode_enabled", None)
                     binding = read_expert_binding(existing)
                     if binding.expert_id and not is_ordinary_chat(updated):
                         binding = ChatExpertBinding(
@@ -465,6 +471,8 @@ class JsonChatRepository(BaseChatRepository):
                 revision=current.revision + 1,
                 expert_id=expert_id,
             )
+            if expert_id is not None:
+                chat.meta["multi_agent_mode_enabled"] = False
             chat.meta[EXPERT_BINDING_META_KEY] = binding.model_dump()
             chat.updated_at = datetime.now(timezone.utc)
             snapshot = self._save_and_prepare_snapshot_sync(
@@ -472,6 +480,52 @@ class JsonChatRepository(BaseChatRepository):
                 already_locked=True,
             )
             return snapshot, binding
+
+    def _set_multi_agent_mode_sync(
+        self,
+        chat_id: str,
+        enabled: bool,
+        expected_revision: int,
+    ):
+        from datetime import datetime, timezone
+
+        with self._write_lock_sync():
+            _, chats_file = self._load_sync()
+            chat = next(
+                (item for item in chats_file.chats if item.id == chat_id),
+                None,
+            )
+            if chat is None:
+                raise KeyError(chat_id)
+            current = read_expert_binding(chat)
+            if current.revision != expected_revision:
+                raise ExpertBindingConflict(current)
+            chat.meta["multi_agent_mode_enabled"] = enabled
+            chat.meta[EXPERT_BINDING_META_KEY] = ChatExpertBinding(
+                revision=current.revision + 1,
+                expert_id=None if enabled else current.expert_id,
+            ).model_dump()
+            chat.updated_at = datetime.now(timezone.utc)
+            snapshot = self._save_and_prepare_snapshot_sync(
+                chats_file,
+                already_locked=True,
+            )
+            return snapshot, chat.model_copy(deep=True)
+
+    async def set_multi_agent_mode(
+        self,
+        chat_id: str,
+        enabled: bool,
+        expected_revision: int,
+    ):
+        snapshot, chat = await run_runtime_state_work(
+            self._set_multi_agent_mode_sync,
+            chat_id,
+            enabled,
+            expected_revision,
+        )
+        self._set_snapshot(snapshot)
+        return chat
 
     def _release_current_expert_binding_sync(self, chat_id: str):
         from datetime import datetime, timezone

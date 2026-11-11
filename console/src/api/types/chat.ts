@@ -14,6 +14,11 @@ export interface ExpertBindingUpdate {
   expert_id: string | null;
 }
 
+export interface MultiAgentModeView {
+  enabled: boolean;
+  expert_binding: ExpertBindingView;
+}
+
 export interface ExpertBindingConflict {
   chat_id?: string;
   code:

@@ -4,8 +4,10 @@ import { Form } from "@agentscope-ai/design";
 /** 仅新页面注册日期字段，旧任务表单不改变。 */
 export function ManagedDateRangeField({
   inherited = false,
+  disabled = false,
 }: {
   inherited?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <Form.Item
@@ -18,7 +20,7 @@ export function ManagedDateRangeField({
       }
     >
       <DatePicker.RangePicker
-        disabled={inherited}
+        disabled={inherited || disabled}
         style={{ width: "100%" }}
         format="YYYY-MM-DD"
         placeholder={["开始日期", "结束日期"]}

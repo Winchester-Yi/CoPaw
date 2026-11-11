@@ -17,6 +17,9 @@ vi.mock("./cronjob", () => ({
 }));
 vi.mock("./schedulerCron", () => ({ schedulerCronApi: { listAll: vi.fn() } }));
 vi.mock("../request", () => ({ request: vi.fn() }));
+vi.mock("./cronMigration", () => ({
+  cronMigrationApi: { ownership: vi.fn().mockResolvedValue([]) },
+}));
 const context = {
   actor_id: "u",
   tenant_id: "u",

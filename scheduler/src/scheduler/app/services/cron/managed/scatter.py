@@ -8,6 +8,7 @@ from math import floor
 from typing import Optional, TypeGuard
 
 from .cron_syntax import business_parts
+from ..calendar_schedule import CALENDAR_DAY, candidate_cron, validate_cron
 
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DAY_TO_INDEX = {name: index for index, name in enumerate(DAY_NAMES)}
@@ -66,6 +67,8 @@ def shift_cron_expression(
     """将 5 字段 cron 按 offset 向前平移。"""
     timezone_value = timezone_name or "UTC"
     parts = cron_expression.strip().split()
+    if len(parts) in {5, 6} and CALENDAR_DAY.fullmatch(parts[2]):
+        return _calendar_shift(cron_expression, timezone_value, offset_minutes)
     if len(parts) == 6:
         return _shift_year(parts, timezone_value, offset_minutes)
     if len(parts) != 5:
@@ -107,7 +110,7 @@ def shift_cron_expression(
             offset_minutes=offset_minutes,
         )
 
-    if dom == "*" and month == "*" and dow != "*":
+    if _is_weekly(dom, month, dow):
         shifted_dow = _shift_dow(dow, day_delta)
         if shifted_dow is None:
             return _error(
@@ -167,6 +170,22 @@ def _shift_year(parts, zone, offset):
     return ShiftedCron(result.cron + " " + parts[5], zone, offset)
 
 
+def _calendar_shift(expression, zone, offset):
+    """日历定义不平移日期，仅校验平台每日候选可以安全提前。"""
+    try:
+        expression = validate_cron(expression)
+    except ValueError:
+        return _error(zone, offset, "unsupported calendar cron")
+    shifted = shift_cron_expression(
+        candidate_cron(expression),
+        zone,
+        offset_minutes=offset,
+    )
+    if shifted.error:
+        return shifted
+    return ShiftedCron(expression, zone, offset)
+
+
 def _error(
     timezone_name: str,
     offset_minutes: int,
@@ -204,6 +223,11 @@ def _hourly(
     return (
         minute is not None and hour == "*" and _is_every_day(dom, month, dow)
     )
+
+
+def _is_weekly(dom: str, month: str, dow: str) -> bool:
+    """周排程仅调整星期，避免与月内日期规则混合平移。"""
+    return dom == "*" and month == "*" and dow != "*"
 
 
 def _shift_clock(

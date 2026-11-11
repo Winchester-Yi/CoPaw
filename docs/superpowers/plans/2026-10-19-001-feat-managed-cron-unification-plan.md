@@ -8,6 +8,8 @@ origin: docs/superpowers/plans/2026-10-18-001-feat-system-cron-external-query-pl
 
 # 新版定时任务统一扩展总体设计
 
+> 后续规则更新（2026-11-05）：本文原“nW前后最近、等距取较早”口径已由用户确认改为“当月n号（含）及之前最近的实际工作日”；不跨月、无候选跳过，短月仍从月末开始。当前验收以[工作日执行说明](../../deployment/cron_workday_execution.md)为准。
+
 ## 1. 摘要与文档边界
 
 将系统任务调度、工作日日历及排程、对外查询兼容、相关页面能力统一纳入 Scheduler 新链路。Scheduler 管理调度，SWE 执行业务并直接写共库结果，Monitor 保留兼容查询与监控；旧用户任务链路不因本次扩展改变。

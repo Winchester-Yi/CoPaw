@@ -349,7 +349,6 @@ async def test_partial_background_start_failure_still_runs_shutdown(
         "_initialize_skill_scan_history",
         "_initialize_cron_broadcast_children_store",
         "_initialize_cron_broadcast_task_store",
-        "_register_wealth_plan_store",
         "_initialize_skill_readiness",
         "_initialize_database_backed_modules",
     ):

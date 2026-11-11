@@ -15,6 +15,7 @@ import Chat from "../../pages/Chat";
 import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
+import ChannelCronMigration from "../../pages/Control/ChannelCronMigration";
 import SchedulerCronJobsPage from "../../pages/Control/SchedulerCronJobs";
 import FeaturedCasesPage from "../../pages/Control/FeaturedCases";
 import ScenarioPresetsPage from "../../pages/Control/ScenarioPresets";
@@ -44,7 +45,6 @@ import ContinuousIterationPage from "../../pages/Harness/ContinuousIteration";
 import TestDownloadCardPage from "../../pages/TestDownloadCard";
 import TestFileManagerDrawerPage from "../../pages/TestFileManagerDrawer";
 import TestUserDetailModalPage from "../../pages/TestUserDetailModal";
-import ReportViewPage from "../../pages/ReportView";
 // ==================== 测试页面结束 ====================
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
@@ -62,6 +62,7 @@ const pathToKey: Record<string, string> = {
   "/channels": "channels",
   "/sessions": "sessions",
   "/cron-jobs": "cron-jobs",
+  "/channel-cron-migration": "channel-cron-migration",
   "/scheduler-cron-jobs": "scheduler-cron-jobs",
   "/greeting-management": "greeting-management",
   "/featured-cases-management": "featured-cases-management",
@@ -89,6 +90,7 @@ const pathToKey: Record<string, string> = {
   "/analytics/traces": "analytics-traces",
   "/analytics/business-overview": "analytics-business-overview",
   "/analytics/claw-data-overview": "analytics-claw-data-overview",
+  "/analytics/claw-skill-data-overview": "analytics-claw-skill-data-overview",
   "/analytics/cron-job-overview": "analytics-cron-job-overview",
   "/analytics/continuous-governance": "analytics-continuous-governance",
   "/monitor/tasks": "monitor-task-center",
@@ -115,9 +117,6 @@ export default function MainLayout() {
   // 动态渲染模版上下文
   const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
 
-  // 检测是否为 reportView 页面，如果是则跳过预加载所有模块
-  const isReportViewPage = currentPath === "/reportView";
-
   // Global shell display control:
   // - iframe hideMenu === true hides Header and Sidebar
   // - origin=Y maps to hideMenu=true (see iframeMessage.ts)
@@ -141,8 +140,8 @@ export default function MainLayout() {
 
   // 初始化动态渲染模版（应用启动时预加载）
   useEffect(() => {
-    dynamicRender.initialize({ skipPreload: isReportViewPage });
-  }, [dynamicRender, isReportViewPage]);
+    dynamicRender.initialize();
+  }, [dynamicRender]);
 
   return (
     <Layout className={styles.mainLayout}>
@@ -154,15 +153,13 @@ export default function MainLayout() {
         <Content
           className={`page-container${
             hideGlobalShell ? "" : " page-container--with-sidebar"
-          }${isReportViewPage ? " page-container--no-rightPadding" : ""}${
-            showContentOnly ? ` ${styles.contentOnlyContainer}` : ""
-          }`}
+          }${showContentOnly ? ` ${styles.contentOnlyContainer}` : ""}`}
         >
           {!showContentOnly && <ConsoleCronBubble />}
           <div
             className={`page-content${
-              isReportViewPage ? " single-page-content" : ""
-            }${showContentOnly ? ` ${styles.contentOnlyContent}` : ""}`}
+              showContentOnly ? ` ${styles.contentOnlyContent}` : ""
+            }`}
           >
             <Routes>
               {hideChat ? (
@@ -178,6 +175,7 @@ export default function MainLayout() {
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />
+              <Route path="/channel-cron-migration" element={<ChannelCronMigration />} />
               <Route
                 path="/scheduler-cron-jobs"
                 element={<SchedulerCronJobsPage />}
@@ -235,7 +233,6 @@ export default function MainLayout() {
                 element={<TestUserDetailModalPage />}
               />
               {/* ==================== 测试路由结束 ==================== */}
-              <Route path="/reportView" element={<ReportViewPage />} />
               <Route path="/market" element={<MarketPage />} />
               <Route path="/my-skills" element={<MySkillsPage />} />
               <Route path="/my-mcp" element={<MyMCPPage />} />

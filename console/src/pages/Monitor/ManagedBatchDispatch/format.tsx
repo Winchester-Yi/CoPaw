@@ -33,5 +33,16 @@ export function statusTag(status: string) {
   const color = colors[status] || "default";
   return <Tag color={color}>{labels[status] || status}</Tag>;
 }
+export function settledStatusTag(status: string, settled: string | null) {
+  if (settled === "success") return <Tag color="success">子任务成功</Tag>;
+  if (settled === "error") return <Tag color="error">子任务失败</Tag>;
+  if (!settled && status === "success")
+    return <Tag color="processing">等待子任务完成</Tag>;
+  return (
+    <Tag>
+      {settled ? `子任务：${labels[settled] || settled}` : "子任务状态未确认"}
+    </Tag>
+  );
+}
 export const timeText = (value?: string | null) =>
   value ? dayjs(value).format("YYYY-MM-DD HH:mm:ss") : "-";

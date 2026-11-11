@@ -183,6 +183,47 @@ def binding_api(tmp_path, monkeypatch):
     return TestClient(app), repo
 
 
+def test_multi_agent_mode_api_is_atomic_and_server_owned(binding_api):
+    client, _ = binding_api
+    assert (
+        client.put(
+            "/chats/chat/expert-binding",
+            json={"expected_revision": 0, "expert_id": "a"},
+        ).status_code
+        == 200
+    )
+    response = client.put(
+        "/chats/chat/multi-agent-mode",
+        json={"enabled": True, "expected_revision": 1},
+    )
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+    assert response.json()["expert_binding"]["expert_id"] is None
+    assert response.json()["expert_binding"]["revision"] == 2
+    assert (
+        client.put(
+            "/chats/chat/multi-agent-mode",
+            json={"enabled": False, "expected_revision": 1},
+        ).status_code
+        == 409
+    )
+    assert (
+        client.put(
+            "/chats/chat",
+            json={"meta": {"multi_agent_mode_enabled": False}},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/chats/chat/multi-agent-mode",
+            headers={"user": "bob"},
+            json={"enabled": False, "expected_revision": 2},
+        ).status_code
+        == 404
+    )
+
+
 def test_binding_api_preserves_revision_and_syncs_conflicts(binding_api):
     client, _ = binding_api
     assert client.get("/chats/chat/expert-binding").json()["revision"] == 0

@@ -3,6 +3,7 @@
 
 import json
 import sys
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,22 @@ from swe.cli.cron_cmd import cron_group
 from swe.config.context import tenant_context
 
 
+@pytest.fixture(autouse=True)
+def runtime_identity(monkeypatch):
+    monkeypatch.setenv("SWE_TENANT_ID", "user-a")
+    monkeypatch.setenv("SWE_SOURCE_ID", "RMASSIST")
+
+
+def _detail(spec):
+    return {
+        "spec": {**spec, "tenant_id": "user-a", "source_id": "RMASSIST"},
+        "agent_id": "default",
+        "management_owner": "scheduler",
+        "definition_version": 1,
+        "management_version": 1,
+    }
+
+
 class _Response:
     status_code = 200
 
@@ -21,7 +38,16 @@ class _Response:
         return None
 
     def json(self):
-        return {"ok": True}
+        return {
+            "operation": {
+                "operation_id": "operation-1",
+                "job_id": "job-1",
+                "action": "create",
+                "status": "completed",
+                "stage": "completed",
+                "version": 1,
+            },
+        }
 
 
 def test_cron_create_passes_scope_headers():
@@ -66,7 +92,8 @@ def test_cron_create_passes_scope_headers():
     assert kwargs["headers"]["X-Source-Id"] == "source-a"
 
 
-def test_cron_create_does_not_invent_default_source_header():
+def test_cron_create_does_not_invent_default_source_header(monkeypatch):
+    monkeypatch.delenv("SWE_SOURCE_ID")
     runner = CliRunner()
 
     with patch("swe.cli.cron_cmd.client") as mock_client:
@@ -98,10 +125,9 @@ def test_cron_create_does_not_invent_default_source_header():
             ],
         )
 
-    assert result.exit_code == 0
-    _, kwargs = mock_http.post.call_args
-    assert kwargs["headers"]["X-Tenant-Id"] == "default"
-    assert "X-Source-Id" not in kwargs["headers"]
+    assert result.exit_code != 0
+    assert "source-id" in result.output
+    mock_http.post.assert_not_called()
 
 
 def test_cli_workflow_file_uses_target_user_for_task_ownership(tmp_path):
@@ -211,7 +237,7 @@ def test_cron_create_agent_sets_model_slot() -> None:
 
     assert result.exit_code == 0
     _, kwargs = mock_http.post.call_args
-    assert kwargs["json"]["model_slot"] == {
+    assert kwargs["json"]["spec"]["model_slot"] == {
         "provider_id": "openai",
         "model": "gpt-5.4",
     }
@@ -249,7 +275,7 @@ def test_cron_create_defaults_notification_delay_minutes() -> None:
 
     assert result.exit_code == 0
     _, kwargs = mock_http.post.call_args
-    assert kwargs["json"]["meta"]["notification_delay_minutes"] == 0
+    assert kwargs["json"]["spec"]["meta"]["notification_delay_minutes"] == 0
 
 
 def test_cron_create_sets_notification_delay_minutes() -> None:
@@ -286,7 +312,7 @@ def test_cron_create_sets_notification_delay_minutes() -> None:
 
     assert result.exit_code == 0
     _, kwargs = mock_http.post.call_args
-    assert kwargs["json"]["meta"]["notification_delay_minutes"] == 120
+    assert kwargs["json"]["spec"]["meta"]["notification_delay_minutes"] == 120
 
 
 def test_cron_create_text_ignores_model_slot() -> None:
@@ -325,7 +351,7 @@ def test_cron_create_text_ignores_model_slot() -> None:
 
     assert result.exit_code == 0
     _, kwargs = mock_http.post.call_args
-    assert "model_slot" not in kwargs["json"]
+    assert "model_slot" not in kwargs["json"]["spec"]
 
 
 def test_cron_create_requires_model_provider_and_model_together() -> None:
@@ -404,7 +430,7 @@ def test_cron_update_without_model_flags_preserves_existing_model_slot() -> (
         mock_http.get.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value=existing),
+            json=MagicMock(return_value=_detail(existing)),
         )
         mock_http.put.return_value = _Response()
         mock_client.return_value = mock_http
@@ -416,7 +442,7 @@ def test_cron_update_without_model_flags_preserves_existing_model_slot() -> (
 
     assert result.exit_code == 0
     _, kwargs = mock_http.put.call_args
-    assert kwargs["json"]["model_slot"] == {
+    assert kwargs["json"]["spec"]["model_slot"] == {
         "provider_id": "openai",
         "model": "gpt-5.4",
     }
@@ -463,7 +489,7 @@ def test_cron_update_with_model_flags_replaces_existing_model_slot() -> None:
         mock_http.get.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value=existing),
+            json=MagicMock(return_value=_detail(existing)),
         )
         mock_http.put.return_value = _Response()
         mock_client.return_value = mock_http
@@ -482,7 +508,7 @@ def test_cron_update_with_model_flags_replaces_existing_model_slot() -> None:
 
     assert result.exit_code == 0
     _, kwargs = mock_http.put.call_args
-    assert kwargs["json"]["model_slot"] == {
+    assert kwargs["json"]["spec"]["model_slot"] == {
         "provider_id": "anthropic",
         "model": "claude-sonnet-4",
     }
@@ -529,7 +555,7 @@ def test_cron_update_to_text_clears_model_slot() -> None:
         mock_http.get.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value=existing),
+            json=MagicMock(return_value=_detail(existing)),
         )
         mock_http.put.return_value = _Response()
         mock_client.return_value = mock_http
@@ -541,4 +567,4 @@ def test_cron_update_to_text_clears_model_slot() -> None:
 
     assert result.exit_code == 0
     _, kwargs = mock_http.put.call_args
-    assert "model_slot" not in kwargs["json"]
+    assert "model_slot" not in kwargs["json"]["spec"]

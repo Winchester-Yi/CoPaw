@@ -19,6 +19,9 @@ const cronJobApiMocks = vi.hoisted(() => ({
   listCronJobs: vi.fn(),
 }));
 const schedulerMocks = vi.hoisted(() => ({ listAll: vi.fn() }));
+vi.mock("@/api/modules/cronMigration", () => ({
+  cronMigrationApi: { ownership: vi.fn().mockResolvedValue([]) },
+}));
 vi.mock("@/api/modules/schedulerCron", () => ({
   schedulerCronApi: schedulerMocks,
 }));
@@ -651,6 +654,31 @@ describe("SessionApi identity mapping", () => {
     expect(list).toHaveLength(1);
     expect(list[0]?.id).toBe(logicalSessionId);
     expect(list[0]?.name).toBe("new chat");
+  });
+
+  it("attaches a created draft chat to a new local session", async () => {
+    const sessionApi = new SessionApi();
+    const session = { name: "first message", messages: [] };
+    await sessionApi.createSession(session);
+    const temporaryId = (session as { id?: string }).id!;
+
+    sessionApi.attachDraftChat(temporaryId, "draft-logical", "draft-chat");
+
+    expect(sessionApi.getChatIdForSession(temporaryId)).toBe("draft-chat");
+    expect(sessionApi.getLogicalSessionId(temporaryId)).toBe("draft-logical");
+  });
+
+  it("distinguishes attachment-only submission from a manual new session", async () => {
+    const sessionApi = new SessionApi();
+    const onCreated = vi.fn();
+    sessionApi.onSessionCreated = onCreated;
+    await sessionApi.createSession({
+      name: "",
+      messages: [],
+      __fromSubmit: true,
+    });
+    await sessionApi.createSession({ name: "manual", messages: [] });
+    expect(onCreated.mock.calls.map((call) => call[1])).toEqual([true, false]);
   });
 
   it("loads a newly created local session without refreshing the chat list once", async () => {

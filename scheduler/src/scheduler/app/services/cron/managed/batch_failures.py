@@ -167,6 +167,7 @@ def preview_item(row):
             row.get("settled_error_code"),
         ),
         "error_message": row.get("display_error_message", ""),
+        "error_type": row.get("error_type"),
         "transport_only": row["status"] == "dispatch_failed"
         and not row.get("accepted_at"),
     }
@@ -180,7 +181,8 @@ async def display_error_messages(db, rows):
     ]
     histories = (
         await db.fetch_all(
-            "SELECT id,tenant_id,job_id,error_message FROM swe_cron_executions WHERE id IN ("
+            "SELECT id,tenant_id,job_id,status,async_status,error_type,error_message,meta "
+            "FROM swe_cron_executions WHERE id IN ("
             + ",".join("%s" for _ in ids)
             + ")",
             tuple(ids),
@@ -189,7 +191,11 @@ async def display_error_messages(db, rows):
         else []
     )
     messages = {
-        (item["id"], item["tenant_id"], item["job_id"]): item["error_message"]
+        (
+            item["id"],
+            item["tenant_id"],
+            item["job_id"],
+        ): item
         for item in histories
     }
     for row in rows:
@@ -207,11 +213,17 @@ async def display_error_messages(db, rows):
         row["display_error_message"] = next(
             (
                 value[:2048]
-                for value in (history, detail, code)
+                for value in (
+                    history.get("error_message") if history else None,
+                    detail,
+                    code,
+                )
                 if isinstance(value, str) and value.strip()
             ),
             "",
         )
+        row["_history"] = history
+        row["error_type"] = history.get("error_type") if history else None
 
 
 async def failure_preview(db, caller, batch_id, types=()):

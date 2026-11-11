@@ -3,6 +3,8 @@
 
 import logging
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -111,3 +113,26 @@ async def _dispatch_urgent(db, dispatcher, results):
                 identifier,
                 format_management_error(error),
             )
+
+
+class BatchPauseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    paused: bool = Field(strict=True)
+
+
+@router.put(
+    "/{batch_id}/pause",
+    dependencies=[Depends(require_managed_runtime)],
+)
+async def pause_batch(
+    batch_id: str,
+    body: BatchPauseRequest,
+    caller: CallerIdentity = Depends(caller_identity),
+    db=Depends(management_database),
+):
+    from ..services.cron.managed.batch_pause import set_batch_paused
+
+    try:
+        return await set_batch_paused(db, caller, batch_id, body.paused)
+    except Exception as exc:
+        raise batch_error(exc) from exc

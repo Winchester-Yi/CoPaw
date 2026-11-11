@@ -369,6 +369,7 @@ async def test_http_recovery_commits_saved_result_without_running_engine_twice(
     from swe.app.crons.managed_results import ExecutionWriter
     from tests.unit.app.test_managed_cron_execution import Engine
     from tests.unit.app.test_managed_cron_result_recovery import Session
+    from tests.fakes.managed_source_config import ManagedSourceConfigService
 
     db, _, _ = execution_setup
     row, _ = await enqueue(execution_setup)
@@ -395,6 +396,7 @@ async def test_http_recovery_commits_saved_result_without_running_engine_twice(
     )
     app = FastAPI()
     app.state.db_connection = db
+    app.state.source_system_config_service = ManagedSourceConfigService()
     app.include_router(managed_execution_api.router, prefix="/api")
     async with AsyncClient(
         transport=ASGITransport(app=app),

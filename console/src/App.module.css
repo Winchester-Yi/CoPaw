@@ -1,0 +1,62 @@
+.routeOpening {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--console-management-surface, #fff);
+}
+
+.routeStatus {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--console-management-text);
+  font-family: var(--console-font-ui);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  text-align: center;
+}
+
+.routeIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  color: var(--console-management-primary);
+  background: var(--console-management-primary-soft);
+}
+
+.routeProgress {
+  width: 96px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--console-management-primary-soft);
+}
+
+.routeProgressSegment {
+  display: block;
+  width: 32px;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--console-management-primary);
+  animation: routeProgress 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes routeProgress {
+  to {
+    transform: translateX(64px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .routeProgressSegment {
+    animation: none;
+    transform: translateX(32px);
+  }
+}

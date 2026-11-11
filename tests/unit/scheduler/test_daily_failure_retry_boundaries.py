@@ -294,9 +294,14 @@ async def test_batch_daily_retry_can_continue_beyond_native_budget(scenario):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("settled", [False, True])
+@pytest.mark.parametrize(
+    "error_type",
+    ["Prompt", "Business,Prompt", "Business", None],
+)
 async def test_async_failure_uses_confirmation_day_and_waits_for_settlement(
     scenario,
     settled,
+    error_type,
 ):
     from scheduler.app.services.cron.managed.settlement import (
         ExecutionSettlement,
@@ -309,14 +314,16 @@ async def test_async_failure_uses_confirmation_day_and_waits_for_settlement(
         "UPDATE swe_cron_execution_runs SET settled_status=NULL,settled_at=NULL",
     )
     await scenario.db.execute(
-        "UPDATE swe_cron_executions SET async_status=%s",
-        ("error" if settled else "pending",),
+        "UPDATE swe_cron_executions SET async_status=%s,error_type=%s",
+        ("error" if settled else "pending", error_type),
     )
     scenario.now[0] += timedelta(days=1)
     await ExecutionSettlement(scenario.db, clock=scenario.clock).tick()
     result = await scan(scenario)
-    assert result["call"]["queued_count"] == int(settled)
-    if settled:
+    assert result["call"]["queued_count"] == int(
+        settled and "Prompt" in (error_type or ""),
+    )
+    if settled and "Prompt" in (error_type or ""):
         assert (
             result["items"][0]["previous_execution_id"] == row["execution_id"]
         )
@@ -343,3 +350,23 @@ async def test_locked_candidate_must_still_belong_to_requested_source(
     assert (await wrong_call.calls.get("other", call["call_id"]))[
         "queued_count"
     ] == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_retry_respects_current_batch_pause(scenario):
+    _, batch, _ = await scenario.batch(attempts=3)
+    await scenario.db.execute(
+        "UPDATE swe_cron_managed_trigger_receipts SET batch_paused=1 WHERE batch_id=%s",
+        (batch,),
+    )
+    result = await scan(scenario)
+    assert result["call"]["queued_count"] == 0
+    assert any(
+        item["reason"] == "cron_daily_retry_batch_paused"
+        for item in result["items"]
+    )
+    await scenario.db.execute(
+        "UPDATE swe_cron_managed_trigger_receipts SET batch_paused=0 WHERE batch_id=%s",
+        (batch,),
+    )
+    assert (await scan(scenario))["call"]["queued_count"] == 1

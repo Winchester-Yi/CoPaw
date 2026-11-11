@@ -86,7 +86,17 @@ class ManagementStore:
             f"SELECT COUNT(*) AS count FROM swe_cron_execution_runs WHERE {WHERE_JOB} AND {occupied_run_sql()}",
             key,
         )
-        return bool(row["count"])
+        if row["count"]:
+            return True
+        from . import recheck_worker
+
+        if not recheck_worker.storage_ready:
+            return False
+        rechecks = await self.db.fetch_one(
+            f"SELECT COUNT(*) AS count FROM {recheck_worker.TABLE} WHERE {WHERE_JOB} AND status='running'",
+            key,
+        )
+        return bool(rechecks["count"])
 
     async def begin(self, caller, action, payload, job_id=None):
         for attempt in range(3):

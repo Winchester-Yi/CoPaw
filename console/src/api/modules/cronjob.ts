@@ -17,7 +17,9 @@ import type {
 } from "../types";
 
 export const cronJobApi = {
-  listCronJobs: () => request<CronJobSpecOutput[]>("/cron/jobs"),
+  listCronJobs: (excludeMigrated = false) => request<CronJobSpecOutput[]>(
+    excludeMigrated ? "/cron/jobs?exclude_migrated=true" : "/cron/jobs",
+  ),
 
   listCronJobsForContext: (context: ManagedCronContext, signal?: AbortSignal) =>
     request<CronJobSpecOutput[]>("/cron/jobs", {

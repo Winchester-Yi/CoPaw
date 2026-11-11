@@ -411,7 +411,9 @@ export const useChatAnywhereSessions = () => {
 
   const updateSession = React.useCallback(
     async (
-      session: Partial<IAgentScopeRuntimeWebUISession>,
+      session: Partial<IAgentScopeRuntimeWebUISession> & {
+        __fromSubmit?: boolean;
+      },
       updateOptions?: IAgentScopeRuntimeWebUISessionUpdateOptions,
     ) => {
       const res = session.id
@@ -424,15 +426,19 @@ export const useChatAnywhereSessions = () => {
     [],
   );
 
-  const createSession = React.useCallback(async (data?: { name?: string }) => {
-    const session = await updateSession({
-      name: data?.name || "",
-      messages: [],
-    });
-    setCurrentSessionId(session.id);
-    setMessages(session.messages);
-    return session.id;
-  }, []);
+  const createSession = React.useCallback(
+    async (data?: { name?: string; fromSubmit?: boolean }) => {
+      const session = await updateSession({
+        name: data?.name,
+        messages: [],
+        __fromSubmit: data?.fromSubmit,
+      });
+      setCurrentSessionId(session.id);
+      setMessages(session.messages);
+      return session.id;
+    },
+    [],
+  );
 
   const changeCurrentSessionId = React.useCallback((sessionId: string) => {
     setCurrentSessionId(sessionId);

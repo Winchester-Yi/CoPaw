@@ -13,6 +13,20 @@
   `test_answer_turn_includes_response_after_admission_projects_question`，覆盖无后续
   Turn、同 Chat 后续 Turn 和另一 Chat 后续 Turn；使用完整 `Msg.to_dict()` 夹具。
 
+## 新会话切换多智能体模式后出现 409
+
+- 检查 `PUT /chats/{chat_id}/multi-agent-mode` 的 `expected_revision` 和 409 响应中的 `expert_binding.revision`。专家绑定与模式切换共享版本号，成功切换会递增版本；旧版本请求会返回 `expert_binding_changed`。
+- 新会话临时 ID 解析为真实 chat ID 时，前端必须将成功响应应用到同一会话的新身份。若首次 PUT 成功但开关未更新、再次点击使用旧版本，检查 `console/src/pages/Chat/index.tsx` 的 `changeMultiAgentMode` 和会话身份映射。
+- 从其他页面进入空白聊天时，`window.currentSessionId` 可能仍是旧会话。模式设置和反馈查询不应使用该全局值作为当前会话；空白草稿应创建并切换到新 chat。
+- 空白聊天开启计划模式会预先创建 chat；首条消息创建临时会话时须绑定该 chat 的 ID 和逻辑 session ID，避免计划状态留在另一个会话。计划模式保存期间应保留待发送内容，等待保存完成后再发送。
+- 回归入口：`console/src/pages/Chat/index.test.tsx` 的新会话模式切换测试，以及 `tests/unit/app/test_multi_agent_mode.py`。
+
+## Tracing 错误字段过长与会话静默
+
+- `Tracing write failed; retaining batch` 配合 MySQL 1406、`error` 列超长时，失败批次会反复重试；队列达到容量后，新的 span 提交可能等待，进而阻塞模型调用。应按 Pod 和时间核实，不应仅凭 watchdog 日志断定原因。
+- trace 的新增和更新，以及 span 的单条新增、批量新增和更新，在落库前将 error 限制为 4096 UTF-8 字节，包含截断标记。该限制不解决其他永久性写入错误或已运行进程中的旧队列积压。
+- 排查入口：`src/swe/tracing/store.py`、`src/swe/tracing/writer.py`；回归入口：`tests/unit/tracing/test_store.py`。
+
 ## 选择专家后提示无法启动
 
 - **现象**：提示 `The selected expert could not be started`，但这条兜底提示本身不能区分启动拒绝与结果解析失败。
@@ -62,10 +76,10 @@
 
 ## 财富规划看板“全部”混入不适用岗位的关注来源
 
-- 可见范围：行长（含 RB0108 理财主管）查看本行“分行关注、行长关注”；中台只查看本行“分行关注”。客户经理仍按本行创建/分发关系查看规划。
-- 后端：`roles.py` 的 `get_visible_source_labels()` 同时用于 `WealthPlanStore.list_for_viewer()` 的内存/SQL 查询和详情接口的来源校验。仅隐藏前端分类无法阻止“全部”混入其他来源，也无法限制直接访问详情。
+- 可见范围：行长（含 RB0108 理财主管）查看本行“分行关注”和自己创建的“行长关注”；中台只查看本行“分行关注”。客户经理仍按本行创建/分发关系查看规划。
+- 后端：Java 规划服务负责列表和详情的来源校验。仅隐藏前端分类无法阻止“全部”混入其他来源，也无法限制直接访问详情。
 - 前端：`permissions.ts` 的 `BOARD_SOURCES_BY_ROLE` 控制看板分类、概览数量、日历、列表和图例。前后端来源规则需同步；这是按规划来源过滤，不是按场景名称删除或合并不同规划。
-- 排查入口：`src/swe/app/wealth_plans/roles.py`、`store.py`、`router.py` 及 `console/src/pages/WealthWorkbench/Board/`。验证同分行、跨分行、创建人/目标用户，以及管理岗位别名。
+- 排查入口：Java 规划列表/详情接口及 `console/src/pages/WealthWorkbench/Board/`。验证同分行、跨分行、创建人/目标用户，以及管理岗位别名。
 
 ## 财富工作台在旧内核浏览器报 hidePopover is not a function
 
@@ -84,8 +98,8 @@
 - 触发条件：所选场景 ID（外部 `skillId`，落库为 `scene_id`）与本分行已有规划重复，且已有规划符合当前发布人的角色占用规则、分发接收人员有交集。中台检查“分行关注”；行长检查“分行关注”和“行长关注”；客户经理检查这两类及本人创建的规划，不受其他客户经理个人规划限制。
 - 日期与状态规则：同一场景仅在任务起止日期区间重叠时占用，起止日期包含当天。例如 9 月 1 日至 9 月 30 日与 10 月 1 日至 10 月 31 日可分别建规划；9 月 30 日开始的新区间仍与九月规划重叠。缺失的日期边界按无界处理。发布失败不占用，发布中和已发布会占用；分发目标按 `swe_wealth_plan_targets.sap_id` 的交集判断，排程和经营方向不参与判断。中台仅给 A、B 支行人员发布时，不阻挡 C 支行向其他人员发布同场景规划。
 - 编辑规则：排除正在编辑的规划自身；检查新增场景及日期发生变化的原场景，日期未变的原场景不重新检查冲突。
-- 排查入口：前端 `console/src/pages/WealthWorkbench/utils.ts` 的 `filterSceneConflictPlans()`、`findSceneConflicts()`，后端 `src/swe/app/wealth_plans/router.py` 的 `_validate_scene_conflicts()` 与 `src/swe/app/wealth_plans/store.py` 的 `find_scene_conflicts()`。
-- 排查方式：按提示中的规划名核对 `swe_wealth_plans` 的 `bbk_id`、`source_label`、`sap_id`、`status`，关联 `swe_wealth_plan_scenes.scene_id`。前端使用已加载的可见规划预判并禁用确认按钮；后端检查本行符合角色规则的完整数据，冲突返回 HTTP 409。前端无提示而后端拒绝时，应检查可见范围与列表是否已刷新。
+- 排查入口：前端 `console/src/pages/WealthWorkbench/utils.ts` 的 `filterSceneConflictPlans()`、`findSceneConflicts()`，以及 Java 规划写入接口的冲突校验。
+- 排查方式：按提示中的规划名核对 `swe_wealth_plans` 的 `bbk_id`、`source_label`、`sap_id`、`status`，关联 `swe_wealth_plan_scenes.scene_id`。前端使用已加载的可见规划预判并禁用确认按钮；后端检查本行符合角色规则的完整数据；遇到冲突时，查看 Java 响应的业务码 409。前端无提示而后端拒绝时，应检查可见范围与列表是否已刷新。
 - 处理方式：不同月份可使用相同场景分别建规划，但各场景的任务日期区间不能重叠；需要调整已有任务时从规划看板编辑。排查时同时核对场景子表的 `start_date`、`end_date`，不要仅看规划名称或创建月份。
 
 ## Cron callback 报 Job not found

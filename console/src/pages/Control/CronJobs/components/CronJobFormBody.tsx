@@ -27,6 +27,8 @@ interface CronJobFormBodyProps {
   idDisabled?: boolean;
   /** 新版编辑将启停作为独立管理操作；默认保留旧表单行为。 */
   enabledDisabled?: boolean;
+  /** 仅新版入口开启工作日日历控件；旧页面默认保持原样。 */
+  managedCalendar?: boolean;
 }
 
 export function CronJobFormBody({
@@ -38,8 +40,10 @@ export function CronJobFormBody({
   skillOptionsLoading = false,
   idDisabled = false,
   enabledDisabled = false,
+  managedCalendar = false,
 }: CronJobFormBodyProps) {
   const { t } = useTranslation();
+  const selectedCronType = Form.useWatch("cronType", form);
   const validateSkillIds = (_: unknown, value: unknown) => {
     try {
       normalizeSkillIdsInput(value);
@@ -93,7 +97,12 @@ export function CronJobFormBody({
         tooltip={t("cronJobs.cronTooltip")}
       >
         <Form.Item name="cronType" noStyle>
-          <Select>
+          <Select
+            onChange={(value) => {
+              if (managedCalendar && value === "lastWorkday")
+                form.setFieldValue(["schedule", "timezone"], "Asia/Shanghai");
+            }}
+          >
             <Select.Option value="hourly">
               {t("cronJobs.cronTypeHourly")}
             </Select.Option>
@@ -103,6 +112,11 @@ export function CronJobFormBody({
             <Select.Option value="weekly">
               {t("cronJobs.cronTypeWeekly")}
             </Select.Option>
+            {managedCalendar && (
+              <Select.Option value="lastWorkday">
+                每月最后一个工作日（北京时间）
+              </Select.Option>
+            )}
             <Select.Option value="custom">
               {t("cronJobs.cronTypeCustom")}
             </Select.Option>
@@ -117,7 +131,11 @@ export function CronJobFormBody({
         {({ getFieldValue }) => {
           const cronType = getFieldValue("cronType");
 
-          if (cronType === "daily" || cronType === "weekly") {
+          if (
+            cronType === "daily" ||
+            cronType === "weekly" ||
+            (managedCalendar && cronType === "lastWorkday")
+          ) {
             return (
               <Form.Item
                 name="cronTime"
@@ -221,6 +239,7 @@ export function CronJobFormBody({
         tooltip={t("cronJobs.timezoneTooltip")}
       >
         <Select
+          disabled={managedCalendar && selectedCronType === "lastWorkday"}
           showSearch
           placeholder={t("cronJobs.selectTimezone")}
           filterOption={(input, option) =>
@@ -231,6 +250,17 @@ export function CronJobFormBody({
           options={TIMEZONE_OPTIONS}
         />
       </Form.Item>
+
+      {managedCalendar && (
+        <Form.Item
+          name={["schedule", "run_on_non_workday"]}
+          label="非工作日执行"
+          valuePropName="checked"
+          tooltip="关闭时节假日和非工作日跳过自动执行；手动执行不受影响。LW/nW始终按实际工作日计算。"
+        >
+          <Switch aria-label="非工作日执行" />
+        </Form.Item>
+      )}
 
       <Form.Item label="通知延迟">
         <div className={styles.inlineFieldGroup}>

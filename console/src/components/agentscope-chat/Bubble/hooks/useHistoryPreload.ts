@@ -2,7 +2,6 @@ import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 export const HISTORY_PRELOAD_DISTANCE = 240;
 const MAX_HISTORY_ADVANCE_STEPS = 3;
-const MAX_TURN_ADVANCE_STEPS = 6;
 
 type HistoryAdvance =
   | boolean
@@ -11,8 +10,14 @@ type HistoryAdvance =
 interface UseHistoryPreloadOptions {
   scrollElement: HTMLElement | null;
   /** True only when the local window or archive cursor advanced. */
-  onNearStart: () => Promise<HistoryAdvance>;
-  onRetry?: () => Promise<HistoryAdvance>;
+  onNearStart: (
+    shouldContinue: () => boolean,
+    fillingViewport: boolean,
+  ) => Promise<HistoryAdvance>;
+  onRetry?: (
+    shouldContinue: () => boolean,
+    fillingViewport: boolean,
+  ) => Promise<HistoryAdvance>;
   disabled?: boolean;
   resetKey?: string | null;
   isRestoringAnchor?: () => boolean;
@@ -78,17 +83,18 @@ export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
       readingOlder = true;
       setIsAdvancing(true);
       setLimitReached(false);
-      let archiveSteps = 0;
       try {
-        for (let step = 0; step < MAX_TURN_ADVANCE_STEPS; step += 1) {
+        for (let step = 0; ; step += 1) {
           const result = await (step === 0 && retrying
             ? latest.current.onRetry!
-            : latest.current.onNearStart)();
+            : latest.current.onNearStart)(
+            () => !controller.signal.aborted && readingOlder,
+            fillingViewport,
+          );
           if (controller.signal.aborted) return;
           const progressed =
             typeof result === "boolean" ? result : result.progressed;
           if (!progressed) break;
-          if (typeof result !== "boolean" && result.archive) archiveSteps += 1;
           // Hold the lock through React's commit and the anchor-restoration frame.
           if (!(await nextHistoryFrame(controller.signal))) return;
           if (!(await nextHistoryFrame(controller.signal))) return;
@@ -97,20 +103,10 @@ export default function useHistoryPreload(options: UseHistoryPreloadOptions) {
           }
           previousTop = scrollElement.scrollTop;
           if (
-            !fillingViewport &&
-            typeof result !== "boolean" &&
-            !result.foundUser &&
-            !latest.current.disabled &&
-            (archiveSteps >= 5 || step + 1 >= MAX_TURN_ADVANCE_STEPS)
-          ) {
-            setLimitReached(true);
-          }
-          if (
             (typeof result === "boolean" &&
               (step + 1 >= MAX_HISTORY_ADVANCE_STEPS || !canContinue())) ||
             (typeof result !== "boolean" &&
               ((!fillingViewport && result.foundUser) ||
-                archiveSteps >= 5 ||
                 !readingOlder ||
                 latest.current.disabled)) ||
             (fillingViewport && step + 1 >= MAX_HISTORY_ADVANCE_STEPS) ||

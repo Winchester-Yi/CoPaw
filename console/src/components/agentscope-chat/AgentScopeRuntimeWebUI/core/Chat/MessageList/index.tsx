@@ -262,10 +262,20 @@ export default function MessageList(props: {
   const loadedArchiveMessagesRef = React.useRef<
     IAgentScopeRuntimeWebUIMessage[]
   >([]);
+  const pendingArchiveMessagesRef = React.useRef<
+    IAgentScopeRuntimeWebUIMessage[]
+  >([]);
   const retainedArchiveMessagesRef = React.useRef<
     IAgentScopeRuntimeWebUIMessage[]
   >([]);
   const historyGenerationRef = React.useRef(0);
+  const mountedRef = React.useRef(true);
+  React.useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const latestMessagesRef = React.useRef(messages);
   const messagesRevisionRef = React.useRef(0);
   const pendingCompactionRefreshRef =
@@ -406,6 +416,7 @@ export default function MessageList(props: {
     loadedArchiveMessageIdsRef.current = new Set();
     loadedBoundaryIdsRef.current = new Set();
     loadedArchiveMessagesRef.current = [];
+    pendingArchiveMessagesRef.current = [];
     retainedArchiveMessagesRef.current = [];
     historyGenerationRef.current += 1;
     setHistoryGeneration(historyGenerationRef.current);
@@ -421,7 +432,11 @@ export default function MessageList(props: {
   }, [backendChatId, currentSessionId]);
 
   const loadOlderHistory = React.useCallback(
-    async (retrying = false) => {
+    async (
+      retrying = false,
+      shouldContinue: () => boolean = () => true,
+      fillingViewport = false,
+    ) => {
       if (
         !backendChatId ||
         historyLoadingRef.current ||
@@ -434,38 +449,72 @@ export default function MessageList(props: {
       setHistoryLoadState("loading");
       const generation = historyGenerationRef.current;
       try {
-        const page = await chatApi.getChatHistory(
-          backendChatId,
-          historyCursorRef.current,
-          ARCHIVE_HISTORY_PAGE_LIMIT,
-        );
-        if (generation !== historyGenerationRef.current) return false;
-        if (
-          page.has_more &&
-          (!page.next_cursor || page.next_cursor === historyCursorRef.current)
-        ) {
-          setHistoryLoadState("error");
+        let foundUser = false;
+        let hasMore = true;
+        const visitedCursors = new Set<string>();
+        if (historyCursorRef.current)
+          visitedCursors.add(historyCursorRef.current);
+        do {
+          const page = await chatApi.getChatHistory(
+            backendChatId,
+            historyCursorRef.current,
+            ARCHIVE_HISTORY_PAGE_LIMIT,
+          );
+          if (
+            !mountedRef.current ||
+            generation !== historyGenerationRef.current
+          )
+            return false;
+          if (
+            page.has_more &&
+            (!page.next_cursor || visitedCursors.has(page.next_cursor))
+          ) {
+            throw new Error("Archive cursor did not advance");
+          }
+          if (page.next_cursor) visitedCursors.add(page.next_cursor);
+          historyDoneRef.current = !page.has_more;
+          setHistoryExhausted(!page.has_more);
+          historyCursorRef.current = page.next_cursor || null;
+          const unseenMessages = normalizeHistoryMessages(
+            page.messages || [],
+          ).filter((message) => {
+            if (typeof message.id !== "string") return true;
+            if (loadedArchiveMessageIdsRef.current.has(message.id))
+              return false;
+            loadedArchiveMessageIdsRef.current.add(message.id);
+            return true;
+          });
+          const unseenBoundaries = (page.boundaries || []).filter(
+            (boundary) => {
+              if (loadedBoundaryIdsRef.current.has(boundary.id)) return false;
+              loadedBoundaryIdsRef.current.add(boundary.id);
+              return true;
+            },
+          );
+          const older = convertArchivedPage(
+            unseenMessages,
+            unseenBoundaries,
+          ).map((message) => ({ ...message, history: true }));
+          pendingArchiveMessagesRef.current = mergeHistoryResponses([
+            ...older,
+            ...pendingArchiveMessagesRef.current,
+          ]);
+          const knownMessageIds = new Set(
+            (latestMessagesRef.current || []).map((message) => message.id),
+          );
+          foundUser = older.some(
+            (message) =>
+              message.role === "user" && !knownMessageIds.has(message.id),
+          );
+          hasMore = page.has_more;
+          if (hasMore && !foundUser && !fillingViewport && shouldContinue()) {
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          }
+        } while (hasMore && !foundUser && !fillingViewport && shouldContinue());
+        if (!mountedRef.current || generation !== historyGenerationRef.current)
           return false;
-        }
-        historyDoneRef.current = !page.has_more;
-        setHistoryExhausted(!page.has_more);
-        historyCursorRef.current = page.next_cursor || null;
-        const unseenMessages = normalizeHistoryMessages(
-          page.messages || [],
-        ).filter((message) => {
-          if (typeof message.id !== "string") return true;
-          if (loadedArchiveMessageIdsRef.current.has(message.id)) return false;
-          loadedArchiveMessageIdsRef.current.add(message.id);
-          return true;
-        });
-        const unseenBoundaries = (page.boundaries || []).filter((boundary) => {
-          if (loadedBoundaryIdsRef.current.has(boundary.id)) return false;
-          loadedBoundaryIdsRef.current.add(boundary.id);
-          return true;
-        });
-        const older = convertArchivedPage(unseenMessages, unseenBoundaries).map(
-          (message) => ({ ...message, history: true }),
-        );
+        const older = pendingArchiveMessagesRef.current;
+        pendingArchiveMessagesRef.current = [];
         loadedArchiveMessagesRef.current = mergeHistoryResponses([
           ...older,
           ...loadedArchiveMessagesRef.current,
@@ -497,19 +546,19 @@ export default function MessageList(props: {
         setMessages((current) =>
           reconcileHistoryLayers(archiveMessages, current),
         );
-        setHistoryLoadState(page.has_more ? "idle" : "exhausted");
+        setHistoryLoadState(hasMore ? "idle" : "exhausted");
         return {
           progressed: true,
-          foundUser: uniqueOlder.some((message) => message.role === "user"),
+          foundUser,
           archive: true,
         };
       } catch {
-        if (generation === historyGenerationRef.current) {
+        if (mountedRef.current && generation === historyGenerationRef.current) {
           setHistoryLoadState("error");
         }
         return false;
       } finally {
-        if (generation === historyGenerationRef.current) {
+        if (mountedRef.current && generation === historyGenerationRef.current) {
           historyLoadingRef.current = false;
           setHistoryRetrying(false);
         }
@@ -531,34 +580,40 @@ export default function MessageList(props: {
       : null;
   }, [currentSessionId]);
 
-  const advanceHistory = React.useCallback(async () => {
-    if (hasHiddenLocalHistory) {
-      const historical = safeMessages.filter(isHistoricalMessage);
-      const nextCount = Math.min(
-        visibleHistoryCount + CURRENT_HISTORY_BATCH_SIZE,
-        historicalMessageCount,
-      );
-      const foundUser = historical
-        .slice(visibleHistoryCount, nextCount)
-        .some((message) => message.role === "user");
-      captureVisibleHistoryAnchor();
-      isPrependingHistoryRef.current = true;
-      setVisibleHistoryCount((current) =>
-        Math.min(current + CURRENT_HISTORY_BATCH_SIZE, historicalMessageCount),
-      );
-      return { progressed: true, foundUser, archive: false };
-    }
+  const advanceHistory = React.useCallback(
+    async (shouldContinue: () => boolean, fillingViewport: boolean) => {
+      if (hasHiddenLocalHistory) {
+        const historical = safeMessages.filter(isHistoricalMessage);
+        const nextCount = Math.min(
+          visibleHistoryCount + CURRENT_HISTORY_BATCH_SIZE,
+          historicalMessageCount,
+        );
+        const foundUser = historical
+          .slice(visibleHistoryCount, nextCount)
+          .some((message) => message.role === "user");
+        captureVisibleHistoryAnchor();
+        isPrependingHistoryRef.current = true;
+        setVisibleHistoryCount((current) =>
+          Math.min(
+            current + CURRENT_HISTORY_BATCH_SIZE,
+            historicalMessageCount,
+          ),
+        );
+        return { progressed: true, foundUser, archive: false };
+      }
 
-    setArchivePagingStarted(true);
-    return loadOlderHistory();
-  }, [
-    captureVisibleHistoryAnchor,
-    hasHiddenLocalHistory,
-    historicalMessageCount,
-    safeMessages,
-    visibleHistoryCount,
-    loadOlderHistory,
-  ]);
+      setArchivePagingStarted(true);
+      return loadOlderHistory(false, shouldContinue, fillingViewport);
+    },
+    [
+      captureVisibleHistoryAnchor,
+      hasHiddenLocalHistory,
+      historicalMessageCount,
+      safeMessages,
+      visibleHistoryCount,
+      loadOlderHistory,
+    ],
+  );
 
   React.useLayoutEffect(() => {
     const transaction =
@@ -642,7 +697,8 @@ export default function MessageList(props: {
   const historyPreload = useHistoryPreload({
     scrollElement: historyScrollElement,
     onNearStart: advanceHistory,
-    onRetry: () => loadOlderHistory(true),
+    onRetry: (shouldContinue, fillingViewport) =>
+      loadOlderHistory(true, shouldContinue, fillingViewport),
     disabled:
       isSessionLoading ||
       loadedSessionId !== currentSessionId ||
@@ -687,6 +743,7 @@ export default function MessageList(props: {
           loadedArchiveMessagesRef.current,
         );
         loadedArchiveMessagesRef.current = [];
+        pendingArchiveMessagesRef.current = [];
         loadedArchiveMessageIdsRef.current = new Set();
         loadedBoundaryIdsRef.current = new Set();
         historyGenerationRef.current += 1;

@@ -44,7 +44,10 @@ CHECK_DISPLAY_NAMES = {
 }
 
 _IDENTITY_HEADING = "用户身份信息"
-_IDENTITY_HEADING_PATTERN = re.compile(r"^\s*(?:#+\s*)?用户身份信息\s*$", re.MULTILINE)
+_IDENTITY_HEADING_PATTERN = re.compile(
+    r"^\s*(?:#+\s*)?用户身份信息\s*$",
+    re.MULTILINE,
+)
 _IDENTITY_FIELDS = ("分行号", "网点机构编号", "岗位编号", "客户经理ID")
 _FIELD_PATTERN_TEMPLATE = r"{field}\s*[:：]\s*(?P<value>\S+)"
 _MCP_SERVER_TIMEOUT_SECONDS = 10.0
@@ -71,7 +74,7 @@ class SkillReadinessCheckContext:
     source_id: str
     skill_id: str
     owner: SkillReadinessOwner
-    cron_manager: Any | None = None
+    job_reader: Any | None = None
     workspace: Any | None = None
     passthrough_headers: dict[str, str] = field(default_factory=dict)
 
@@ -424,7 +427,9 @@ class McpToolsAvailableStrategy:
         failures: list[dict[str, Any]] = []
         for requirement in servers:
             server_name = str(requirement.get("name") or "").strip()
-            required_tools = [str(tool) for tool in requirement.get("tools") or []]
+            required_tools = [
+                str(tool) for tool in requirement.get("tools") or []
+            ]
             client_config = _find_mcp_client_config(
                 configured_clients,
                 server_name,
@@ -528,14 +533,25 @@ def _resolve_profile_path(context: SkillReadinessCheckContext) -> Path:
 async def _list_bound_jobs(
     context: SkillReadinessCheckContext,
 ) -> list[CronJobSpec]:
-    cron_manager = context.cron_manager
-    if cron_manager is None:
-        return []
-    jobs = await cron_manager.list_jobs()
+    from ..crons.managed_query_client import ManagedCronQueryClient
+    from ..crons.managed_models import load_managed_spec
+
+    reader = context.job_reader or ManagedCronQueryClient(
+        headers=context.passthrough_headers,
+    )
+    rows = await reader.list_jobs(
+        context.owner.user_id,
+        context.source_id,
+        getattr(context.workspace, "agent_id", "default"),
+    )
+    jobs = [load_managed_spec(row) for row in rows]
     return [
         job
         for job in jobs
-        if cron_skill_ids_contains(getattr(job, "skill_ids", ""), context.skill_id)
+        if cron_skill_ids_contains(
+            getattr(job, "skill_ids", ""),
+            context.skill_id,
+        )
     ]
 
 
@@ -606,7 +622,10 @@ async def _list_missing_mcp_tools(
     if client is None:
         return required_tools or ["<connect>"]
     try:
-        await asyncio.wait_for(client.connect(), timeout=_MCP_SERVER_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            client.connect(),
+            timeout=_MCP_SERVER_TIMEOUT_SECONDS,
+        )
         tools_response = await asyncio.wait_for(
             client.list_tools(timeout=_MCP_SERVER_TIMEOUT_SECONDS),
             timeout=_MCP_SERVER_TIMEOUT_SECONDS,

@@ -100,16 +100,26 @@ def test_cron_list_with_agent_id():
 
     with patch("swe.cli.cron_cmd.client") as mock_client:
         mock_response = MagicMock()
-        mock_response.json.return_value = {"jobs": []}
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"items": [], "next_cursor": None}
         mock_response.raise_for_status = MagicMock()
         mock_client.return_value.__enter__.return_value.get.return_value = (
             mock_response
         )
 
-        runner.invoke(
+        result = runner.invoke(
             cron_group,
-            ["list", "--agent-id", "test123"],
+            [
+                "list",
+                "--agent-id",
+                "test123",
+                "--tenant-id",
+                "user-a",
+                "--source-id",
+                "RMASSIST",
+            ],
         )
+        assert result.exit_code == 0, result.output
 
         # Verify X-Agent-Id header was set
         call_args = (

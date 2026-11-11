@@ -10,6 +10,7 @@ from pydantic import (
     Field,
     ValidationInfo,
     model_validator,
+    model_serializer,
 )
 
 from .registry import (
@@ -56,7 +57,20 @@ DEFAULT_SOURCE_SYSTEM_CONFIG = SourceSystemConfig.model_validate(
 )
 
 
-class SourceSystemConfigRecord(BaseModel):
+class _SchedulerSyncResponse(BaseModel):
+    """保存响应可带同步受理结果，普通只读响应维持既有字段集合。"""
+
+    scheduler_sync: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_sync(self, handler):
+        result = handler(self)
+        if self.scheduler_sync is None:
+            result.pop("scheduler_sync", None)
+        return result
+
+
+class SourceSystemConfigRecord(_SchedulerSyncResponse):
     """Source 系统配置持久化记录。"""
 
     source_id: str = Field(..., min_length=1, max_length=64)
@@ -80,7 +94,7 @@ class EffectiveSourceSystemConfig(BaseModel):
     updated_at: datetime | None = None
 
 
-class CurrentSourceSystemConfigResponse(BaseModel):
+class CurrentSourceSystemConfigResponse(_SchedulerSyncResponse):
     """当前请求 source 的原始配置响应。"""
 
     source_id: str = Field(..., min_length=1, max_length=64)

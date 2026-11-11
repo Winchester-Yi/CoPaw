@@ -164,7 +164,7 @@ export function validCronExpr(value: string | undefined): boolean {
   return /^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/.test(value.trim());
 }
 
-/** 规划的执行排程展示：各场景排程摘要去重拼接 */
+/** 规划的执行频率展示：各场景排程摘要去重拼接 */
 export function planFrequency(p: Plan): string {
   const set = new Set((p.items ?? []).map((x) => scheduleLabel(x.schedule)));
   return [...set].join(" / ") || scheduleLabel(undefined);

@@ -17,6 +17,7 @@ export interface ManagedBatch {
   provider_id?: string | null;
   model_id?: string | null;
   dispatch_paused?: boolean;
+  batch_paused?: boolean;
   lock_owner?: string | null;
   active_count: number;
   waiting_count: number;
@@ -40,6 +41,7 @@ export interface ManagedBatchMember {
   error_code: string | null;
   settled_error_code: string | null;
   error_message?: string;
+  error_type?: string | null;
   provider_id: string;
   model_id: string;
   definition_version: number;
@@ -90,6 +92,34 @@ export interface ManagedBatchDetail {
   event_page: number;
   event_page_size: number;
 }
+export type ManagedFailureFilters = {
+  start_time?: string;
+  end_time?: string;
+  status?: string;
+  query?: string;
+};
+export interface ManagedFailureSummary {
+  total: number;
+  queried_at: string;
+  groups: {
+    failure_type: string;
+    label: string;
+    count: number;
+    details: { message: string; count: number }[];
+    error_types?: { error_type: string | null; count: number }[];
+  }[];
+}
+export interface ManagedMemberAttempt {
+  execution_id: string;
+  business_attempt: number;
+  current: boolean;
+  status: string;
+  settled_status: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_type: string | null;
+  error_message: string;
+}
 export interface RetryCandidate {
   member_id: string;
   execution_id: string;
@@ -99,6 +129,7 @@ export interface RetryCandidate {
   business_attempt: number;
 }
 export interface FailureMember extends RetryCandidate {
+  error_type?: string | null;
   error_message?: string;
   error_code?: string | null;
   settled_error_code?: string | null;
@@ -152,6 +183,22 @@ function call<T>(
 }
 /** 所有权限 Header 仍由统一认证层实时产生；不从批次记录推导角色。 */
 export const managedBatchBoard = {
+  memberAttempts: (
+    source: string, batch: string, member: string, signal?: AbortSignal,
+  ) => call<{ items: ManagedMemberAttempt[] }>(
+    source, `${MONITOR}/batches/${idPath(batch)}/members/${idPath(member)}/attempts`, {}, signal,
+  ),
+  pause: (source: string, batch: string, paused: boolean) =>
+    request<{ batch_id: string; batch_paused: boolean }>(
+      `${SCHEDULER}/${idPath(batch)}/pause`,
+      {
+        method: "PUT",
+        headers: { "X-Source-Id": source },
+        body: JSON.stringify({ paused }),
+      },
+    ),
+  failureSummary: (source: string, filters: ManagedFailureFilters, signal?: AbortSignal) =>
+    call<ManagedFailureSummary>(source, `${MONITOR}/failure-summary`, filters, signal),
   batches: (source: string, filters: Filters, signal?: AbortSignal) =>
     call<ManagedBatchList>(source, `${MONITOR}/batches`, filters, signal),
   detail: (

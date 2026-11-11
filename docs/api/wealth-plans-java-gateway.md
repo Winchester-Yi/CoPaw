@@ -88,7 +88,7 @@ Java 入参/返回使用驼峰：
 | POST | `/api/zt/wealth/wmadm/getUserPostionByBrn` | 分发人员 |
 | POST | `/expert/get-sign` | 客户操作签名 |
 
-不向 Python `/api/wealth/*` 或 `/api/user-info/*` 回退。旧 Python handler 保留供已有调用方兼容，本次没有删除共享后端代码或切换全局 API base。
+不向 Python `/api/wealth/*` 或 `/api/user-info/*` 回退。旧 Python `/api/wealth/*` 路由及发布编排已退役；共享机构人员、Cron 和工作流绑定仍由原服务提供。规划表及建表 SQL 保留。
 
 ## 网关部署要求
 
@@ -147,4 +147,4 @@ location ^~ /api/zt/wealth/plans/ {
 
 `GET /zt/wealth/plans` 的 `scenes[]` 需返回同名字段，前端据此回填编辑页和行长工作任务详情。未返回字段的存量规划，在详情中显示未设置策略；编辑时使用默认值。取消编辑不会写入，提交成功后以服务端查询结果为准。
 
-督办配置的localStorage逻辑已移除，旧本地缓存不再读取或自动上传。Java必须依据可信登录态校验行长权限，负责落库和督办执行；本仓库前端不新增独立督办保存接口，也不修改旧Python发布流程。
+督办配置的localStorage逻辑已移除，旧本地缓存不再读取或自动上传。Java必须依据可信登录态校验行长权限，负责落库和督办执行；本仓库前端不新增独立督办保存接口，发布由 Java 处理。

@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS swe_cron_managed_mode_items (
 COMMENT='Scheduler新版调度方式逐对象切换进度表';
 
 CREATE TABLE IF NOT EXISTS swe_cron_managed_trigger_receipts (
+  batch_paused TINYINT(1) NOT NULL DEFAULT 0 COMMENT '仅暂停当前批次',
   receipt_id VARCHAR(64) NOT NULL COMMENT '触发回执ID，固定任务入口及逻辑执行期',
   callback_key CHAR(64) DEFAULT NULL COMMENT '平台稳定日志标识的幂等摘要，没有日志标识时为空',
   tenant_id VARCHAR(128) NOT NULL COMMENT '入口所属租户ID',

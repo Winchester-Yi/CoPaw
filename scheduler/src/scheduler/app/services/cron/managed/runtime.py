@@ -7,7 +7,10 @@ import os
 from contextlib import asynccontextmanager
 
 from ....database.connection import get_db_connection
-from ..capacity_claim import enable_managed_capacity_accounting
+from ..capacity_claim import (
+    enable_managed_capacity_accounting,
+    set_managed_priority,
+)
 from ..scheduling_service import get_cron_scheduling_service
 from .capacity import ManagedCapacityGate
 from .dispatcher import ManagedSweExecutionClient
@@ -17,6 +20,7 @@ from .schema import assert_managed_schema_ready
 from .swe_client import ManagedSweClient
 from .feedback import ManagedCapacityFeedback
 from .board_schema import assert_managed_board_schema_ready
+from .recheck_worker import prepare_recheck_storage
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,7 @@ async def create_managed_worker(db):
     legacy = get_cron_scheduling_service()
     legacy.bind_managed_feedback(ManagedCapacityFeedback(db))
     await assert_managed_board_schema_ready(db)
+    rechecks_enabled = await prepare_recheck_storage(db)
     base = os.environ.get("SCHEDULER_SWE_API_BASE_URL", "")
     resources = ManagedSweClient(base)
     execution = ManagedSweExecutionClient(base)
@@ -39,11 +44,13 @@ async def create_managed_worker(db):
         platform,
         execution,
         capacity=ManagedCapacityGate(legacy),
+        rechecks_enabled=rechecks_enabled,
     )
 
 
 async def prepare_managed_runtime(app):
     """在旧循环启动前只准备一次，结构或配置不足时保留旧启动行为。"""
+    set_managed_priority(False)
     app.state.managed_cron_runtime_prepared = True
     app.state.managed_cron_runtime_ready = False
     app.state.managed_cron_worker = None
@@ -61,6 +68,7 @@ async def prepare_managed_runtime(app):
 
 
 def _completed(app, task):
+    set_managed_priority(False)
     app.state.managed_cron_runtime_ready = False
     if not task.cancelled() and task.exception() is not None:
         logger.error("新版定时后台异常退出，需要核对服务日志和共库登记")
@@ -104,11 +112,13 @@ async def managed_lifespan(app):
     app.state.managed_cron_task = task
     app.state.managed_cron_stop_event = stop_event
     app.state.managed_cron_runtime_ready = True
+    set_managed_priority(True)
     task.add_done_callback(lambda done: _completed(app, done))
     logger.info("新版定时后台已启动，只恢复已受理的新协议工作")
     try:
         yield
     finally:
+        set_managed_priority(False)
         await _stop(task, stop_event)
         app.state.managed_cron_runtime_ready = False
         logger.info("新版定时后台已停止")

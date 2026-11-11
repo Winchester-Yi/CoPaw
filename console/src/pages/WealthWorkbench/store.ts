@@ -19,6 +19,7 @@ import {
   operationsIdentity,
   useWealthOperations,
 } from "./operations";
+import { canUseExcelDistribution } from "./distribution/excelAccess";
 import { throwIfRequestAborted } from "./abortSignal";
 import { defaultMonitoring, type SceneMonitoring } from "./monitoring";
 import {
@@ -123,6 +124,7 @@ interface WealthState {
   /** 分发目标用户池（仅行长/中台加载） */
   targets: DistributeTarget[];
   targetsLoaded: boolean;
+  distributionBlocked: boolean;
   /** 中台当前浏览的支行；targets 保留跨支行人员信息用于发布。 */
   targetBranch: DistributeBranch | null;
   branchTargetSapIds: string[];
@@ -181,10 +183,16 @@ interface WealthState {
   // —— 规划生命周期 ——
   resetPlanForm: () => void;
   editPlan: (id: string) => void;
-  publishPlan: () => Promise<boolean>;
+  publishPlan: (excel?: {
+    targets: DistributeTarget[];
+    planFormVersion: number;
+    contextVersion: number;
+    userId: string | null;
+  }) => Promise<boolean>;
   removePlan: (id: string) => Promise<void>;
 
   // —— 全局 UI ——
+  markInsuranceCustomerTraced: (custUid: string) => void;
   openDialog: (dialog: DialogState) => void;
   closeDialog: () => void;
   toast: (text: string) => void;
@@ -382,6 +390,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
   editingId: null,
   targets: [],
   targetsLoaded: false,
+  distributionBlocked: false,
   targetBranch: null,
   branchTargetSapIds: [],
   targetSapIds: [],
@@ -563,6 +572,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     const requestSeq = ++targetRequestSeq;
     set({
       targetsLoaded: false,
+      distributionBlocked: false,
       targetBranch: branch ?? null,
       branchTargetSapIds: [],
     });
@@ -771,6 +781,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       targetSapIds: [],
       targets: [],
       targetsLoaded: false,
+      distributionBlocked: false,
       targetBranch: null,
       branchTargetSapIds: [],
       dialog: null,
@@ -784,9 +795,15 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     const items = p.items ? JSON.parse(JSON.stringify(p.items)) : [];
     const draft = normalizeItems({ name: p.name, items });
     const targetSapIds = p.targetSapIds ?? [];
+    const targetsBySapId = new Map<string, DistributeTarget>();
+    for (const target of p.targets ?? []) {
+      if (!targetsBySapId.has(target.sapId)) {
+        targetsBySapId.set(target.sapId, target);
+      }
+    }
     const targets = targetSapIds.map(
       (sapId) =>
-        p.targets?.find((target) => target.sapId === sapId) ?? {
+        targetsBySapId.get(sapId) ?? {
           sapId,
           name: sapId,
           orgName: "",
@@ -800,13 +817,30 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
       targetSapIds,
       targets,
       targetsLoaded: false,
+      distributionBlocked: false,
       targetBranch: null,
       branchTargetSapIds: [],
     });
   },
 
-  publishPlan: async () => {
+  publishPlan: async (excel) => {
     const state = get();
+    const userId = useIframeStore.getState().userId;
+    if (
+      excel &&
+      (!canUseExcelDistribution(userId) ||
+        excel.userId !== userId ||
+        !needsDistributeTargets(state.accountId) ||
+        excel.planFormVersion !== state.planFormVersion ||
+        excel.contextVersion !== state.contextVersion)
+    ) {
+      get().toast("分发权限或规划已变更，请重新确认名单");
+      return false;
+    }
+    if (!excel && state.accountId === "middle" && state.distributionBlocked) {
+      get().toast("请等待人员查询完成，或重试、取消失败的待选机构");
+      return false;
+    }
     if (
       isOperationsMode() &&
       state.editingId &&
@@ -822,7 +856,7 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     }
     const account = currentAccountOf(state);
     // 客户经理的规划只发给自己；行长/中台必须至少选择一个分发目标
-    const targets = buildPublishTargets(state, account);
+    const targets = excel?.targets ?? buildPublishTargets(state, account);
     if (needsDistributeTargets(account.id) && !targets.length) {
       get().toast("请至少选择一个分发目标");
       return false;
@@ -893,6 +927,20 @@ export const useWealthStore = create<WealthState>()((set, get) => ({
     }
   },
 
+  markInsuranceCustomerTraced: (custUid) =>
+    set((state) => {
+      const mark = (rows: Customer[]) =>
+        rows.map((customer) =>
+          customer.custUid === custUid && customer.category === "保险"
+            ? { ...customer, traced: 1 }
+            : customer,
+        );
+      return {
+        customers: mark(state.customers),
+        pendingCustomers: mark(state.pendingCustomers),
+        doneCustomers: mark(state.doneCustomers),
+      };
+    }),
   openDialog: (dialog) => set({ dialog }),
   closeDialog: () => set({ dialog: null }),
 

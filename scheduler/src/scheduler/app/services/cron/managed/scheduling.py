@@ -24,6 +24,8 @@ from .repository import ManagedCronRepository
 from .storage import insert, transaction
 from .batch_members import record_batch_members
 from .date_policy import reason as date_reason
+from .calendar_policy import TriggerObservation, admission
+from ..workday_calendar import CalendarService, CalendarStore
 
 RECEIPTS = "swe_cron_managed_trigger_receipts"
 logger = logging.getLogger(__name__)
@@ -62,9 +64,10 @@ class TriggerGrant:
 
 
 class ManagedSchedulingService:
-    def __init__(self, db, *, clock=None):
+    def __init__(self, db, *, clock=None, calendar=None):
         self.db = db
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.calendar = calendar or CalendarService(store=CalendarStore(db))
 
     async def accept(self, caller, body, kind):
         if kind not in {"ordinary", "batch"}:
@@ -82,7 +85,24 @@ class ManagedSchedulingService:
         receipt_id = str(uuid4())
         identifier = trigger_id(body) or receipt_id
         now = self.clock().astimezone(timezone.utc)
-        logical, physical = trigger_times(body, binding, now)
+        logical, physical, time_basis = trigger_times(body, binding, now)
+        # 上游 HTTP 和日期缓存写入不能占用用户任务事务或批次行锁。
+        decision = await admission(
+            json.loads(root["spec_json"]),
+            logical,
+            self.calendar,
+            root["definition_version"],
+        )
+        decision["time_basis"] = time_basis
+        observation = TriggerObservation(
+            binding,
+            kind,
+            logical,
+            physical,
+            receipt_id,
+            now,
+            decision,
+        )
         async with transaction(self.db) as tx:
             await tx.fetch_one(
                 f"SELECT job_id FROM swe_cron_jobs_v2 WHERE {WHERE_JOB} FOR UPDATE",
@@ -96,13 +116,9 @@ class ManagedSchedulingService:
                 tx,
                 caller,
                 root,
-                binding,
-                kind,
-                logical,
-                physical,
-                receipt_id,
-                now,
+                observation,
             )
+            response["trigger_time_basis"] = time_basis
             await insert(
                 tx,
                 RECEIPTS,
@@ -140,14 +156,16 @@ class ManagedSchedulingService:
         tx,
         caller,
         root,
-        binding,
-        kind,
-        logical,
-        physical,
-        receipt_id,
-        now,
+        observation,
     ):
+        binding = observation.binding
+        kind = observation.kind
+        physical = observation.physical
+        receipt_id = observation.receipt_id
+        now = observation.now
         reason = self._gate(root, binding, physical, now)
+        if not reason and not observation.calendar["allowed"]:
+            reason = observation.calendar["skipped"]
         if kind == "batch":
             control = await tx.fetch_one(
                 f"SELECT state FROM {CONTROLS} WHERE {WHERE_JOB}",
@@ -197,13 +215,8 @@ class ManagedSchedulingService:
             caller,
             root,
             selected,
-            {
-                "logical": logical,
-                "receipt_id": receipt_id,
-                "batch_id": batch_id,
-                "kind": kind,
-                "received_at": now,
-            },
+            batch_id,
+            observation,
         )
         if kind == "ordinary":
             return {
@@ -262,12 +275,13 @@ class ManagedSchedulingService:
         caller,
         root,
         selected,
-        trigger,
+        batch_id,
+        observation,
     ):
-        logical, receipt_id, batch_id, kind = (
-            trigger[name]
-            for name in ("logical", "receipt_id", "batch_id", "kind")
-        )
+        logical = observation.logical
+        receipt_id = observation.receipt_id
+        kind = observation.kind
+
         key = tuple(root[name] for name in IDENTITY_FIELDS)
         ranked = await ordered_members(
             tx,
@@ -298,11 +312,11 @@ class ManagedSchedulingService:
                 "dispatch_priority": rank,
                 "dispatch_order": entry["dispatch_order"],
                 "viewer_heat_score": entry["viewer_heat_score"],
+                "calendar_admission": observation.calendar,
             }
             if kind == "batch":
                 metadata["batch_created_at"] = (
-                    trigger["received_at"]
-                    .astimezone(timezone.utc)
+                    observation.now.astimezone(timezone.utc)
                     .replace(tzinfo=None)
                     .isoformat(" ")
                 )

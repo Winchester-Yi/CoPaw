@@ -76,6 +76,7 @@ _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
         GOAL_DRAFT_DELEGATION_META_KEY,
         "expert_main_binding",
+        "multi_agent_mode_enabled",
         "scenario_preset_snapshot",
         "scenario_preset_snapshot_source",
     },
@@ -105,6 +106,12 @@ class ChatUpdateRequest(BaseModel):
     updated_at: datetime | None = None
     meta: dict[str, Any] | None = None
     status: str | None = None
+
+
+class MultiAgentModeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = Field(strict=True)
+    expected_revision: int = Field(ge=0, strict=True)
 
 
 def _merge_chat_update(
@@ -1841,6 +1848,57 @@ async def get_chat_expert_binding(
     ):
         view = view.model_copy(update={"reason": "expert_main_disabled"})
     return view
+
+
+@router.put("/{chat_id}/multi-agent-mode")
+async def put_multi_agent_mode(
+    chat_id: str,
+    request: Request,
+    patch: MultiAgentModeUpdate,
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    chat = await mgr.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    _authorize_chat(request, chat, workspace)
+    try:
+        chat = await mgr.set_multi_agent_mode(
+            chat_id,
+            patch.enabled,
+            patch.expected_revision,
+        )
+    except ExpertBindingConflict as exc:
+        latest = await mgr.get_chat(chat_id)
+        if latest is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Chat not found",
+            ) from exc
+        view = await binding_view(
+            workspace,
+            latest,
+            enabled=await expert_main_enabled_for_request(request),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "expert_binding_changed",
+                "expert_binding": view.model_dump(),
+                "multi_agent_mode_enabled": latest.meta.get(
+                    "multi_agent_mode_enabled",
+                )
+                is True,
+            },
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat not found") from exc
+    view = await binding_view(
+        workspace,
+        chat,
+        enabled=await expert_main_enabled_for_request(request),
+    )
+    return {"enabled": patch.enabled, "expert_binding": view.model_dump()}
 
 
 @router.put("/{chat_id}/expert-binding", response_model=ExpertBindingView)

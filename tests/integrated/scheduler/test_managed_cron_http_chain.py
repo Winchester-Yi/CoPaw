@@ -71,6 +71,7 @@ async def chain(monkeypatch):
     from swe.app.crons.managed_execution import ManagedExecutionService
     from swe.app.crons.managed_resources import ResourcePreparer
     from swe.app.crons.managed_results import ExecutionWriter
+    from tests.fakes.managed_source_config import ManagedSourceConfigService
 
     db, chats, engine, boundary = (
         CallbackDatabase(),
@@ -80,6 +81,7 @@ async def chain(monkeypatch):
     )
     swe = FastAPI()
     swe.state.db_connection = db
+    swe.state.source_system_config_service = ManagedSourceConfigService()
     swe.include_router(managed_api.router, prefix="/api")
     swe.include_router(managed_execution_api.router, prefix="/api")
     sent = []

@@ -7,10 +7,16 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from .managed_history import history_values, safe_metadata
+from .managed_history import (
+    history_values,
+    safe_metadata,
+    notification_calendar,
+    notification_calendar_enabled,
+)
 from .managed_events import append_run_event
 from .managed_failure import public_error_message
 from .managed_daily_retry import finalize_daily_history, newer_success_exists
+from .managed_recheck_store import register_recheck
 from ..source_system_config.runtime import (
     get_current_source_system_config,
     resolve_cron_unread_auto_pause_config,
@@ -72,6 +78,7 @@ class ExecutionOutcome:
     input_snapshot: dict | None = None
     execution_meta: dict | None = None
     executor_leader: str = ""
+    recheck_output: str | None = None
 
 
 def utc_now():
@@ -298,13 +305,31 @@ class ExecutionWriter:
     async def complete(self, execution_id, key, owner, outcome):
         if outcome.status not in TERMINAL:
             raise ValueError("invalid_cron_execution_status")
+        completed_at = utc_now()
+        calendar_result = None
+        if notification_calendar_enabled(outcome):
+            observed = await self.get(execution_id, key)
+            if (
+                observed["status"] == "running"
+                and observed["run_owner"] == owner
+            ):
+                calendar_result = await notification_calendar(
+                    observed,
+                    completed_at,
+                )
         async with self.db.transaction():
             definition, run = await self._locked(execution_id, key)
             if run["status"] in TERMINAL:
                 return False
             if run["status"] != "running" or run["run_owner"] != owner:
                 raise ExecutionLeaseLost("cron_execution_lease_lost")
-            await self._complete(definition, run, outcome)
+            await self._complete(
+                definition,
+                run,
+                outcome,
+                completed_at=completed_at,
+                calendar_result=calendar_result,
+            )
         logger.info(
             "执行结果事务已提交 execution_id=%s status=%s",
             execution_id,
@@ -312,8 +337,16 @@ class ExecutionWriter:
         )
         return True
 
-    async def _complete(self, definition, run, outcome):
-        now = utc_now()
+    async def _complete(
+        self,
+        definition,
+        run,
+        outcome,
+        *,
+        completed_at=None,
+        calendar_result=None,
+    ):
+        now = completed_at or utc_now()
         history_id = await _insert_history(
             self.db,
             history_values(
@@ -321,6 +354,7 @@ class ExecutionWriter:
                 outcome,
                 now,
                 deleted=bool(definition["deleted_at"]),
+                calendar_result=calendar_result,
             ),
         )
         await self._finalize_previous_history(run)
@@ -351,6 +385,8 @@ class ExecutionWriter:
             )
         else:
             await self._release_stale_running(run, outcome)
+        if outcome.status == "success":
+            await register_recheck(self.db, definition, run, outcome, now)
 
     async def _finalize_previous_history(self, run):
         """与新历史同事务替换业务重试结果，不影响其他任务或其他批次。"""

@@ -453,6 +453,7 @@ class CronExecutor:
             executor_leader=str(result.get("executor_leader") or ""),
             execution_meta=merged_meta or None,
             status=str(result.get("status") or "success"),
+            recheck_output=result.get("recheck_output"),
         )
 
     def _resolve_execution_model(
@@ -1828,6 +1829,8 @@ class CronExecutor:
             result["execution_meta"] = self._stream_state_execution_meta(
                 stream_state,
             )
+            if job.recheck and stream_state.output_source == "persisted":
+                result["recheck_output"] = "\n".join(stream_state.output_parts)
             return result
 
         self._log_agent_cancelled_before_completed(job, stream_state)
@@ -2115,6 +2118,8 @@ class CronExecutor:
             result["execution_meta"] = self._stream_state_execution_meta(
                 stream_state,
             )
+            if job.recheck and stream_state.output_source == "persisted":
+                result["recheck_output"] = "\n".join(stream_state.output_parts)
             if (
                 result.get("status") == "success"
                 and not stream_state.assistant_message_seen

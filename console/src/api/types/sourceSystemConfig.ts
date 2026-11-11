@@ -1,3 +1,5 @@
+import type { SystemSyncSubmission } from "./systemCron";
+
 export interface SourceSystemConfig extends Record<string, unknown> {
   system_prompt_injections?: string[];
   approval_notifications?: {
@@ -38,6 +40,7 @@ export interface CurrentSourceSystemConfigResponse {
   is_default: boolean;
   updated_by?: string | null;
   updated_at?: string | null;
+  scheduler_sync?: SystemSyncSubmission;
 }
 
 export interface CurrentSourceSystemConfigUpdateRequest {

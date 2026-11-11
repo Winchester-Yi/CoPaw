@@ -55,6 +55,69 @@ def _make_channel(**overrides: Any) -> ZhaohuChannel:
     return ch
 
 
+@pytest.mark.asyncio
+async def test_task_progress_reads_scheduler_without_legacy_manager(
+    monkeypatch,
+):
+    from swe.config.context import encode_scope_id
+    from swe.app.crons.managed_query_client import ManagedCronQueryClient
+
+    class Workspace:
+        tenant_id = encode_scope_id("alice", "bank")
+        agent_id = "default"
+
+        @property
+        def cron_manager(self):
+            raise AssertionError("must not read legacy manager")
+
+    reader = AsyncMock(
+        return_value=[
+            {
+                "job_id": "stable-job",
+                "task_name": "报告",
+                "meta": {"task_chat_id": "stable-chat"},
+            },
+        ],
+    )
+    monkeypatch.setattr(ManagedCronQueryClient, "query_progress", reader)
+    channel = _make_channel()
+    channel._workspace = Workspace()
+    channel._should_include_link = AsyncMock(return_value=True)
+    channel._build_task_progress_card = MagicMock(return_value=[])
+    channel.send_custom_card = AsyncMock(return_value=(0, "ok"))
+    assert await channel._query_task_progress("alice", "open-id")
+    assert reader.await_args.args[:3] == ("alice", "bank", "default")
+    cards = channel._build_task_progress_card.call_args.args[0]
+    assert cards[0]["job_id"] == "stable-job"
+    assert cards[0]["task_chat_id"] == "stable-chat"
+
+
+@pytest.mark.asyncio
+async def test_task_progress_failure_does_not_send_empty_success_card(
+    monkeypatch,
+):
+    from swe.config.context import encode_scope_id
+    from swe.app.crons.managed_query_client import ManagedCronQueryClient
+
+    channel = _make_channel()
+    channel._workspace = type(
+        "Workspace",
+        (),
+        {
+            "tenant_id": encode_scope_id("alice", "bank"),
+            "agent_id": "default",
+        },
+    )()
+    monkeypatch.setattr(
+        ManagedCronQueryClient,
+        "query_progress",
+        AsyncMock(side_effect=RuntimeError("unavailable")),
+    )
+    channel.send_custom_card = AsyncMock()
+    assert not await channel._query_task_progress("alice", "open-id")
+    channel.send_custom_card.assert_not_awaited()
+
+
 def _decode_action_tag(url: str) -> dict[str, Any]:
     params = parse_qs(urlparse(url).query)
     encoded = params["actionParams"][0]

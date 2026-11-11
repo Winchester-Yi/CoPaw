@@ -20,7 +20,8 @@ async def group(setup, targets=None):
     )
 
     db, caller, management = setup
-    root = await create_source(setup, "batch_enabled")
+    # 排序测试跨越周末，显式排除日历策略对排序断言的干扰。
+    root = await create_source(setup, "batch_enabled", allow_non_workday=True)
     command = payload(targets=targets)
     command.update(enable_offset=False, offset_window_hours=0)
     task = await BroadcastStore(db).submit(caller, root["job_id"], command)

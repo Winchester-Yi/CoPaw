@@ -25,6 +25,9 @@ import type {
 import { useIframeStore } from "@/stores/iframeStore";
 import { useSourceSystemConfigStore } from "@/stores/sourceSystemConfigStore";
 import { DEFAULT_SOURCE_ID } from "@/constants/identity";
+import { useCronContext } from "@/hooks/useCronContext";
+import { SystemCronSyncStatus } from "@/components/SystemCronSyncStatus";
+import type { SystemSyncSubmission } from "@/api/types/systemCron";
 
 import {
   ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
@@ -100,6 +103,14 @@ export default function SystemConfigPage() {
     (state) => state.sourceId,
   );
   const canManage = isSuperManager || manager;
+  const syncContext = useCronContext();
+  const [syncReceipt, setSyncReceipt] = useState<{
+    source: string;
+    value: SystemSyncSubmission;
+  } | null>(null);
+  const pendingLoad = useRef<{ sourceId: string; requestId: number } | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -168,6 +179,7 @@ export default function SystemConfigPage() {
 
   useEffect(() => {
     if (!canManage) {
+      pendingLoad.current = null;
       requestSeqRef.current += 1;
       setLoading(false);
       setSaving(false);
@@ -195,8 +207,11 @@ export default function SystemConfigPage() {
     if (record?.source_id === activeSourceId) {
       return;
     }
+    // 清空旧草稿会再次渲染，同一来源的在途读取不能被二次请求作废并吞掉错误。
+    if (pendingLoad.current?.sourceId === activeSourceId) return;
 
     const request = beginRequest(activeSourceId);
+    pendingLoad.current = request;
     setLoading(true);
     setSaving(false);
     setRequestError(null);
@@ -230,6 +245,8 @@ export default function SystemConfigPage() {
         );
       })
       .finally(() => {
+        if (pendingLoad.current?.requestId === request.requestId)
+          pendingLoad.current = null;
         if (isCurrentRequest(request)) {
           setLoading(false);
         }
@@ -519,6 +536,13 @@ export default function SystemConfigPage() {
       setRecord(nextRecord);
       setDraftConfig(nextRecord.config);
       setPromptSegments(readSystemPromptInjections(nextRecord.config));
+      setSyncReceipt({
+        source: request.sourceId,
+        value: nextRecord.scheduler_sync ?? {
+          submission_status: "failed",
+          error_code: "system_sync_receipt_unavailable",
+        },
+      });
       await loadEffectiveConfig(request.sourceId);
       if (!isCurrentRequest(request)) {
         return;
@@ -826,7 +850,7 @@ export default function SystemConfigPage() {
         </section>
         <section className={styles.toolOutputSection}>
           <div className={styles.switchRow}>
-            <span className={styles.switchTitle}>周末不发招呼完成通知</span>
+            <span className={styles.switchTitle}>非工作日不发招呼完成通知</span>
             <Switch
               checked={cronNotificationConfig.skip_weekend_zhaohu_enabled}
               disabled={formDisabled}
@@ -956,10 +980,17 @@ export default function SystemConfigPage() {
     setRequestError(null);
     setValidationError(null);
     try {
-      await sourceSystemConfigApi.deleteCurrent();
+      const deleted = await sourceSystemConfigApi.deleteCurrent();
       if (!isCurrentRequest(request)) {
         return;
       }
+      setSyncReceipt({
+        source: request.sourceId,
+        value: deleted?.scheduler_sync ?? {
+          submission_status: "failed",
+          error_code: "system_sync_receipt_unavailable",
+        },
+      });
       const nextRecord = await sourceSystemConfigApi.getCurrent();
       if (
         !isCurrentRequest(request) ||
@@ -1445,7 +1476,7 @@ export default function SystemConfigPage() {
                         {t(
                           "sourceSystemConfigPage.cronSkipWeekendZhaohuTitle",
                           {
-                            defaultValue: "周末不发招呼完成通知",
+                            defaultValue: "非工作日不发招呼完成通知",
                           },
                         )}
                       </span>
@@ -1454,7 +1485,7 @@ export default function SystemConfigPage() {
                           "sourceSystemConfigPage.cronSkipWeekendZhaohuDescription",
                           {
                             defaultValue:
-                              "开启后，按任务时区判断原始通知时间，落在周六或周日的定时任务运行结果不发送招呼完成通知。",
+                              "新版任务按北京时间的原定通知日期（含延迟）判断非工作日；仅抑制招呼提醒，不影响执行结果和未读。旧任务保留原周末规则。",
                           },
                         )}
                       </span>
@@ -1600,6 +1631,18 @@ export default function SystemConfigPage() {
                   </div>
                 </section>
               </div>
+              {canManage && (
+                <SystemCronSyncStatus
+                  context={syncContext}
+                  scope="source"
+                  taskTypes={["task_session_cleanup", "archive_maintenance"]}
+                  submission={
+                    syncReceipt?.source === activeSourceId
+                      ? syncReceipt.value
+                      : undefined
+                  }
+                />
+              )}
             </Card>
 
             <Card

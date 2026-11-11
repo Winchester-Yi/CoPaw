@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """只读取已登记执行，按固定失败窗口分页，再以最新事实筛选。"""
 
+from .....config.constant import CRON_BATCH_MAX_ATTEMPTS
 from .daily_retry_policy import (
-    NATIVE_BATCH_ATTEMPTS,
     excluded_failure,
     failure_time,
     json_object,
@@ -135,6 +135,6 @@ def native_retry_reason(row, current, member):
     ] or row["enqueued_state_version"] < (
         current.get("state_queue_invalidation_version") or 0
     )
-    if attempt < NATIVE_BATCH_ATTEMPTS and not invalidated:
+    if attempt < CRON_BATCH_MAX_ATTEMPTS and not invalidated:
         return "cron_daily_retry_native_retry_pending"
     return None

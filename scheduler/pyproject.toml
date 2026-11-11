@@ -13,6 +13,10 @@ dependencies = [
     "tzdata>=2024.1",
 ]
 
+[project.optional-dependencies]
+# 仅从行内批准的软件源安装；未安装时保留缓存及明确的日历降级。
+workday-auth = ["ZA33_CMBSM==1.17.43"]
+
 [tool.setuptools.dynamic]
 version = {attr = "scheduler.__version__.__version__"}
 

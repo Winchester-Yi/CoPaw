@@ -31,6 +31,14 @@ async def test_actual_app_lifespan_starts_and_stops_new_worker_inside_old_lifecy
 ):
     from scheduler.app import _app
     from scheduler.app.services.cron.managed import runtime
+    from scheduler.app.services.cron import capacity_claim
+
+    monkeypatch.setattr(
+        capacity_claim,
+        "MANAGED_PRIORITY_ENABLED",
+        False,
+        raising=False,
+    )
 
     worker, order = Worker(), []
 
@@ -55,10 +63,12 @@ async def test_actual_app_lifespan_starts_and_stops_new_worker_inside_old_lifecy
     async with _app.app.router.lifespan_context(app):
         await asyncio.wait_for(worker.started.wait(), 2)
         assert app.state.managed_cron_runtime_ready
+        assert capacity_claim.MANAGED_PRIORITY_ENABLED
         assert not app.state.managed_cron_task.done()
     assert worker.stopped.is_set()
     assert app.state.managed_cron_task.done()
     assert not app.state.managed_cron_runtime_ready
+    assert not capacity_claim.MANAGED_PRIORITY_ENABLED
     assert order == ["legacy_start", "legacy_stop"]
 
 

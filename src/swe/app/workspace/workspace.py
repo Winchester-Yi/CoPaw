@@ -21,6 +21,7 @@ from .service_factories import (
     create_chat_service,
     create_channel_service,
     create_agent_config_watcher,
+    refresh_system_cron,
 )
 from ..runner import AgentRunner
 from ..runner.task_tracker import TaskTracker
@@ -421,6 +422,16 @@ class Workspace:
                 start_method="start",
                 stop_method="stop",
                 priority=40,
+                concurrent_init=False,
+            ),
+        )
+
+        # 新版系统刷新不再依赖旧 CronManager，旧用户任务仍由上面的服务恢复。
+        sm.register(
+            ServiceDescriptor(
+                name="system_cron_refresh",
+                post_init=refresh_system_cron,
+                priority=45,
                 concurrent_init=False,
             ),
         )

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...config.context import encode_scope_id, is_valid_identity_value
 from .managed_diagnostics import format_storage_error
 from .managed_resources import ResourcePreparer
+from .managed_migration import uses_original_resources
 
 router = APIRouter(
     prefix="/internal/cron/managed",
@@ -100,6 +101,7 @@ async def _operation(request, body):
         raise HTTPException(404, "cron_operation_not_found")
     if row["state_job_id"] is None:
         raise HTTPException(503, "cron_state_record_missing")
+    row["_migration"] = await uses_original_resources(db, row)
     return row
 
 
@@ -200,7 +202,9 @@ async def _initialize_resources(request, body, action):
         row["job_id"],
         row["status"],
     )
-    if row["status"] == "completed":
+    if row["status"] == "completed" or (
+        action == "cleanup" and row.get("_migration")
+    ):
         return None
     # 工作区初始化可能启动后台任务，必须放在业务事务外。
     # 避免新任务通过 ContextVar 继承正在使用的数据库连接和事务。
@@ -257,6 +261,8 @@ async def _cleanup(request, row, service):
         return {"cleaned": False, "deferred": True}
     if row["status"] == "completed":
         return {"cleaned": True}
+    if row.get("_migration"):
+        return {"cleaned": True, "original_resources_preserved": True}
     try:
         return await service.cleanup(_spec(row), row)
     except HTTPException:

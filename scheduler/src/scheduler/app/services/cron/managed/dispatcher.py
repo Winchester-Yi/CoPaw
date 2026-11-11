@@ -18,6 +18,7 @@ from .run_accounting import occupied_run_sql
 from .swe_client import checked_base
 from .dispatch_events import append_run_event
 from .date_policy import reason as date_reason
+from .batch_pause import batch_for_execution, lock_batch
 
 logger = logging.getLogger(__name__)
 DISPATCH_RETRY_DELAYS_SECONDS = (5, 10, 20, 30, 60)
@@ -47,6 +48,9 @@ class ManagedSweExecutionClient:
         """恢复既有执行的结果提交，不调用执行业务入口。"""
         return await self._call("recover", row, caller)
 
+    async def recheck(self, action, row, caller):
+        return await self._call(f"rechecks/{action}", row, caller)
+
     async def _call(self, action, row, caller):
         headers = {
             **self.headers,
@@ -58,8 +62,11 @@ class ManagedSweExecutionClient:
         }
         if caller.is_manager:
             headers["X-User-Role"] = "manager"
-        body = {"execution_id": row["execution_id"], "job_id": row["job_id"]}
-        if action == "execute":
+        identity = (
+            "recheck_id" if action.startswith("rechecks/") else "execution_id"
+        )
+        body = {identity: row[identity], "job_id": row["job_id"]}
+        if action.endswith("execute"):
             body["dispatch_token"] = row["dispatch_owner"]
         url = f"{self.base_url}/api/internal/cron/managed/{action}"
         if self.http is not None:
@@ -74,7 +81,7 @@ class ManagedSweExecutionClient:
         result = response.json()
         if (
             not isinstance(result, dict)
-            or result.get("execution_id") != row["execution_id"]
+            or result.get(identity) != row[identity]
         ):
             raise ValueError("invalid_swe_execution_receipt")
         return result
@@ -195,7 +202,22 @@ class ExecutionDispatcher:
         permit = await self._capacity_permit(row, recovery, capacity_permit)
         if self.capacity is not None and not recovery and permit is None:
             return None
-        return await self._claim_transaction(row, retry, recovery, permit)
+        receipt = None if recovery else await batch_for_execution(self.db, row)
+        if (
+            not recovery
+            and receipt is None
+            and json.loads(row.get("dispatch_meta_json") or "{}").get(
+                "batch_id",
+            )
+        ):
+            return None
+        return await self._claim_transaction(
+            row,
+            retry,
+            recovery,
+            permit,
+            receipt,
+        )
 
     async def _capacity_permit(self, row, recovery, capacity_permit):
         permit = capacity_permit
@@ -211,10 +233,23 @@ class ExecutionDispatcher:
             raise ValueError("cron_capacity_permit_scope_conflict")
         return permit
 
-    async def _claim_transaction(self, row, retry, recovery, permit):
+    async def _claim_transaction(
+        self,
+        row,
+        retry,
+        recovery,
+        permit,
+        receipt=None,
+    ):
         async with transaction(self.db) as tx:
             if permit is not None and not await self.capacity.lock(tx, permit):
                 return None
+            if receipt is not None:
+                current_batch = await lock_batch(tx, receipt)
+                if (
+                    current_batch is None or current_batch["batch_paused"]
+                ) and row["status"] not in {"accepted", "running"}:
+                    return None
             # 与 SWE 启动及单任务启停遵守同样的定义→执行锁顺序。
             key = tuple(row[name] for name in IDENTITY_FIELDS)
             where = " AND ".join(f"{name}=%s" for name in IDENTITY_FIELDS)

@@ -45,6 +45,16 @@ class ManagedSweClient:
     async def cleanup(self, operation, caller):
         return await self._call("cleanup", operation, caller)
 
+    async def migration_snapshot(self, caller, job_id):
+        return await self._call(
+            "migration-snapshot",
+            {"operation_id": "snapshot", "job_id": job_id},
+            caller,
+        )
+
+    async def migration_stop_legacy(self, operation, caller):
+        return await self._call("migration-stop-legacy", operation, caller)
+
     async def _call(self, action, operation, caller):
         logger.info(
             "调用 SWE 执行资源接口 action=%s operation_id=%s job_id=%s",
@@ -70,6 +80,8 @@ class ManagedSweClient:
             "operation_id": operation["operation_id"],
             "job_id": operation["job_id"],
         }
+        if action == "migration-snapshot":
+            body.pop("operation_id")
         url = f"{self.base_url}/api/internal/cron/managed/{action}"
         if self.http is not None:
             response = await self.http.post(url, headers=headers, json=body)

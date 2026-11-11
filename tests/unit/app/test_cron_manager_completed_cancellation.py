@@ -1091,6 +1091,12 @@ def test_completed_agent_output_cancelled_before_stream_close_is_cancelled(
 ):
     """未确认 session 提交时，完成消息后的取消必须保持 cancelled。"""
     info_messages: list[str] = []
+    monkeypatch.setattr(
+        CronExecutor,
+        "_resolve_execution_model",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(CronExecutor, "_apply_auth_token", AsyncMock())
 
     def fake_executor_info(message, *args, **_kwargs) -> None:
         try:
@@ -1108,9 +1114,17 @@ def test_completed_agent_output_cancelled_before_stream_close_is_cancelled(
         job = _build_agent_job()
         channel_manager = _ChannelManager()
         monitor = _MonitorSyncClient()
+        output_seen = asyncio.Event()
+
+        class ObservedRunner(_Runner):
+            async def stream_query(self, request):
+                async for event in super().stream_query(request):
+                    yield event
+                    output_seen.set()
+
         manager = CronManager(
             repo=_Repo(job),
-            runner=_Runner(),
+            runner=ObservedRunner(),
             channel_manager=channel_manager,
         )
         manager._monitor_sync_client = (
@@ -1123,7 +1137,8 @@ def test_completed_agent_output_cancelled_before_stream_close_is_cancelled(
                 is_manual=False,
             ),
         )
-        await asyncio.sleep(0.05)
+        # 等待真实输出阶段，避免机器配置加载耗时改变取消发生的位置。
+        await asyncio.wait_for(output_seen.wait(), timeout=5)
         assert channel_manager.events == []
 
         task.cancel()

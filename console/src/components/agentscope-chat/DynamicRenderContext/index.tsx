@@ -27,17 +27,24 @@ interface DynamicRenderContextValue {
   initialize: (options?: { skipPreload?: boolean }) => Promise<void>;
   /** 获取模板内容（从缓存或重新获取） */
   getTemplateContent: (templateId: number) => Promise<string | null>;
-  /** 根据模版名称获取模版ID */
+  /** 根据模板名称获取模板ID */
   getTemplateIdByName: (templateName: string) => number | null;
-  /** 判断模版是否为静态模版（templateFlag === 'no_query'） */
+  /** 判断模板是否为静态模板（templateFlag === 'no_query'） */
   isStaticTemplate: (templateId: number) => boolean;
   /** 渲染模板数据 */
   renderTemplate: (
     templateId: number,
     data: Record<string, any>
   ) => Promise<string | null>;
-  /** 渲染静态模版（无需数据获取，直接渲染模版内容） */
+  /** 渲染静态模板（无需数据获取，直接渲染模板内容） */
   renderStaticTemplate: (templateId: number) => Promise<string | null>;
+  /** 直接用 templateName 获取模板内容（不依赖 templateId） */
+  getTemplateContentByName: (templateName: string) => Promise<string | null>;
+  /** 直接用 templateName 渲染模板 */
+  renderTemplateByName: (
+    templateName: string,
+    data: Record<string, any>
+  ) => Promise<string | null>;
   templateList
 }
 
@@ -50,6 +57,8 @@ const DynamicRenderContext = createContext<DynamicRenderContextValue>({
   isStaticTemplate: () => false,
   renderTemplate: async () => null,
   renderStaticTemplate: async () => null,
+  getTemplateContentByName: async () => null,
+  renderTemplateByName: async () => null,
   templateList: [],
 });
 
@@ -68,6 +77,8 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
   const templateCacheRef = useRef<Map<number, TemplateCache>>(new Map());
   // 正在加载的 Promise 缓存，避免重复请求
   const loadingPromiseRef = useRef<Map<number, Promise<string>>>(new Map());
+  // 按 templateName 去重的 Promise 缓存（模板列表未加载时使用）
+  const loadingByNameRef = useRef<Map<string, Promise<string>>>(new Map());
   // 初始化状态标记
   const initializedRef = useRef(false);
   // requestIdleCallback 的 ID，用于清理
@@ -85,6 +96,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
         cancelIdleCallback(idleCallbackIdRef.current);
         idleCallbackIdRef.current = null;
       }
+      loadingByNameRef.current.clear();
     };
   }, []);
 
@@ -146,7 +158,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       const templateList = await dynamicRenderApi.getTemplateList();
       templateListRef.current = templateList.data || [];
 
-      // 2. 如果 skipPreload 为 true，则不预加载模版内容（按需加载模式）
+      // 2. 如果 skipPreload 为 true，则不预加载模板内容（按需加载模式）
       if (options?.skipPreload) {
         setIsTemplateListLoaded(true);
         return;
@@ -183,7 +195,7 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
   }, [preloadTemplates]);
 
   /**
-   * 根据模板名称获取模板 ID
+   * 根据模板名称获取模板ID
    */
   const getTemplateIdByName = useCallback((templateName: string): number | null => {
     const template = templateListRef.current.find(
@@ -212,11 +224,41 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
         return existingPromise;
       }
 
-      // 3. 按需加载模板
+      // 2b. 防御：如果通过 templateId 找不到，尝试通过 templateName 在 loadingByNameRef 中查找
       const template = templateListRef.current.find(
         (t) => t.templateId === templateId
       );
+      if (template) {
+        const existingByName = loadingByNameRef.current.get(template.templateName);
+        if (existingByName) return existingByName;
+      }
+
+      // 3. 按需加载模板
       if (!template) {
+        // 如果模板列表尚未加载完成，等待加载完成后再查找
+        if (!isTemplateListLoaded) {
+          console.warn(`模板列表尚未加载，等待中...`);
+          return new Promise<string | null>((resolve) => {
+            const check = () => {
+              if (unmountedRef.current) {
+                resolve(null);
+                return;
+              }
+              const t = templateListRef.current.find(
+                (t) => t.templateId === templateId
+              );
+              if (t) {
+                getTemplateContent(templateId).then(resolve);
+              } else if (!isTemplateListLoaded) {
+                setTimeout(check, 100);
+              } else {
+                console.warn(`未找到模板 ID: ${templateId}`);
+                resolve(null);
+              }
+            };
+            check();
+          });
+        }
         console.warn(`未找到模板 ID: ${templateId}`);
         return null;
       }
@@ -316,6 +358,108 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
     [getTemplateContent]
   );
 
+  /**
+   * 直接用 templateName 获取模板内容（不依赖 templateId）
+   */
+  const getTemplateContentByName = useCallback(
+    async (templateName: string): Promise<string | null> => {
+      if (unmountedRef.current) return null;
+
+      // 如果模板列表为空，跳过缓存查找，直接请求
+      if (templateListRef.current.length === 0) {
+        // 去重：检查是否有正在进行的同名请求
+        const existingByName = loadingByNameRef.current.get(templateName);
+        if (existingByName) return existingByName;
+
+        const loadPromise = (async () => {
+          try {
+            const response = await dynamicRenderApi.getTemplateContent(templateName);
+            if (unmountedRef.current) return "";
+            loadingByNameRef.current.delete(templateName);
+
+            // 请求完成后，尝试回填 templateCacheRef
+            // 此时模板列表可能已加载完成
+            const template = templateListRef.current.find(
+              (t) => t.templateName === templateName
+            );
+            if (template) {
+              const compiled = Handlebars.compile(response.content);
+              templateCacheRef.current.set(template.templateId, {
+                content: response.content,
+                compiled,
+              });
+            }
+
+            return response.content;
+          } catch (err) {
+            loadingByNameRef.current.delete(templateName);
+            console.error(`加载模板 ${templateName} 失败:`, err);
+            throw err;
+          }
+        })();
+
+        loadingByNameRef.current.set(templateName, loadPromise);
+        return loadPromise;
+      }
+
+      const template = templateListRef.current.find(
+        (t) => t.templateName === templateName
+      );
+      const cacheKey = template?.templateId;
+
+      if (cacheKey !== undefined) {
+        const cached = templateCacheRef.current.get(cacheKey);
+        if (cached) return cached.content;
+
+        const existingPromise = loadingPromiseRef.current.get(cacheKey);
+        if (existingPromise) return existingPromise;
+      }
+
+      const loadPromise = (async () => {
+        try {
+          const response = await dynamicRenderApi.getTemplateContent(templateName);
+          if (unmountedRef.current) return "";
+          const compiled = Handlebars.compile(response.content);
+          if (cacheKey !== undefined) {
+            templateCacheRef.current.set(cacheKey, { content: response.content, compiled });
+            loadingPromiseRef.current.delete(cacheKey);
+          }
+          return response.content;
+        } catch (err) {
+          if (cacheKey !== undefined) loadingPromiseRef.current.delete(cacheKey);
+          console.error(`加载模板 ${templateName} 失败:`, err);
+          throw err;
+        }
+      })();
+
+      if (cacheKey !== undefined) {
+        loadingPromiseRef.current.set(cacheKey, loadPromise);
+      }
+      return loadPromise;
+    },
+    []
+  );
+
+  /**
+   * 直接用 templateName 渲染模板
+   */
+  const renderTemplateByName = useCallback(
+    async (templateName: string, data: Record<string, any>): Promise<string | null> => {
+      try {
+        const content = await getTemplateContentByName(templateName);
+        if (!content) {
+          throw new Error(`模板 ${templateName} 加载失败`);
+        }
+        const compiled = Handlebars.compile(content);
+        return compiled(data);
+      } catch (err) {
+        console.error(`渲染模板 ${templateName} 失败:`, err);
+        return null;
+      }
+    },
+    [getTemplateContentByName]
+  );
+
   // 使用 useMemo 优化 Context value，避免不必要的重渲染
   const value = useMemo(
     () => ({
@@ -327,6 +471,8 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       isStaticTemplate,
       renderTemplate,
       renderStaticTemplate,
+      getTemplateContentByName,
+      renderTemplateByName,
       templateList: templateListRef,
     }),
     [
@@ -338,6 +484,8 @@ export function DynamicRenderProvider(props: DynamicRenderProviderProps) {
       isStaticTemplate,
       renderTemplate,
       renderStaticTemplate,
+      getTemplateContentByName,
+      renderTemplateByName,
     ]
   );
 

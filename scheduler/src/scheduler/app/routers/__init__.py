@@ -7,12 +7,21 @@ from .cron import router as cron_router
 from .batch_operations import router as batch_operations_router
 from .batch_run_state import router as batch_run_state_router
 from .managed_cron import router as managed_cron_router
+from .managed_cron_rechecks import router as managed_cron_rechecks_router
+from .managed_cron_progress import router as managed_cron_progress_router
 from .managed_callbacks import router as managed_callbacks_router
 from .managed_batch_operations import router as managed_batch_operations_router
 from .daily_failure_retry import router as daily_failure_retry_router
 from .cron_task_tracking import router as cron_task_tracking_router
 from .managed_cron_date_ranges import router as managed_cron_date_ranges_router
+from .calendar import router as calendar_router
+from .external_cron import router as external_cron_router
+from .system_cron import router as system_cron_router
+from .system_cron_execution import router as system_cron_execution_router
+from .system_cron_workspace import router as system_cron_workspace_router
+
 from .managed_cron_management import router as managed_cron_management_router
+from .selected_cron_migration import router as selected_cron_migration_router
 from .managed_cron_controls import router as managed_cron_controls_router
 from .managed_cron_broadcast import router as managed_cron_broadcast_router
 from .managed_cron_dispatch_state import (
@@ -24,7 +33,10 @@ api_router.include_router(cron_router)
 api_router.include_router(batch_operations_router)
 api_router.include_router(batch_run_state_router)
 api_router.include_router(managed_cron_router)
+api_router.include_router(managed_cron_rechecks_router)
+api_router.include_router(managed_cron_progress_router)
 api_router.include_router(managed_cron_management_router)
+api_router.include_router(selected_cron_migration_router)
 api_router.include_router(managed_cron_controls_router)
 api_router.include_router(managed_cron_broadcast_router)
 api_router.include_router(managed_cron_dispatch_state_router)
@@ -33,5 +45,11 @@ api_router.include_router(managed_batch_operations_router)
 api_router.include_router(daily_failure_retry_router)
 api_router.include_router(cron_task_tracking_router)
 api_router.include_router(managed_cron_date_ranges_router)
+api_router.include_router(calendar_router)
+api_router.include_router(external_cron_router)
+api_router.include_router(system_cron_router)
+api_router.include_router(system_cron_execution_router)
+api_router.include_router(system_cron_workspace_router)
+
 
 __all__ = ["api_router"]

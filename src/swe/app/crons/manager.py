@@ -2,15 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import random
-import re
-import httpx
-from contextlib import asynccontextmanager, contextmanager
-from copy import deepcopy
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -29,25 +25,34 @@ from ..cron_result_metrics import (
 )
 from ...config.context import (
     canonicalize_scope_id,
-    is_valid_identity_value,
     resolve_runtime_identity,
     resolve_scope_id,
 )
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
 from ..source_system_config.runtime import (
-    bind_source_system_config,
     get_current_source_system_config,
-    reset_current_source_system_config,
     resolve_cron_notification_config,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
-    set_current_source_system_config,
 )
-from ..continuous_governance.models import GOVERNANCE_ID_MAX_LENGTH
 from .auth_state import prefetch_auth_token
 from .cron_utils import compute_next_run_at, compute_next_run_times
 from .executor import CronExecutor
+from .task_progress import TaskProgressView
 from .models import CronJobSpec, CronJobState, CronTaskView, JobsFile
+from .notification_sender import CronNotificationSender
+from .system_runtime import SystemTaskRuntime, every_to_cron
+from .session_cleanup import (
+    TASK_MESSAGES_STATE_KEY,
+    _TaskSessionCleanupSnapshot,
+    _extract_task_message_preview,
+    _prune_task_session_state as _prune_task_session_state,
+    task_session_write_lock,
+)
+from .legacy_session_cleanup import (
+    LegacyTaskSessionCleaner,
+    apply_cleanup_meta,
+)
 from .task_view import MANUAL_PAUSE_REASON, build_cron_task_view
 from ..runner.models import ChatSpec
 from .repo.base import BaseJobRepository
@@ -65,7 +70,6 @@ HEARTBEAT_JOB_ID = "_heartbeat"
 DREAM_JOB_ID = "_dream"
 TASK_SESSION_CLEANUP_TASK_TYPE = "cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
-TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_SUCCESS_EXECUTION_KEYS_META_KEY = "task_success_execution_keys"
 MAX_TASK_SUCCESS_EXECUTION_KEYS = 100
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
@@ -90,12 +94,6 @@ BATCH_DISPATCH_CRON_FALLBACK_WARNING = (
 DISPATCH_INTENTS_ENABLED_ENV = "SWE_CRON_DISPATCH_INTENTS_ENABLED"
 SCHEDULER_API_URL_ENV = "SWE_SCHEDULER_API_URL"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-
-# 心跳 every 字段解析正则（如 "30m"、"6h"）
-_EVERY_PATTERN = re.compile(
-    r"^(?:(?P<hours>\d+)h|(?P<minutes>\d+)m)$",
-    re.IGNORECASE,
-)
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -305,268 +303,6 @@ def _monitor_notification_schedule(
     return _MonitorNotificationSchedule(None, "", suppress=True)
 
 
-def _parse_cleanup_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str) and value.strip():
-        try:
-            parsed = datetime.fromisoformat(
-                value.strip().replace("Z", "+00:00"),
-            )
-        except ValueError:
-            return None
-    else:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _extract_task_message_preview(message: dict[str, Any]) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.strip()
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "text" and item.get("text"):
-            parts.append(str(item["text"]))
-    return "".join(parts).strip()
-
-
-@dataclass(frozen=True)
-class _TaskSessionCleanupParts:
-    next_state: dict[str, Any]
-    memory_state: dict[str, Any]
-    memory_content: list[Any]
-    task_runs: list[Any]
-    task_messages: list[Any]
-
-
-@dataclass(frozen=True)
-class _TaskRunPruneResult:
-    adjusted_runs: list[Any]
-    retained_content: list[Any]
-    removed_runs: int
-    skipped_runs: int
-    latest_preview: str
-    latest_run_at: datetime | None
-    aborted: bool = False
-
-
-@dataclass(frozen=True)
-class _TaskMessagePruneResult:
-    kept_messages: list[Any]
-    removed_messages: int
-    latest_preview: str
-    latest_run_at: datetime | None
-
-
-def _cleanup_state_parts(state: dict[str, Any]) -> _TaskSessionCleanupParts:
-    next_state = deepcopy(state)
-    raw_runs = next_state.get("task_runs")
-    task_runs = raw_runs if isinstance(raw_runs, list) else []
-    agent_state = next_state.get("agent")
-    if not isinstance(agent_state, dict):
-        agent_state = {}
-        next_state["agent"] = agent_state
-    memory_state = agent_state.get("memory")
-    if not isinstance(memory_state, dict):
-        memory_state = {}
-        agent_state["memory"] = memory_state
-    content = memory_state.get("content")
-    memory_content = content if isinstance(content, list) else []
-    raw_messages = next_state.get(TASK_MESSAGES_STATE_KEY)
-    task_messages = raw_messages if isinstance(raw_messages, list) else []
-    return _TaskSessionCleanupParts(
-        next_state=next_state,
-        memory_state=memory_state,
-        memory_content=memory_content,
-        task_runs=task_runs,
-        task_messages=task_messages,
-    )
-
-
-def _task_run_memory_range(
-    raw_run: dict[str, Any],
-    memory_content_length: int,
-) -> tuple[int, int] | None:
-    raw_start = raw_run.get("memory_start")
-    raw_end = raw_run.get("memory_end")
-    if not isinstance(raw_start, int) or not isinstance(raw_end, int):
-        return None
-    if raw_start < 0 or raw_end < raw_start:
-        return None
-    if raw_end > memory_content_length:
-        return None
-    return raw_start, raw_end
-
-
-def _adjust_task_run_memory_ranges(
-    kept_runs: list[Any],
-    keep_mask: list[bool],
-) -> list[Any]:
-    retained_counts = [0]
-    for kept in keep_mask:
-        retained_counts.append(retained_counts[-1] + int(kept))
-
-    adjusted_runs: list[Any] = []
-    for raw_run in kept_runs:
-        if not isinstance(raw_run, dict):
-            adjusted_runs.append(raw_run)
-            continue
-        start = int(raw_run["memory_start"])
-        end = int(raw_run["memory_end"])
-        adjusted = dict(raw_run)
-        adjusted["memory_start"] = retained_counts[start]
-        adjusted["memory_end"] = retained_counts[end]
-        adjusted_runs.append(adjusted)
-    return adjusted_runs
-
-
-def _prune_task_runs(
-    task_runs: list[Any],
-    memory_content: list[Any],
-    cutoff: datetime,
-) -> _TaskRunPruneResult:
-    kept_runs: list[Any] = []
-    removed_runs = 0
-    skipped_runs = 0
-    keep_mask = [True] * len(memory_content)
-    latest_preview = ""
-    latest_run_at: datetime | None = None
-
-    for raw_run in task_runs:
-        if not isinstance(raw_run, dict):
-            kept_runs.append(raw_run)
-            skipped_runs += 1
-            continue
-        memory_range = _task_run_memory_range(raw_run, len(memory_content))
-        if memory_range is None:
-            return _TaskRunPruneResult(
-                adjusted_runs=[],
-                retained_content=[],
-                removed_runs=0,
-                skipped_runs=1,
-                latest_preview="",
-                latest_run_at=None,
-                aborted=True,
-            )
-        raw_start, raw_end = memory_range
-        ended_at = _parse_cleanup_datetime(raw_run.get("ended_at"))
-        if ended_at is not None and ended_at < cutoff:
-            removed_runs += 1
-            for index in range(raw_start, raw_end):
-                keep_mask[index] = False
-            continue
-        kept_runs.append(raw_run)
-        if ended_at is None:
-            skipped_runs += 1
-            continue
-        if latest_run_at is None or ended_at >= latest_run_at:
-            latest_run_at = ended_at
-            latest_preview = str(raw_run.get("preview_text") or "")
-
-    retained_content = [
-        item for index, item in enumerate(memory_content) if keep_mask[index]
-    ]
-    return _TaskRunPruneResult(
-        adjusted_runs=_adjust_task_run_memory_ranges(kept_runs, keep_mask),
-        retained_content=retained_content,
-        removed_runs=removed_runs,
-        skipped_runs=skipped_runs,
-        latest_preview=latest_preview,
-        latest_run_at=latest_run_at,
-    )
-
-
-def _prune_task_messages(
-    task_messages: list[Any],
-    cutoff: datetime,
-    latest_preview: str,
-    latest_run_at: datetime | None,
-) -> _TaskMessagePruneResult:
-    kept_messages: list[Any] = []
-    removed_messages = 0
-    for raw_message in task_messages:
-        if not isinstance(raw_message, dict):
-            kept_messages.append(raw_message)
-            continue
-        timestamp = _parse_cleanup_datetime(raw_message.get("timestamp"))
-        if timestamp is not None and timestamp < cutoff:
-            removed_messages += 1
-            continue
-        kept_messages.append(raw_message)
-        if timestamp is not None and (
-            latest_run_at is None or timestamp >= latest_run_at
-        ):
-            latest_run_at = timestamp
-            message_preview = _extract_task_message_preview(raw_message)
-            if message_preview:
-                latest_preview = message_preview
-
-    return _TaskMessagePruneResult(
-        kept_messages=kept_messages,
-        removed_messages=removed_messages,
-        latest_preview=latest_preview,
-        latest_run_at=latest_run_at,
-    )
-
-
-def _aborted_cleanup_snapshot(
-    state: dict[str, Any],
-) -> _TaskSessionCleanupSnapshot:
-    return _TaskSessionCleanupSnapshot(
-        state=state,
-        changed=False,
-        has_result=False,
-        latest_preview="",
-        latest_run_at=None,
-        skipped_runs=1,
-    )
-
-
-def _prune_task_session_state(
-    state: dict[str, Any],
-    cutoff: datetime,
-) -> _TaskSessionCleanupSnapshot:
-    parts = _cleanup_state_parts(state)
-    run_result = _prune_task_runs(
-        parts.task_runs,
-        parts.memory_content,
-        cutoff,
-    )
-    if run_result.aborted:
-        return _aborted_cleanup_snapshot(state)
-
-    message_result = _prune_task_messages(
-        parts.task_messages,
-        cutoff,
-        run_result.latest_preview,
-        run_result.latest_run_at,
-    )
-
-    parts.memory_state["content"] = run_result.retained_content
-    parts.next_state["task_runs"] = run_result.adjusted_runs
-    parts.next_state[TASK_MESSAGES_STATE_KEY] = message_result.kept_messages
-    changed = (
-        run_result.removed_runs > 0 or message_result.removed_messages > 0
-    )
-    return _TaskSessionCleanupSnapshot(
-        state=parts.next_state,
-        changed=changed,
-        has_result=message_result.latest_run_at is not None,
-        latest_preview=message_result.latest_preview[:10],
-        latest_run_at=message_result.latest_run_at,
-        removed_runs=run_result.removed_runs,
-        removed_messages=message_result.removed_messages,
-        skipped_runs=run_result.skipped_runs,
-    )
-
-
 @dataclass
 class _Runtime:
     sem: asyncio.Semaphore
@@ -587,19 +323,11 @@ class _ExecutionOutcome:
     source_system_config: Any = None
 
 
-@dataclass(frozen=True)
-class _TaskSessionCleanupSnapshot:
-    state: dict[str, Any]
-    changed: bool
-    has_result: bool
-    latest_preview: str
-    latest_run_at: datetime | None
-    removed_runs: int = 0
-    removed_messages: int = 0
-    skipped_runs: int = 0
-
-
-class CronManager:  # pylint: disable=too-many-public-methods
+class CronManager(
+    CronNotificationSender,
+    SystemTaskRuntime,
+    TaskProgressView,
+):  # pylint: disable=too-many-public-methods
     """Manages scheduled cron jobs and heartbeat.
 
     Job scheduling is delegated to an external scheduler platform via
@@ -663,12 +391,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
             logger.debug("Monitor sync client not available")
 
     async def initialize(self) -> None:
-        """初始化：加载 repo，注册系统任务，启动后台 prefetch 循环。"""
+        """保留旧用户任务恢复和凭据预热；系统刷新由工作区独立挂点提交。"""
         async with self._lock:
             if self._started:
                 return
             self._started = True
-        self._load_system_job_ids()
         # 调度平台不可用时不应阻塞工作空间初始化
         try:
             await self._restore_external_job_ids()
@@ -678,13 +405,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 exc_info=True,
             )
         self._prefetch_task = asyncio.create_task(self._prefetch_loop())
-        try:
-            await self._register_system_jobs()
-        except Exception:
-            logger.warning(
-                "Failed to register system jobs to external scheduler",
-                exc_info=True,
-            )
 
     # ----- read/state -----
 
@@ -717,141 +437,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 if job.task_type in {"agent", "workflow"}:
                     user_jobs.append(job)
         return user_jobs
-
-    def _calculate_run_times_on_date(
-        self,
-        job: CronJobSpec,
-        date: datetime,
-    ) -> list[datetime]:
-        """Calculate all scheduled run times for a job on a given date.
-
-        Args:
-            job: The cron job specification
-            date: The date to calculate run times for
-
-        Returns:
-            List of scheduled run times on that date
-        """
-        cron_expr = job.schedule.cron if job.schedule else ""
-        tz_name = job.schedule.timezone or self._timezone or "UTC"
-        if not cron_expr:
-            return []
-
-        start_of_day = date.replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        if start_of_day.tzinfo is None:
-            start_of_day = start_of_day.replace(tzinfo=timezone.utc)
-
-        run_times: list[datetime] = []
-        cursor = start_of_day
-        safety_limit = 20
-
-        for _ in range(safety_limit):
-            try:
-                next_run = compute_next_run_at(
-                    cron_expr,
-                    tz_name,
-                    now=cursor,
-                )
-            except Exception:
-                break
-
-            if next_run.date() != date.date():
-                break
-
-            run_times.append(next_run)
-            cursor = next_run + timedelta(seconds=1)
-
-        return run_times
-
-    def _determine_task_status(
-        self,
-        scheduled_time: datetime,
-        state: CronJobState,
-        date: datetime,
-    ) -> str:
-        """Determine task status based on schedule and execution state.
-
-        Args:
-            scheduled_time: The scheduled execution time
-            state: The job's current state
-            date: The query date
-
-        Returns:
-            Status string: "completed", "in_progress", "pending", "error", "cancelled"
-        """
-        now = datetime.now(timezone.utc)
-        last_run = state.last_run_at
-
-        if state.last_status == "running":
-            return "in_progress"
-        if scheduled_time > now:
-            return "pending"
-        if last_run and last_run.date() == date.date():
-            if state.last_status == "success":
-                return "completed"
-            if state.last_status in ("error", "cancelled"):
-                return state.last_status
-            return "in_progress"
-        return "pending"
-
-    def _build_task_status_display(
-        self,
-        task_status: str,
-        scheduled_time: Optional[datetime],
-        last_run: Optional[datetime],
-    ) -> tuple[str, str]:
-        """Build status_text and time_info for display.
-
-        Args:
-            task_status: The task status
-            scheduled_time: Scheduled execution time (UTC)
-            last_run: Last actual run time (UTC)
-
-        Returns:
-            Tuple of (status_text, time_info)
-        """
-        status_map = {
-            "completed": ("已完成", "已执行完成"),
-            "in_progress": ("进行中", "任务执行中"),
-            "pending": ("待开始", "等待执行"),
-            "error": ("执行失败", "执行失败"),
-            "cancelled": ("已取消", "任务已取消"),
-        }
-
-        if task_status not in status_map:
-            return ("未知", "")
-
-        status_text, default_info = status_map[task_status]
-
-        # Convert UTC to local time for display
-        def utc_to_local(dt: Optional[datetime]) -> Optional[datetime]:
-            if dt is None:
-                return None
-            if dt.tzinfo is None:
-                # Assume UTC if no timezone
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone()
-
-        local_last_run = utc_to_local(last_run)
-        local_scheduled_time = utc_to_local(scheduled_time)
-
-        if task_status == "completed" and local_last_run:
-            time_info = f"{local_last_run.strftime('%H:%M')}已完成"
-        elif task_status == "in_progress" and local_last_run:
-            time_info = f"{local_last_run.strftime('%H:%M')}已启动"
-        elif task_status == "error" and local_last_run:
-            time_info = f"{local_last_run.strftime('%H:%M')}执行失败"
-        elif task_status == "pending" and local_scheduled_time:
-            time_info = f"将于{local_scheduled_time.strftime('%H:%M')}执行"
-        else:
-            time_info = default_info
-
-        return (status_text, time_info)
 
     async def query_user_tasks_by_date(
         self,
@@ -1421,70 +1006,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
             },
         )
 
-    def _resolve_scheduled_run_source_id(
-        self,
-        source_id: str | None,
-        scope_id: str | None,
-    ) -> str | None:
-        """优先用显式 source_id，缺失时从 runtime scope 解码。"""
-        if source_id:
-            return source_id
-        if scope_id:
-            _, resolved_source_id, _ = resolve_runtime_identity(scope_id)
-            if resolved_source_id:
-                return resolved_source_id
-        return None
-
-    async def _resolve_scheduled_run_source_system_config(
-        self,
-        *,
-        source_id: str | None,
-        scope_id: str | None,
-        boundary_name: str,
-    ) -> Any | None:
-        """按 Scheduled Run Boundary 规则解析 source system config。"""
-        resolved_source_id = self._resolve_scheduled_run_source_id(
-            source_id,
-            scope_id,
-        )
-        if resolved_source_id is None:
-            logger.warning(
-                "Scheduled run source config binding skipped: boundary=%s "
-                "reason=no_source_identity",
-                boundary_name,
-            )
-            return None
-
-        if self._source_system_config_service is None:
-            logger.debug(
-                "Scheduled run source config binding skipped: boundary=%s "
-                "source_id=%s reason=no_service",
-                boundary_name,
-                resolved_source_id,
-            )
-            return None
-
-        return await self._source_system_config_service.resolve_config(
-            resolved_source_id,
-        )
-
-    @contextmanager
-    def _bind_scheduled_run_source_system_config(
-        self,
-        source_system_config: Any | None,
-    ):
-        """Bind resolved source config, or explicitly clear inherited request config."""
-        if source_system_config is not None:
-            with bind_source_system_config(source_system_config):
-                yield
-            return
-
-        token = set_current_source_system_config(cast(Any, None))
-        try:
-            yield
-        finally:
-            reset_current_source_system_config(token)
-
     async def _resolve_task_session_cleanup_config(self):
         tenant_id, source_id = self._get_external_scheduler_business_identity()
         del tenant_id
@@ -1932,6 +1453,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 name=f"cron-run-{job_id}",
             )
         task.add_done_callback(lambda t: self._task_done_cb(t, job))
+        return None
 
     @staticmethod
     def _prepare_run_dispatch_meta(
@@ -2539,11 +2061,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         *,
         timeout_seconds: float = 5.0,
     ):
-        lock_factory = getattr(session, "session_write_lock", None)
-        if not callable(lock_factory):
-            yield
-            return
-        async with lock_factory(
+        async with task_session_write_lock(
+            session,
             session_id,
             user_id,
             timeout_seconds=timeout_seconds,
@@ -2688,474 +2207,18 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return True, auto_paused
         return False, False
 
-    def _build_wplus_link(self, session_id: str) -> str:
-        """Build W+ deep link for cron task completion notification.
-
-        生成格式：CMBMobileOA:///?pcSysId=xxx&pcWebConfig=xxx&pcParams=xxx
-        用于在 PC 端招乎上跳转 W+ 并自动登录。
-        """
-        from ...config.utils import load_config
-
-        config = load_config()
-        zhaohu_config = config.channels.zhaohu
-
-        # 获取配置
-        menu_id = zhaohu_config.cron_task_menu_id or ""
-        error_page = zhaohu_config.cron_task_error_page or ""
-        sys_id = zhaohu_config.cron_task_sys_id or ""
-
-        # 构建参数
-        param = {
-            "errorPage": error_page,
-            "to": menu_id,
-            "type": "toMenu",
-            "queryParam": {
-                "sessionId": session_id,
-                "origin": "Y",
-            },
-        }
-
-        # 参数格式化: encodeURIComponent(btoa(JSON.stringify(param)))
-        pc_params = base64.b64encode(
-            json.dumps(param, ensure_ascii=False).encode("utf-8"),
-        ).decode("utf-8")
-        pc_params = self._url_encode(pc_params)
-
-        # 再封装一层: encodeURIComponent(btoa('pcParams='+pc_params))
-        pc_params_wrapper = base64.b64encode(
-            f"pcParams={pc_params}".encode("utf-8"),
-        ).decode("utf-8")
-        pc_params_wrapper = self._url_encode(pc_params_wrapper)
-
-        pc_web_config = "eyJuYW1lIjoi6LSi5a%2BMVysiLCJ5c3RBdXRoIjoidHJ1ZSJ9"
-
-        # 拼接地址
-        wplus_link = (
-            f"CMBMobileOA:///?pcSysId={sys_id}"
-            f"&pcWebConfig={pc_web_config}"
-            f"&pcParams={pc_params_wrapper}"
-        )
-        return wplus_link
-
-    def _url_encode(self, text: str) -> str:
-        """URL encode text."""
-        import urllib.parse
-
-        return urllib.parse.quote(text, safe="")
-
-    def _get_zhaohu_push_config(self) -> Any:
-        """Read the zhaohu channel config for session-end push links.
-
-        Prefer the tenant agent config (where the prefix is distributed via
-        console / inherited from template); fall back to global config.json
-        so the call never fails.
-        """
-        from ...config.utils import load_config
-
-        try:
-            from ...config.config import load_agent_config
-
-            agent_cfg = load_agent_config(
-                self._agent_id or "default",
-                tenant_id=self._tenant_id,
-            )
-            channels = getattr(agent_cfg, "channels", None)
-            if channels is not None:
-                zhaohu = getattr(channels, "zhaohu", None)
-                if zhaohu is not None:
-                    return zhaohu
-        except Exception:
-            logger.info(
-                "zhaohu push config from agent failed, fallback to global",
-            )
-        return load_config().channels.zhaohu
-
-    def _build_session_end_push_link(self, job: CronJobSpec) -> str:
-        """非 RMASSIST 来源的定时任务通知跳转链接。
-
-        链接前缀与 ID 类型来自 zhaohu 渠道配置
-        （session_end_push_link_prefix / session_end_push_link_id_type）：
-        - id_type=chat_id    -> {prefix}?chatId={job.meta.task_chat_id}
-        - id_type=session_id -> {prefix}?sessionId={job.meta.task_session_id}
-        前缀为空或对应 ID 值为空时返回空串（不附加链接）。
-        """
-        zhaohu_cfg = self._get_zhaohu_push_config()
-        prefix = getattr(zhaohu_cfg, "session_end_push_link_prefix", "") or ""
-        if not prefix:
-            return ""
-        sep = "&" if "?" in prefix else "?"
-        id_type = (
-            getattr(zhaohu_cfg, "session_end_push_link_id_type", "")
-            or "session_id"
-        )
-        if id_type == "chat_id":
-            chat_id = str(
-                (getattr(job, "meta", None) or {}).get("task_chat_id", ""),
-            )
-            return f"{prefix}{sep}chatId={chat_id}" if chat_id else ""
-        session_id = (getattr(job, "meta", None) or {}).get(
-            "task_session_id",
-            "",
-        ) or ""
-        return f"{prefix}{sep}sessionId={session_id}" if session_id else ""
-
-    def _build_wplus_pc_link(self, session_id: str) -> str:
-        """Build W+ PC menu HTTPS link for notification jump.
-
-        格式: {domain}/gate/wpluspcmenuui/pcmenu?isSafeUrl=Y&sysid=retailbanking&pcParams=xxx
-        用于在 W+ 消息推送中跳转到小助 claw 版指定会话。
-        """
-        from ...constant import CRON_WPLUS_PC_MENU_DOMAIN
-
-        domain = CRON_WPLUS_PC_MENU_DOMAIN.rstrip("/")
-        if not domain:
-            return ""
-
-        param = {
-            "type": "toMenu",
-            "to": "cmbclaw",
-            "queryParam": {
-                "sessionId": session_id,
-                "origin": "Y",
-            },
-        }
-        pc_params = base64.b64encode(
-            json.dumps(param, ensure_ascii=False).encode("utf-8"),
-        ).decode("utf-8")
-        pc_params = self._url_encode(pc_params)
-
-        return (
-            f"{domain}/gate/wpluspcmenuui/pcmenu"
-            f"?isSafeUrl=Y&sysid=retailbanking&pcParams={pc_params}"
-        )
-
-    async def _push_wplus_notification(
-        self,
-        job: CronJobSpec,
-        *,
-        raise_on_error: bool = False,
-    ) -> None:
-        """Push W+ message notification when a cron task completes."""
-
-        from ...constant import (
-            CRON_WPLUS_MSG_APP_ID,
-            CRON_WPLUS_MSG_HEADER_KEY,
-            CRON_WPLUS_MSG_HEADER_VALUE,
-            CRON_WPLUS_MSG_NOTICE_ID,
-            CRON_WPLUS_MSG_URL,
-        )
-
-        msg_url = CRON_WPLUS_MSG_URL
-        notice_id = CRON_WPLUS_MSG_NOTICE_ID
-        app_id = CRON_WPLUS_MSG_APP_ID
-        header_key = CRON_WPLUS_MSG_HEADER_KEY
-        header_value = CRON_WPLUS_MSG_HEADER_VALUE
-        if (
-            not msg_url
-            or not notice_id
-            or not app_id
-            or not header_key
-            or not header_value
-        ):
-            logger.debug(
-                "Skip W+ push: config incomplete "
-                "(msg_url=%s, notice_id=%s, app_id=%s, header_key=%s, header_value=%s)",
-                bool(msg_url),
-                bool(notice_id),
-                bool(app_id),
-                bool(header_key),
-                bool(header_value),
-            )
-            return
-
-        session_id = job.meta.get("task_session_id")
-        creator_id = job.meta.get("creator_user_id")
-        if not creator_id:
-            logger.info("Skip W+ push: job %s has no creator_user_id", job.id)
-            return
-
-        now = datetime.now()
-        wplus_pc_link = (
-            self._build_wplus_pc_link(session_id) if session_id else ""
-        )
-
-        payload = {
-            "appId": app_id,
-            "msgUrl": wplus_pc_link,
-            "msgText": (
-                f"你发起的定时任务【{job.name}】已完成，"
-                f"请进入小助claw版查看，完成时间:"
-                f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
-            ),
-            "msgTime": now.strftime("%Y-%m-%d %H:%M:%S.")
-            + f"{now.microsecond // 1000:03d}",
-            "msgStyle": "TEXT",
-            "msgTitle": f"{job.name}完成啦~",
-            "noticeId": notice_id,
-            "msgExpand": "",
-            "msgSubTitle": "",
-            "pushChannel": "HELP_CAT",
-            "targetSapId": str(creator_id),
-            "externalMsgId": str(uuid4()),
-            "msgPictureUrl": "",
-            "targetSapIdList": [],
-        }
-
-        headers = {
-            header_key: header_value,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    msg_url,
-                    json=payload,
-                    headers=headers,
-                )
-                result = resp.json()
-                if result.get("code") != "success":
-                    logger.warning(
-                        "W+ push returned non-success: job_id=%s result=%s",
-                        job.id,
-                        result,
-                    )
-                else:
-                    logger.info(
-                        "W+ push sent: job_id=%s job_name=%s target=%s",
-                        job.id,
-                        job.name,
-                        creator_id,
-                    )
-        except asyncio.CancelledError:
-            logger.warning(
-                "W+ push cancelled: job_id=%s job_name=%s",
-                job.id,
-                job.name,
-            )
-            raise
-        except Exception as exc:
-            logger.warning(
-                "W+ push failed: job_id=%s job_name=%s error=%s",
-                job.id,
-                job.name,
-                repr(exc),
-            )
-            if raise_on_error:
-                raise
-
-    async def _push_task_success_notification(
-        self,
-        job: CronJobSpec,
-        *,
-        raise_on_error: bool = False,
-    ) -> None:
-        """Push success notification when an agent task completes."""
-        # 只对 agent 类型的任务发送通知
-        if job.task_type not in {"agent", "workflow"}:
-            logger.debug(
-                "Skip notification: job %s has no completion push",
-                job.id,
-            )
-            return
-
-        task_session_id = job.meta.get("task_session_id")
-        if not task_session_id:
-            logger.info("Skip notification: job %s has no session_id", job.id)
-            return
-        creator_id = job.meta.get("creator_user_id")
-        logger.info(
-            "Sending cron task completion notification: "
-            "job_id=%s job_name=%s session_id=%s",
-            job.id,
-            job.name,
-            task_session_id,
-        )
-
-        # 构建 meta，包含 link 和 summary
-        meta = dict(job.dispatch.meta or {})
-
-        # RMASSIST 使用 W+ 深链；其他来源从 zhaohu 配置生成跳转链接
-        is_rmassist = job.source_id == "RMASSIST"
-        if is_rmassist:
-            wplus_link = self._build_wplus_link(task_session_id)
-            logger.debug("Generated W+ link: %s", wplus_link)
-            meta["link_url"] = wplus_link
-            meta["link_text"] = "点击跳转小助claw版查看"
-        else:
-            link_url = self._build_session_end_push_link(job)
-            if link_url:
-                meta["link_url"] = link_url
-                meta["link_text"] = "点击查看详情"
-        meta["notification_summary"] = "小助claw定时任务完成提醒"
-
-        await self.push_message(
-            creator_id,
-            job,
-            task_session_id,
-            meta,
-            raise_on_error=raise_on_error,
-        )
-
-        # W+ 消息推送: 仅 RMASSIST 来源且 zhaohu 渠道启用时触发
-        if is_rmassist and self._channel_manager is not None:
-            zhaohu_ch = await self._channel_manager.get_channel("zhaohu")
-            if zhaohu_ch is not None:
-                await self._push_wplus_notification(
-                    job,
-                    raise_on_error=raise_on_error,
-                )
-
-    async def push_message(
-        self,
-        creator_id: Any | None,
-        job: CronJobSpec,
-        session_id: Any | None,
-        meta: Optional[Dict[str, Any]] | None,
-        *,
-        raise_on_error: bool = False,
-    ):
-        # 固定使用 zhaohu 通道发送通知
-        # 用 try-except 包裹，避免任务被取消时通知发送失败影响主流程
-        try:
-            await self._channel_manager.send_text(
-                channel="zhaohu",
-                user_id=creator_id,
-                session_id=session_id,
-                text=f"叮咚，你发起的定时任务【{job.name}】已完成，快来查收结果~",
-                meta=meta,
-            )
-            logger.info(
-                "Cron task completion notification sent: "
-                "job_id=%s job_name=%s",
-                job.id,
-                job.name,
-            )
-        except asyncio.CancelledError:
-            logger.warning(
-                "Cron task notification cancelled: job_id=%s job_name=%s",
-                job.id,
-                job.name,
-            )
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Failed to send cron task notification: "
-                "job_id=%s job_name=%s error=%s",
-                job.id,
-                job.name,
-                repr(exc),
-            )
-            if raise_on_error:
-                raise
-
     async def run_task_session_cleanup(
         self,
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """清理当前 manager 范围内的定时任务会话历史文件。"""
-        config = await self._resolve_task_session_cleanup_config()
-        result: dict[str, Any] = {
-            "enabled": config.enabled,
-            "retention_days": config.retention_days,
-            "sessions_seen": 0,
-            "sessions_cleaned": 0,
-            "sessions_skipped_locked": 0,
-            "runs_removed": 0,
-            "messages_removed": 0,
-        }
-        if not config.enabled:
-            return result
-        session = getattr(self._runner, "session", None)
-        if session is None:
-            return result
-
-        cutoff_base = now or datetime.now(timezone.utc)
-        if cutoff_base.tzinfo is None:
-            cutoff_base = cutoff_base.replace(tzinfo=timezone.utc)
-        cutoff = cutoff_base.astimezone(timezone.utc) - timedelta(
-            days=config.retention_days,
+        cleaner = LegacyTaskSessionCleaner(
+            self._repo,
+            getattr(self._runner, "session", None),
+            await self._resolve_task_session_cleanup_config(),
+            lock=self._lock,
         )
-
-        for job in await self._repo.list_jobs():
-            meta = job.meta or {}
-            task_session_id = meta.get("task_session_id")
-            creator_user_id = meta.get("creator_user_id")
-            if not task_session_id or not creator_user_id:
-                continue
-            result["sessions_seen"] += 1
-            mutate_session_state = getattr(
-                session,
-                "mutate_session_state",
-                None,
-            )
-            snapshot: _TaskSessionCleanupSnapshot | None = None
-            try:
-                if callable(mutate_session_state):
-
-                    def _mutate_state(
-                        state: dict[str, Any],
-                    ) -> dict[str, Any]:
-                        nonlocal snapshot
-                        snapshot = _prune_task_session_state(state, cutoff)
-                        if snapshot.changed:
-                            return snapshot.state
-                        return state
-
-                    await mutate_session_state(
-                        session_id=str(task_session_id),
-                        user_id=str(creator_user_id),
-                        mutator=_mutate_state,
-                        create_if_not_exist=True,
-                        timeout_seconds=5.0,
-                    )
-                else:
-                    async with self._task_session_write_lock(
-                        session,
-                        str(task_session_id),
-                        str(creator_user_id),
-                    ):
-                        state = await session.get_session_state_dict(
-                            str(task_session_id),
-                            str(creator_user_id),
-                            allow_not_exist=True,
-                        )
-                        snapshot = _prune_task_session_state(state, cutoff)
-                        if snapshot.changed:
-                            await session.save_merged_state(
-                                session_id=str(task_session_id),
-                                user_id=str(creator_user_id),
-                                state=snapshot.state,
-                            )
-            except TimeoutError:
-                result["sessions_skipped_locked"] += 1
-                logger.info(
-                    "Task session cleanup skipped locked session: %s",
-                    task_session_id,
-                )
-                continue
-
-            if snapshot is None or not snapshot.changed:
-                continue
-            result["sessions_cleaned"] += 1
-            result["runs_removed"] += snapshot.removed_runs
-            result["messages_removed"] += snapshot.removed_messages
-
-            def _apply_cleanup_meta(
-                jobs_file: JobsFile,
-                job_id: str = job.id,
-                snap: _TaskSessionCleanupSnapshot = snapshot,
-            ) -> tuple[bool, None]:
-                return self._apply_task_session_cleanup_meta(
-                    jobs_file,
-                    job_id,
-                    snap,
-                )
-
-            async with self._lock:
-                await self._mutate_jobs_file_locked(_apply_cleanup_meta)
-        logger.info("Task session cleanup result: %s", result)
-        return result
+        return await cleaner.run(now=now)
 
     def _apply_task_session_cleanup_meta(
         self,
@@ -3163,21 +2226,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         job_id: str,
         snapshot: _TaskSessionCleanupSnapshot,
     ) -> tuple[bool, None]:
-        for index, job in enumerate(jobs_file.jobs):
-            if job.id != job_id:
-                continue
-            meta = dict(job.meta or {})
-            meta["task_has_scheduled_result"] = snapshot.has_result
-            meta["task_last_scheduled_preview"] = (
-                snapshot.latest_preview if snapshot.has_result else ""
-            )
-            meta["task_last_scheduled_run_at"] = (
-                snapshot.latest_run_at if snapshot.has_result else None
-            )
-            meta["task_unread_execution_count"] = 0
-            jobs_file.jobs[index] = job.model_copy(update={"meta": meta})
-            return True, None
-        return False, None
+        return apply_cleanup_meta(jobs_file, job_id, snapshot)
 
     async def send_task_success_notification(
         self,
@@ -3736,213 +2785,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if trace_id and not outcome.trace_id:
             outcome.trace_id = trace_id
 
-    async def run_heartbeat(self) -> None:
-        """执行一次心跳任务（供外部调度平台调用）。"""
-        from .heartbeat import run_heartbeat_once
-
-        workspace_dir, tenant_id, source_id, scope_id, runtime_tenant_id = (
-            self._resolve_runtime_context()
-        )
-        source_system_config = (
-            await self._resolve_scheduled_run_source_system_config(
-                source_id=source_id,
-                scope_id=scope_id,
-                boundary_name="heartbeat",
-            )
-        )
-        with (
-            bind_tenant_context(
-                tenant_id=tenant_id,
-                workspace_dir=workspace_dir,
-                source_id=source_id,
-                scope_id=scope_id,
-            ),
-            bind_llm_workload(LLM_WORKLOAD_CRON),
-            self._bind_scheduled_run_source_system_config(
-                source_system_config,
-            ),
-        ):
-            await run_heartbeat_once(
-                runner=self._runner,
-                channel_manager=self._channel_manager,
-                agent_id=self._agent_id,
-                tenant_id=runtime_tenant_id,
-                workspace_dir=workspace_dir,
-            )
-
-    async def run_dream(self) -> None:
-        """执行一次梦境任务（供外部调度平台调用）。"""
-        workspace_dir, tenant_id, source_id, scope_id, runtime_tenant_id = (
-            self._resolve_runtime_context()
-        )
-        source_system_config = (
-            await self._resolve_scheduled_run_source_system_config(
-                source_id=source_id,
-                scope_id=scope_id,
-                boundary_name="dream",
-            )
-        )
-        with (
-            bind_tenant_context(
-                tenant_id=tenant_id,
-                workspace_dir=workspace_dir,
-                source_id=source_id,
-                scope_id=scope_id,
-            ),
-            bind_llm_workload(LLM_WORKLOAD_CRON),
-            self._bind_scheduled_run_source_system_config(
-                source_system_config,
-            ),
-        ):
-            before_record_ids = await self._load_dream_record_ids(
-                workspace_dir,
-            )
-            await self._runner.memory_manager.dream_memory(
-                tenant_id=runtime_tenant_id,
-                trigger="cron",
-            )
-            governance_agent_id = self._continuous_governance_target_agent_id()
-            await self._dual_write_dream_records(
-                workspace_dir=workspace_dir,
-                source_id=source_id,
-                tenant_id=tenant_id,
-                agent_id=governance_agent_id,
-                before_record_ids=before_record_ids,
-            )
-            if workspace_dir is not None:
-                from ..routers.dream_logs import (
-                    dual_write_dream_archive_maintenance_result,
-                    run_dream_archive_maintenance,
-                )
-
-                maintenance = await asyncio.to_thread(
-                    run_dream_archive_maintenance,
-                    workspace_dir,
-                    actor="dream_cron",
-                )
-                if (
-                    maintenance is not None
-                    and self._continuous_governance_service is not None
-                    and source_id
-                    and tenant_id
-                    and governance_agent_id
-                ):
-                    await dual_write_dream_archive_maintenance_result(
-                        service=self._continuous_governance_service,
-                        source_id=source_id,
-                        target_user_id=tenant_id,
-                        target_agent_id=governance_agent_id,
-                        maintenance=maintenance,
-                        actor="dream_cron",
-                        source_name=source_id,
-                    )
-        logger.debug("Dream task executed successfully")
-
-    async def _load_dream_record_ids(
-        self,
-        workspace_dir: Path | None,
-    ) -> set[str]:
-        """读取 dream 执行前已有记录 id。"""
-        if workspace_dir is None:
-            return set()
-        data = await self._load_dream_logs(workspace_dir)
-        return {
-            str(record.get("id") or "")
-            for record in data.get("records", [])
-            if isinstance(record, dict) and record.get("id")
-        }
-
-    def _continuous_governance_target_agent_id(self) -> str | None:
-        """返回可安全写入持续治理读模型的 agent 标识。"""
-        agent_id = self._agent_id or "default"
-        if len(
-            agent_id,
-        ) > GOVERNANCE_ID_MAX_LENGTH or not is_valid_identity_value(agent_id):
-            logger.warning(
-                "Skip continuous governance dual-write for invalid agent id",
-            )
-            return None
-        return agent_id
-
-    async def _dual_write_dream_records(
-        self,
-        *,
-        workspace_dir: Path | None,
-        source_id: str | None,
-        tenant_id: str | None,
-        agent_id: str | None,
-        before_record_ids: set[str],
-    ) -> None:
-        """cron dream 完成后把新增治理记录写入数据库读模型。"""
-        service = self._continuous_governance_service
-        if (
-            workspace_dir is None
-            or not source_id
-            or not tenant_id
-            or not agent_id
-        ):
-            return
-        if service is None:
-            return
-        data = await self._load_dream_logs(workspace_dir)
-        for record in data.get("records", []):
-            if not isinstance(record, dict):
-                continue
-            record_id = str(record.get("id") or "")
-            if not record_id or record_id in before_record_ids:
-                continue
-            await service.upsert_workspace_governance_record_with_health(
-                source_id=source_id,
-                target_user_id=tenant_id,
-                target_user_name=None,
-                bbk_id=None,
-                target_agent_id=agent_id,
-                record=record,
-            )
-
-    async def _load_dream_logs(self, workspace_dir: Path) -> dict[str, Any]:
-        """在线程池中读取 workspace dream_logs.json。"""
-        return await asyncio.to_thread(
-            self._load_dream_logs_sync,
-            workspace_dir,
-        )
-
-    def _load_dream_logs_sync(self, workspace_dir: Path) -> dict[str, Any]:
-        """同步读取 workspace dream_logs.json，供线程池包装调用。"""
-        path = workspace_dir / "dream_logs.json"
-        if not path.exists():
-            return {"records": []}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {"records": []}
-        return data if isinstance(data, dict) else {"records": []}
-
-    def _resolve_runtime_context(
-        self,
-    ) -> tuple[Path | None, str | None, str | None, str | None, str | None]:
-        """从工作区 runtime tenant 还原 logical tenant/source/scope。"""
-        workspace_dir_value = getattr(self._runner, "workspace_dir", None)
-        workspace_dir = (
-            Path(workspace_dir_value) if workspace_dir_value else None
-        )
-        runtime_tenant_id = self._tenant_id
-        workspace = getattr(self._runner, "_workspace", None)
-        workspace_tenant_id = getattr(workspace, "tenant_id", None)
-        if workspace_tenant_id:
-            runtime_tenant_id = workspace_tenant_id
-
-        tenant_id, source_id, scope_id = resolve_runtime_identity(
-            runtime_tenant_id,
-        )
-        return (
-            workspace_dir,
-            tenant_id,
-            source_id,
-            scope_id,
-            scope_id or tenant_id,
-        )
-
     # ── 系统任务（heartbeat / dream）调度平台注册 ──
 
     def _system_job_ids_path(self) -> Path:
@@ -4011,6 +2853,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
             logger.debug("Failed to restore external_job_ids from jobs.json")
 
     async def _restore_external_job_id(self, job: CronJobSpec) -> None:
+        # 迁移只停旧定义，不允许重载重新打开普通或批定时器。
+        if (job.meta or {}).get("task_migration_stop"):
+            return
         ext_id = str((job.meta or {}).get("external_job_id", "") or "")
         if is_batch_dispatch_managed_broadcast_child(job):
             await self._restore_batch_dispatch_child_external_job(
@@ -4212,174 +3057,42 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 return True, None
         return False, None
 
-    @staticmethod
-    def _every_to_cron(every: str) -> str:
-        """将 interval 字符串转换为 5 字段 cron 表达式。
+    _every_to_cron = staticmethod(every_to_cron)
 
-        支持格式：
-        - "Nm"（1-59 分钟）→ "*/N * * * *"
-        - "Nh"（1-23 小时）→ "0 */N * * *"
-        如果 every 已经是 5 字段 cron，直接返回。
-        """
-        from .heartbeat import is_cron_expression
+    async def _register_system_jobs(self) -> dict[str, Any]:
+        """工作区启动只提交固定新版刷新，不读取或接管旧系统绑定。"""
+        from .system_bridge import submit_agent_refresh
 
-        every = (every or "").strip()
-        if not every:
-            return ""
-        if is_cron_expression(every):
-            return every
-
-        m = _EVERY_PATTERN.match(every)
-        if not m:
-            logger.warning(
-                "Failed to parse every=%r, fallback to 0/30 * * * *",
-                every,
-            )
-            return "0/30 * * * *"
-
-        if m.group("hours"):
-            hours = int(m.group("hours"))
-            if 1 <= hours <= 23:
-                return f"0 0/{hours} * * *"
-            logger.warning(
-                "Hours out of range (1-23): %s, fallback to 0/30 * * * *",
-                hours,
-            )
-            return "0/30 * * * *"
-
-        minutes = int(m.group("minutes"))
-        if 1 <= minutes <= 59:
-            return f"0/{minutes} * * * *"
-        logger.warning(
-            "Minutes out of range (1-59): %s, fallback to 0/30 * * * *",
-            minutes,
+        tenant_id, source_id = self._get_external_scheduler_business_identity()
+        return await submit_agent_refresh(
+            tenant_id,
+            source_id,
+            self._agent_id or "default",
         )
-        return "0/30 * * * *"
 
-    async def _register_system_jobs(self) -> None:
-        """注册 tenant 级 heartbeat 和 dream 到外部调度平台。"""
-        await self.register_heartbeat()
-        await self.register_dream()
+    async def register_heartbeat(self) -> dict[str, Any]:
+        """保留原保存挂点名称，但只提交Scheduler新版刷新意图。"""
+        from .system_bridge import submit_agent_refresh
 
-    async def register_heartbeat(self) -> None:
-        """将心跳任务注册到外部调度平台（或禁用时取消注册）。"""
-        if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
-            return
-
-        from ...config.utils import get_heartbeat_config
-
-        hb = get_heartbeat_config(self._agent_id, tenant_id=self._tenant_id)
-        job_id = HEARTBEAT_JOB_ID
-        ext_id = self._system_job_ids.get(job_id, "")
-
-        if not hb.enabled:
-            if ext_id:
-                try:
-                    await self._scheduler_adapter.pause_job(ext_id)
-                except Exception:
-                    logger.warning(
-                        "Failed to pause heartbeat on external scheduler",
-                        exc_info=True,
-                    )
-            return
-
-        cron = self._every_to_cron(hb.every)
-        if not cron:
-            return
-
-        callback_url = self._build_callback_url("heartbeat")
         tenant_id, source_id = self._get_external_scheduler_business_identity()
-        try:
-            if ext_id:
-                await self._scheduler_adapter.update_job(
-                    external_id=ext_id,
-                    tenant_id=tenant_id,
-                    source_id=source_id,
-                    agent_id=self._agent_id or "",
-                    task_type="heartbeat",
-                    job_id=job_id,
-                    job_name="Heartbeat",
-                    cron=cron,
-                    callback_url=callback_url,
-                )
-                await self._scheduler_adapter.resume_job(ext_id)
-            else:
-                ext_id = await self._scheduler_adapter.register_job(
-                    tenant_id=tenant_id,
-                    source_id=source_id,
-                    agent_id=self._agent_id or "",
-                    task_type="heartbeat",
-                    job_id=job_id,
-                    job_name="Heartbeat",
-                    cron=cron,
-                    callback_url=callback_url,
-                )
-                if ext_id:
-                    self._system_job_ids[job_id] = ext_id
-                    self._save_system_job_ids()
-        except Exception:
-            logger.warning(
-                "Failed to register heartbeat to external scheduler",
-                exc_info=True,
-            )
+        return await submit_agent_refresh(
+            tenant_id,
+            source_id,
+            self._agent_id or "default",
+            "heartbeat",
+        )
 
-    async def register_dream(self) -> None:
-        """将梦境任务注册到外部调度平台（或 cron 为空时取消注册）。"""
-        if isinstance(self._scheduler_adapter, NoopSchedulerAdapter):
-            return
+    async def register_dream(self) -> dict[str, Any]:
+        """梦境配置刷新交给新版控制面，不再接管system_jobs.json。"""
+        from .system_bridge import submit_agent_refresh
 
-        from ...config.utils import get_dream_cron
-
-        job_id = DREAM_JOB_ID
-        ext_id = self._system_job_ids.get(job_id, "")
-        dream_cron = get_dream_cron(self._agent_id, tenant_id=self._tenant_id)
-
-        if not dream_cron:
-            if ext_id:
-                try:
-                    await self._scheduler_adapter.pause_job(ext_id)
-                except Exception:
-                    logger.warning(
-                        "Failed to pause dream on external scheduler",
-                        exc_info=True,
-                    )
-            return
-
-        callback_url = self._build_callback_url("dream")
         tenant_id, source_id = self._get_external_scheduler_business_identity()
-        try:
-            if ext_id:
-                await self._scheduler_adapter.update_job(
-                    external_id=ext_id,
-                    tenant_id=tenant_id,
-                    source_id=source_id,
-                    agent_id=self._agent_id or "",
-                    task_type="dream",
-                    job_id=job_id,
-                    job_name="Dream",
-                    cron=dream_cron,
-                    callback_url=callback_url,
-                )
-                await self._scheduler_adapter.resume_job(ext_id)
-            else:
-                ext_id = await self._scheduler_adapter.register_job(
-                    tenant_id=tenant_id,
-                    source_id=source_id,
-                    agent_id=self._agent_id or "",
-                    task_type="dream",
-                    job_id=job_id,
-                    job_name="Dream",
-                    cron=dream_cron,
-                    callback_url=callback_url,
-                )
-                if ext_id:
-                    self._system_job_ids[job_id] = ext_id
-                    self._save_system_job_ids()
-        except Exception:
-            logger.warning(
-                "Failed to register dream to external scheduler",
-                exc_info=True,
-            )
+        return await submit_agent_refresh(
+            tenant_id,
+            source_id,
+            self._agent_id or "default",
+            "dream",
+        )
 
     def _build_callback_url(self, task_type: str, job_id: str = "") -> str:
         """拼接外部调度平台回调 URL。

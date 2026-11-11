@@ -18,7 +18,39 @@ export interface ManagedRunDateRange {
   start_date: string;
   end_date: string;
 }
-export type ManagedCronSpec = Omit<CronJobSpecInput, "id"> & {
+export type ManagedCronSchedule = CronJobSpecInput["schedule"] & {
+  run_on_non_workday?: boolean;
+};
+export interface ManagedRecheckRule {
+  delay_seconds: number;
+  instruction: string;
+}
+
+export interface ManagedRecheck {
+  recheck_id: string;
+  parent_execution_id: string;
+  job_id: string;
+  job_name: string;
+  run_at: string | null;
+  started_at: string | null;
+  finished_at?: string | null;
+  reason_code?: string | null;
+  chat_id?: string | null;
+  status:
+    | "queued"
+    | "dispatching"
+    | "accepted"
+    | "running"
+    | "success"
+    | "error"
+    | "cancelled";
+}
+
+export type ManagedRecheckView = "active" | "history";
+
+export type ManagedCronSpec = Omit<CronJobSpecInput, "id" | "schedule"> & {
+  schedule: ManagedCronSchedule;
+
   id?: string;
   tenant_id?: string;
   source_id?: string;
@@ -27,10 +59,15 @@ export type ManagedCronSpec = Omit<CronJobSpecInput, "id"> & {
   bbk_id?: string;
   plan_id?: string;
   run_date_range?: ManagedRunDateRange | null;
+  recheck?: ManagedRecheckRule | null;
 };
 
 export interface ManagedJob extends CronJobSpecOutput {
+  has_distributed_children?: boolean;
   run_date_range?: ManagedRunDateRange | null;
+  recheck?: ManagedRecheckRule | null;
+  schedule: ManagedCronSchedule;
+
   tenant_id: string;
   source_id: string;
   agent_id: string;

@@ -14,6 +14,7 @@ window.__env__ = {
   responseFeedbackUserWhitelist: ["*"], // 回答反馈卡片白名单，"*"表示全员开放
   voiceRecorderUserWhitelist: ["*"], // 语音录制按钮白名单，"*"表示全员开放
   directAccessUserWhitelist: [], // 顶层窗口直接访问白名单；空数组表示全部拒绝，不支持"*"
+  wealthExcelDistributionUsers: [], // Excel 分发白名单，使用真实登录 SAP 用户 ID
   operationsUsersByBranch: { V00001: ["80008888"] }, // 财富工作台运维入口白名单，按真实分行匹配用户编号；空对象禁用，不支持"*"
   chatSessionPageSize: 100, // 聊天历史分页大小，未配置或非法时默认100
 };

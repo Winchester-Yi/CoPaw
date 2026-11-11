@@ -3,7 +3,14 @@
  * 对应原型 tasksHTML：经营/客户双视角、任务树、重点标签表头筛选、
  * 经营方案/触达记录两类弹窗，执行列外链跳转电访与客户洞察。
  */
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Tooltip } from "antd";
 import { ChevronDown, RotateCw } from "lucide-react";
@@ -15,9 +22,17 @@ import { CustomerSchemePreview } from "../components/CustomerSchemePreview";
 import { CustomerMetrics } from "../components/CustomerMetrics";
 import { CustomerScenes } from "../components/CustomerScenes";
 import { buildCustomerGroups } from "./customerGroups";
+import { CustomerListSkeleton } from "./CustomerListSkeleton";
+import skeletonStyles from "./CustomerListSkeleton.module.less";
 import { ContactStatusFilter } from "./ContactStatusFilter";
 import { SceneFilter } from "./SceneFilter";
-import { contactStatusOf, type ContactStatusFilterValue } from "./contactStatus";
+import { InsuranceTracking } from "./InsuranceTracking";
+import { JoinTracking } from "./InsuranceTracking/JoinTracking";
+import joinStyles from "./InsuranceTracking/JoinTracking.module.less";
+import {
+  contactStatusOf,
+  type ContactStatusFilterValue,
+} from "./contactStatus";
 import { buildInsightUrl, buildTelUrl, fetchSchemeSignature } from "../api";
 import { useCanAccess, useWealthStore } from "../store";
 import type { Customer } from "../types";
@@ -58,8 +73,8 @@ function sourceTagClass(source: string) {
   return source === "分行关注"
     ? styles.purple
     : source === "行长关注"
-      ? styles.orange
-      : "";
+    ? styles.orange
+    : "";
 }
 
 function OpportunityHtml({ value }: { value: string }) {
@@ -151,7 +166,10 @@ export function Opportunities({
  * signature 需异步获取，为避免弹窗被拦截，先同步打开空白窗口占位，
  * 随后异步填充 location 指向最终外链。
  */
-async function openOutboundLink(kind: "dial" | "insight", c: Customer) {
+async function openOutboundLink(
+  kind: "dial" | "insight",
+  c: Pick<Customer, "custUid" | "bbkOrgId" | "name">,
+) {
   // 埋点：电访 button_id=phone，客户洞察 button_id=insight
   reportTaskClick(c, kind === "dial" ? "phone" : "insight");
   const win = window.open("", "_blank");
@@ -170,12 +188,18 @@ async function openOutboundLink(kind: "dial" | "insight", c: Customer) {
     }
   } catch (error) {
     win?.close();
-    console.warn(`[Wealth] 打开${kind === "dial" ? "电访" : "客户洞察"}外链失败`, error);
+    console.warn(
+      `[Wealth] 打开${kind === "dial" ? "电访" : "客户洞察"}外链失败`,
+      error,
+    );
   }
 }
 
 /** 客户清单的洞察 / 电访点击；操作者与机构信息由 recordClick 补齐。 */
-function reportTaskClick(c: Customer, buttonId: "phone" | "insight") {
+function reportTaskClick(
+  c: Pick<Customer, "custUid" | "name">,
+  buttonId: "phone" | "insight",
+) {
   const buttonName = buttonId === "phone" ? "电访" : "客户洞察";
   const payload: HtmlTrackerPayloadType = {
     button_id: buttonId,
@@ -206,8 +230,8 @@ function labelTagClass(label: string) {
   return label === "总行重点"
     ? styles.red
     : label === "行长指派"
-      ? styles.orange
-      : "";
+    ? styles.orange
+    : "";
 }
 
 /** 重点标签单元格：空值使用低强调度占位标签，避免表格出现空洞。 */
@@ -238,8 +262,8 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     page === "done"
       ? s.doneCounts
       : page === "pending"
-        ? s.pendingCounts
-        : s.todayCounts,
+      ? s.pendingCounts
+      : s.todayCounts,
   );
   const customersLoading = useWealthStore((s) => s.customersLoading);
   const pendingCustomers = useWealthStore((s) => s.pendingCustomers);
@@ -254,13 +278,19 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const loadPendingCustomers = useWealthStore((s) => s.loadPendingCustomers);
   const loadDoneCustomers = useWealthStore((s) => s.loadDoneCustomers);
   const openDialog = useWealthStore((s) => s.openDialog);
+  const markInsuranceCustomerTraced = useWealthStore(
+    (s) => s.markInsuranceCustomerTraced,
+  );
+  const toast = useWealthStore((s) => s.toast);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [view, setView] = useState<"business" | "customer">("business");
+  const [insuranceSelected, setInsuranceSelected] = useState(false);
+  const [insuranceRefreshKey, setInsuranceRefreshKey] = useState(0);
+  const [insuranceBusy, setInsuranceBusy] = useState(false);
   const [taskLabel, setTaskLabel] = useState("全部");
-  const [contactStatus, setContactStatus] = useState<ContactStatusFilterValue>(
-    "全部",
-  );
+  const [contactStatus, setContactStatus] =
+    useState<ContactStatusFilterValue>("全部");
   const [search, setSearch] = useState("");
   const [sceneFilter, setSceneFilter] = useState<string | null>(null);
   const [selectedSceneId, setSelectedSceneId] = useState(
@@ -285,12 +315,20 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   const schemeOpenSeqRef = useRef(0);
 
   const isBiz = view === "business" && page === "today";
+  const isInsurance = isBiz && insuranceSelected;
+  const refreshBusy = isInsurance ? insuranceBusy : customersLoading;
   const doneView = page === "done";
   const showScenes = !isBiz;
 
   /** 工作任务树：从「已发布且今日有排程」的规划场景实时推导 */
   const today = dateKey(new Date());
   const taskTree = useMemo(() => buildTaskTree(plans, today), [plans, today]);
+  const menuGroups = taskTree.some((group) => group.category === "保险")
+    ? taskTree
+    : [...taskTree, { category: "保险", nodes: [] }];
+  const firstInsuranceSkill = taskTree.find(
+    (group) => group.category === "保险",
+  )?.nodes[0];
   const selectedNode =
     taskTree
       .flatMap((group) => group.nodes)
@@ -298,6 +336,13 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     taskTree[0]?.nodes[0];
   const selectedSkillId = selectedNode?.sceneId;
   const selectedTask = selectedNode?.sceneName ?? "";
+  const showJoinTracking =
+    isBiz &&
+    taskTree.some(
+      (group) =>
+        group.category === "保险" &&
+        group.nodes.some((node) => node.sceneId === selectedSkillId),
+    );
 
   // 规划变更/移除后选中节点可能失效：回退到树的第一个节点
   useEffect(() => {
@@ -314,22 +359,20 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       (page === "done"
         ? doneLoading
         : page === "pending"
-          ? pendingLoading
-          : customersLoading));
-  const pool =
-    loading
-      ? []
-      : page === "done"
-        ? doneCustomers
-        : page === "pending"
-          ? pendingCustomers
-          : customers;
+        ? pendingLoading
+        : customersLoading));
+  const pool = loading
+    ? []
+    : page === "done"
+    ? doneCustomers
+    : page === "pending"
+    ? pendingCustomers
+    : customers;
 
   /** 原型 customerList：ignoreLabel 用于标签浮层计数 */
   const buildList = (ignoreLabel: boolean, ignoreContactStatus = false) => {
     let list = page === "pending" ? pool.filter((c) => !c.done) : pool;
-    if (isBiz)
-      list = list.filter((c) => c.skillId === selectedSkillId);
+    if (isBiz) list = list.filter((c) => c.skillId === selectedSkillId);
     if (showScenes && sceneFilter !== null)
       list = list.filter((c) => c.skillNames?.includes(sceneFilter));
     if (search.trim())
@@ -377,8 +420,9 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   }, [list, isBiz, page]);
   const showContactStatus = page === "today";
   const contactStatusCustomers = buildList(false, true);
-  const sceneOptions = [...new Set(pool.flatMap((c) => c.skillNames ?? []))]
-    .filter(Boolean);
+  const sceneOptions = [
+    ...new Set(pool.flatMap((c) => c.skillNames ?? [])),
+  ].filter(Boolean);
   const columnCount = (isBiz ? 6 : 8) + Number(showContactStatus);
   const tableGroups = groups.length
     ? groups
@@ -387,7 +431,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
   // 进入今日任务或切回经营视角更新规划；场景切换仅查询所选技能。
   // 绘制前启动查询，避免新视角短暂显示旧名单和统计。
   useLayoutEffect(() => {
-    if (!plansLoaded) {
+    if (!plansLoaded || isInsurance) {
       return;
     }
     const enteringToday =
@@ -414,6 +458,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     }
   }, [
     page,
+    isInsurance,
     view,
     selectedSkillId,
     plansLoaded,
@@ -498,10 +543,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       e.key === "Home"
         ? 0
         : e.key === "End"
-          ? choices.length - 1
-          : e.key === "ArrowDown"
-            ? (index + 1) % choices.length
-            : (index + choices.length - 1) % choices.length;
+        ? choices.length - 1
+        : e.key === "ArrowDown"
+        ? (index + 1) % choices.length
+        : (index + choices.length - 1) % choices.length;
     e.preventDefault();
     choices[next]?.focus();
   };
@@ -512,9 +557,7 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
    * 客户经营方案弹窗：优先以 iframe 渲染客户名单返回的 filename 链接
    * （/wealth/name-list 的 filename 为 reportView 完整 URL）；无链接时回退空态。
    */
-  const showScheme = (id: string) => {
-    const c = getCustomer(id);
-    if (!c) return;
+  const showScheme = (c: Pick<Customer, "link" | "name" | "task">) => {
     // 埋点：查看经营方案 button_id=plan
     // reportTaskClick(c, "plan");
     if (!c.link) {
@@ -533,9 +576,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     try {
       const u = new URL(c.link);
       u.searchParams.set("_t", String(seq));
+      u.searchParams.set("headBbk", String(true));
       previewUrl = u.toString();
     } catch {
-      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}`;
+      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}&headBbk=true`;
     }
     // 经营方案以 iframe 铺满整个弹窗：不渲染标题头部、正文无内边距、
     // iframe 无边框。plain 弹窗通过弹窗类专用宽度铺满可用区域。
@@ -587,14 +631,15 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
     });
   };
 
-  const title =
-    page === "pending"
-      ? "待触达客户清单"
-      : doneView
-        ? "已完成任务"
-        : isBiz
-          ? "客户经营清单"
-          : "今日客户经营清单";
+  const title = isInsurance
+    ? "保险核心跟踪"
+    : page === "pending"
+    ? "待触达客户清单"
+    : doneView
+    ? "已完成任务"
+    : isBiz
+    ? "客户经营清单"
+    : "今日客户经营清单";
 
   const filterActive = taskLabel !== "全部";
 
@@ -606,73 +651,89 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
             <h2>工作任务</h2>
             <Tooltip
               trigger={["hover", "focus"]}
-              title={customersLoading ? "正在刷新工作任务" : "刷新工作任务"}
+              title={refreshBusy ? "任务加载或保存中" : "刷新工作任务"}
             >
               <span>
                 <button
                   type="button"
                   className={styles.taskRefresh}
                   aria-label="刷新工作任务"
-                  disabled={!plansLoaded || customersLoading}
-                  aria-busy={customersLoading}
-                  onClick={() =>
+                  disabled={!plansLoaded || refreshBusy}
+                  aria-busy={refreshBusy}
+                  onClick={() => {
+                    if (isInsurance) {
+                      setInsuranceRefreshKey((key) => key + 1);
+                      return;
+                    }
                     void (selectedSkillId
                       ? refreshTodayCustomers("business", selectedSkillId)
-                      : refreshTodayCustomers("business"))
-                  }
+                      : refreshTodayCustomers("business"));
+                  }}
                 >
                   <RotateCw
                     size={16}
                     aria-hidden="true"
-                    className={
-                      customersLoading ? styles.taskRefreshBusy : undefined
-                    }
+                    className={refreshBusy ? styles.taskRefreshBusy : undefined}
                   />
                 </button>
               </span>
             </Tooltip>
           </div>
-          {taskTree.length ? (
-            taskTree.map((g) => (
-              <details className={styles.treeGroup} key={g.category} open>
-                <summary>
-                  <Icon name={CATEGORY_ICONS[g.category] ?? "layer"} />
-                  {g.category}
-                  <Icon name="up" className={styles.arrow} />
-                </summary>
-                {g.nodes.map((n) => (
-                  <Tooltip
-                    key={n.sceneId}
-                    placement="right"
-                    trigger={["hover", "focus"]}
-                    title={
-                      <div className={styles.taskTreeTooltip}>
-                        <div>技能名称：{n.sceneName}</div>
-                        <div>来源规划：{n.planName}</div>
-                      </div>
-                    }
+          {menuGroups.map((g) => (
+            <details className={styles.treeGroup} key={g.category} open>
+              <summary>
+                <Icon name={CATEGORY_ICONS[g.category] ?? "layer"} />
+                {g.category}
+                <Icon name="up" className={styles.arrow} />
+              </summary>
+              {g.category === "保险" && (
+                <button
+                  type="button"
+                  className={cx(
+                    styles.treeItem,
+                    styles.insuranceTreeItem,
+                    isInsurance && styles.active,
+                  )}
+                  aria-pressed={isInsurance}
+                  onClick={() => setInsuranceSelected(true)}
+                >
+                  <span className={styles.treeSkillName}>保险核心跟踪</span>
+                </button>
+              )}
+              {g.nodes.map((n) => (
+                <Tooltip
+                  key={n.sceneId}
+                  placement="right"
+                  trigger={["hover", "focus"]}
+                  title={
+                    <div className={styles.taskTreeTooltip}>
+                      <div>技能名称：{n.sceneName}</div>
+                      <div>来源规划：{n.planName}</div>
+                    </div>
+                  }
+                >
+                  <button
+                    className={cx(
+                      styles.treeItem,
+                      !isInsurance &&
+                        selectedSkillId === n.sceneId &&
+                        styles.active,
+                    )}
+                    onClick={() => {
+                      setInsuranceSelected(false);
+                      setSelectedSceneId(n.sceneId);
+                    }}
                   >
-                    <button
-                      className={cx(
-                        styles.treeItem,
-                        selectedSkillId === n.sceneId && styles.active,
-                      )}
-                      onClick={() => setSelectedSceneId(n.sceneId)}
-                    >
-                      <span
-                        className={cx(styles.tag, sourceTagClass(n.source))}
-                      >
-                        {n.source}
-                      </span>
-                      <span className={styles.treeSkillName}>
-                        {n.sceneName}
-                      </span>
-                    </button>
-                  </Tooltip>
-                ))}
-              </details>
-            ))
-          ) : (
+                    <span className={cx(styles.tag, sourceTagClass(n.source))}>
+                      {n.source}
+                    </span>
+                    <span className={styles.treeSkillName}>{n.sceneName}</span>
+                  </button>
+                </Tooltip>
+              ))}
+            </details>
+          ))}
+          {!taskTree.length && (
             <p className={styles.pageNote}>
               今日暂无排程中的经营场景，可在「创建计划」中新建并发布规划。
             </p>
@@ -684,28 +745,30 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
         <div className={styles.sectionHead}>
           <h2>{title}</h2>
           {page === "today" ? (
-            <div className={styles.switch} aria-label="任务视角">
-              <button
-                disabled={customersLoading}
-                className={view === "business" ? styles.active : ""}
-                onClick={() => {
-                  setView("business");
-                  setTaskLabel("全部");
-                }}
-              >
-                经营视角
-              </button>
-              <button
-                disabled={customersLoading}
-                className={view === "customer" ? styles.active : ""}
-                onClick={() => {
-                  setView("customer");
-                  setTaskLabel("全部");
-                }}
-              >
-                客户视角
-              </button>
-            </div>
+            !isInsurance && (
+              <div className={styles.switch} aria-label="任务视角">
+                <button
+                  disabled={customersLoading}
+                  className={view === "business" ? styles.active : ""}
+                  onClick={() => {
+                    setView("business");
+                    setTaskLabel("全部");
+                  }}
+                >
+                  经营视角
+                </button>
+                <button
+                  disabled={customersLoading}
+                  className={view === "customer" ? styles.active : ""}
+                  onClick={() => {
+                    setView("customer");
+                    setTaskLabel("全部");
+                  }}
+                >
+                  客户视角
+                </button>
+              </div>
+            )
           ) : (
             <button
               className={`${styles.btn} ${styles.soft} ${styles.sm}`}
@@ -716,364 +779,442 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
           )}
         </div>
 
-        <div className={styles.taskSummary}>
-          <div className={styles.bubble}>
-            <Icon name={doneView ? "check" : "list"} />
-          </div>
-          <div>
-            <h3 className={styles.taskSummaryTitle}>
-              {doneView
-                ? "客户经营任务已完成"
-                : page === "pending"
-                  ? "待处理：客户触达"
-                  : isBiz
+        {isInsurance ? (
+          <InsuranceTracking
+            refreshKey={insuranceRefreshKey}
+            onExecute={openOutboundLink}
+            onShowScheme={(customer) =>
+              showScheme({
+                link: customer.link,
+                name: customer.name,
+                task: customer.sceneName ?? "",
+              })
+            }
+            onBusyChange={setInsuranceBusy}
+            onViewInsuranceTasks={
+              firstInsuranceSkill
+                ? () => {
+                    setInsuranceSelected(false);
+                    setSelectedSceneId(firstInsuranceSkill.sceneId);
+                  }
+                : undefined
+            }
+          />
+        ) : (
+          <>
+            <div className={styles.taskSummary}>
+              <div className={styles.bubble}>
+                <Icon name={doneView ? "check" : "list"} />
+              </div>
+              <div>
+                <h3 className={styles.taskSummaryTitle}>
+                  {doneView
+                    ? "客户经营任务已完成"
+                    : page === "pending"
+                    ? "待处理：客户触达"
+                    : isBiz
                     ? selectedTask
                       ? "当前任务：" + selectedTask
                       : "今日暂无排程中的任务"
                     : "今日任务：客户经营"}
-              {isBiz &&
-                !loading &&
-                !customersLoading &&
-                selectedNode &&
-                !pool.length && (
-                  <span className={styles.taskExecutionTime}>
-                    执行时间：{scheduleLabel(selectedNode.schedule)}
-                  </span>
-                )}
-            </h3>
-            <div className={styles.summaryMetrics}>
-              <span>
-                目标客户 <b>{loading ? "--" : (counts?.targetCusCount ?? "--")}</b>{" "}
-                人
-              </span>
-              <span>
-                今日已触达{" "}
-                <b>{loading ? "--" : (counts?.todayTouchCount ?? "--")}</b> 人
-              </span>
-              <span>
-                七日内已触达{" "}
-                <b>{loading ? "--" : (counts?.sevenDayTouchCount ?? "--")}</b> 人
-              </span>
-              <span>
-                待处理{" "}
-                <b className={styles.red}>
-                  {loading ? "--" : (counts?.unTouchedCount ?? "--")}
-                </b>{" "}
-                人
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {page !== "today" && (
-          <div className={styles.tableToolbar}>
-            <span className={styles.subtle}>
-              {doneView ? "触达记录与经营结果" : "优先处理尚未触达的客户"}
-            </span>
-            <input
-              className={styles.input}
-              aria-label="搜索客户或经营机会"
-              placeholder="搜索客户、标签或经营机会"
-              defaultValue={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-              }}
-            />
-          </div>
-        )}
-
-        <div className={styles.customerGroups}>
-          {tableGroups.map((group, index) => {
-            const groupKey = `${selectedSkillId ?? ""}|${group.key}`;
-            const collapsed = collapsedGroups.has(groupKey);
-            const tableId = `${groupTablesId}-${index}`;
-            const groupTitle = group.fields
-              .map((field) => `${field.label}：${field.value}`)
-              .join(" / ");
-            return (
-              <div key={groupKey} className={styles.customerGroup}>
-                {group.fields.length > 0 && (
-                  <h3 className={styles.customerGroupHeading}>
-                    <button
-                      type="button"
-                      className={styles.customerGroupToggle}
-                      aria-expanded={!collapsed}
-                      aria-controls={tableId}
-                      aria-label={`${groupTitle}，${group.customers.length} 人`}
-                      onClick={() =>
-                        setCollapsedGroups((current) => {
-                          const next = new Set(current);
-                          if (next.has(groupKey)) {
-                            next.delete(groupKey);
-                          } else {
-                            next.add(groupKey);
-                          }
-                          return next;
-                        })
-                      }
-                    >
-                      <ChevronDown
-                        size={18}
-                        aria-hidden="true"
-                        className={cx(
-                          styles.customerGroupChevron,
-                          collapsed && styles.customerGroupChevronCollapsed,
-                        )}
-                      />
-                      <span className={styles.customerGroupTitle}>
-                        {groupTitle}
+                  {isBiz &&
+                    !loading &&
+                    !customersLoading &&
+                    selectedNode &&
+                    !pool.length && (
+                      <span className={styles.taskExecutionTime}>
+                        执行时间：{scheduleLabel(selectedNode.schedule)}
                       </span>
-                      <span className={styles.customerGroupCount}>
-                        {group.customers.length} 人
-                      </span>
-                    </button>
-                  </h3>
-                )}
-                <div
-                  id={tableId}
-                  className={styles.tableWrap}
-                  hidden={collapsed}
-                >
-                  <table
-                    aria-label={group.fields.length > 0 ? groupTitle : undefined}
-                    className={cx(
-                      styles.customerTable,
-                      doneView
-                        ? styles.completedTable
-                        : styles.opportunityTable,
-                      styles.metricsTable,
-                      showScenes && styles.sceneTable,
-                      page === "today" && !isBiz && styles.todayCustomerTable,
-                      showContactStatus && styles.todayTaskTable,
                     )}
-                  >
-                    <thead>
-                      <tr>
-                        <th>客户姓名</th>
-                        {!isBiz && (
-                          <th scope="col" className={styles.tagFilterHeading}>
-                            <button
-                              type="button"
-                              ref={triggerRef}
-                              className={cx(
-                                styles.tagFilterTrigger,
-                                filterActive && styles.filtered,
-                              )}
-                              aria-label={
-                                "筛选重点标签" +
-                                (filterActive ? `，当前：${taskLabel}` : "")
-                              }
-                              aria-haspopup="dialog"
-                              aria-expanded={tagFilterOpen}
-                              aria-controls="wealthTagFilterPopover"
-                              onClick={toggleTagFilter}
-                            >
-                              <span>重点标签</span>
-                              <span className={styles.tagFilterIcon}>
-                                <svg viewBox="0 0 20 20" aria-hidden="true">
-                                  <path d="M3 4h14l-5.5 6v5l-3 1v-6Z" />
-                                </svg>
-                                {filterActive && <i></i>}
-                              </span>
-                            </button>
-                            {filterActive && (
-                              <div className={styles.tagFilterApplied}>
-                                <span>{taskLabel}</span>
-                                <button
-                                  type="button"
-                                  aria-label="清除重点标签筛选"
-                                  title="清除筛选"
-                                  onClick={() => applyTagFilter("全部")}
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            )}
-                          </th>
-                        )}
-                        {showScenes && (
-                          <th scope="col" className={styles.sceneCol}>
-                            <SceneFilter
-                              value={sceneFilter}
-                              options={sceneOptions}
-                              onChange={setSceneFilter}
-                            />
-                          </th>
-                        )}
-                        {!doneView && (
-                          <th className={styles.opportunityCol}>经营机会</th>
-                        )}
-                        <th scope="col" className={styles.metricsCol}>
-                          客户指标
-                        </th>
-                        {doneView && (
-                          <th className={styles.channelCol}>触达方式</th>
-                        )}
-                        {showContactStatus && (
-                          <th
-                            scope="col"
-                            className={cx(
-                              styles.contactStatusCol,
-                              styles.tagFilterHeading,
-                            )}
-                          >
-                            <ContactStatusFilter
-                              value={contactStatus}
-                              customers={contactStatusCustomers}
-                              onChange={setContactStatus}
-                            />
-                          </th>
-                        )}
-                        <th scope="col" className={styles.recentContactCol}>
-                          最近接触时间
-                        </th>
-                        {!doneView && (
-                          <th className={styles.schemeCol}>经营方案</th>
-                        )}
-                        <th className={styles.executionCol}>
-                          {doneView ? "完成时间" : "执行"}
-                        </th>
-                        {doneView && <th>经营结果</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {group.customers.length ? (
-                        group.customers.map((c) => (
-                          <tr key={c.id}>
-                            <td className={styles.name}>{c.name}</td>
-                            {!isBiz && (
-                              <td>
-                                <CustomerLabel label={c.label} />
-                              </td>
-                            )}
-                            {showScenes && (
-                              <td className={styles.sceneCol}>
-                                <CustomerScenes key={c.id} names={c.skillNames} />
-                              </td>
-                            )}
-                            {!doneView && (
-                              <td className={styles.reason}>
-                                <Opportunities customer={c} multiple={!isBiz} />
-                              </td>
-                            )}
-                            <td className={styles.metricsCol}>
-                              <CustomerMetrics
-                                key={c.id}
-                                fields={c.dynamicFields}
-                              />
-                            </td>
-                            {doneView && (
-                              <td className={styles.channelCol}>
-                                <Icon
-                                  name={
-                                    c.channel === "电话"
-                                      ? "phone"
-                                      : c.channel === "企微"
-                                      ? "chat"
-                                      : "user"
-                                  }
-                                />
-                                {"　"}
-                                {contactMethodLabel(c.channel)}
-                              </td>
-                            )}
-                            {showContactStatus && (
-                              <td className={styles.contactStatusCol}>
-                                <span
-                                  className={cx(
-                                    styles.tag,
-                                    c.touched === 1
-                                      ? styles.green
-                                      : styles.emptyTag,
-                                  )}
-                                >
-                                  {contactStatusOf(c.touched)}
-                                </span>
-                              </td>
-                            )}
-                            <td
-                              className={styles.recentContactCol}
-                              title={c.time || undefined}
-                            >
-                              <span className={styles.recentContactValue}>
-                                {c.time || "—"}
-                              </span>
-                            </td>
-                            {!doneView && (
-                              <td className={styles.schemeCol}>
-                                <button
-                                  className={styles.link}
-                                  onClick={() => showScheme(c.id)}
-                                >
-                                  查看经营方案
-                                </button>
-                              </td>
-                            )}
-                            <td className={styles.executionCol}>
-                              {doneView ? (
-                                c.time
-                              ) : (
-                                <div className={styles.contactActions}>
-                                  <button
-                                    className={`${styles.btn} ${styles.primary}`}
-                                    onClick={() => openOutboundLink("dial", c)}
-                                  >
-                                    <Icon name="phone" />
-                                    电访
-                                  </button>
-                                  <button
-                                    className={styles.btn}
-                                    onClick={() =>
-                                      openOutboundLink("insight", c)
-                                    }
-                                  >
-                                    <Icon name="user" />
-                                    客户洞察
-                                  </button>
-                                </div>
-                              )}
-                            </td>
-                            {doneView && (
-                              <td>
-                                <button
-                                  className={styles.link}
-                                  onClick={() => showResult(c.id)}
-                                >
-                                  查看记录
-                                </button>
-                              </td>
-                            )}
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={columnCount}>
-                            <div
-                              className={styles.empty}
-                              role={loading ? "status" : undefined}
-                            >
-                              {loading
-                                ? "客户清单加载中…"
-                                : isBiz && selectedTask && !search.trim() && contactStatus === "全部"
-                                ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
-                                : "暂无符合条件的客户"}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
+                </h3>
+                <div className={styles.summaryMetrics}>
+                  <span>
+                    目标客户{" "}
+                    <b>{loading ? "--" : counts?.targetCusCount ?? "--"}</b> 人
+                  </span>
+                  <span>
+                    今日已触达{" "}
+                    <b>{loading ? "--" : counts?.todayTouchCount ?? "--"}</b> 人
+                  </span>
+                  <span>
+                    七日内已触达{" "}
+                    <b>{loading ? "--" : counts?.sevenDayTouchCount ?? "--"}</b>{" "}
+                    人
+                  </span>
+                  <span>
+                    待处理{" "}
+                    <b className={styles.red}>
+                      {loading ? "--" : counts?.unTouchedCount ?? "--"}
+                    </b>{" "}
+                    人
+                  </span>
                 </div>
               </div>
-            );
-          })}
-        </div>
+            </div>
 
-        <div className={styles.pagination}>
-          <span className={styles.total}>
-            共 {loading ? "--" : list.length} 条记录
-          </span>
-        </div>
+            {page !== "today" && (
+              <div className={styles.tableToolbar}>
+                <span className={styles.subtle}>
+                  {doneView ? "触达记录与经营结果" : "优先处理尚未触达的客户"}
+                </span>
+                <input
+                  className={styles.input}
+                  aria-label="搜索客户或经营机会"
+                  placeholder="搜索客户、标签或经营机会"
+                  defaultValue={search}
+                  onChange={(e) => {
+                    setSearch(e.target.value);
+                  }}
+                />
+              </div>
+            )}
+
+            {loading && (
+              <span className={skeletonStyles.status} role="status">
+                客户清单加载中…
+              </span>
+            )}
+            <div className={styles.customerGroups} aria-busy={loading}>
+              {tableGroups.map((group, index) => {
+                const groupKey = `${selectedSkillId ?? ""}|${group.key}`;
+                const collapsed = collapsedGroups.has(groupKey);
+                const tableId = `${groupTablesId}-${index}`;
+                const groupTitle = group.fields
+                  .map((field) => `${field.label}：${field.value}`)
+                  .join(" / ");
+                return (
+                  <div key={groupKey} className={styles.customerGroup}>
+                    {group.fields.length > 0 && (
+                      <h3 className={styles.customerGroupHeading}>
+                        <button
+                          type="button"
+                          className={styles.customerGroupToggle}
+                          aria-expanded={!collapsed}
+                          aria-controls={tableId}
+                          aria-label={`${groupTitle}，${group.customers.length} 人`}
+                          onClick={() =>
+                            setCollapsedGroups((current) => {
+                              const next = new Set(current);
+                              if (next.has(groupKey)) {
+                                next.delete(groupKey);
+                              } else {
+                                next.add(groupKey);
+                              }
+                              return next;
+                            })
+                          }
+                        >
+                          <ChevronDown
+                            size={18}
+                            aria-hidden="true"
+                            className={cx(
+                              styles.customerGroupChevron,
+                              collapsed && styles.customerGroupChevronCollapsed,
+                            )}
+                          />
+                          <span className={styles.customerGroupTitle}>
+                            {groupTitle}
+                          </span>
+                          <span className={styles.customerGroupCount}>
+                            {group.customers.length} 人
+                          </span>
+                        </button>
+                      </h3>
+                    )}
+                    <div
+                      id={tableId}
+                      className={styles.tableWrap}
+                      hidden={collapsed}
+                    >
+                      <table
+                        aria-label={
+                          group.fields.length > 0 ? groupTitle : undefined
+                        }
+                        className={cx(
+                          styles.customerTable,
+                          doneView
+                            ? styles.completedTable
+                            : styles.opportunityTable,
+                          styles.metricsTable,
+                          showScenes && styles.sceneTable,
+                          page === "today" &&
+                            !isBiz &&
+                            styles.todayCustomerTable,
+                          showContactStatus && styles.todayTaskTable,
+                        )}
+                      >
+                        <thead>
+                          <tr>
+                            <th>客户姓名</th>
+                            {!isBiz && (
+                              <th
+                                scope="col"
+                                className={styles.tagFilterHeading}
+                              >
+                                <button
+                                  type="button"
+                                  ref={triggerRef}
+                                  className={cx(
+                                    styles.tagFilterTrigger,
+                                    filterActive && styles.filtered,
+                                  )}
+                                  aria-label={
+                                    "筛选重点标签" +
+                                    (filterActive ? `，当前：${taskLabel}` : "")
+                                  }
+                                  aria-haspopup="dialog"
+                                  aria-expanded={tagFilterOpen}
+                                  aria-controls="wealthTagFilterPopover"
+                                  onClick={toggleTagFilter}
+                                >
+                                  <span>重点标签</span>
+                                  <span className={styles.tagFilterIcon}>
+                                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                                      <path d="M3 4h14l-5.5 6v5l-3 1v-6Z" />
+                                    </svg>
+                                    {filterActive && <i></i>}
+                                  </span>
+                                </button>
+                                {filterActive && (
+                                  <div className={styles.tagFilterApplied}>
+                                    <span>{taskLabel}</span>
+                                    <button
+                                      type="button"
+                                      aria-label="清除重点标签筛选"
+                                      title="清除筛选"
+                                      onClick={() => applyTagFilter("全部")}
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                )}
+                              </th>
+                            )}
+                            {showScenes && (
+                              <th scope="col" className={styles.sceneCol}>
+                                <SceneFilter
+                                  value={sceneFilter}
+                                  options={sceneOptions}
+                                  onChange={setSceneFilter}
+                                />
+                              </th>
+                            )}
+                            {!doneView && (
+                              <th className={styles.opportunityCol}>
+                                经营机会
+                              </th>
+                            )}
+                            <th scope="col" className={styles.metricsCol}>
+                              客户指标
+                            </th>
+                            {doneView && (
+                              <th className={styles.channelCol}>触达方式</th>
+                            )}
+                            {showContactStatus && (
+                              <th
+                                scope="col"
+                                className={cx(
+                                  styles.contactStatusCol,
+                                  styles.tagFilterHeading,
+                                )}
+                              >
+                                <ContactStatusFilter
+                                  value={contactStatus}
+                                  customers={contactStatusCustomers}
+                                  onChange={setContactStatus}
+                                />
+                              </th>
+                            )}
+                            <th scope="col" className={styles.recentContactCol}>
+                              最近接触时间
+                            </th>
+                            {!doneView && (
+                              <th className={styles.schemeCol}>经营方案</th>
+                            )}
+                            <th className={styles.executionCol}>
+                              {doneView ? "完成时间" : "执行"}
+                            </th>
+                            {doneView && <th>经营结果</th>}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {loading ? (
+                            <CustomerListSkeleton
+                              business={isBiz}
+                              completed={doneView}
+                              showContactStatus={showContactStatus}
+                            />
+                          ) : group.customers.length ? (
+                            group.customers.map((c) => (
+                              <tr key={c.id}>
+                                <td className={styles.name}>{c.name}</td>
+                                {!isBiz && (
+                                  <td>
+                                    <CustomerLabel label={c.label} />
+                                  </td>
+                                )}
+                                {showScenes && (
+                                  <td className={styles.sceneCol}>
+                                    <CustomerScenes
+                                      key={c.id}
+                                      names={c.skillNames}
+                                    />
+                                  </td>
+                                )}
+                                {!doneView && (
+                                  <td className={styles.reason}>
+                                    <Opportunities
+                                      customer={c}
+                                      multiple={!isBiz}
+                                    />
+                                  </td>
+                                )}
+                                <td className={styles.metricsCol}>
+                                  <CustomerMetrics
+                                    key={c.id}
+                                    fields={c.dynamicFields}
+                                  />
+                                </td>
+                                {doneView && (
+                                  <td className={styles.channelCol}>
+                                    <Icon
+                                      name={
+                                        c.channel === "电话"
+                                          ? "phone"
+                                          : c.channel === "企微"
+                                          ? "chat"
+                                          : "user"
+                                      }
+                                    />
+                                    {"　"}
+                                    {contactMethodLabel(c.channel)}
+                                  </td>
+                                )}
+                                {showContactStatus && (
+                                  <td className={styles.contactStatusCol}>
+                                    <span
+                                      className={cx(
+                                        styles.tag,
+                                        c.touched === 1
+                                          ? styles.green
+                                          : styles.emptyTag,
+                                      )}
+                                    >
+                                      {contactStatusOf(c.touched)}
+                                    </span>
+                                  </td>
+                                )}
+                                <td
+                                  className={styles.recentContactCol}
+                                  title={c.time || undefined}
+                                >
+                                  <span className={styles.recentContactValue}>
+                                    {c.time || "—"}
+                                  </span>
+                                </td>
+                                {!doneView && (
+                                  <td className={styles.schemeCol}>
+                                    <button
+                                      className={styles.link}
+                                      onClick={() => showScheme(c)}
+                                    >
+                                      查看经营方案
+                                    </button>
+                                  </td>
+                                )}
+                                <td className={styles.executionCol}>
+                                  {doneView ? (
+                                    c.time
+                                  ) : (
+                                    <div
+                                      className={cx(
+                                        styles.contactActions,
+                                        showJoinTracking && joinStyles.actions,
+                                      )}
+                                    >
+                                      <button
+                                        className={`${styles.btn} ${styles.primary}`}
+                                        onClick={() =>
+                                          openOutboundLink("dial", c)
+                                        }
+                                      >
+                                        <Icon name="phone" />
+                                        电访
+                                      </button>
+                                      <button
+                                        className={styles.btn}
+                                        onClick={() =>
+                                          openOutboundLink("insight", c)
+                                        }
+                                      >
+                                        <Icon name="user" />
+                                        客户洞察
+                                      </button>
+                                      {showJoinTracking && (
+                                        <JoinTracking
+                                          customer={c}
+                                          onAdded={(
+                                            custUid,
+                                            alreadyTracked,
+                                          ) => {
+                                            markInsuranceCustomerTraced(
+                                              custUid,
+                                            );
+                                            setInsuranceRefreshKey(
+                                              (value) => value + 1,
+                                            );
+                                            toast(
+                                              alreadyTracked
+                                                ? "该客户已在保险核心跟踪中"
+                                                : "已加入保险核心跟踪",
+                                            );
+                                          }}
+                                        />
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                                {doneView && (
+                                  <td>
+                                    <button
+                                      className={styles.link}
+                                      onClick={() => showResult(c.id)}
+                                    >
+                                      查看记录
+                                    </button>
+                                  </td>
+                                )}
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={columnCount}>
+                                <div className={styles.empty}>
+                                  {isBiz &&
+                                  selectedTask &&
+                                  !search.trim() &&
+                                  contactStatus === "全部"
+                                    ? `「${selectedTask}」暂无客户名单，待定时任务执行后生成`
+                                    : "暂无符合条件的客户"}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className={styles.pagination}>
+              <span className={styles.total}>
+                共 {loading ? "--" : list.length} 条记录
+              </span>
+            </div>
+          </>
+        )}
       </section>
 
       {tagFilterOpen && !isBiz && (

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from tests.unit.app.test_managed_cron_execution import Engine
+from tests.fakes.managed_source_config import ManagedSourceConfigService
 from tests.unit.scheduler.test_managed_cron_executions import (
     enqueue,
     execution_setup,
@@ -120,6 +121,7 @@ async def test_valid_dispatch_and_result_recovery_have_separate_body_contracts(
     )
     app = FastAPI()
     app.state.db_connection = db
+    app.state.source_system_config_service = ManagedSourceConfigService()
     app.include_router(managed_execution_api.router, prefix="/api")
     async with AsyncClient(
         transport=ASGITransport(app=app),

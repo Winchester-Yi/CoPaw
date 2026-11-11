@@ -165,6 +165,7 @@ class ManagedExecutionService:
                 input_snapshot=result.input_snapshot,
                 execution_meta=result.execution_meta,
                 executor_leader=result.executor_leader,
+                recheck_output=getattr(result, "recheck_output", None),
             )
         except (Exception, asyncio.CancelledError) as exc:
             logger.warning(

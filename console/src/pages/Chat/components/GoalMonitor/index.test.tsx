@@ -65,6 +65,25 @@ describe("GoalMonitor", () => {
   afterEach(cleanup);
   beforeEach(() => vi.clearAllMocks());
 
+  it("shows durable delegation authorization and refreshes after steering", async () => {
+    mocks.getRecentGoal.mockResolvedValue({
+      ...goal,
+      subagent_delegation_enabled: false,
+    });
+    render(<GoalMonitor chatId="chat-1" />);
+    await waitFor(() => screen.getByRole("button", { name: "目标运行状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "目标运行状态" }));
+    expect(screen.getByText("子代理委派：未授权")).toBeInTheDocument();
+    mocks.getRecentGoal.mockResolvedValue({
+      ...goal,
+      subagent_delegation_enabled: true,
+    });
+    fireEvent(window, new Event("goal-authorization-changed"));
+    await waitFor(() =>
+      expect(screen.getByText("子代理委派：已授权")).toBeInTheDocument(),
+    );
+  });
+
   it("uses a compact trigger and expands the Goal summary", async () => {
     mocks.getRecentGoal.mockResolvedValue(goal);
     render(<GoalMonitor chatId="chat-1" />);

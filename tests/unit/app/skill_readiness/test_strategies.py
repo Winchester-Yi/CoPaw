@@ -38,7 +38,7 @@ def _context(tmp_path, monkeypatch, cron_manager=None):
         source_id="source-a",
         skill_id="skill-a",
         owner=SkillReadinessOwner(user_id="alice"),
-        cron_manager=cron_manager,
+        job_reader=cron_manager or _CronManager([]),
     )
 
 
@@ -91,7 +91,9 @@ async def test_profile_identity_block_requires_heading_and_fields(
     monkeypatch,
 ):
     context = _context(tmp_path, monkeypatch)
-    profile_path = config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    profile_path = (
+        config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    )
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text(
         "### 用户身份信息\n"
@@ -116,7 +118,9 @@ async def test_profile_identity_block_accepts_second_level_heading(
     monkeypatch,
 ):
     context = _context(tmp_path, monkeypatch)
-    profile_path = config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    profile_path = (
+        config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    )
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text(
         "## 用户身份信息\n"
@@ -151,7 +155,9 @@ async def test_profile_identity_block_accepts_standalone_identity_line(
     identity_line,
 ):
     context = _context(tmp_path, monkeypatch)
-    profile_path = config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    profile_path = (
+        config_utils.get_tenant_working_dir(context.scope_id) / "PROFILE.md"
+    )
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text(
         identity_line
@@ -205,8 +211,53 @@ class _CronManager:
     def __init__(self, jobs):
         self.jobs = jobs
 
-    async def list_jobs(self):
-        return self.jobs
+    async def list_jobs(self, *identity):
+        return [job.model_dump(mode="json") for job in self.jobs]
+
+
+@pytest.mark.asyncio
+async def test_bound_new_job_accepts_year_and_workday_schedule(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.crons.managed_models import load_managed_spec
+
+    raw = _job().model_dump(mode="json")
+    raw["schedule"]["cron"] = "0 9 LW * * 2026-2029"
+    raw["run_date_range"] = {
+        "start_date": "2026-01-01",
+        "end_date": "2029-12-31",
+    }
+    context = _context(
+        tmp_path,
+        monkeypatch,
+        _CronManager([load_managed_spec(raw)]),
+    )
+    result = await BoundCronJobStrategy().run(
+        context,
+        SkillReadinessCheckConfig(name="bound_cron_job"),
+    )
+    assert result.status == "pass"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_unavailable_is_check_failure_not_no_bound_jobs(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+
+    context = _context(tmp_path, monkeypatch)
+    context.job_reader = SimpleNamespace(
+        list_jobs=AsyncMock(side_effect=RuntimeError("scheduler unavailable")),
+    )
+    registry = SkillReadinessStrategyRegistry([BoundCronJobStrategy()])
+    result = await registry.run_check(
+        context,
+        SkillReadinessCheckConfig(name=BoundCronJobStrategy.name),
+    )
+    assert result.status == "fail"
+    assert result.message == "自检执行失败"
 
 
 @pytest.mark.asyncio
@@ -338,7 +389,13 @@ async def test_mcp_tools_missing_server_is_fail(tmp_path, monkeypatch):
     workspace = type(
         "Workspace",
         (),
-        {"config": type("Config", (), {"mcp": type("Mcp", (), {"clients": {}})()})()},
+        {
+            "config": type(
+                "Config",
+                (),
+                {"mcp": type("Mcp", (), {"clients": {}})()},
+            )(),
+        },
     )()
     context = _context(tmp_path, monkeypatch)
     context.workspace = workspace
@@ -425,7 +482,11 @@ class _SlowMcpClient:
 
 @pytest.mark.asyncio
 async def test_mcp_tools_timeout_is_fail(tmp_path, monkeypatch):
-    client_config = type("ClientConfig", (), {"enabled": True, "name": "toolbox"})()
+    client_config = type(
+        "ClientConfig",
+        (),
+        {"enabled": True, "name": "toolbox"},
+    )()
     workspace = type(
         "Workspace",
         (),
@@ -433,7 +494,13 @@ async def test_mcp_tools_timeout_is_fail(tmp_path, monkeypatch):
             "config": type(
                 "Config",
                 (),
-                {"mcp": type("Mcp", (), {"clients": {"toolbox": client_config}})()},
+                {
+                    "mcp": type(
+                        "Mcp",
+                        (),
+                        {"clients": {"toolbox": client_config}},
+                    )(),
+                },
             )(),
         },
     )()
@@ -444,6 +511,7 @@ async def test_mcp_tools_timeout_is_fail(tmp_path, monkeypatch):
         "_MCP_SERVER_TIMEOUT_SECONDS",
         0.001,
     )
+
     async def _create_client(*args, **kwargs):
         return _SlowMcpClient()
 

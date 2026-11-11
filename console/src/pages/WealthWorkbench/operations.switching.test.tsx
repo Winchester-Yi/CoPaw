@@ -3,7 +3,6 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor,
   within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -16,12 +15,29 @@ import {
   fetchDistributeBranches,
   fetchDistributeTargets,
 } from "./distributeTargets";
+import {
+  queryInstitutionTree,
+  queryInstitutionPeople,
+} from "./distribution/api";
 import { getWorkbenchContext, useWealthOperations } from "./operations";
 import { useWealthStore } from "./store";
 import type { Plan, PlanItem, Scene } from "./types";
 
+// JSDOM has no layout; exercise selection here and real virtualization in browser QA.
+vi.mock("@tanstack/react-virtual", () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 72,
+    getVirtualItems: () =>
+      Array.from({ length: Math.min(count, 2) }, (_, index) => ({
+        index,
+        key: index,
+        start: index * 72,
+      })),
+  }),
+}));
 vi.mock("../../constants/bbk", async (original) => ({
   ...(await original<typeof import("../../constants/bbk")>()),
+  BBK_ID_TO_NAME_MAP: { "100": "总行", "110": "北京分行", "120": "测试B分行" },
   BBK_ID_MAP: [
     { label: "总行", value: "100" },
     { label: "北京分行", value: "110" },
@@ -34,6 +50,11 @@ vi.mock("./api", async (original) => ({
   fetchPlanList: vi.fn(),
   fetchScenesByCategory: vi.fn(),
   publishPlan: vi.fn(),
+}));
+vi.mock("./distribution/api", async (original) => ({
+  ...(await original<typeof import("./distribution/api")>()),
+  queryInstitutionTree: vi.fn(),
+  queryInstitutionPeople: vi.fn(),
 }));
 vi.mock("./distributeTargets", () => ({
   fetchDistributeBranches: vi.fn(),
@@ -122,6 +143,36 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  vi.mocked(queryInstitutionTree).mockImplementation(async (context) => ({
+    mOrgCode: context.bbk,
+    mOrgName: context.name,
+    mOrgLvl: 30,
+    children: [
+      {
+        mOrgCode: `${context.bbk}001`,
+        mOrgName: `${context.bbk}支行`,
+        mOrgLvl: 80,
+        children: [],
+      },
+    ],
+  }));
+  vi.mocked(queryInstitutionPeople).mockImplementation(async () => [
+    {
+      sapId: `user-${getWorkbenchContext().bbk}`,
+      name: `${getWorkbenchContext().bbk}客户经理`,
+      orgName: "测试支行",
+      bbkId: getWorkbenchContext().bbk!,
+      bbkOrgId: `${getWorkbenchContext().bbk}001`,
+    },
+  ]);
   window.__env__ = { operationsUsersByBranch: { V00001: ["80008888"] } };
   useWealthOperations.setState(useWealthOperations.getInitialState(), true);
   useWealthStore.setState(useWealthStore.getInitialState(), true);
@@ -162,7 +213,10 @@ beforeEach(() => {
     },
   ]);
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function mount() {
   return render(
@@ -188,18 +242,14 @@ describe("运维开启与切换分行的完整状态边界", () => {
     await selectBranch("北京分行");
     await screen.findByText("规划看板内容：plan-110");
     fireEvent.click(screen.getByRole("button", { name: "创建计划" }));
+    expect(screen.queryByRole("radio", { name: "上传 Excel 名单" })).toBeNull();
     fireEvent.click(
       await screen.findByRole("button", { name: /测试经营场景/ }),
     );
     fireEvent.change(screen.getByLabelText("规划名称"), {
       target: { value: "A分行草稿" },
     });
-    const branchSelect = screen.getByRole("combobox", { name: "选择支行" });
-    await waitFor(() => expect(branchSelect).toBeEnabled());
-    fireEvent.mouseDown(branchSelect);
-    fireEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: /110支行/ }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "110支行" }));
     fireEvent.click(await screen.findByRole("button", { name: /110客户经理/ }));
     expect(useWealthStore.getState().targetSapIds).toEqual(["user-110"]);
 
@@ -230,12 +280,7 @@ describe("运维开启与切换分行的完整状态边界", () => {
     expect(useIframeStore.getState()).toBe(originalIdentity);
 
     fireEvent.click(screen.getByRole("button", { name: "创建计划" }));
-    const nextBranchSelect = screen.getByRole("combobox", { name: "选择支行" });
-    await waitFor(() => expect(nextBranchSelect).toBeEnabled());
-    fireEvent.mouseDown(nextBranchSelect);
-    fireEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: /120支行/ }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "120支行" }));
     await screen.findByRole("button", { name: /120客户经理/ });
     expect(
       screen.queryByRole("button", { name: /110客户经理/ }),

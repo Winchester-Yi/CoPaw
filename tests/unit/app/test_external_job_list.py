@@ -31,6 +31,17 @@ URL = "/api/external/cron/jobs"
 HEADERS = {"X-Tenant-Id": "alice", "X-Source-Id": "portal"}
 
 
+def test_legacy_external_list_does_not_depend_on_database(api):
+    _seed(api.root, [_job("old-file-task")])
+    api.client.app.state.db_connection = SimpleNamespace(
+        is_connected=False,
+        fetch_all=AsyncMock(side_effect=AssertionError("no database access")),
+    )
+    response = api.client.get(URL, headers=HEADERS)
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == ["old-file-task"]
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.setattr(config_utils, "WORKING_DIR", tmp_path)
@@ -57,7 +68,10 @@ def api(tmp_path, monkeypatch):
     app.state.multi_agent_manager = manager
     with TestClient(app) as client:
         yield SimpleNamespace(
-            client=client, root=tmp_path, pool=pool, manager=manager
+            client=client,
+            root=tmp_path,
+            pool=pool,
+            manager=manager,
         )
 
 
@@ -87,10 +101,10 @@ def _job(job_id="job-1", *, owner="alice", bound=True, enabled=True):
             "task_type": "agent",
             "request": {"input": "run report"},
             "dispatch": {
-                "target": {"user_id": owner, "session_id": f"s-{job_id}"}
+                "target": {"user_id": owner, "session_id": f"s-{job_id}"},
             },
             "meta": meta,
-        }
+        },
     )
 
 
@@ -108,7 +122,7 @@ def _seed(root, jobs, *, tenant="alice", source="portal", agent="default"):
                         agent: {"id": agent, "workspace_dir": str(workspace)},
                     },
                 },
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -139,7 +153,10 @@ def test_absent_tenant_is_empty_without_initialization(api, suffix):
 @pytest.mark.parametrize("user_id", [None, "alice", "bob"])
 @pytest.mark.parametrize("loaded", [False, True])
 def test_bound_jobs_match_original_list_response(
-    api, monkeypatch, user_id, loaded
+    api,
+    monkeypatch,
+    user_id,
+    loaded,
 ):
     from swe.app.crons import api as cron_api
     from swe.app.crons import manager as manager_module
@@ -151,10 +168,14 @@ def test_bound_jobs_match_original_list_response(
         datetime(2030, 1, day, 1, tzinfo=timezone.utc) for day in (1, 2, 3)
     ]
     monkeypatch.setattr(
-        manager_module, "compute_next_run_times", lambda *a, **kw: next_runs
+        manager_module,
+        "compute_next_run_times",
+        lambda *a, **kw: next_runs,
     )
     monkeypatch.setattr(
-        external_jobs, "compute_next_run_times", lambda *a, **kw: next_runs
+        external_jobs,
+        "compute_next_run_times",
+        lambda *a, **kw: next_runs,
     )
     # Real legacy read methods with no runtime startup in the comparison harness.
     legacy_manager = object.__new__(CronManager)
@@ -164,7 +185,7 @@ def test_bound_jobs_match_original_list_response(
     legacy_manager._timezone = "Asia/Shanghai"
     legacy_manager.list_jobs = AsyncMock(return_value=jobs)
     legacy_manager.create_or_replace_job = AsyncMock(
-        side_effect=AssertionError("must not write")
+        side_effect=AssertionError("must not write"),
     )
     if loaded:
         scope = resolve_storage_tenant_id("alice", "portal")
@@ -191,7 +212,8 @@ def test_bound_jobs_match_original_list_response(
     )
     with TestClient(legacy_app) as client:
         expected = client.get(
-            "/api/cron/jobs?user_id=ignored", headers=headers
+            "/api/cron/jobs?user_id=ignored",
+            headers=headers,
         )
     assert response.status_code == expected.status_code == 200
     assert response.json() == expected.json()
@@ -231,7 +253,8 @@ def test_tenant_and_source_storage_isolation(api, tenant, source):
     _seed(api.root, [_job("own")])
     _seed(api.root, [_job("separate")], tenant=tenant, source=source)
     response = api.client.get(
-        URL, headers={**HEADERS, "X-Tenant-Id": tenant, "X-Source-Id": source}
+        URL,
+        headers={**HEADERS, "X-Tenant-Id": tenant, "X-Source-Id": source},
     )
     assert response.status_code == 200
     assert [item["id"] for item in response.json()] == ["separate"]
@@ -258,7 +281,7 @@ def test_active_and_explicit_agent_selection(api):
     other = active.parent / "other"
     other.mkdir()
     (other / "jobs.json").write_text(
-        JobsFile(jobs=[_job("other")]).model_dump_json()
+        JobsFile(jobs=[_job("other")]).model_dump_json(),
     )
     path = active.parent.parent / "config.json"
     data = json.loads(path.read_text())
@@ -280,7 +303,8 @@ def test_active_and_explicit_agent_selection(api):
 def test_identity_headers_remain_required(api, missing):
     assert (
         api.client.get(
-            URL, headers={k: v for k, v in HEADERS.items() if k != missing}
+            URL,
+            headers={k: v for k, v in HEADERS.items() if k != missing},
         ).status_code
         == 400
     )
@@ -297,7 +321,8 @@ def test_auth_is_not_exempt(api, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "filename", ["config.json", "workspaces/default/jobs.json"]
+    "filename",
+    ["config.json", "workspaces/default/jobs.json"],
 )
 def test_corrupt_storage_is_not_repaired(api, filename):
     _seed(api.root, [_job()])
@@ -312,7 +337,8 @@ def test_corrupt_storage_is_not_repaired(api, filename):
 def test_unknown_disabled_and_foreign_agent_paths(api):
     assert (
         api.client.get(
-            URL, headers={**HEADERS, "X-Agent-Id": "unknown"}
+            URL,
+            headers={**HEADERS, "X-Agent-Id": "unknown"},
         ).status_code
         == 404
     )
@@ -346,7 +372,7 @@ def test_original_jobs_still_bootstraps(api, monkeypatch):
         tenant_workspace,
         "resolve_user_identity",
         AsyncMock(
-            return_value=SimpleNamespace(user_name="Alice", bbk_id="id")
+            return_value=SimpleNamespace(user_name="Alice", bbk_id="id"),
         ),
     )
     api.pool.ensure_bootstrap.side_effect = TenantBootstrapUnavailable("test")

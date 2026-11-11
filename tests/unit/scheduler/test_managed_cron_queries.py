@@ -85,7 +85,7 @@ class QueryDatabase:
     async def fetch_all(self, query, params=None):
         if self.broken:
             raise RuntimeError("database unavailable: private credentials")
-        if not query.lstrip().upper().startswith("SELECT "):
+        if not query.lstrip().upper().startswith(("SELECT ", "WITH ")):
             self.writes += 1
         return [
             dict(row)
@@ -331,6 +331,29 @@ def test_invalid_schedule_is_not_exposed_as_a_successful_empty_preview(
 
 
 PATH = "/api/scheduler/cron/jobs"
+
+
+@pytest.mark.asyncio
+async def test_list_marks_previously_distributed_parent(client, database):
+    database.add("parent")
+    database.add("standalone")
+    database.add(
+        "old-child",
+        tenant="bob",
+        parent=("alice", "bank", "default", "parent"),
+        deleted=True,
+    )
+    database.add(
+        "unrelated-child",
+        tenant="bob",
+        parent=("alice", "other", "default", "standalone"),
+    )
+    response = await client.get(PATH, headers=HEADERS)
+    assert response.status_code == 200
+    assert {
+        row["id"]: row["has_distributed_children"]
+        for row in response.json()["items"]
+    } == {"parent": True, "standalone": False}
 
 
 @pytest.mark.asyncio

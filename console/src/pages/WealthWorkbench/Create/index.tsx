@@ -2,7 +2,7 @@
  * 智能财富工作台 —— 创建计划页（新建 / 修改工作规划）
  * 对应原型 createHTML：场景选择、方向与排程配置、规划名称、
  * 分发目标（仅支行行长/分行中台）、发布确认。
- * 执行排程与控制台定时任务同一模型，自定义规则在提交前转换为 cron。
+ * 执行频率与控制台定时任务同一模型，自定义规则在提交前转换为 cron。
  */
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -14,6 +14,12 @@ import styles from "../index.module.less";
 import { useIframeStore } from "../../../stores/iframeStore";
 import { Icon } from "../components/Icon";
 import { TargetPicker } from "../components/TargetPicker";
+import {
+  ExcelRosterSummary,
+  ExcelTargetPicker,
+} from "../components/ExcelTargetPicker";
+import excelStyles from "../components/ExcelTargetPicker.module.less";
+import { canUseExcelDistribution } from "../distribution/excelAccess";
 import { TimeField } from "../components/TimeField";
 import {
   buildCustomCron,
@@ -36,7 +42,7 @@ import {
   findSceneConflicts,
   isValidCustNum,
 } from "../utils";
-import type { PlanItem, Scene } from "../types";
+import type { DistributeTarget, PlanItem, Scene } from "../types";
 import { defaultMonitoring, type SceneMonitoring } from "../monitoring";
 
 const PUSH_TIME_LABEL = "名单推送时间";
@@ -58,7 +64,7 @@ const STEP_DEFS = [
   {
     n: 3,
     title: "任务周期与排程",
-    sub: "按场景设置有效期与执行排程",
+    sub: "按场景设置有效期与执行频率",
     target: "direction",
   },
 ] as const;
@@ -723,6 +729,23 @@ export function MonitoringFields({
   );
 }
 
+interface TargetMethodState {
+  key: string;
+  method: "excel" | "institution";
+  visitedInstitution: boolean;
+  excelTargets: DistributeTarget[];
+  excelPending: boolean;
+  originalSapIds: string[];
+}
+
+function formatTargetChanges(original: string[], current: string[]) {
+  const oldIds = new Set(original);
+  const newIds = new Set(current);
+  const added = current.filter((id) => !oldIds.has(id)).length;
+  const removed = original.filter((id) => !newIds.has(id)).length;
+  return `新增 ${added} 人 · 移除 ${removed} 人 · 最终 ${current.length} 人`;
+}
+
 export default function Create() {
   const account = useWealthStore(selectCurrentAccount);
   const draft = useWealthStore((s) => s.draft);
@@ -745,8 +768,11 @@ export default function Create() {
   const publishPlan = useWealthStore((s) => s.publishPlan);
   const openDialog = useWealthStore((s) => s.openDialog);
   const toast = useWealthStore((s) => s.toast);
-  const targetSapIds = useWealthStore((s) => s.targetSapIds);
+  const manualSapIds = useWealthStore((s) => s.targetSapIds);
   const plans = useWealthStore((s) => s.plans);
+  const manualBlocked = useWealthStore(
+    (s) => s.accountId === "middle" && s.distributionBlocked,
+  );
   const plansLoaded = useWealthStore((s) => s.plansLoaded);
   const navigate = useNavigate();
 
@@ -759,6 +785,36 @@ export default function Create() {
 
   const needsTargets = needsDistributeTargets(account?.id ?? "rm");
   const stepDefs = needsTargets ? [...STEP_DEFS, TARGET_STEP] : STEP_DEFS;
+  const userId = useIframeStore((s) => s.userId);
+  const contextVersion = useWealthStore((s) => s.contextVersion);
+  const excelAllowed = needsTargets && canUseExcelDistribution(userId);
+  const formKey = JSON.stringify([
+    planFormVersion,
+    contextVersion,
+    userId,
+    excelAllowed,
+  ]);
+  const initialSelection = (): TargetMethodState => ({
+    key: formKey,
+    method: excelAllowed ? "excel" : "institution",
+    visitedInstitution: !excelAllowed,
+    excelTargets:
+      excelAllowed && editingId ? useWealthStore.getState().targets : [],
+    excelPending: false,
+    originalSapIds: editingId ? manualSapIds : [],
+  });
+  const [selection, setSelection] = useState(initialSelection);
+  if (selection.key !== formKey) setSelection(initialSelection());
+  const useExcel = excelAllowed && selection.method === "excel";
+  const excelTargets = selection.excelTargets;
+  const targetSapIds = useExcel
+    ? excelTargets.map((target) => target.sapId)
+    : manualSapIds;
+  const distributionBlocked = !useExcel && manualBlocked;
+  const publishDisabled =
+    !plansLoaded ||
+    distributionBlocked ||
+    (useExcel && (selection.excelPending || !excelTargets.length));
 
   // 进入时保留修改入口回填的规划；离开后清空，避免下次新建沿用旧内容。
   useEffect(() => {
@@ -791,6 +847,10 @@ export default function Create() {
   };
 
   const onPublish = () => {
+    if (distributionBlocked) {
+      toast("请等待人员查询完成，或重试、取消失败的待选机构");
+      return;
+    }
     if (!plansLoaded) {
       toast("正在加载已有规划，请稍候");
       return;
@@ -845,7 +905,19 @@ export default function Create() {
               <strong>{draft.items.length} 个</strong>
             </div>
           </div>
-          {needsTargets && <TargetNamesSummary sapIds={targetSapIds} />}
+          {useExcel ? (
+            <>
+              <strong>分发方式 · 上传 Excel 名单</strong>
+              {editingId && (
+                <p>
+                  {formatTargetChanges(selection.originalSapIds, targetSapIds)}
+                </p>
+              )}
+              <ExcelRosterSummary people={excelTargets} />
+            </>
+          ) : (
+            needsTargets && <TargetNamesSummary sapIds={targetSapIds} />
+          )}
           {draft.items.map((x, i) => (
             <div className={styles.recommendation} key={x.id}>
               <h3>
@@ -854,7 +926,7 @@ export default function Create() {
               <p style={{ margin: 0 }}>
                 任务周期：{x.cycle}（{x.start} 至 {x.end}）
                 <br />
-                执行排程：
+                执行频率：
                 {x.schedule.type === "custom"
                   ? customScheduleLabel(x.schedule.rawCron)
                   : scheduleLabel(x.schedule)}
@@ -878,7 +950,15 @@ export default function Create() {
           primary: true,
           disabled: conflicts.length > 0,
           onClick: () => {
-            void publishPlan().then((ok) => {
+            const published = useExcel
+              ? publishPlan({
+                  targets: excelTargets,
+                  planFormVersion,
+                  contextVersion,
+                  userId,
+                })
+              : publishPlan();
+            void published.then((ok) => {
               if (ok) navigate("/wealth/board");
             });
           },
@@ -909,7 +989,7 @@ export default function Create() {
           </button>
           <button
             className={`${styles.btn} ${styles.primary}`}
-            disabled={!plansLoaded}
+            disabled={publishDisabled}
             aria-busy={!plansLoaded}
             onClick={onPublish}
           >
@@ -1195,9 +1275,9 @@ export default function Create() {
                 />
               </div>
             </div>
-            <p className={styles.pageNote}>
-              任务周期是场景的有效期，执行排程决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
-            </p>
+            {/* <p className={styles.pageNote}>
+              任务周期是场景的有效期，执行频率决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
+            </p> */}
           </section>
 
           {needsTargets && (
@@ -1208,7 +1288,69 @@ export default function Create() {
                   （已选 {targetSapIds.length} 人）
                 </span>
               </h3>
-              <TargetPicker key={planFormVersion} />
+              {excelAllowed ? (
+                <>
+                  <fieldset className={excelStyles.methods}>
+                    <legend>分发方式</legend>
+                    <label>
+                      <input
+                        type="radio"
+                        name="wealth-distribution-method"
+                        checked={!useExcel}
+                        onChange={() =>
+                          setSelection((current) => ({
+                            ...current,
+                            method: "institution",
+                            visitedInstitution: true,
+                          }))
+                        }
+                      />
+                      按机构选人
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="wealth-distribution-method"
+                        checked={useExcel}
+                        onChange={() =>
+                          setSelection((current) => ({
+                            ...current,
+                            method: "excel",
+                          }))
+                        }
+                      />
+                      {editingId ? "Excel 名单管理" : "上传 Excel 名单"}
+                    </label>
+                  </fieldset>
+                  {selection.visitedInstitution && (
+                    <div hidden={useExcel}>
+                      <TargetPicker key={planFormVersion} />
+                    </div>
+                  )}
+                  <div hidden={!useExcel}>
+                    <ExcelTargetPicker
+                      key={formKey}
+                      currentTargets={editingId ? excelTargets : undefined}
+                      onPendingChange={(excelPending) =>
+                        setSelection((current) =>
+                          current.key === formKey
+                            ? { ...current, excelPending }
+                            : current,
+                        )
+                      }
+                      onChange={(targets) =>
+                        setSelection((current) =>
+                          current.key === formKey
+                            ? { ...current, excelTargets: targets }
+                            : current,
+                        )
+                      }
+                    />
+                  </div>
+                </>
+              ) : (
+                <TargetPicker key={planFormVersion} />
+              )}
             </section>
           )}
         </div>
@@ -1234,7 +1376,7 @@ export default function Create() {
         */}
           <button
             className={`${styles.btn} ${styles.primary}`}
-            disabled={!plansLoaded}
+            disabled={publishDisabled}
             aria-busy={!plansLoaded}
             onClick={onPublish}
           >

@@ -5,7 +5,7 @@ from .executions import RUN_TABLE
 from .operations import IDENTITY_FIELDS, utc_now
 from .run_accounting import occupied_run_sql
 from .date_policy import BEIJING
-from datetime import datetime
+from datetime import timezone
 
 SCOPE_FIELDS = ("source_id", "provider_id", "model_id")
 INVALIDATED = (
@@ -20,7 +20,7 @@ def _batch_order():
     """新工作使用冻结元数据，存量工作仍由真实回执和成员关系确定顺序。"""
     received = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.batch_created_at')),(SELECT MIN(t.created_at) FROM swe_cron_managed_batch_members m JOIN swe_cron_managed_trigger_receipts t ON t.batch_id=m.batch_id AND t.source_id=m.source_id WHERE m.current_execution_id=r.execution_id AND m.source_id=r.source_id AND t.kind='batch' AND t.status='accepted'),'1000-01-01')"
     first = "COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.batch_queue_order')) AS UNSIGNED),(SELECT MIN(i.queue_order) FROM swe_cron_managed_batch_members m JOIN swe_cron_managed_batch_members b ON b.batch_id=m.batch_id JOIN swe_cron_execution_runs i ON i.execution_id=b.initial_execution_id WHERE m.current_execution_id=r.execution_id AND m.source_id=r.source_id),r.queue_order)"
-    return f" ORDER BY CASE WHEN r.dispatch_lane='urgent' THEN 0 ELSE 1 END,{received},{first},r.dispatch_order,r.queue_order LIMIT %s"
+    return f" ORDER BY CASE WHEN r.dispatch_lane='urgent' THEN 0 ELSE 1 END,{received},{first},r.dispatch_order,r.queue_order"
 
 
 def _identity_match(left, right):
@@ -30,7 +30,14 @@ def _identity_match(left, right):
     )
 
 
-def _base(running):
+def _occupied_for_job():
+    return (
+        f"(SELECT COUNT(*) FROM {RUN_TABLE} a WHERE {_identity_match('a', 'r')} "
+        f"AND a.execution_id<>r.execution_id AND {occupied_run_sql('a')})"
+    )
+
+
+def _base(running, now=None):
     status = (
         "('running')"
         if running
@@ -43,19 +50,49 @@ def _base(running):
         "AND JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))='scheduler_managed_v1' "
         "AND (r.dispatch_lease_until IS NULL OR r.dispatch_lease_until<=%s)"
     )
-    now = utc_now().isoformat(" ")
-    params = [now]
+    moment = (now or utc_now()).replace(tzinfo=timezone.utc)
+    timestamp = moment.replace(tzinfo=None).isoformat(" ")
+    params = [timestamp]
     if not running:
+        # Filter paused batches before LIMIT so they cannot block other work.
+        sql += (
+            " AND (r.status='accepted' OR NOT EXISTS ("
+            "SELECT 1 FROM swe_cron_managed_trigger_receipts p "
+            "JOIN swe_cron_managed_batch_members pm ON pm.batch_id=p.batch_id AND pm.source_id=p.source_id "
+            "WHERE pm.current_execution_id=r.execution_id "
+            "AND p.source_id=r.source_id AND p.kind='batch' "
+            "AND p.status='accepted' AND p.batch_paused=1))"
+        )
         sql += (
             f" AND (r.not_before_at<=%s OR r.not_before_at IS NULL OR {INVALIDATED}) "
             f"AND (r.status='accepted' OR {INVALIDATED} OR "
-            f"(SELECT COUNT(*) FROM {RUN_TABLE} a WHERE {_identity_match('a', 'r')} "
-            f"AND a.execution_id<>r.execution_id AND {occupied_run_sql('a')}) "
+            f"{_occupied_for_job()} "
             "< CAST(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.runtime.max_concurrency')) AS UNSIGNED))"
         )
-        today = datetime.now(BEIJING).date().isoformat()
-        params.extend((now, today, today, today, today))
+        today = moment.astimezone(BEIJING).date().isoformat()
+        params.extend((timestamp, today, today, today, today))
     return sql, params
+
+
+def priority_candidates(scope, now):
+    """仅取需要新占容量的有效候选，不为清理失效队列或恢复受理请求留位。"""
+    sql, params = _base(False, now)
+    today = (
+        now.replace(tzinfo=timezone.utc).astimezone(BEIJING).date().isoformat()
+    )
+    sql += (
+        " AND r.status IN ('queued','dispatch_failed') "
+        f"AND NOT {INVALIDATED} AND "
+        + " AND ".join(f"r.{name}=%s" for name in SCOPE_FIELDS)
+    )
+    fields = ",".join(f"r.{name}" for name in IDENTITY_FIELDS)
+    return (
+        f"SELECT {fields}, {_occupied_for_job()} AS occupied_count, "
+        "CAST(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.runtime.max_concurrency')) AS UNSIGNED) AS max_concurrency"
+        + sql
+        + _batch_order(),
+        (*params, today, today, *scope),
+    )
 
 
 class ManagedWorkQuery:
@@ -96,9 +133,10 @@ class ManagedWorkQuery:
             "SELECT r.execution_id"
             + sql
             + (
-                " ORDER BY r.updated_at,r.queue_order LIMIT %s"
+                " ORDER BY r.updated_at,r.queue_order"
                 if running
                 else _batch_order()
-            ),
+            )
+            + " LIMIT %s",
             (*params, self.limit),
         )

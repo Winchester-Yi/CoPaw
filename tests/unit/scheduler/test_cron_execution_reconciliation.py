@@ -52,6 +52,10 @@ class _SqliteDb:
     def __init__(self):
         self.connection = sqlite3.connect(":memory:", isolation_level=None)
         self.connection.row_factory = sqlite3.Row
+        self.connection.create_collation(
+            "utf8mb4_bin",
+            lambda a, b: (a > b) - (a < b),
+        )
         self.before_update = None
         self.connection.executescript(
             """
@@ -65,13 +69,13 @@ class _SqliteDb:
             );
             CREATE TABLE swe_cron_executions (
                 id INTEGER PRIMARY KEY, job_id TEXT, tenant_id TEXT,
-                trace_id TEXT, status TEXT, async_status TEXT, error_message TEXT,
+                trace_id TEXT, status TEXT, async_status TEXT, error_type TEXT, error_message TEXT,
                 end_time TEXT, dispatch_intent_id INTEGER,
                 dispatch_batch_id TEXT, dispatch_attempt INTEGER
             );
             CREATE TABLE swe_cron_dispatch_events (
                 id INTEGER PRIMARY KEY, intent_id INTEGER, event_type TEXT,
-                created_at TEXT
+                created_at TEXT, details TEXT
             );
             """,
         )
@@ -163,6 +167,7 @@ class _SqliteDb:
                 "trace_id": "trace-1",
                 "status": "success",
                 "async_status": None,
+                "error_type": "Prompt",
                 "error_message": "",
                 "end_time": NOW - timedelta(hours=1),
                 "dispatch_intent_id": 7,
@@ -199,7 +204,7 @@ def persisted_store(monkeypatch):
         ("success", "error", "pending", "子任务执行失败"),
         ("error", None, "pending", "agent failed"),
         ("error", "success", "pending", "agent failed"),
-        ("cancelled", None, "pending", "agent failed"),
+        ("cancelled", None, "failed", "agent failed"),
         ("timeout", None, "pending", "agent failed"),
         ("success", None, "dispatched", ""),
         ("success", "", "dispatched", ""),
@@ -270,9 +275,10 @@ async def test_auth_expired_fails_without_retry_or_worker_penalty(
     assert row["completed_at"] == NOW.isoformat(" ")
     assert row["due_at"] == NOW.isoformat(" ")
     assert row["error_message"].startswith("鉴权过期:")
-    assert store._record_event_best_effort.await_args.kwargs["details"][
-        "retry"
-    ] is False
+    assert (
+        store._record_event_best_effort.await_args.kwargs["details"]["retry"]
+        is False
+    )
 
     feedback = await store.summarize_recent_completion_feedback(
         since=NOW - timedelta(minutes=5),
@@ -290,6 +296,12 @@ async def test_auth_expired_fails_without_retry_or_worker_penalty(
         status="failed",
         completed_at=NOW,
         updated_at=NOW,
+        error_message="agent failed",
+    )
+    db.add_execution(
+        id=43,
+        dispatch_intent_id=8,
+        status="error",
         error_message="agent failed",
     )
     feedback = await store.summarize_recent_completion_feedback(
@@ -749,3 +761,38 @@ async def test_terminal_result_of_a_lost_claim_is_settled(persisted_store):
     db.add_execution(async_status="success")
     assert await store.reconcile_dispatched_executions(now_utc=NOW) == 1
     assert db.intent()["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type,model_failed",
+    [
+        ("Prompt", True),
+        ("Business,Prompt", True),
+        ('["Prompt","Network"]', True),
+        ("Business", False),
+        ("prompt", False),
+        (None, False),
+    ],
+)
+async def test_legacy_subtask_model_failure_uses_contains(
+    persisted_store,
+    error_type,
+    model_failed,
+):
+    db, store = persisted_store
+    db.add_intent()
+    db.add_execution(async_status="error", error_type=error_type)
+    await store.reconcile_dispatched_executions(now_utc=NOW)
+    assert db.intent()["status"] == ("pending" if model_failed else "failed")
+    assert (
+        store._record_event_best_effort.await_args.kwargs["details"]["retry"]
+        is model_failed
+    )
+    if not model_failed:
+        feedback = await store.summarize_recent_completion_feedback(
+            since=NOW - timedelta(minutes=5),
+            now_utc=NOW,
+        )
+        assert feedback["failure_count"] == 0
+        assert feedback["success_count"] == 1

@@ -9,6 +9,13 @@ RECEIPTS = "swe_cron_managed_trigger_receipts"
 MEMBERS = "swe_cron_managed_batch_members"
 RUNS = "swe_cron_execution_runs"
 EVENTS = "swe_cron_managed_dispatch_events"
+STATS_FIELDS = (
+    "total_batches",
+    "total_members",
+    "done_members",
+    "failed_members",
+    "running_batches",
+)
 
 
 def identity_join(left, right):
@@ -37,21 +44,33 @@ VALID = (
     "AND JSON_UNQUOTE(JSON_EXTRACT(c.members_json,CONCAT('$[',m.dispatch_order,'].execution_id')))=m.initial_execution_id "
     f"AND {MANIFEST_IDENTITY})"
 )
+RECEIPT_SELECT = f"""
+SELECT c.receipt_id,c.batch_id,c.tenant_id,c.source_id,c.agent_id,c.job_id,
+c.logical_fire_at,c.physical_fire_at,c.created_at,c.batch_paused,
+CAST(c.members_json AS JSON) AS members_json,
+JSON_UNQUOTE(JSON_EXTRACT(p.spec_json,'$.name')) AS job_name,
+CASE WHEN ps.dispatch_state='batch_paused' THEN 1 ELSE 0 END AS dispatch_paused,
+CASE WHEN p.management_owner='scheduler' THEN 0 ELSE 1 END AS invalid_parent
+FROM {RECEIPTS} c
+LEFT JOIN swe_cron_jobs_v2 p ON {identity_join('c', 'p')}
+LEFT JOIN swe_cron_job_states ps ON {identity_join('c', 'ps')}
+"""
 BATCH_FROM = (
-    f"FROM {RECEIPTS} c LEFT JOIN swe_cron_jobs_v2 p ON {identity_join('c', 'p')} "
-    f"LEFT JOIN swe_cron_job_states ps ON {identity_join('c', 'ps')} "
+    "FROM board_receipts c "
     f"LEFT JOIN {MEMBERS} m ON c.batch_id=m.batch_id AND c.source_id=m.source_id AND c.source_id COLLATE utf8mb4_bin=m.source_id "
     f"LEFT JOIN {RUNS} r ON m.current_execution_id=r.execution_id AND {identity_join('m', 'r')} "
     f"LEFT JOIN swe_cron_jobs_v2 d ON {identity_join('m', 'd')} "
     f"LEFT JOIN swe_cron_job_states s ON {identity_join('m', 's')} "
 )
 BATCH_SELECT = f"""
-SELECT c.receipt_id,c.batch_id,c.tenant_id,c.source_id,c.agent_id,c.job_id,
-c.logical_fire_at,c.physical_fire_at,c.created_at,c.members_json,
-JSON_UNQUOTE(JSON_EXTRACT(p.spec_json,'$.name')) AS job_name,
+SELECT /*+ NO_MERGE(c) */ c.receipt_id,c.batch_id,c.tenant_id,c.source_id,c.agent_id,c.job_id,
+c.logical_fire_at,c.physical_fire_at,c.created_at,c.job_name,
+MAX(JSON_LENGTH(c.members_json)) AS expected_member_count,
+MAX(JSON_TYPE(c.members_json)) AS manifest_type,
 MAX(CASE WHEN m.member_role='parent' THEN r.provider_id END) AS provider_id,
 MAX(CASE WHEN m.member_role='parent' THEN r.model_id END) AS model_id,
-MAX(CASE WHEN ps.dispatch_state='batch_paused' THEN 1 ELSE 0 END) AS dispatch_paused,
+MAX(c.dispatch_paused) AS dispatch_paused,
+MAX(c.batch_paused) AS batch_paused,
 COUNT(m.member_id) AS member_count,
 SUM(CASE WHEN {DONE} THEN 1 ELSE 0 END) AS done_count,
 SUM(CASE WHEN {FAILED} THEN 1 ELSE 0 END) AS failed_count,
@@ -60,10 +79,10 @@ SUM(CASE WHEN r.status IN ('skipped','cancelled') THEN 1 ELSE 0 END) AS skipped_
 SUM(CASE WHEN {ACTIVE} THEN 1 ELSE 0 END) AS active_count,
 SUM(CASE WHEN r.status IN ('queued','dispatch_failed') THEN 1 ELSE 0 END) AS waiting_count,
 SUM(CASE WHEN m.member_id IS NOT NULL AND NOT COALESCE({VALID},0) THEN 1 ELSE 0 END) AS invalid_count,
-MAX(CASE WHEN p.management_owner='scheduler' THEN 0 ELSE 1 END) AS invalid_parent
+MAX(c.invalid_parent) AS invalid_parent
 {BATCH_FROM}
 """
-STATE = "CASE WHEN invalid_count>0 OR invalid_parent>0 OR COALESCE(UPPER(JSON_TYPE(members_json)),'')<>'ARRAY' OR member_count<>JSON_LENGTH(members_json) THEN 'unavailable' WHEN active_count>0 THEN 'running' WHEN waiting_count>0 THEN 'pending' WHEN member_count=0 THEN 'received' WHEN done_count<>member_count THEN 'unavailable' WHEN failed_count>0 THEN 'failed' ELSE 'completed' END"
+STATE = "CASE WHEN invalid_count>0 OR invalid_parent>0 OR COALESCE(UPPER(manifest_type),'')<>'ARRAY' OR member_count<>expected_member_count THEN 'unavailable' WHEN active_count>0 THEN 'running' WHEN waiting_count>0 THEN 'pending' WHEN member_count=0 THEN 'received' WHEN done_count<>member_count THEN 'unavailable' WHEN failed_count>0 THEN 'failed' ELSE 'completed' END"
 
 
 def db_time(value):
@@ -138,8 +157,37 @@ def batch_where(source, start=None, end=None, query=None, batch_id=None):
     return " AND ".join(clauses), tuple(params)
 
 
+def _aggregate_ctes(where):
+    # NO_MERGE 将文本清单物化为原生 JSON，避免逐成员重新解析整份 LONGTEXT。
+    return (
+        f"WITH board_receipts AS ({RECEIPT_SELECT} WHERE {where}), "
+        f"board_aggregates AS ({BATCH_SELECT} GROUP BY c.receipt_id), "
+        f"board_batches AS (SELECT a.*, {STATE} AS status FROM board_aggregates a)"
+    )
+
+
 def aggregate_query(where):
-    return f"SELECT a.*, {STATE} AS status FROM ({BATCH_SELECT} WHERE {where} GROUP BY c.receipt_id) a"
+    return f"{_aggregate_ctes(where)} SELECT * FROM board_batches"
+
+
+def list_query(where, filtered):
+    stats_filter = (
+        "WHERE status=%s OR status='unavailable'" if filtered else ""
+    )
+    page_filter = "WHERE status=%s" if filtered else ""
+    return (
+        f"{_aggregate_ctes(where)}, board_stats AS ("
+        "SELECT COUNT(*) AS total_batches, SUM(member_count) AS total_members, "
+        "SUM(done_count) AS done_members, SUM(failed_count) AS failed_members, "
+        "SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running_batches, "
+        "SUM(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) AS unavailable_batches "
+        f"FROM board_batches {stats_filter}), board_page AS ("
+        f"SELECT * FROM board_batches {page_filter} "
+        "ORDER BY logical_fire_at DESC,batch_id DESC LIMIT %s OFFSET %s) "
+        "SELECT board_stats.*,board_page.* FROM board_stats "
+        "LEFT JOIN board_page ON 1=1 "
+        "ORDER BY board_page.logical_fire_at DESC,board_page.batch_id DESC"
+    )
 
 
 def event_selection(source, batch_id):

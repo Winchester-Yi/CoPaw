@@ -18,7 +18,7 @@ export function useCronJobs() {
   const fetchJobs = async () => {
     setLoading(true);
     try {
-      const data = await api.listCronJobs();
+      const data = await api.listCronJobs(true);
       if (data) {
         setJobs(data as CronJob[]);
       }

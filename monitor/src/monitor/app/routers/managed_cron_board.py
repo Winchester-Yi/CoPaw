@@ -102,6 +102,41 @@ async def workers(
         raise board_error(exc) from exc
 
 
+@router.get("/failure-summary", summary="按当前全局筛选统计失败类型及具体详情")
+async def failure_summary(
+    filters: BoardListQuery = Depends(),
+    source=Depends(manager_source),
+    service=Depends(board_service),
+):
+    check_range(filters.start_time, filters.end_time)
+    try:
+        return await service.failure_summary(
+            source,
+            start=filters.start_time,
+            end=filters.end_time,
+            status=filters.status,
+            query=filters.query,
+        )
+    except Exception as exc:
+        raise board_error(exc) from exc
+
+
+@router.get(
+    "/batches/{batch_id}/members/{member_id}/attempts",
+    summary="按需查询指定批成员的业务尝试历史",
+)
+async def member_attempts(
+    batch_id: str,
+    member_id: str,
+    source=Depends(manager_source),
+    service=Depends(board_service),
+):
+    try:
+        return await service.member_attempts(source, batch_id, member_id)
+    except Exception as exc:
+        raise board_error(exc) from exc
+
+
 @router.get(
     "/batches/{batch_id}",
     summary="查询新版批次详情，成员与事件独立分页",

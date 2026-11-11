@@ -1,0 +1,111 @@
+.editor {
+  max-height: calc(100vh - 36px);
+  overflow: hidden;
+
+  form {
+    font: inherit;
+    color: inherit;
+  }
+  h2 {
+    margin: 0;
+    padding-right: 28px;
+    overflow-wrap: anywhere;
+  }
+  .customerInfo {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: 12px 24px;
+  }
+  .customerName {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    small {
+      margin-bottom: 0;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    strong {
+      min-width: 0;
+    }
+  }
+  .sceneField {
+    width: 100%;
+    min-width: 0;
+    margin-bottom: 0;
+    label {
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 400;
+    }
+    :global(.ant-form-item-row),
+    :global(.swe-form-item-row) {
+      align-items: flex-start;
+      flex-wrap: nowrap;
+    }
+    :global(.ant-form-item-label),
+    :global(.swe-form-item-label) {
+      display: flex;
+      align-items: center;
+      min-height: 36px;
+    }
+  }
+  .sceneFeedback {
+    grid-column: 1 / -1;
+    text-align: right;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 20px;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 480px) {
+    .customerInfo {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .field {
+    margin-bottom: 16px;
+    &:last-child {
+      margin-bottom: 0;
+    }
+    label {
+      color: var(--ink);
+      font-weight: 550;
+    }
+  }
+  input,
+  select,
+  textarea {
+    font: inherit;
+    min-width: 0;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: 2px solid var(--blue);
+    outline-offset: 1px;
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--blue);
+  }
+  .textHint {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 4px;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .textOverflow {
+    color: var(--console-management-error, #b94a4f);
+  }
+  .required {
+    color: var(--red);
+  }
+}

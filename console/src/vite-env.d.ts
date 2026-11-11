@@ -19,6 +19,7 @@ interface RuntimeEnvConfig {
   voiceRecorderUserWhitelist?: string[];
   directAccessUserWhitelist?: string[];
   operationsUsersByBranch?: Record<string, readonly string[]>;
+  wealthExcelDistributionUsers?: readonly string[];
   chatSessionPageSize?: number | string;
 }
 

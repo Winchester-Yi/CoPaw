@@ -6,6 +6,7 @@ import { Button, Checkbox, Flex, Tooltip, message } from "antd";
 import { CloseOutlined, GlobalOutlined, LinkOutlined } from "@ant-design/icons";
 import { chatApi } from "@/api/modules/chat";
 import type { ChatShareOptions } from "@/api/types";
+import { useIframeStore } from "@/stores/iframeStore";
 import { buildChatShareUrl } from "./shareUrl";
 import { getShareSelectionState } from "./shareSelection";
 import { useChatShareSelection } from "../../chatShareContext";
@@ -22,6 +23,7 @@ interface ChatAreaBounds {
 }
 
 const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
+  const source = useIframeStore((state) => state.source);
   const shareSelection = useChatShareSelection();
   const { close } = shareSelection;
   const selectedTurnIdsRef = useRef(shareSelection.selectedTurnIds);
@@ -99,7 +101,7 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
       ) {
         return null;
       }
-      const url = buildChatShareUrl(result.share_path);
+      const url = buildChatShareUrl(result.share_path, window.location, source);
       shareSelection.setShareUrl(url);
       return url;
     } catch (error) {

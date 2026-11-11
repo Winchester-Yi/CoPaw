@@ -10,6 +10,7 @@ from .batch_failures import (
     STOP_TYPES,
     failure_preview,
     is_failure,
+    display_error_messages,
     member_rows,
     read_batch,
 )
@@ -17,6 +18,7 @@ from .batch_members import MEMBERS
 from .batch_retry_contract import BatchRetryConflict, ManagedBatchRetryRequest
 from .definition import canonical, request_hash
 from .dispatch_events import EVENTS, append_run_event, failure_type
+from .failure_policy import is_model_failure
 from .executions import (
     ExecutionConflict,
     ExecutionRequest,
@@ -100,6 +102,8 @@ class BatchRetryService:
             previous = await self._previous(tx, digest, fingerprint)
             if previous is not None:
                 return previous
+            if receipt["batch_paused"]:
+                raise BatchRetryConflict("cron_batch_paused")
             rows = await member_rows(tx, receipt)
             by_id = {row["member_id"]: row for row in rows}
             if any(item.member_id not in by_id for item in command.candidates):
@@ -168,6 +172,7 @@ class BatchRetryService:
     async def _apply(self, tx, caller, batch_id, command, rows, digest):
         from .retry_priority import lane_for_batch
 
+        await display_error_messages(tx, list(rows.values()))
         retry_lane = await lane_for_batch(tx, batch_id)
         results = []
         audit = {
@@ -254,6 +259,11 @@ class BatchRetryService:
             return "cron_retry_not_failed"
         if row["status"] == "dispatch_failed" and row.get("accepted_at"):
             return "cron_retry_acceptance_inconsistent"
+        if row["status"] != "dispatch_failed" and not is_model_failure(
+            row,
+            row.get("_history"),
+        ):
+            return "cron_retry_non_model_failure"
         if failure_type(row) in STOP_TYPES and not confirmed:
             raise ValueError("cron_retry_confirmation_required")
         return None

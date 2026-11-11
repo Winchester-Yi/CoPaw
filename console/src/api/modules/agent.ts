@@ -1,4 +1,5 @@
 import { request } from "../request";
+import type { SystemSyncSubmission } from "../types/systemCron";
 import type {
   AgentRequest,
   AgentInitRequest,
@@ -43,10 +44,13 @@ export const agentApi = {
     request<AgentsRunningConfig>("/agent/running-config"),
 
   updateAgentRunningConfig: (config: AgentsRunningConfig) =>
-    request<AgentsRunningConfig>("/agent/running-config", {
-      method: "PUT",
-      body: JSON.stringify(config),
-    }),
+    request<AgentsRunningConfig & { scheduler_sync?: SystemSyncSubmission }>(
+      "/agent/running-config",
+      {
+        method: "PUT",
+        body: JSON.stringify(config),
+      },
+    ),
 
   getAgentLanguage: () => request<{ language: string }>("/agent/language"),
 
@@ -102,9 +106,7 @@ export const agentApi = {
       "/agent/config/distribution/tenants",
     ),
 
-  distributeAgentConfig: (
-    payload: AgentConfigDistributionRequest,
-  ) =>
+  distributeAgentConfig: (payload: AgentConfigDistributionRequest) =>
     request<AgentConfigDistributionResponse>("/agent/config/distribute", {
       method: "POST",
       body: JSON.stringify(payload),

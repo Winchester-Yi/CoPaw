@@ -393,6 +393,8 @@ FROM (
   UNION ALL
   SELECT 'swe_cron_managed_mode_items' AS table_name, 'error_code' AS column_name
   UNION ALL
+  SELECT 'swe_cron_managed_trigger_receipts' AS table_name, 'batch_paused' AS column_name
+  UNION ALL
   SELECT 'swe_cron_managed_trigger_receipts' AS table_name, 'receipt_id' AS column_name
   UNION ALL
   SELECT 'swe_cron_managed_trigger_receipts' AS table_name, 'callback_key' AS column_name
@@ -508,6 +510,8 @@ FROM (
   SELECT 'swe_cron_executions' AS table_name, 'status' AS column_name
   UNION ALL
   SELECT 'swe_cron_executions' AS table_name, 'async_status' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_executions' AS table_name, 'error_type' AS column_name
   UNION ALL
   SELECT 'swe_cron_executions' AS table_name, 'error_message' AS column_name
   UNION ALL

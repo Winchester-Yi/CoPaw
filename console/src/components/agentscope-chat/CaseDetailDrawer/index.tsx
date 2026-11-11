@@ -1,12 +1,18 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Drawer, Spin } from "antd";
 import Style from "./style";
 import type { FeaturedCase, CaseStep } from "@/api/types/featuredCases";
 import type { ModelSlotConfig } from "@/api/types";
 import ScheduledTaskPopup from "@/components/ScheduledTaskPopup";
-import { cronJobApi } from "@/api/modules/cronjob";
-import { getUserId, getChannel } from "@/utils/identity";
-import { buildCronJobSpec, type ScheduleConfig } from "@/utils/cron";
+import { getChannel } from "@/utils/identity";
+import type { ScheduleConfig } from "@/utils/cron";
+import type {
+  ManagedCronSchedule,
+  ManagedCronSpec,
+} from "@/api/types/schedulerCron";
+import { getCurrentCronContext, useCronContext } from "@/hooks/useCronContext";
+import { useManagedShortcutCreation } from "@/hooks/useManagedShortcutCreation";
+import { buildManagedCaseSpec } from "./managedSpec";
 
 export interface CaseDetailDrawerProps {
   visible: boolean;
@@ -91,6 +97,14 @@ export default function CaseDetailDrawer({
   loading = false,
   onMakeSimilar,
 }: CaseDetailDrawerProps) {
+  const context = useCronContext();
+  const creation = useManagedShortcutCreation(
+    context,
+    `featured_case:${caseData?.id ?? "none"}`,
+  );
+  const submittedSpec = useRef<{ key: string; spec: ManagedCronSpec } | null>(
+    null,
+  );
   const [iframeLoading, setIframeLoading] = useState(true);
   const [iframeError, setIframeError] = useState(false);
   const [scheduledPopupVisible, setScheduledPopupVisible] = useState(false);
@@ -120,26 +134,34 @@ export default function CaseDetailDrawer({
     config: ScheduleConfig,
     modelSlot?: ModelSlotConfig,
     notificationDelayMinutes?: number,
+    managedSchedule?: ManagedCronSchedule,
   ) => {
     void config;
-    if (!caseData) return;
+    if (!caseData) throw new DOMException("案例已关闭", "AbortError");
 
-    const userId = getUserId();
-    const channel = getChannel();
-
-    const spec = buildCronJobSpec({
-      cronExpression,
-      name: caseData.label || "定时任务",
-      userId,
-      sessionId: undefined,
-      caseValue: caseData.value,
-      channel,
-      modelSlot,
-      notificationDelayMinutes,
-      subscriptionKey: `featured_case:${caseData.id}`,
-    });
-
-    await cronJobApi.createCronJob(spec);
+    if (!managedSchedule || managedSchedule.cron !== cronExpression)
+      throw new Error("排程尚未确认，请重新打开定时设置");
+    if (caseData.source_id && caseData.source_id !== context.source_id)
+      throw new Error("案例所属来源已切换，请重新打开当前来源的案例");
+    const key = JSON.stringify([context, caseData.id]);
+    if (!creation.locked) {
+      submittedSpec.current = {
+        key,
+        spec: buildManagedCaseSpec({
+          caseData,
+          context,
+          schedule: managedSchedule,
+          channel: getChannel(),
+          modelSlot,
+          notificationDelayMinutes,
+        }),
+      };
+    }
+    if (!submittedSpec.current || submittedSpec.current.key !== key)
+      throw new Error("上次创建内容尚未确认，请到定时任务（新）核对进度");
+    await creation.create(submittedSpec.current.spec);
+    if (JSON.stringify(context) !== JSON.stringify(getCurrentCronContext()))
+      throw new DOMException("任务所属工作区已切换", "AbortError");
 
     // 通知 Chat 页面刷新任务列表
     document.dispatchEvent(new CustomEvent("taskCreated"));
@@ -210,9 +232,7 @@ export default function CaseDetailDrawer({
             {/* Left: Steps */}
             <div className="case-detail-drawer-steps-panel">
               {steps.length === 0 ? (
-                <div className="case-detail-drawer-empty">
-                  暂无步骤说明
-                </div>
+                <div className="case-detail-drawer-empty">暂无步骤说明</div>
               ) : (
                 steps.map((step, i) => (
                   <div key={i} className="case-detail-drawer-step">
@@ -274,6 +294,7 @@ export default function CaseDetailDrawer({
             className="case-detail-drawer-footer-btn"
             type="button"
             onClick={handleOpenScheduledPopup}
+            disabled={!caseData || creation.loading}
           >
             <SubscribeIcon />
             订阅为定时任务
@@ -290,11 +311,15 @@ export default function CaseDetailDrawer({
         </div>
       </Drawer>
       <ScheduledTaskPopup
-        open={scheduledPopupVisible}
+        key={JSON.stringify([context, caseData?.id])}
+        open={Boolean(scheduledPopupVisible && visible && caseData)}
         onClose={handleCloseScheduledPopup}
         onConfirm={handleConfirmScheduledTask}
         onSuccess={handleTaskCreatedSuccess}
         caseValue={caseData?.value}
+        managedContext={context}
+        settingsLocked={creation.locked}
+        showCalendarOptions={false}
       />
     </>
   );

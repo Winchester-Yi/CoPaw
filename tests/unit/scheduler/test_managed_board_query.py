@@ -11,6 +11,156 @@ from tests.unit.scheduler.test_managed_batch_retry import (
 )
 
 
+@pytest.mark.parametrize("query", ["report", "model-in-one-member"])
+@pytest.mark.asyncio
+async def test_board_combines_time_status_and_global_keyword(
+    callback_setup,
+    query,
+):
+    from datetime import datetime
+
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET model_id='model-in-one-member'",
+    )
+    result = await ManagedBoardQuery(db).batches(
+        "bank",
+        start=datetime(2026, 10, 16, 9),
+        end=datetime(2026, 10, 16, 9),
+        status="failed",
+        query=query,
+    )
+    assert result["total"] == 1
+    assert result["stats"]["failed_members"] == 1
+    assert result["items"][0]["status"] == "failed"
+    excluded = await ManagedBoardQuery(db).batches(
+        "bank",
+        start=datetime(2026, 10, 16, 9, 0, 1),
+        query=query,
+    )
+    assert excluded["total"] == 0
+    assert excluded["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_board_stats_and_items_share_one_read_snapshot(callback_setup):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    fetch_all = db.fetch_all
+    changed = False
+
+    async def read_then_change_status(query, params=None):
+        nonlocal changed
+        rows = await fetch_all(query, params)
+        if rows and "total_batches" in rows[0] and not changed:
+            db.conn.execute(
+                "UPDATE swe_cron_execution_runs SET status='queued',settled_status=NULL",
+            )
+            changed = True
+        return rows
+
+    db.fetch_all = read_then_change_status
+    result = await ManagedBoardQuery(db).batches("bank")
+    assert changed
+    assert (
+        result["stats"]["failed_members"] == result["items"][0]["failed_count"]
+    )
+
+
+@pytest.mark.parametrize("page, status", [(2, None), (1, "completed")])
+@pytest.mark.asyncio
+async def test_board_empty_page_preserves_global_stats(
+    callback_setup,
+    page,
+    status,
+):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    await failed_batch(callback_setup)
+    result = await ManagedBoardQuery(callback_setup[0]).batches(
+        "bank",
+        page=page,
+        page_size=1,
+        status=status,
+    )
+    assert result["items"] == []
+    assert result["total"] == (1 if status is None else 0)
+    assert result["stats"]["total_members"] == (1 if status is None else 0)
+
+
+@pytest.mark.parametrize("corruption", ["identity", "execution", "missing"])
+@pytest.mark.asyncio
+async def test_board_rejects_bad_relation_outside_selected_status(
+    callback_setup,
+    corruption,
+):
+    import json
+
+    from monitor.app.services.cron.managed_board import (
+        ManagedBoardQuery,
+        ManagedBoardUnavailable,
+    )
+
+    db = callback_setup[0]
+    _, batch = await failed_batch(callback_setup)
+    if corruption == "missing":
+        db.conn.execute("DELETE FROM swe_cron_managed_batch_members")
+    else:
+        raw = db.conn.execute(
+            "SELECT members_json FROM swe_cron_managed_trigger_receipts WHERE batch_id=?",
+            (batch,),
+        ).fetchone()[0]
+        manifest = json.loads(raw)
+        if corruption == "identity":
+            manifest[0]["identity"][0] = "ALICE"
+        else:
+            manifest[0]["execution_id"] = "foreign-execution"
+        db.conn.execute(
+            "UPDATE swe_cron_managed_trigger_receipts SET members_json=? WHERE batch_id=?",
+            (json.dumps(manifest), batch),
+        )
+    with pytest.raises(ManagedBoardUnavailable):
+        await ManagedBoardQuery(db).batches("bank", status="completed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [None, "failed", "completed"])
+@pytest.mark.parametrize("page", [1, 2])
+async def test_list_aggregates_once_and_preserves_filtered_totals(
+    callback_setup,
+    status,
+    page,
+):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+
+    db = callback_setup[0]
+    await failed_batch(callback_setup)
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    result = await ManagedBoardQuery(db).batches(
+        "bank",
+        status=status,
+        page=page,
+        page_size=1,
+    )
+    aggregates = [q for q in statements if "GROUP BY c.receipt_id" in q]
+    assert len(aggregates) == 1
+    assert aggregates[0].count("GROUP BY c.receipt_id") == 1
+    expected = 0 if status == "completed" else 1
+    assert result["total"] == expected
+    assert result["stats"]["total_members"] == expected
+    assert result["stats"]["failed_members"] == expected
+    assert len(result["items"]) == (expected if page == 1 else 0)
+    assert result["page"] == page
+    assert result["page_size"] == 1
+    assert not (await ManagedBoardQuery(db).batches("other"))["items"]
+
+
 @pytest.mark.asyncio
 async def test_board_counts_current_member_without_growing_after_retry(
     callback_setup,
@@ -45,6 +195,19 @@ async def test_board_counts_current_member_without_growing_after_retry(
     assert detail["batch"]["member_count"] == 1
     assert detail["batch"]["status"] == "pending"
     assert detail["members"][0]["business_attempt"] == 2
+    member = detail["members"][0]
+    history = await service.member_attempts("bank", batch, member["member_id"])
+    assert [
+        (row["business_attempt"], row["current"]) for row in history["items"]
+    ] == [
+        (1, False),
+        (2, True),
+    ]
+    assert history["items"][0]["execution_id"] == member["member_id"]
+    assert history["items"][0]["status"] == "error"
+    assert history["items"][1]["execution_id"] == member["execution_id"]
+    with pytest.raises(LookupError):
+        await service.member_attempts("other", batch, member["member_id"])
     assert detail["event_total"] > 1
     assert len(detail["events"]) == 1
     assert not (
@@ -284,3 +447,31 @@ async def test_async_child_failure_has_readable_message_without_inventing_detail
         detail["members"][0]["settled_error_code"]
         == "cron_async_subtasks_failed"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", ["Prompt", "Business", None])
+async def test_board_and_retry_preview_preserve_raw_error_type(
+    callback_setup,
+    error_type,
+):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+    from scheduler.app.services.cron.managed.batch_retry import (
+        BatchRetryService,
+    )
+
+    db = callback_setup[0]
+    caller, batch = await failed_batch(callback_setup)
+    await db.execute(
+        "UPDATE swe_cron_executions SET error_type=%s",
+        (error_type,),
+    )
+    detail = await ManagedBoardQuery(db).detail(
+        "bank",
+        batch,
+        BoardDetailQuery(),
+    )
+    preview = await BatchRetryService(db).preview(caller, batch)
+    assert detail["members"][0]["error_type"] == error_type
+    assert preview["items"][0]["error_type"] == error_type
+    assert detail["batch"]["status"] == "failed"

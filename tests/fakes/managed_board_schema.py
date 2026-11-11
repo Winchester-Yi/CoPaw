@@ -21,6 +21,7 @@ def add_board_tables(connection):
     )
     connection.executescript("""
         CREATE TABLE swe_cron_managed_trigger_receipts (
+            batch_paused INTEGER NOT NULL DEFAULT 0,
             receipt_id TEXT PRIMARY KEY, callback_key TEXT UNIQUE,
             tenant_id TEXT, source_id TEXT, agent_id TEXT, job_id TEXT,
             external_job_id TEXT, operation_id TEXT, kind TEXT,

@@ -129,12 +129,15 @@ class TrackingSources:
 
     def own(self, table, rank, fact, stamp, key, *, seq="0"):
         sequence = seq if seq == "0" else "n." + seq
+        event_scope = (
+            " AND n.event_type<>'recheck_terminal'" if table == EVENTS else ""
+        )
         return TrackingSource(
             table,
             rank,
             fact,
             f"SELECT n.*,n.{stamp} AS _time,CAST(n.{key} AS CHAR) AS _key,{sequence} AS _seq "
-            f"FROM {table} n WHERE {where_identity('n')}",
+            f"FROM {table} n WHERE {where_identity('n')}{event_scope}",
             self.key,
         )
 

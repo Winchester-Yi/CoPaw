@@ -80,6 +80,8 @@ def _utc(value):
 
 
 def _notification_time(run, spec, now):
+    if run.get("kind") == "manual":
+        return _utc(now)
     meta = spec.get("meta", {})
     try:
         delay = min(
@@ -103,7 +105,39 @@ def _notification_time(run, spec, now):
     return _utc(now) + timedelta(minutes=delay)
 
 
-def notification_fields(run, spec, outcome, now, *, deleted=False):
+def notification_calendar_enabled(outcome):
+    """成功且来源开启过滤时才读取执行判断日历需求，关闭时无额外查询。"""
+    config = resolve_cron_notification_config(
+        get_current_source_system_config(),
+    )
+    return outcome.status == "success" and config.skip_weekend_zhaohu_enabled
+
+
+async def notification_calendar(run, now):
+    """在结果写事务外按原定通知日期取得日历，不沿用任务执行开关。"""
+    from .calendar_client import resolve_calendar
+
+    spec = json.loads(run["spec_json"])
+    if run["kind"] == "manual" or spec["task_type"] not in {
+        "agent",
+        "workflow",
+    }:
+        return None
+    return await resolve_calendar(
+        at=_notification_time(run, spec, now),
+        timezone_name="Asia/Shanghai",
+    )
+
+
+def notification_fields(
+    run,
+    spec,
+    outcome,
+    now,
+    *,
+    deleted=False,
+    calendar_result=None,
+):
     zone = spec["schedule"].get("timezone", "UTC")
     retry = json.loads(run["dispatch_meta_json"]).get("daily_failure_retry")
     if isinstance(retry, dict) and retry.get("notification_timezone"):
@@ -122,7 +156,11 @@ def notification_fields(run, spec, outcome, now, *, deleted=False):
         and run["kind"] != "manual"
         and config.skip_weekend_zhaohu_enabled
     ):
-        needed = due.astimezone(ZoneInfo(zone)).weekday() < 5
+        needed = (
+            calendar_result["is_workday"]
+            if calendar_result is not None
+            else due.astimezone(ZoneInfo("Asia/Shanghai")).weekday() < 5
+        )
     return {
         "notification_status": "pending" if needed else "not_required",
         "notification_due_at": (
@@ -134,7 +172,7 @@ def notification_fields(run, spec, outcome, now, *, deleted=False):
     }
 
 
-def history_values(run, outcome, now, *, deleted=False):
+def history_values(run, outcome, now, *, deleted=False, calendar_result=None):
     spec = json.loads(run["spec_json"])
     started = _utc(run.get("started_at") or run.get("accepted_at") or now)
     end = _utc(now)
@@ -168,7 +206,14 @@ def history_values(run, outcome, now, *, deleted=False):
         "input_snapshot": bounded_json(outcome.input_snapshot, 16000),
         "output_preview": outcome.preview[:512],
         "meta": history_metadata(run, outcome),
-        **notification_fields(run, spec, outcome, now, deleted=deleted),
+        **notification_fields(
+            run,
+            spec,
+            outcome,
+            now,
+            deleted=deleted,
+            calendar_result=calendar_result,
+        ),
         "is_read": 0,
         "read_at": None,
         "created_at": end.astimezone(beijing).replace(tzinfo=None),

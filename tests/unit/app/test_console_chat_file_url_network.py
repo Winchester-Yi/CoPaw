@@ -12,6 +12,40 @@ from swe.app.routers import console as console_router
 from swe.app.routers.console import _extract_session_and_payload
 
 
+def test_console_forwards_explicit_subagent_intent():
+    from types import SimpleNamespace
+    from swe.app.runner.runner import AgentRunner
+
+    payload = _extract_session_and_payload(
+        {
+            "session_id": "s",
+            "user_id": "u",
+            "input": [],
+            "enable_subagents": True,
+        },
+    )
+    assert payload["meta"]["enable_subagents"] is True
+    request = SimpleNamespace(channel_meta=payload["meta"])
+    assert AgentRunner._request_allows_subagents(request) is True
+
+
+def test_console_forwards_intent_from_parsed_agent_request():
+    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
+    request = AgentRequest.model_validate(
+        {
+            "session_id": "s",
+            "user_id": "u",
+            "input": [],
+            "enable_subagents": True,
+        },
+    )
+    assert (
+        _extract_session_and_payload(request)["meta"]["enable_subagents"]
+        is True
+    )
+
+
 def test_extract_session_and_payload_keeps_file_url_network():
     payload = _extract_session_and_payload(
         {

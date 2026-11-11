@@ -40,7 +40,14 @@ async def failed_mysql_batch(pair):
         PlatformClient(),
     ).create(
         caller,
-        {**create_payload("board-mysql"), "dispatch_state": "batch_enabled"},
+        {
+            **create_payload(
+                "board-mysql",
+                task_type="text",
+                text="board fixture",
+            ),
+            "dispatch_state": "batch_enabled",
+        },
     )
     binding = await db.fetch_one(
         "SELECT batch_external_job_id FROM swe_cron_job_states WHERE tenant_id=%s AND job_id=%s",
@@ -82,6 +89,43 @@ async def failed_mysql_batch(pair):
         ),
     )
     return replace(caller, is_manager=True), response["batch_id"]
+
+
+@pytest.mark.asyncio
+async def test_mysql_failure_summary_matches_details_and_latest_retry(
+    mysql_pair,
+):
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+    from scheduler.app.services.cron.managed.batch_retry import (
+        BatchRetryService,
+    )
+
+    caller, batch = await failed_mysql_batch(mysql_pair)
+    await mysql_pair.scheduler.execute(
+        "UPDATE swe_cron_executions SET error_message=%s WHERE tenant_id=%s",
+        ("模型限流，请稍后重试", caller.tenant_id),
+    )
+    board = ManagedBoardQuery(mysql_pair.scheduler)
+    summary = await board.failure_summary(caller.source_id, status="failed")
+    assert summary["total"] == 1
+    assert summary["groups"] == [
+        {
+            "failure_type": "model_rate_limit",
+            "label": "模型限流",
+            "count": 1,
+            "details": [{"message": "模型限流，请稍后重试", "count": 1}],
+        },
+    ]
+    assert (await board.batches(caller.source_id))["stats"][
+        "failed_members"
+    ] == summary["total"]
+    service = BatchRetryService(mysql_pair.scheduler)
+    await service.retry(
+        caller,
+        batch,
+        retry_body(await service.preview(caller, batch), "summary-retry"),
+    )
+    assert (await board.failure_summary(caller.source_id))["total"] == 0
 
 
 @pytest.mark.asyncio

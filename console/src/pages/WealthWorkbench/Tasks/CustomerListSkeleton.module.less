@@ -1,0 +1,56 @@
+.row {
+  .contactStatus {
+    min-width: 110px;
+  }
+
+  .placeholder {
+    display: block;
+    width: 52px;
+    max-width: 100%;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--console-management-border, #e5e7eb);
+    animation: customerListPulse 1.6s ease-in-out infinite;
+  }
+
+  .long {
+    width: 140px;
+  }
+
+  .metrics {
+    width: 260px;
+    height: 30px;
+  }
+
+  .actions {
+    width: 160px;
+  }
+}
+
+.status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes customerListPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row .placeholder {
+    animation: none;
+  }
+}

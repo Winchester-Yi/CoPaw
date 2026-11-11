@@ -1,0 +1,195 @@
+@import "../../../styles/scrollbar.less";
+
+.methods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+  color: var(--ink);
+}
+
+.methods legend {
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.methods label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 32px;
+  cursor: pointer;
+}
+
+.methods input {
+  accent-color: var(--blue);
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+
+.uploadRow,
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.uploadRow {
+  padding: 16px;
+}
+
+.fileIcon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  font-size: 22px;
+  border-radius: var(--radius);
+  color: var(--blue);
+  background: var(--wash);
+}
+
+.fileInfo {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.fileInfo p {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.actions a {
+  text-decoration: none;
+}
+
+.actions :global(.anticon) {
+  font-size: 16px;
+}
+
+.panel :focus-visible,
+.methods :focus-visible,
+.roster :focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.feedback {
+  margin: 0;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.feedback[role="alert"],
+details.feedback {
+  color: #972d30;
+  background: #fff5f5;
+}
+
+.feedback button {
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.roster {
+  --target-border: var(--line);
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.roster p {
+  margin: 0 0 6px;
+}
+
+.scrollList {
+  max-height: 240px;
+  overflow: auto;
+  .thin-scrollbar();
+}
+
+.feedback summary {
+  cursor: pointer;
+}
+
+.rosterBody {
+  margin-top: 12px;
+}
+
+.peopleToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.peopleToolbar input {
+  flex: 0 1 320px;
+}
+
+.peopleToolbar select {
+  flex: 0 1 180px;
+  cursor: pointer;
+}
+
+.peopleGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  gap: 8px;
+  max-height: 288px;
+  overflow: auto;
+  padding: 3px;
+  margin: 0;
+  list-style: none;
+  .thin-scrollbar();
+}
+
+.remove {
+  margin-left: auto;
+}
+
+.emptyPeople {
+  color: var(--text);
+  padding-block: 8px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.importReview {
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.importReview p {
+  margin: 6px 0;
+}
+
+.importReview summary {
+  cursor: pointer;
+  color: var(--blue);
+}
+
+.importReview .actions {
+  margin-top: 10px;
+}

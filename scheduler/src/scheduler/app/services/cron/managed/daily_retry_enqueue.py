@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """只为锁内确认的失败创建新尝试，保留批关系和原通知时间。"""
 
+import hashlib
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import timedelta, timezone
 
 from . import executions
 from .batch_members import MEMBERS, RECEIPTS
@@ -31,6 +32,8 @@ from .executions import (
 from .identity import CallerIdentity
 from .repository import IDENTITY_FIELDS, ManagedCronRepository
 from .storage import update
+
+RETRY_SPREAD_SECONDS = 3600
 
 
 @dataclass
@@ -87,7 +90,7 @@ async def _receipt(db, member, *, lock=False):
     if order < 0:
         return None
     return await db.fetch_one(
-        f"SELECT receipt_id,batch_id,tenant_id,source_id,agent_id,job_id,kind,status,logical_fire_at,"
+        f"SELECT receipt_id,batch_id,tenant_id,source_id,agent_id,job_id,kind,status,batch_paused,logical_fire_at,"
         f"JSON_EXTRACT(members_json,%s) AS manifest_member FROM {RECEIPTS} WHERE batch_id=%s"
         + (" FOR UPDATE" if lock else ""),
         (f"$[{order}]", member["batch_id"]),
@@ -164,6 +167,8 @@ async def eligible_reason(tx, call, row, current, member, receipt, prepared):
         or json_object(row["dispatch_meta_json"]).get("protocol") != PROTOCOL
     ):
         return "cron_daily_retry_candidate_identity_invalid"
+    if receipt and receipt["batch_paused"]:
+        return "cron_daily_retry_batch_paused"
     reason = definition_reason(current) or terminal_reason(row, call)
     if reason:
         return reason
@@ -183,7 +188,23 @@ async def eligible_reason(tx, call, row, current, member, receipt, prepared):
     )
 
 
-def retry_command(call, row, current, member, now):
+def retry_not_before_at(call, row):
+    """按调用和任务身份稳定散列到受理后的 1 小时窗口。"""
+    seed = "|".join(
+        [str(call["call_id"]), *(str(row[name]) for name in IDENTITY_FIELDS)],
+    )
+    slot = (
+        int.from_bytes(
+            hashlib.sha256(seed.encode("utf-8")).digest()[:8],
+            "big",
+        )
+        % RETRY_SPREAD_SECONDS
+    )
+    accepted_at = utc_time(call["cutoff_at"]).replace(tzinfo=timezone.utc)
+    return accepted_at + timedelta(seconds=slot)
+
+
+def retry_command(call, row, current, member):
     original = json_object(row["dispatch_meta_json"])
     prior = retry_marker(row)
     due, zone = notification_target(row)
@@ -229,14 +250,14 @@ def retry_command(call, row, current, member, now):
         ),
         expected_definition_version=current["definition_version"],
         dispatch_meta=metadata,
-        not_before_at=now.replace(tzinfo=timezone.utc),
+        not_before_at=retry_not_before_at(call, row),
     )
 
 
 async def enqueue_retry(tx, call, row, current, member, prepared, now):
     key = tuple(row[name] for name in IDENTITY_FIELDS)
     caller = CallerIdentity(*key[:3], row["actor_id"] or row["tenant_id"])
-    command = retry_command(call, row, current, member, now)
+    command = retry_command(call, row, current, member)
     if member:
         from .retry_priority import lane_for_batch
 

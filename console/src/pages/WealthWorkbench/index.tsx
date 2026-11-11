@@ -25,6 +25,7 @@ import {
   operationsIdentity,
   useWealthOperations,
 } from "./operations";
+import { useInstitutionPreload } from "./distribution/useInstitutionPreload";
 import operationStyles from "./components/OperationsControl.module.less";
 
 export default function WealthWorkbench() {
@@ -83,6 +84,12 @@ export default function WealthWorkbench() {
       }
     },
     [],
+  );
+
+  useInstitutionPreload(
+    initialized &&
+      accountId === "middle" &&
+      (!operationsEnabled || Boolean(operationsBranch)),
   );
 
   if (!initialized) {

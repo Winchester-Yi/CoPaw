@@ -8,19 +8,23 @@ import os
 
 import httpx
 from croniter import croniter
+from ..calendar_schedule import candidate_cron, validate_cron
 
 from .cron_syntax import business_parts
 
 from .operations import RegistrationRejected, RegistrationUnknown
 from .swe_client import checked_base
+from .calendar_policy import timer_expression
 
 logger = logging.getLogger(__name__)
 
 
 def platform_cron(expression):
+    expression = candidate_cron(validate_cron(expression))
     parts = business_parts(expression)
     suffix = " " + parts[5] if len(parts) == 6 else ""
     expanded, _ = croniter.expand(" ".join(parts[:5]))
+
     weekdays = expanded[4]
     if weekdays == ["*"]:
         return "0 " + " ".join((*parts[:4], "?")) + suffix
@@ -147,7 +151,7 @@ class ManagedPlatformClient:
             "jobDesc": f"{prefix} {operation['tenant_id']}/{operation['source_id']} - {spec['name']}"[
                 :200
             ],
-            "jobCron": platform_cron(spec["schedule"]["cron"]),
+            "jobCron": platform_cron(timer_expression(spec)),
             "jobAddress": f"{self.callback_base}/api/scheduler/cron/{callback}/callback",
             "jobParam": encoded,
         }

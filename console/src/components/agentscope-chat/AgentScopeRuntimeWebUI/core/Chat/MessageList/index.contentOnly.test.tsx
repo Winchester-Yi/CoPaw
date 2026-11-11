@@ -317,7 +317,7 @@ describe("MessageList content-only composition", () => {
       expect(screen.getByRole("alert")).toHaveTextContent("历史消息加载失败"),
     );
     expect(mocks.messages.some((message) => message.id === "fragment")).toBe(
-      true,
+      false,
     );
     fireEvent.click(screen.getByRole("button", { name: "重试加载历史消息" }));
     await waitFor(() =>
@@ -329,6 +329,9 @@ describe("MessageList content-only composition", () => {
       20,
     );
     expect(mocks.messages.some((message) => message.id === "question")).toBe(
+      true,
+    );
+    expect(mocks.messages.some((message) => message.id === "fragment")).toBe(
       true,
     );
   });
@@ -357,34 +360,95 @@ describe("MessageList content-only composition", () => {
     );
   });
 
-  it("bounds pages with no visible additions and permits explicit continuation", async () => {
+  it("keeps one loading state and reveals archived pages together after finding a user", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     let page = 0;
-    apiMocks.getChatHistory.mockImplementation(async () => ({
-      messages: [],
-      boundaries: [],
-      has_more: true,
-      next_cursor: `cursor-${++page}`,
-    }));
+    let finish!: (value: unknown) => void;
+    apiMocks.getChatHistory.mockImplementation(async () => {
+      page += 1;
+      if (page === 7)
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return {
+        messages: [{ id: `fragment-${page}`, role: "assistant" }],
+        boundaries: [],
+        has_more: true,
+        next_cursor: `cursor-${page}`,
+      };
+    });
     render(<MessageList onSubmit={vi.fn()} />);
     const node = screen.getByTestId("bubble-list");
     node.scrollTop = -600;
     fireEvent.scroll(node);
     await waitFor(() =>
-      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(7),
     );
-    await flushHistoryLayout();
-    await flushHistoryLayout();
-    await flushHistoryLayout();
-    await flushHistoryLayout();
-    await flushHistoryLayout();
-    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(5);
-    fireEvent.click(
-      screen.getByRole("button", { name: "本轮内容较多，继续加载更早消息" }),
+    expect(screen.getByRole("status")).toHaveTextContent("正在加载更早的消息");
+    expect(mocks.messages).toHaveLength(1);
+    await act(async () =>
+      finish({
+        messages: [{ id: "question", role: "user" }],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      }),
     );
     await waitFor(() =>
-      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(6),
+      expect(mocks.messages.some((message) => message.id === "question")).toBe(
+        true,
+      ),
     );
+    expect(mocks.messages.some((message) => message.id === "fragment-1")).toBe(
+      true,
+    );
+  });
+
+  it("stops paging and reveals loaded messages when the reader scrolls down", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    let finish!: (value: unknown) => void;
+    apiMocks.getChatHistory.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    render(<MessageList onSubmit={vi.fn()} />);
+    const list = screen.getByTestId("bubble-list");
+    list.scrollTop = -600;
+    fireEvent.scroll(list);
+    fireEvent.wheel(list, { deltaY: 100 });
+    await act(async () =>
+      finish({
+        messages: [{ id: "fragment", role: "assistant" }],
+        boundaries: [],
+        has_more: true,
+        next_cursor: "next",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.messages.some((message) => message.id === "fragment")).toBe(
+        true,
+      ),
+    );
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops a cycle of archive cursors with retry feedback", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    for (const cursor of ["a", "b", "a"]) {
+      apiMocks.getChatHistory.mockResolvedValueOnce({
+        messages: [],
+        boundaries: [],
+        has_more: true,
+        next_cursor: cursor,
+      });
+    }
+    render(<MessageList onSubmit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("历史消息加载失败"),
+    );
+    expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(3);
   });
 
   it("rejects an archive cursor that cannot advance and retries the same page", async () => {
@@ -500,12 +564,6 @@ describe("MessageList content-only composition", () => {
     await waitFor(() =>
       expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1),
     );
-    await waitFor(() => expect(mocks.messages).toHaveLength(1));
-    expect(mocks.messages[0].id).toBe(responseId);
-    expect(
-      (mocks.messages[0].cards?.[0].data as { output: unknown[] }).output,
-    ).toHaveLength(3);
-    await flushHistoryLayout();
     await waitFor(() =>
       expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2),
     );
@@ -515,6 +573,7 @@ describe("MessageList content-only composition", () => {
         "assistant",
       ]),
     );
+    expect(mocks.messages[1].id).toBe(responseId);
     expect(
       (mocks.messages[1].cards?.[0].data as { output: unknown[] }).output,
     ).toHaveLength(3);
@@ -551,7 +610,7 @@ describe("MessageList content-only composition", () => {
           next_cursor: lastPage ? null : "page-" + page,
         });
       }
-      const rendered = render(<MessageList onSubmit={vi.fn()} />);
+      render(<MessageList onSubmit={vi.fn()} />);
       const list = screen.getByTestId("bubble-list");
       const responseId = actual.convertArchivedPage(
         [{ id: "fragment-" + pageCount, role: "assistant", content: "part 0" }],
@@ -559,10 +618,15 @@ describe("MessageList content-only composition", () => {
       )[0].id;
       list.scrollTop = -380;
       fireEvent.scroll(list);
+      await waitFor(() =>
+        expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(pageCount),
+      );
+      await waitFor(() =>
+        expect(
+          mocks.messages.some((message) => message.id === "question"),
+        ).toBe(true),
+      );
       for (let page = 0; page < pageCount; page += 1) {
-        await waitFor(() =>
-          expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(page + 1),
-        );
         const response = mocks.messages.find(
           (message) => message.role === "assistant",
         )!;
@@ -589,14 +653,10 @@ describe("MessageList content-only composition", () => {
           ).output.map((item) => item.id),
         ).toEqual(
           Array.from(
-            { length: page + 1 },
-            (_, index) => "fragment-" + (pageCount - page + index),
+            { length: pageCount },
+            (_, index) => "fragment-" + (index + 1),
           ),
         );
-        if (page < pageCount - 1) {
-          rendered.rerender(<MessageList onSubmit={vi.fn()} />);
-          await flushHistoryLayout();
-        }
       }
       expect(mocks.messages.map((message) => message.role)).toEqual([
         "user",
@@ -1191,6 +1251,7 @@ describe("MessageList content-only composition", () => {
     apiMocks.getChatHistory.mockResolvedValue({
       messages: Array.from({ length: 20 }, (_, index) => ({
         id: `archived-${index + 1}`,
+        role: index === 0 ? "user" : "assistant",
       })),
       boundaries: [],
       has_more: true,
@@ -1345,7 +1406,7 @@ describe("MessageList content-only composition", () => {
   it("preserves the visible content within a response when earlier history is inserted", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     apiMocks.getChatHistory.mockResolvedValue({
-      messages: [{ id: "archived-message" }],
+      messages: [{ id: "archived-message", role: "user" }],
       boundaries: [],
       has_more: true,
       next_cursor: "next-page",
@@ -1434,7 +1495,7 @@ describe("MessageList content-only composition", () => {
   it("restores the visible anchor after a post-commit history layout shift", async () => {
     mocks.messages = [{ id: "online-message", history: true }];
     let resolveHistory!: (page: {
-      messages: Array<{ id: string }>;
+      messages: Array<{ id: string; role?: string }>;
       boundaries: never[];
       has_more: boolean;
       next_cursor: string | null;
@@ -1458,7 +1519,7 @@ describe("MessageList content-only composition", () => {
     });
 
     resolveHistory({
-      messages: [{ id: "archived-message" }],
+      messages: [{ id: "archived-message", role: "user" }],
       boundaries: [],
       has_more: true,
       next_cursor: "next-page",
@@ -1670,7 +1731,7 @@ describe("MessageList content-only composition", () => {
     apiMocks.getChatHistory
       .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValue({
-        messages: [{ id: "older" }],
+        messages: [{ id: "older", role: "user" }],
         boundaries: [],
         has_more: true,
         next_cursor: "next",

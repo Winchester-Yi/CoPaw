@@ -11,6 +11,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
 from swe.tracing.models import TraceStatus
 from swe.tracing.agent_trace_sdk import start_child_span
+from ...crons.recheck_context import RecheckStartDenied, active_recheck
 
 from ..command_dispatch import _is_command, run_command_path
 from ..query_attempt import _query_session_execution
@@ -53,9 +54,14 @@ async def stream_admission(
             user_id,
             request=request,
         ) as session_execution:
-            if session_execution is not None and not (
-                query and _is_command(query)
-            ):
+            recheck = await _admit_recheck(
+                active_recheck.get(),
+                session_execution,
+                session_id,
+                user_id,
+            )
+            is_command = recheck is None and query and _is_command(query)
+            if session_execution is not None and not is_command:
                 await admit_user_turn(
                     session_execution,
                     msgs=msgs,
@@ -70,24 +76,18 @@ async def stream_admission(
             if session_execution is not None:
                 preflight_args["session_execution"] = session_execution
             preflight = await owner._prepare_query_preflight(**preflight_args)
-            if preflight.response is not None:
-                yield preflight.response, True
-                if preflight.cleanup_denied_memory:
-                    cleanup_args = {
-                        "session_id": session_id,
-                        "user_id": user_id,
-                        "denial_response": preflight.response,
-                    }
-                    if session_execution is not None:
-                        cleanup_args["session_execution"] = session_execution
-                    await owner._cleanup_denied_session_memory(**cleanup_args)
+            denial = await _prepare_preflight_denial(
+                owner,
+                preflight,
+                session_execution,
+                session_id,
+                user_id,
+            )
+            if denial is not None:
+                yield denial, True
                 return
 
-            if (
-                not preflight.approval_consumed
-                and query
-                and _is_command(query)
-            ):
+            if not preflight.approval_consumed and is_command:
                 trace_id = await owner._start_query_trace(request, msgs)
                 try:
                     command_args = (request, msgs, owner)
@@ -132,3 +132,37 @@ async def stream_admission(
                 **query_args,
             ):
                 yield message, last
+
+
+async def _admit_recheck(recheck, session_execution, session_id, user_id):
+    if recheck is None:
+        return None
+    if (
+        session_execution is None
+        or recheck.session_id != session_id
+        or recheck.user_id != user_id
+        or not await recheck.start()
+    ):
+        raise RecheckStartDenied()
+    return recheck
+
+
+async def _prepare_preflight_denial(
+    owner,
+    preflight,
+    session_execution,
+    session_id,
+    user_id,
+):
+    response = preflight.response
+    if response is None or not preflight.cleanup_denied_memory:
+        return response
+    cleanup_args = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "denial_response": response,
+    }
+    if session_execution is not None:
+        cleanup_args["session_execution"] = session_execution
+    await owner._cleanup_denied_session_memory(**cleanup_args)
+    return response

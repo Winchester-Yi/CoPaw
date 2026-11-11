@@ -209,17 +209,24 @@ async def test_workers_and_manual_retry_cannot_add_duplicate_attempts(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "async_status,elapsed,expected",
+    "async_status,error_type,elapsed,expected",
     [
-        ("error", 1, 1),
-        ("pending", 7799, 0),
-        ("pending", 7801, 1),
-        ("success", 7801, 0),
+        ("error", "Prompt", 1, 1),
+        ("error", "Business", 1, 0),
+        ("error", "prompt", 1, 0),
+        ("error", "Prompt ", 1, 1),
+        ("error", "Business,Prompt", 1, 1),
+        ("error", '["Network", "Prompt"]', 1, 1),
+        ("error", None, 1, 0),
+        ("pending", "Prompt", 7799, 0),
+        ("pending", None, 7801, 0),
+        ("success", "Prompt", 7801, 0),
     ],
 )
 async def test_async_failure_and_old_timeout_rule(
     callback_setup,
     async_status,
+    error_type,
     elapsed,
     expected,
 ):
@@ -233,8 +240,8 @@ async def test_async_failure_and_old_timeout_rule(
         (now - timedelta(seconds=elapsed),),
     )
     await db.execute(
-        "UPDATE swe_cron_executions SET status='success',async_status=%s",
-        (async_status,),
+        "UPDATE swe_cron_executions SET status='success',async_status=%s,error_type=%s",
+        (async_status, error_type),
     )
     await ExecutionSettlement(db, clock=lambda: now).tick()
     assert await worker.tick() == expected

@@ -211,6 +211,15 @@ export default function FailurePanel({
                 width: 90,
               },
               {
+                title: "error_type",
+                dataIndex: "error_type",
+                width: 130,
+                ellipsis: true,
+                render: (value: string | null | undefined) => (
+                  <Tooltip title={value ?? "-"}>{value ?? "-"}</Tooltip>
+                ),
+              },
+              {
                 title: "原始失败原因",
                 width: 260,
                 ellipsis: { showTitle: false },

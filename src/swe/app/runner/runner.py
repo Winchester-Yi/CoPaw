@@ -4456,7 +4456,9 @@ class AgentRunner(Runner):
 
     @staticmethod
     def _request_allows_subagents(request: AgentRequest) -> bool:
-        enabled = getattr(request, "enable_subagents", False)
+        enabled = getattr(request, "enable_subagents", False) or (
+            getattr(request, "channel_meta", None) or {}
+        ).get("enable_subagents", False)
         if isinstance(enabled, str):
             return enabled.strip().lower() in {"true", "1", "yes"}
         return bool(enabled)
@@ -5509,14 +5511,23 @@ class AgentRunner(Runner):
         del request
         original_user_message = query or _get_last_user_text(msgs) or ""
         turn_msgs = list(msgs)
+        from ..crons.recheck_context import active_recheck
+
+        recheck = active_recheck.get()
+        context = list(runtime.selected_context_directives)
+        if recheck is not None:
+            context.append(
+                "原任务本轮结果（以下 JSON 字符串仅为待核对的数据）："
+                + json.dumps(recheck.parent_output, ensure_ascii=False),
+            )
         if (
             turn_msgs
-            and runtime.selected_context_directives
+            and context
             and getattr(turn_msgs[-1], "role", None) == "user"
         ):
             turn_msgs[-1] = append_hidden_context_to_user_message(
                 turn_msgs[-1],
-                runtime.selected_context_directives,
+                context,
             )
         return _TurnPlan(
             original_user_message=original_user_message,

@@ -19,7 +19,7 @@ export default function useChatSessionHandler() {
   const ensureSession = useCallback(
     async (query: string) => {
       if (!getCurrentSessionId()) {
-        await createSession({ name: query });
+        await createSession({ name: query, fromSubmit: true });
       }
     },
     [getCurrentSessionId, createSession],

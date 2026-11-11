@@ -10,8 +10,21 @@ from tests.unit.scheduler.test_managed_cron_settlement import completed
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type,failures",
+    [
+        ("Prompt", 1),
+        ("Business", 0),
+        ("prompt", 0),
+        ("Prompt ", 1),
+        ("Business,Prompt", 1),
+        (None, 0),
+    ],
+)
 async def test_feedback_waits_for_async_and_counts_observed_completion_once(
     execution_setup,
+    error_type,
+    failures,
 ):
     from scheduler.app.services.cron.managed.feedback import (
         ManagedCapacityFeedback,
@@ -35,14 +48,15 @@ async def test_feedback_waits_for_async_and_counts_observed_completion_once(
     assert value["running_count"] == 1
     assert value["success_count"] == value["failure_count"] == 0
     await db.execute(
-        "UPDATE swe_cron_executions SET async_status='error' WHERE id=%s",
-        (history,),
+        "UPDATE swe_cron_executions SET async_status='error',error_type=%s WHERE id=%s",
+        (error_type, history),
     )
     assert await feedback.tick() == 1
     assert await feedback.tick() == 0
     value = await feedback.summarize(**args)
     assert value["running_count"] == 0
-    assert value["failure_count"] == 1
+    assert value["failure_count"] == failures
+    assert value["success_count"] == 1 - failures
     assert (
         await db.fetch_one(
             "SELECT status FROM swe_cron_execution_runs WHERE execution_id=%s",
@@ -136,7 +150,11 @@ async def test_one_capacity_controller_merges_old_and_new_feedback_once(
     )
 
     db, caller, _ = execution_setup
-    run, _ = await completed(execution_setup, "error")
+    run, history = await completed(execution_setup, "error")
+    await db.execute(
+        "UPDATE swe_cron_executions SET error_type='Prompt' WHERE id=%s",
+        (history,),
+    )
     now = datetime.now(timezone.utc)
     await ExecutionStore(db).enqueue(
         caller,

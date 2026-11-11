@@ -1,4 +1,5 @@
 import { request } from "../request";
+import type { SystemSyncSubmission } from "../types/systemCron";
 import type {
   CurrentSourceSystemConfigResponse,
   CurrentSourceSystemConfigUpdateRequest,
@@ -30,8 +31,11 @@ export const sourceSystemConfigApi = {
     );
   },
 
-  deleteCurrent(): Promise<{ deleted: boolean }> {
-    return request<{ deleted: boolean }>(
+  deleteCurrent(): Promise<{
+    deleted: boolean;
+    scheduler_sync?: SystemSyncSubmission;
+  }> {
+    return request<{ deleted: boolean; scheduler_sync?: SystemSyncSubmission }>(
       "/source-system-config/current",
       {
         method: "DELETE",

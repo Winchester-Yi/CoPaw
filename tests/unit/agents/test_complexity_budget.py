@@ -26,6 +26,7 @@ from swe.app.runner.expert_main_admission import (
     _validate_prepared_binding,
     admit_expert_main,
 )
+from swe.app.runner.command_dispatch import _run_conversation_command
 from swe.app.runner.runner import AgentRunner, _extract_assistant_response
 from swe.app.routers.console import (
     _apply_expert_payload_metadata,
@@ -68,6 +69,7 @@ def test_targeted_agent_paths_stay_within_complexity_budget() -> None:
         ToolGuardMixin._acting_policy_denial,
         ToolGuardMixin._build_approval_extra,
         _extract_session_and_payload,
+        _run_conversation_command,
         AgentRunner._resolve_pending_approval,
         AgentRunner._prepare_query_agent_context,
         admit_expert_main,

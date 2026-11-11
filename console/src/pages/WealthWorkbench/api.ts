@@ -216,8 +216,14 @@ function mapPlan(view: PlanView): Plan {
 // 场景查询：统一 request 调用 skill-config/list
 // ---------------------------------------------------------------------------
 
-async function fetchSceneSkills(category: string): Promise<SceneSkillItem[]> {
+export async function fetchSceneSkills(
+  category: string,
+  signal?: AbortSignal,
+): Promise<SceneSkillItem[]> {
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, { once: true });
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
     const context = getWorkbenchContext();
@@ -238,6 +244,7 @@ async function fetchSceneSkills(category: string): Promise<SceneSkillItem[]> {
     return (payload.data ?? []).filter((item) => Boolean(item?.skillId));
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -362,6 +369,7 @@ interface NameListItemView {
   strongContactTime?: string | null;
   touchMethod?: string | null;
   touched?: number | null;
+  traced?: number | null;
   fieldList?: NameListFieldValue[];
 }
 
@@ -563,6 +571,7 @@ export async function fetchTodayCustomers(
         category: task.category,
         task: task.sceneName,
         touched: item.touched,
+        traced: item.traced,
         done: item.touched === 1,
         channel: item.touchMethod ?? "",
         time: item.strongContactTime ?? "",
@@ -650,6 +659,7 @@ async function fetchCustomerViewCustomers(
         ? skillNames.join("、")
         : scenes.map((t) => t.sceneName).join("、"),
       touched: item.touched,
+      traced: item.traced,
       done: item.touched == null ? opts.done ?? false : item.touched === 1,
       channel: item.touchMethod ?? "",
       time: item.strongContactTime ?? "",

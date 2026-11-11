@@ -231,6 +231,12 @@ export function createSidebarNavigation(
           visible: visibility.showSourceManagement,
         },
         {
+          key: "channel-cron-migration",
+          label: "定时任务迁移",
+          icon: <SparkDateLine size={size} />,
+          visible: visibility.showSourceManagement,
+        },
+        {
           key: "system-check",
           label: t("nav.systemCheck", { defaultValue: "系统自检" }),
           icon: <SearchCheck size={size} />,
