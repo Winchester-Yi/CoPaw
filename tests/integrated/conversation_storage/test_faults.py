@@ -42,7 +42,7 @@ async def test_fsync_failure_never_installs_sql_root(
         nonlocal calls
         is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
         calls += int(is_directory)
-        if (directory and is_directory and calls == 3) or (
+        if (directory and is_directory and calls == 4) or (
             not directory and not is_directory
         ):
             raise OSError(errno.EIO, "injected durability failure")
