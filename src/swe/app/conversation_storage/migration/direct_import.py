@@ -216,12 +216,18 @@ class DirectImporter(ConversationImporter):
 
     async def _batch_finished(self, position):
         # SQL completion was persisted with publication commit; mirror only now.
-        await self.journal.hydrate()
+        await self.journal.refresh_batch(position)
 
     async def run(self, report):
         await self.journal.prepare()
         await self.journal.mark_state("importing")
-        result = await super().run(report)
-        await self.journal.capture_retentions()
-        await self.journal.mark_state("imported")
-        return result
+        persist_updates = self.journal.persist_updates
+        self.journal.persist_updates = False
+        try:
+            result = await super().run(report)
+            await self.journal.capture_retentions()
+            await self.journal.mark_state("imported")
+            self.manifest._persist()
+            return result
+        finally:
+            self.journal.persist_updates = persist_updates

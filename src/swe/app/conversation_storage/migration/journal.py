@@ -42,6 +42,7 @@ class MigrationJournal:
         self.db, self.manifest = database, manifest
         self.server_uuid = server_uuid
         self.migration_id = manifest.migration_id.encode()
+        self.persist_updates = True
 
     def _bindings(self):
         data = self.manifest.data
@@ -332,7 +333,8 @@ class MigrationJournal:
         self.manifest.data["assignments"].setdefault(kind, {})[
             position
         ] = assignment
-        self.manifest._persist()
+        if self.persist_updates:
+            self.manifest._persist()
         return dict(assignment)
 
     @staticmethod
@@ -514,6 +516,23 @@ class MigrationJournal:
         if persist:
             self.manifest._persist()
 
+    async def refresh_batch(self, position):
+        """Mirror only this committed SQL batch, never scan all tickets."""
+        kind, key = self._key("batch", position)
+        row = await self.db.fetch_one(
+            "SELECT * FROM "
+            + ENTRIES
+            + " WHERE migration_id=%s AND entry_kind=%s AND source_key=%s",
+            (self.migration_id, kind, key),
+        )
+        if row is None or row["state"] not in ("committed", "verified"):
+            raise ValueError(
+                "completed batch has no committed SQL journal row",
+            )
+        self.manifest.data["batches"][position] = row["state"]
+        if self.persist_updates:
+            self.manifest._persist()
+
     async def set_batch_state(self, position, state, *, mirror=True):
         from .manifest import TRANSITIONS
 
@@ -551,7 +570,8 @@ class MigrationJournal:
                 )
         if mirror:
             self.manifest.data["batches"][position] = state
-            self.manifest._persist()
+            if self.persist_updates:
+                self.manifest._persist()
 
     async def record_share(self, token, before, expected):
         # Called while the original share is row-locked in publication commit.

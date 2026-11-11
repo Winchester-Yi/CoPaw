@@ -512,3 +512,46 @@ async def test_committed_share_resume_rejects_changed_locator():
     ):
         with pytest.raises(IntegrityError, match="locator"):
             await store.verify_batch(request, 84, plan, {})
+
+
+async def test_deferred_updates_keep_sql_authority_without_full_mirror_rewrites():
+    from unittest.mock import Mock
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    db, frozen = Database(), manifest()
+    frozen._persist = Mock()
+    journal = MigrationJournal(db, frozen)
+    journal.persist_updates = False
+    first = await journal.allocate("session", "scope/session")
+    assert first["target_id"] == db.entries[0]["id"]
+    assert db.commits == 1
+    frozen._persist.assert_not_called()
+    db.entries.append(
+        {
+            "migration_id": journal.migration_id,
+            "entry_kind": b"batch",
+            "source_key": b"scope/batch",
+            "state": "committed",
+        },
+    )
+    await journal.refresh_batch("scope/batch")
+    assert frozen.data["batches"] == {"scope/batch": "committed"}
+    frozen._persist.assert_not_called()
+    assert not any("ORDER BY id" in query for query in db.queries)
+    # A restart can reconstruct the ticket from SQL even if the mirror was lost.
+    restarted = manifest()
+    recovered = await MigrationJournal(db, restarted).allocate(
+        "session",
+        "scope/session",
+    )
+    assert recovered == first
+
+
+async def test_refresh_batch_rejects_incomplete_sql_state():
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    db, frozen = Database(), manifest()
+    journal = MigrationJournal(db, frozen)
+    with pytest.raises(ValueError, match="committed SQL"):
+        await journal.refresh_batch("missing")
+    assert frozen.data["batches"] == {}
