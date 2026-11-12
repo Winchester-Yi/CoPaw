@@ -2,6 +2,7 @@
 import asyncio
 from contextvars import ContextVar
 import threading
+import time
 
 import pytest
 
@@ -10,6 +11,37 @@ from swe.app.conversation_storage.migration.parallel import (
     MigrationIO,
     MigrationStopped,
 )
+
+
+def test_freshness_reuses_scanned_ancestors_only_within_one_check(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration import freshness
+
+    child = tmp_path / "workspace"
+    child.mkdir()
+    payload = child / "state.json"
+    payload.write_text("{}")
+    cutoff = time.time_ns() + 1_000_000_000
+    calls = []
+    original = freshness.os.walk
+
+    def walk(root, **kwargs):
+        calls.append(root)
+        return original(root, **kwargs)
+
+    monkeypatch.setattr(freshness.os, "walk", walk)
+    checked = set()
+    assert (
+        freshness.changed_source([tmp_path], cutoff, checked=checked) is None
+    )
+    assert freshness.changed_source([child], cutoff, checked=checked) is None
+    assert calls == [tmp_path]
+    import os
+
+    os.utime(payload, ns=(cutoff + 1, cutoff + 1))
+    assert freshness.changed_source([tmp_path], cutoff)[0] == payload
 
 
 def test_shared_freshness_scans_parent_once_and_retains_change(monkeypatch):

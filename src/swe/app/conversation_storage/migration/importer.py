@@ -395,12 +395,17 @@ class ConversationImporter:
         from .freshness import changed_source, tenant_key
 
         timestamps = self.manifest.data.get("tenant_sync_started_at_ns", {})
+        checked_by_cutoff = {}
         for workspace in report["workspaces"]:
             service_unit_id, tenant_id = workspace["scope"][:2]
             cutoff = timestamps.get(tenant_key(service_unit_id, tenant_id))
             if cutoff is None:
                 continue
-            changed = changed_source(workspace.get("source_paths", []), cutoff)
+            changed = changed_source(
+                workspace.get("source_paths", []),
+                cutoff,
+                checked=checked_by_cutoff.setdefault(cutoff, set()),
+            )
             if changed:
                 path, modified_at_ns = changed
                 blocker = {
@@ -428,6 +433,7 @@ class ConversationImporter:
                     str(Path(share["snapshot_path"]).parent),
                 ],
                 cutoff,
+                checked=checked_by_cutoff.setdefault(cutoff, set()),
             )
             if changed:
                 path, modified_at_ns = changed
