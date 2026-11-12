@@ -311,6 +311,195 @@ async def test_10k_workspace_import_resume_verify_finalize(
     workers,
 ):
     database = conversation_test_database
+    datasets, services, shares = await _prepare_benchmark(
+        database,
+        tmp_path,
+        workers,
+    )
+    metrics = _dataset_metrics(datasets)
+    delay_ms = _configured_io_delay(monkeypatch)
+    process, rss_peak, stop_sampler, sampler = _start_rss_sampler()
+    peak_spool_bytes = _track_spool_peak(monkeypatch)
+    peak_index_bytes = _track_index_peak(monkeypatch)
+    sql_metrics = _track_sql_queries(monkeypatch)
+    bundle_metrics = _track_bundle_io(monkeypatch)
+    phases = {}
+    observations = []
+    current_stage = {}
+
+    def begin_stage(stage):
+        current_stage.update(name=stage, started=time.perf_counter())
+        observations.append(
+            _metric_snapshot(stage, sql_metrics, bundle_metrics),
+        )
+        _progress(stage, workers)
+
+    started = time.perf_counter()
+    passed = False
+    try:
+        begin_stage("discovery")
+        discovery_started = time.perf_counter()
+        manifest = await asyncio.to_thread(
+            _freeze_manifest,
+            services,
+            shares,
+            tmp_path / "manifest.json",
+            database.config.database,
+        )
+        phases["discovery_and_freeze_seconds"] = round(
+            time.perf_counter() - discovery_started,
+            3,
+        )
+        monkeypatch.setattr(
+            "swe.database.config.get_database_config",
+            lambda: database.config,
+        )
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        begin_stage("preflight")
+        preflight_started = time.perf_counter()
+        preflight = await asyncio.to_thread(
+            _run_bounded_command,
+            "preflight",
+            manifest.path,
+        )
+        assert preflight["passed"]
+        phases["preflight_seconds"] = round(
+            time.perf_counter() - preflight_started,
+            3,
+        )
+        begin_stage("import-and-resume")
+        phases["import_with_resume_seconds"] = (
+            await _interrupt_import_and_resume(
+                manifest,
+                workers,
+                work_dir,
+                monkeypatch,
+            )
+        )
+        begin_stage("verify-and-finalize")
+        verify_seconds, finalize_seconds = await _verify_and_finalize(
+            manifest,
+            database,
+            work_dir,
+            tmp_path / "completion",
+            workers,
+        )
+        phases["verify_seconds"] = verify_seconds
+        phases["finalize_seconds"] = finalize_seconds
+        passed = True
+    finally:
+        primary_error = sys.exc_info()[0]
+        ended = time.perf_counter()
+        cleanup_error = _cleanup_measurement(
+            stop_sampler,
+            sampler,
+            process,
+            rss_peak,
+            datasets,
+        )
+        cleanup_seconds = time.perf_counter() - ended
+        try:
+            print(
+                json.dumps(
+                    {
+                        "passed": passed and cleanup_error is None,
+                        "error_type": (
+                            primary_error.__name__ if primary_error else None
+                        ),
+                        "cleanup_error_type": (
+                            type(cleanup_error).__name__
+                            if cleanup_error
+                            else None
+                        ),
+                        "cleanup_seconds": round(cleanup_seconds, 3),
+                        "last_stage": current_stage["name"],
+                        "last_stage_seconds": round(
+                            ended - current_stage["started"],
+                            3,
+                        ),
+                        "workers": workers,
+                        "workspaces": WORKSPACE_COUNT,
+                        "populated_workspaces": WORKSPACE_COUNT
+                        // POPULATED_EVERY,
+                        "phases": phases,
+                        "dataset": metrics,
+                        "configured_nas_io_delay_ms": delay_ms,
+                        "total_seconds": round(
+                            ended - started,
+                            3,
+                        ),
+                        "sampled_process_peak_rss_bytes": rss_peak[0],
+                        "peak_spool_bytes": peak_spool_bytes[0],
+                        "peak_index_bytes": peak_index_bytes[0],
+                        "sql_queries": sql_metrics,
+                        "bundle_io": bundle_metrics,
+                        "metric_observations": observations
+                        + [
+                            _metric_snapshot(
+                                "exit",
+                                sql_metrics,
+                                bundle_metrics,
+                            ),
+                        ],
+                        "metrics_scope": {
+                            "passed": "migration test body and local source cleanup only; fixture teardown outcome is recorded by pytest/JUnit",
+                            "sql_queries": "cursor calls; excludes pool wait and driver BEGIN/COMMIT; executemany counts as one call",
+                            "bundle_io": "method calls include configured delay and nested calls; summed durations overlap and cannot be added as exclusive wall time",
+                            "failed_calls": "method exceptions/cancellations; not migration error rate",
+                        },
+                    },
+                    sort_keys=True,
+                ),
+            )
+        except (OSError, ValueError):
+            if primary_error is None and cleanup_error is None:
+                raise
+        if primary_error is None and isinstance(cleanup_error, Exception):
+            raise RuntimeError("benchmark cleanup failed") from cleanup_error
+
+
+def _start_rss_sampler():
+    process = psutil.Process()
+    rss_peak = [process.memory_info().rss]
+    stop_sampler = threading.Event()
+
+    def sample_rss():
+        while not stop_sampler.wait(0.01):
+            rss_peak[0] = max(rss_peak[0], process.memory_info().rss)
+
+    sampler = threading.Thread(target=sample_rss, daemon=True)
+    sampler.start()
+    return process, rss_peak, stop_sampler, sampler
+
+
+def _cleanup_measurement(
+    stop,
+    sampler,
+    process,
+    rss_peak,
+    datasets,
+) -> Exception | None:
+    errors: list[Exception] = []
+
+    def attempt(function, *args):
+        try:
+            function(*args)
+        except Exception as error:
+            errors.append(error)
+
+    def sample_final_rss():
+        rss_peak[0] = max(rss_peak[0], process.memory_info().rss)
+
+    attempt(stop.set)
+    attempt(sampler.join)
+    attempt(sample_final_rss)
+    for source, _nas in datasets:
+        attempt(_make_writable, source)
+    return errors[0] if errors else None
+
+
+async def _prepare_benchmark(database, tmp_path, workers):
     await ChatShareStore(database).ensure_schema()
     await apply_sql_script(
         database,
@@ -357,91 +546,7 @@ async def test_10k_workspace_import_resume_verify_finalize(
     shares = await database.fetch_all(
         "SELECT token,chat_id,creator_id,tenant_id,snapshot_key,created_at,access_count,last_access_at FROM swe_chat_shares",
     )
-    metrics = _dataset_metrics(datasets)
-    delay_ms = _configured_io_delay(monkeypatch)
-    process = psutil.Process()
-    rss_peak = [process.memory_info().rss]
-    stop_sampler = threading.Event()
-
-    def sample_rss():
-        while not stop_sampler.wait(0.01):
-            rss_peak[0] = max(rss_peak[0], process.memory_info().rss)
-
-    sampler = threading.Thread(target=sample_rss, daemon=True)
-    sampler.start()
-    peak_spool_bytes = _track_spool_peak(monkeypatch)
-    peak_index_bytes = _track_index_peak(monkeypatch)
-    phases = {}
-    started = time.perf_counter()
-    try:
-        _progress("discovery", workers)
-        discovery_started = time.perf_counter()
-        manifest = await asyncio.to_thread(
-            _freeze_manifest,
-            services,
-            shares,
-            tmp_path / "manifest.json",
-            database.config.database,
-        )
-        phases["discovery_and_freeze_seconds"] = round(
-            time.perf_counter() - discovery_started,
-            3,
-        )
-        monkeypatch.setattr(
-            "swe.database.config.get_database_config",
-            lambda: database.config,
-        )
-        work_dir = tmp_path / "work"
-        work_dir.mkdir()
-        _progress("preflight", workers)
-        preflight = await asyncio.to_thread(
-            _run_bounded_command,
-            "preflight",
-            manifest.path,
-        )
-        assert preflight["passed"]
-        _progress("import-and-resume", workers)
-        phases["import_with_resume_seconds"] = (
-            await _interrupt_import_and_resume(
-                manifest,
-                workers,
-                work_dir,
-                monkeypatch,
-            )
-        )
-        _progress("verify-and-finalize", workers)
-        verify_seconds, finalize_seconds = await _verify_and_finalize(
-            manifest,
-            database,
-            work_dir,
-            tmp_path / "completion",
-            workers,
-        )
-        phases["verify_seconds"] = verify_seconds
-        phases["finalize_seconds"] = finalize_seconds
-        rss_peak[0] = max(rss_peak[0], process.memory_info().rss)
-        print(
-            json.dumps(
-                {
-                    "workers": workers,
-                    "workspaces": WORKSPACE_COUNT,
-                    "populated_workspaces": WORKSPACE_COUNT // POPULATED_EVERY,
-                    "phases": phases,
-                    "dataset": metrics,
-                    "configured_nas_io_delay_ms": delay_ms,
-                    "total_seconds": round(time.perf_counter() - started, 3),
-                    "sampled_process_peak_rss_bytes": rss_peak[0],
-                    "peak_spool_bytes": peak_spool_bytes[0],
-                    "peak_index_bytes": peak_index_bytes[0],
-                },
-                sort_keys=True,
-            ),
-        )
-    finally:
-        stop_sampler.set()
-        sampler.join()
-        for source, _nas in datasets:
-            _make_writable(source)
+    return datasets, services, shares
 
 
 def _progress(stage, workers):
@@ -450,6 +555,66 @@ def _progress(stage, workers):
         file=sys.stderr,
         flush=True,
     )
+
+
+def _metric_snapshot(stage, sql, bundle):
+    return {
+        "stage": stage,
+        "sql_queries": dict(sql),
+        "bundle_io": {name: dict(values) for name, values in bundle.items()},
+    }
+
+
+def _track_sql_queries(monkeypatch):
+    """Count cursor queries only; excludes pool wait and driver BEGIN/COMMIT."""
+    from swe.database.session import DatabaseSession
+
+    metrics = {"calls": 0, "failed_calls": 0, "summed_seconds": 0.0}
+    lock = threading.Lock()
+    original = DatabaseSession._query
+
+    async def measured(session, query, params, mode):
+        started = time.perf_counter()
+        failed = True
+        try:
+            result = await original(session, query, params, mode)
+            failed = False
+            return result
+        finally:
+            with lock:
+                metrics["calls"] += 1
+                metrics["failed_calls"] += int(failed)
+                metrics["summed_seconds"] += time.perf_counter() - started
+
+    monkeypatch.setattr(DatabaseSession, "_query", measured)
+    return metrics
+
+
+def _track_bundle_io(monkeypatch):
+    """Sum call durations, including nested calls and configured IO delay."""
+    metrics = {}
+    lock = threading.Lock()
+    for name in ("inspect", "read_extent", "publish", "confirm_durable"):
+        original = getattr(BundleStore, name)
+        metrics[name] = {"calls": 0, "failed_calls": 0, "summed_seconds": 0.0}
+
+        def measured(*args, _original=original, _name=name, **kwargs):
+            started = time.perf_counter()
+            failed = True
+            try:
+                result = _original(*args, **kwargs)
+                failed = False
+                return result
+            finally:
+                with lock:
+                    metrics[_name]["calls"] += 1
+                    metrics[_name]["failed_calls"] += int(failed)
+                    metrics[_name]["summed_seconds"] += (
+                        time.perf_counter() - started
+                    )
+
+        monkeypatch.setattr(BundleStore, name, measured)
+    return metrics
 
 
 def _dataset_metrics(datasets):
