@@ -26,6 +26,7 @@ from swe.agents.memory.conversation_archive import (
 from swe.app.runner.session import _read_json_state_sync
 from swe.app.runner.turn_ledger import TurnLedger
 from ..chat_mutations import load_metadata_json
+from .source_inputs import safe_input_entries
 
 
 def safe_files(root):
@@ -44,11 +45,9 @@ def safe_files(root):
 
 
 @contextmanager
-def working_copy(root, *, selected=None):
-    root = Path(root).resolve(strict=True)
-    paths = safe_files(root)
-    if selected is not None:
-        paths = [path for path in paths if selected(path.relative_to(root))]
+def working_copy(root, *, relative_roots):
+    root = Path(root).absolute()
+    paths = safe_input_entries(root, relative_roots)
     with tempfile.TemporaryDirectory(
         prefix="conversation-legacy-",
     ) as directory:
@@ -56,8 +55,11 @@ def working_copy(root, *, selected=None):
         target.mkdir()
         for source in paths:
             destination = target / source.relative_to(root)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
+            if source.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
         yield target
 
 
@@ -66,7 +68,8 @@ def _json(path):
 
 
 def read_session(path):
-    path = Path(path).resolve(strict=True)
+    path = Path(path).absolute()
+    safe_input_entries(path.parent, (path.name,))
     _, committed = _read_json_state_sync(str(path), allow_not_exist=False)
     if committed.get("schema_version") != 3:
         return {
@@ -76,17 +79,11 @@ def read_session(path):
             "recovery_actions": [],
             "files": [path.name],
         }
-    generation = committed.get("session_generation")
-
-    def selected(relative):
-        if relative == Path(path.name):
-            return True
-        return len(relative.parts) > 2 and relative.parts[:2] == (
-            ".turn-ledger",
-            generation,
-        )
-
-    with working_copy(path.parent, selected=selected) as root:
+    generation_root = (
+        TurnLedger(path).directory(committed).relative_to(path.parent)
+    )
+    relative_roots = (path.name, generation_root)
+    with working_copy(path.parent, relative_roots=relative_roots) as root:
         copied = root / path.name
         _, state = _read_json_state_sync(str(copied), allow_not_exist=False)
         original = deepcopy(state)
@@ -107,7 +104,9 @@ def read_session(path):
             "state": state,
             "recovery_actions": actions,
             "files": [
-                str(item.relative_to(root)) for item in safe_files(root)
+                str(item.relative_to(root))
+                for item in safe_input_entries(root, relative_roots)
+                if item.is_file()
             ],
         }
 
@@ -257,13 +256,10 @@ def _validate_epoch_history(epochs, current):
 def read_archive(dialog_root, chat_id):
     ConversationArchiveStore._validate_chat_id(chat_id)
 
-    def selected(relative):
-        return relative.parts[0] == chat_id or relative.parts == (
-            ".deleted",
-            chat_id,
-        )
-
-    with working_copy(dialog_root, selected=selected) as copied:
+    with working_copy(
+        dialog_root,
+        relative_roots=(chat_id, Path(".deleted") / chat_id),
+    ) as copied:
         store = ConversationArchiveStore(
             copied,
             cursor_secret=b"offline-migration",
