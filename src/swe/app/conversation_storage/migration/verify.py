@@ -222,11 +222,16 @@ async def verify_import(
             memory_bytes=memory_bytes // workers,
             health_check=health_check,
         )
-    for workspace in inventory["workspaces"]:
-        bundles = stores[workspace["scope"][0]]
+
+    def merge_runtime_result(local):
+        report["checked"].extend(local["checked"])
+        report["blockers"].extend(local["blockers"])
+
+    async def runtime_workspace(workspace, bundles):
+        local = {"checked": [], "blockers": []}
         for session in workspace["sessions"]:
             await _checked(
-                report,
+                local,
                 session["position"],
                 _verify_session(
                     database,
@@ -241,7 +246,7 @@ async def verify_import(
             )
         for chat in workspace["chats"]:
             await _checked(
-                report,
+                local,
                 chat["position"],
                 _verify_chat(
                     database,
@@ -254,18 +259,67 @@ async def verify_import(
                     messages_verified=io is not None,
                 ),
             )
-    for share in inventory["shares"]:
+
+        return local
+
+    if io is not None:
+        from .runtime_prefetch import verify_prefetched_workspaces
+
+        await verify_prefetched_workspaces(
+            database,
+            stores,
+            inventory,
+            runtime_workspace,
+            io=io,
+            workers=workers,
+            allowance=memory_bytes // workers,
+            health_check=health_check,
+            merge_result=merge_runtime_result,
+        )
+    else:
+        for workspace in inventory["workspaces"]:
+            merge_runtime_result(
+                await runtime_workspace(
+                    workspace,
+                    stores[workspace["scope"][0]],
+                ),
+            )
+
+    async def runtime_share(share, share_bundles):
+        local = {"checked": [], "blockers": []}
         await _checked(
-            report,
+            local,
             share["position"],
             _verify_share(
                 database,
-                stores[share["service_unit_id"]],
+                share_bundles,
                 share,
                 io=io,
                 snapshot_verified=io is not None,
             ),
         )
+
+        return local
+
+    if io is not None:
+        from .runtime_prefetch import verify_prefetched_shares
+
+        await verify_prefetched_shares(
+            database,
+            stores,
+            inventory["shares"],
+            runtime_share,
+            io=io,
+            workers=workers,
+            allowance=memory_bytes // workers,
+            health_check=health_check,
+            merge_result=merge_runtime_result,
+        )
+    else:
+        for share in inventory["shares"]:
+            merge_runtime_result(
+                await runtime_share(share, stores[share["service_unit_id"]]),
+            )
     for item in (() if io is not None else inventory.get("files", [])):
         from .importer import artifact_is_reconstructed
 
