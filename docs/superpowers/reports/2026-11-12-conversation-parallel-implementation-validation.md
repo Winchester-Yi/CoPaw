@@ -1,6 +1,6 @@
 # 会话迁移并行实现与验证记录
 
-状态：输入边界及列明专项已有通过证据；当前固定源码完整逻辑验收尚未完成，首轮两组失败项单进程复跑通过，去重剩余327项执行中，初次故障根因待诊断。万级端到端四档验收按用户要求停止，未通过。测试使用用户授权的隔离 MySQL schema 和本地目录；不代表业务 NAS 性能。
+状态：输入边界及列明专项已有通过证据；固定源码360项完整逻辑suite的节点覆盖已收齐，359项至少一次通过、1项因缺样本跳过。但三个用例曾出现数据库操作超时/503，各自复跑通过；未取得单次全量零失败结果，超时根因待诊断。万级端到端四档验收按用户要求停止，未通过。测试使用用户授权的隔离 MySQL schema 和本地目录；不代表业务 NAS 性能。
 
 ## 已提交实现
 
@@ -93,6 +93,8 @@
 - shard 1：**11 passed、1 failed、1 error，270.16秒**，`test_chat_repository_mysql.py::test_atomic_rebind_and_busy_target_rejection` 出现 `get_autocommit` 超时及teardown连接丢失；日志 `/tmp/conversation-current-shard-1.log`。
 - shard 2：**20 passed、1 failed，272.85秒**，`test_api_mysql.py::test_http_context_numeric_stale_and_sql_failure_are_distinct` 的context-usage返回503而非200；日志 `/tmp/conversation-current-shard-2.log`。
 - 两个失败项单进程复跑：**2 passed，23.548秒**，JUnit `/tmp/conversation-current-failure-repro.xml`，runner退出0，隔离库finally清理成功。初次失败保留，根因未定；不能仅因复跑通过就归因为环境问题。
-- 首轮31个不同用例通过，加两项复跑通过，本轮已有去重33项通过记录。去重剩余327项已由主代理在单进程执行，日志 `/tmp/conversation-current-remaining.log`，目标JUnit `/tmp/conversation-current-remaining.xml`；结果 **pending**。
+- 去重剩余327项单进程运行到首个失败：**289 passed、1 skipped、1 failed，4191.15秒**，JUnit `/tmp/conversation-current-remaining.xml`。失败 `test_rollback.py::test_new_compact_and_stop_export_preserve_old_archive_and_complete_root` 在retention reference query触发30秒 `Database operation timed out`，详见日志 `/tmp/conversation-current-remaining.log`。skip原因仍是缺既有workspace/secret样本。
+- 上述失败用例单独复跑 **1 passed，50.81秒**，JUnit `/tmp/conversation-current-third-failure-repro.xml`；不改变首次超时事实或其根因不确定性。
+- 原360节点集合尾部 **36 passed，999.60秒**，JUnit `/tmp/conversation-current-final-tail.xml`。核对六份JUnit node id，360/360项均有终态记录，359项至少一次通过、1项因缺既有workspace/secret样本跳过。三个不同用例曾超时或503，各自复跑通过；这些多轮结果不是单次全量零失败套件，根因仍待诊断。
 
-当前完整逻辑验收尚未完成，不把33项或历史1408/98/4+2+1证据写成当前HEAD一次全量通过。等待剩余结果及初次故障诊断；万级保持停止，不作生产放行。
+当前完整逻辑节点覆盖已收齐，但仍有三个未解释的数据库路径超时/503首轮失败，且没有一轮全量零失败执行。不能将这些结果简单归因环境，也不能把重跑通过当作首轮未发生失败；万级保持停止，不作生产放行。

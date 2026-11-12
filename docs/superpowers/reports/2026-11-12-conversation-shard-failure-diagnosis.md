@@ -15,6 +15,9 @@
 | shard 1清理堆栈 | fixture准备执行子库DROP时，连接池重新连接；MySQL握手读取返回EOF，驱动抛2013 `Lost connection to MySQL server during query`。 | 另一个控制连接的建连也失败，增强共享通路问题的可能性；不证明服务重启或网络故障。该段本身不能证明子库删除成功。 |
 | `/tmp/conversation-current-shard-2.log`、同名前缀 `.xml` | 20 passed、1 failed，进程报告272.85秒。失败项 `test_http_context_numeric_stale_and_sql_failure_are_distinct` setup日志17:38:53，ChatManager日志17:38:58；JUnit记录61.456秒。第一次context-usage请求期望200、得到503。 | 失败发生在测试显式注入 `StorageUnavailable` 之前；该次503不是测试设计中的预期负例。日志未保留响应背后的异常cause。 |
 | `/tmp/conversation-current-failure-repro.xml` | 两失败项单进程复跑2 passed，23.548秒。 | 降低稳定、无条件逻辑回归的可能性；不能排除并发软件缺陷或暂态故障，不能证明“环境原因”。 |
+| `/tmp/conversation-current-remaining.log`、同名前缀 `.xml` | 之后的单进程续跑289 passed、1 skipped、1 failed，4191.15秒。失败 `test_new_compact_and_stop_export_preserve_old_archive_and_complete_root` 在 `retentions.pin` → `fetch_reference_rows` 的MySQL查询超过30秒，尚未到后续archive断言。 | 又出现一次数据库路径等待超时；发生在单进程中，说明“仅由双进程并发导致”的解释不足，但仍无法区分MySQL服务/网络、客户端连接状态或该SQL/测试路径问题。 |
+| `/tmp/conversation-current-third-failure-repro.xml` | 上述archive compact失败项单独复跑1 passed，50.81秒。 | 再次未稳定复现；不撤销首次超时证据，也不确诊环境原因。 |
+| `/tmp/conversation-current-final-tail.xml` | 原360节点集合最后36项通过，36 passed，999.60秒；runner退出并清理其隔离父schema。 | node id核对显示360项均有终态记录，359项至少一次通过、1项跳过。由于执行分散且含重试，这不等同于单次全量零失败。 |
 
 两项失败的setup相差3秒，整体进程结束时间接近。日志没有每次SQL和异常发生的精确时间戳，不能仅据这一关联断言是同一事件。
 
@@ -41,6 +44,6 @@ runner为每进程生成随机 `test_conversation_acceptance_<uuid>` 父库，�
 
 ## 最小后续验证
 
-先等待当前剩余327项单进程运行退出并保存结果，不为本诊断中断或重启它。随后在固定源码、相同隔离库约束下，仅对两失败项做受控串行与双进程对照；记录每次异常的phase、类型、errno、连接ID和API503原始cause，配合同窗服务端只读指标。诊断记录不得包含凭据、SQL参数或会话正文。
+最后36项现已完成；360个节点均有终态记录，其中359项至少一次通过、1项跳过，三个此前失败的用例各自复跑通过。新增的单进程超时使单纯“双进程资源争用”假设减弱。若继续诊断，应先在获授权的隔离测试范围内捕获超时阶段和cause，再判断是否需要并发对照。未获明确授权前不访问服务端监控面、不运行额外双进程压力实验。诊断记录不得包含凭据、SQL参数或会话正文。
 
 单次未复现不足以关闭问题；若异常再次出现，以上信息应能区分服务器/网络、客户端连接状态与独立API错误。不得通过放宽超时、添加自动换连接续写、跳过断言或将历史通过数字合并为当前全量成功来消除失败记录。本报告不提供生产放行或万级/NAS性能验收结论。

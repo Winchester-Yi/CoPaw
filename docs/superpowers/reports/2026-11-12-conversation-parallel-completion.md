@@ -2,7 +2,7 @@
 
 日期：2026-11-12。代码核对基线：`abe53af76b2ad008f91ed63c1d6edc81df8b6dd2`，包含已快进合入的 `160f4bca8`、`23bee5b7d`。本报告只新增文档，未运行数据库测试，也未修改生产实现。
 
-**结论：并行实现与小规模逻辑证据已具备；原设计整体目标尚未完成，不作生产放行。** 当前固定源码版本的完整逻辑集成验收尚未完成：首轮两组遇失败停止，失败两项单进程复跑通过，去重剩余327项正在单进程执行。初次故障根因待诊断，完整结果为 pending。此前1408项单元/CLI、98项续跑及4+2+1项专项通过均按各自版本和执行范围保留，不能合称当前HEAD一次性全量通过。用户已要求停止万级基线，本轮不得恢复该测试。
+**结论：并行实现与小规模逻辑证据已具备；原设计整体目标尚未完成，不作生产放行。** 固定源码版本360项逻辑suite已全部获得终态记录：**359项至少一次通过、1项跳过**。执行分散于多个进程；三个用例曾出现数据库操作超时/HTTP 503，随后单项复跑通过，未得到一轮无失败的全量结果，根因仍未定。此前1408项单元/CLI、98项续跑及4+2+1项专项通过均按各自版本和执行范围保留，不能合称当前HEAD一次性全量通过。用户已要求停止万级基线，本轮不得恢复该测试。
 
 ## 核对口径
 
@@ -41,9 +41,12 @@
 - shard 1：**11 passed、1 failed、1 error，270.16秒**。`test_chat_repository_mysql.py::test_atomic_rebind_and_busy_target_rejection` 在 `get_autocommit` 超时，teardown连接丢失；日志 `/tmp/conversation-current-shard-1.log`。
 - shard 2：**20 passed、1 failed，272.85秒**。`test_api_mysql.py::test_http_context_numeric_stale_and_sql_failure_are_distinct` 的context-usage期望200、实际503；日志 `/tmp/conversation-current-shard-2.log`。
 - 两个失败项随后在单进程复跑：**2 passed，23.548秒**，`/tmp/conversation-current-failure-repro.xml`，runner退出0，隔离库finally清理成功。复跑通过不抹去首次失败，也不能据此认定为环境问题；初次故障根因尚未确定。
-- 首轮31个不同用例通过，加两项复跑通过，目前去重33项有本轮通过记录。其余327项由主代理在单进程继续执行，日志 `/tmp/conversation-current-remaining.log`，目标JUnit `/tmp/conversation-current-remaining.xml`；当前结果pending，不预先计通过。
+- 首轮两个分组共31项通过；两失败项在单进程复跑2项通过。余下327项单进程运行至首个失败，报告 **289 passed、1 skipped、1 failed，4191.15秒**，日志 `/tmp/conversation-current-remaining.log`、JUnit `/tmp/conversation-current-remaining.xml`。skip仍是缺既有workspace/secret配置的app bootstrap用例。
+- 该单进程失败为 `test_rollback.py::test_new_compact_and_stop_export_preserve_old_archive_and_complete_root`，在 `retentions.pin` 的 `fetch_reference_rows` 查询中触发30秒数据库操作超时；没有进入测试后续归档断言。相同用例随后单独运行 **1 passed，50.81秒**，日志 `/tmp/conversation-current-third-failure-repro.log`、JUnit `/tmp/conversation-current-third-failure-repro.xml`。复跑通过不消除首次超时，也不能证明其为环境故障。
+- 原360节点集合尾部36项已单进程完成：**36 passed，999.60秒**，JUnit `/tmp/conversation-current-final-tail.xml`，日志 `/tmp/conversation-current-final-tail.log`，隔离测试runner正常退出并执行父schema清理。
+- 核对六份JUnit中的node id后，360项全部有终态记录，359项至少一次通过，1项跳过（既有workspace/secret样本未配置）。三个不同用例曾在先前运行中失败，之后均单项通过。**这是跨多次运行的覆盖汇总，不是一轮全量零失败验收**；数据库操作超时/503根因仍不确定。
 
-需等待剩余进程退出、JUnit和隔离库清理结果，并保留初次故障的诊断状态。不得用collection、pre-commit、本报告静态核对或以前数字替代当前全量验收。
+完整逻辑suite节点覆盖已收齐；剩余逻辑验证工作是解释间歇性数据库路径失败，并在根因处理后取得固定版本的一轮全量结果。不得把多轮覆盖汇总表述为单次全绿，也不得用collection、pre-commit或以前版本数字替代当前全量验收。
 
 ## 剩余完成门禁
 
