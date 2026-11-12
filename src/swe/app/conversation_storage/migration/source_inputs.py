@@ -2,11 +2,13 @@
 """Explicit conversation inputs, shared by inventory and source fencing."""
 
 from pathlib import Path
+import os
 import stat
 import uuid
 
 from ..bundle import MAX_READ_BYTES
 from ..chat_mutations import load_metadata_json
+from .spool import MigrationCapacityError
 
 
 def _relative(value):
@@ -16,7 +18,15 @@ def _relative(value):
     return path
 
 
-def safe_input_entries(root, relative_roots, *, recursive=True):
+def safe_input_entries(
+    root,
+    relative_roots,
+    *,
+    recursive=True,
+    entry_limit=None,
+    max_file_bytes=None,
+    max_total_file_bytes=None,
+):
     """Inspect selected entrances, never enumerate their unselected parents.
 
     Ancestor directories are included as shallow safety/freeze evidence.
@@ -26,8 +36,10 @@ def safe_input_entries(root, relative_roots, *, recursive=True):
     if root.resolve(strict=True) != root:
         raise ValueError("source root contains a symlink or is not canonical")
     found = {}
+    total_file_bytes = 0
 
     def inspect(path):
+        nonlocal total_file_bytes
         details = path.lstat()
         if stat.S_ISLNK(details.st_mode):
             raise ValueError(
@@ -37,7 +49,29 @@ def safe_input_entries(root, relative_roots, *, recursive=True):
             stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)
         ):
             raise ValueError("source contains unsupported filesystem object")
-        found[path] = details
+        if path not in found:
+            if entry_limit is not None and len(found) >= entry_limit:
+                raise MigrationCapacityError(
+                    "workspace source entries exceed migration memory allowance",
+                )
+            if stat.S_ISREG(details.st_mode):
+                if (
+                    max_file_bytes is not None
+                    and details.st_size > max_file_bytes
+                ):
+                    raise MigrationCapacityError(
+                        "workspace source file exceeds the bounded reader limit: "
+                        + str(path),
+                    )
+                total_file_bytes += details.st_size
+                if (
+                    max_total_file_bytes is not None
+                    and total_file_bytes > max_total_file_bytes
+                ):
+                    raise MigrationCapacityError(
+                        "workspace source exceeds its migration memory allowance",
+                    )
+            found[path] = details
         return details
 
     if not stat.S_ISDIR(inspect(root).st_mode):
@@ -54,7 +88,15 @@ def safe_input_entries(root, relative_roots, *, recursive=True):
             details = inspect(current)
             walked.add(current)
             if stat.S_ISDIR(details.st_mode):
-                pending.extend(sorted(current.iterdir(), reverse=True))
+                children = []
+                # Path.iterdir may materialize os.listdir before yielding.
+                # Inspect and admit each entry while scandir is still bounded.
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        child = current / entry.name
+                        inspect(child)
+                        children.append(child)
+                pending.extend(sorted(children, reverse=True))
 
     selected = sorted({_relative(value) for value in relative_roots})
     for relative in selected:

@@ -140,7 +140,13 @@ def _preflight_workspace(workspace, allowance):
         dialog_dir=workspace.get("dialog_dir", "dialog"),
         max_session_bytes=min(MAX_READ_BYTES, source_limit),
     )
-    for path in safe_input_entries(root, roots):
+    for path in safe_input_entries(
+        root,
+        roots,
+        entry_limit=count_limit,
+        max_file_bytes=MAX_READ_BYTES,
+        max_total_file_bytes=source_limit,
+    ):
         if not path.is_file():
             continue
         size = path.stat().st_size
