@@ -457,8 +457,8 @@ async def test_commit_locks_guard_session_chat_turn_publication_in_order(
     db.queries.clear()
     await service.commit(operation.operation_key)
     locks = [query for query in db.queries if "FOR UPDATE" in query]
+    assert sum("guard_marker=1" in query for query in locks) == 2
     assert [query.split("FROM ")[1].split()[0] for query in locks] == [
-        "swe_conversation_retentions",
         "swe_conversation_retentions",
         "swe_conversation_retentions",
         "swe_conversation_sessions",
