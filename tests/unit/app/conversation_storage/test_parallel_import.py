@@ -288,3 +288,85 @@ async def test_router_verifies_already_committed_batch_with_real_stages(
             verify,
         )
     assert not router._contexts
+
+
+async def test_artifacts_precede_workspace_identity_and_keep_global_index():
+    from swe.app.conversation_storage.migration.importer import (
+        ParallelWorkspaceImporter,
+    )
+    from swe.app.conversation_storage.migration.direct_import import (
+        DirectTarget,
+        _workspace_inputs,
+    )
+
+    calls = []
+    workspace = {
+        "scope": ["svc", "tenant", "source", "agent"],
+        "sessions": [],
+        "chats": [],
+    }
+
+    class Files:
+        def __iter__(self):
+            raise AssertionError("must not rescan all files")
+
+        def for_workspace(self, index):
+            calls.append(("files", index))
+            return [{"workspace": index, "path": "agent.json", "bytes": 2}]
+
+    inputs = list(
+        _workspace_inputs({"workspaces": [workspace], "files": Files()}),
+    )
+    inputs[0]["_migration_index"] = 17
+    inputs[0]["_migration_files"][0]["workspace"] = 17
+    context = type(
+        "Context",
+        (),
+        {"manifest_data": {"source_boundary": {"snapshot_id": "frozen"}}},
+    )()
+    importer = ParallelWorkspaceImporter(
+        context,
+        DirectTarget("schema", "schema", "migration"),
+    )
+
+    async def artifacts(report):
+        assert report["files"][0]["workspace"] == 17
+        assert report["workspaces"][17]["scope"] == workspace["scope"]
+        calls.append(("artifacts", 17))
+
+    async def identities(_workspace, _scope):
+        calls.append(("identities", 17))
+
+    importer._retain_source_artifacts = artifacts
+    importer._identities = identities
+    await importer.run_workspace(inputs[0])
+    assert calls == [("files", 0), ("artifacts", 17), ("identities", 17)]
+
+
+async def test_parallel_artifact_reads_use_bounded_io_threads(monkeypatch):
+    import threading
+    from swe.app.conversation_storage.migration import importer as module
+    from swe.app.conversation_storage.migration.direct_import import (
+        DirectTarget,
+    )
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    barrier = threading.Barrier(2)
+    owner_thread = threading.get_ident()
+
+    def read(_workspace, _item):
+        assert threading.get_ident() != owner_thread
+        barrier.wait(timeout=5)
+        return b"artifact"
+
+    monkeypatch.setattr(module, "_read_source_artifact", read)
+    async with MigrationIO(2) as io:
+        context = type("Context", (), {"manifest_data": {}, "io": io})()
+        worker = module.ParallelWorkspaceImporter(
+            context,
+            DirectTarget("s", "s", "m"),
+        )
+        values = await asyncio.gather(
+            *[worker._read_source_artifact({}, {}) for _ in range(2)],
+        )
+    assert values == [b"artifact", b"artifact"]

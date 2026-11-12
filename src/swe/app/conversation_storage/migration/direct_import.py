@@ -311,7 +311,6 @@ class DirectImporter(ConversationImporter):
         self.journal.persist_updates = False
         try:
             await next(iter(self.stores.values())).validate_target()
-            await self._retain_source_artifacts(report)
 
             def store_factory(workspace):
                 service = workspace["scope"][0]
@@ -332,7 +331,7 @@ class DirectImporter(ConversationImporter):
                 health_check=health_check,
             )
             self.chat_ids = await runner.run(
-                report["workspaces"],
+                _workspace_inputs(report),
                 lambda context: ParallelWorkspaceImporter(
                     context,
                     self.target,
@@ -350,3 +349,25 @@ class DirectImporter(ConversationImporter):
             }
         finally:
             self.journal.persist_updates = persist_updates
+
+
+def _workspace_inputs(report):
+    """Attach original-index artifacts without repeated full-file traversal."""
+    files = report["files"]
+    by_workspace = None
+    if not hasattr(files, "for_workspace"):
+        by_workspace = {}
+        for item in files:
+            by_workspace.setdefault(item["workspace"], []).append(item)
+    for index in range(len(report["workspaces"])):
+        workspace = report["workspaces"][index]
+        artifacts = (
+            files.for_workspace(index)
+            if by_workspace is None
+            else by_workspace.get(index, [])
+        )
+        yield {
+            **workspace,
+            "_migration_index": index,
+            "_migration_files": artifacts,
+        }

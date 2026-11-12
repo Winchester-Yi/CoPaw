@@ -70,6 +70,9 @@ class Files(Iterable):
     def __init__(self, workspaces):
         self._workspaces = workspaces
 
+    def for_workspace(self, index):
+        return self._workspaces._record(index)["files"]
+
     def __iter__(self):
         for index in range(len(self._workspaces)):
             yield from self._workspaces._record(index)["files"]

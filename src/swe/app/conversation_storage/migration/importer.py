@@ -583,45 +583,14 @@ class ConversationImporter:
                 archive_batches(chat["archive"])
 
     async def _retain_source_artifacts(self, report):
-        from pathlib import Path
-        from ..bundle import BundleBlock, MAX_READ_BYTES
+        from ..bundle import BundleBlock
         from ..identity import WorkspaceScope
-        import stat
 
         for item in report["files"]:
             workspace = report["workspaces"][item["workspace"]]
             if artifact_is_reconstructed(item, workspace):
                 continue
-            root = Path(workspace["root"]).resolve(strict=True)
-            relative = Path(item["path"])
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ValueError(
-                    "legacy artifact path escapes bound source root",
-                )
-            path = root / relative
-            if any(
-                part.is_symlink()
-                for part in (path, *path.parents)
-                if part.is_relative_to(root)
-            ):
-                raise ValueError("legacy artifact path contains symlink")
-            if (
-                not path.resolve(strict=True).is_relative_to(root)
-                or stat.S_IMODE(path.stat().st_mode) & 0o222
-            ):
-                raise ValueError(
-                    "legacy artifact is not inside frozen read-only source",
-                )
-            if path.stat().st_size > MAX_READ_BYTES:
-                raise ValueError(
-                    "legacy artifact exceeds supported migration reader limit; split-file migration required",
-                )
-            with path.open("rb") as stream:
-                raw = stream.read(MAX_READ_BYTES + 1)
-            if len(raw) != item["bytes"]:
-                raise ValueError(
-                    "legacy artifact size changed after inventory",
-                )
+            raw = await self._read_source_artifact(workspace, item)
             metadata = {
                 "version": 2,
                 "workspace": item["workspace"],
@@ -651,6 +620,9 @@ class ConversationImporter:
                     ),
                 ],
             )
+
+    async def _read_source_artifact(self, workspace, item):
+        return _read_source_artifact(workspace, item)
 
     def _validate_source_binding(self, report):
         from pathlib import Path
@@ -1384,17 +1356,72 @@ class ParallelWorkspaceImporter(ConversationImporter):
     async def _chat_session_id(self, chat_id):
         return await self.context.store("chat_session_id", chat_id)
 
+    async def _read_source_artifact(self, workspace, item):
+        return await self.context.io.call(
+            _read_source_artifact,
+            workspace,
+            item,
+        )
+
     async def run_workspace(self, workspace):
         from ..identity import WorkspaceScope
         from .parallel_import import workspace_source_copy
 
         workspace = workspace_source_copy(workspace)
         scope = WorkspaceScope.from_values(workspace["scope"])
+        index = workspace.pop("_migration_index", 0)
+        files = workspace.pop("_migration_files", [])
+        if files:
+            await self._retain_source_artifacts(
+                {
+                    "files": files,
+                    "workspaces": {index: workspace},
+                    "source_boundary": self.manifest.data["source_boundary"],
+                },
+            )
         await self._identities(workspace, scope)
         for session in workspace["sessions"]:
             await self._session(session, workspace, scope)
         for chat in workspace["chats"]:
             await self._archive(chat, scope)
+
+
+def _read_source_artifact(workspace, item):
+    from pathlib import Path
+    from ..bundle import MAX_READ_BYTES
+    import stat
+
+    root = Path(workspace["root"]).resolve(strict=True)
+    relative = Path(item["path"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(
+            "legacy artifact path escapes bound source root",
+        )
+    path = root / relative
+    if any(
+        part.is_symlink()
+        for part in (path, *path.parents)
+        if part.is_relative_to(root)
+    ):
+        raise ValueError("legacy artifact path contains symlink")
+    if (
+        not path.resolve(strict=True).is_relative_to(root)
+        or stat.S_IMODE(path.stat().st_mode) & 0o222
+    ):
+        raise ValueError(
+            "legacy artifact is not inside frozen read-only source",
+        )
+    if path.stat().st_size > MAX_READ_BYTES:
+        raise ValueError(
+            "legacy artifact exceeds supported migration reader limit; split-file migration required",
+        )
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_READ_BYTES + 1)
+    if len(raw) != item["bytes"]:
+        raise ValueError(
+            "legacy artifact size changed after inventory",
+        )
+    return raw
 
 
 def _json(value):
