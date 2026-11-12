@@ -49,7 +49,15 @@ def inputs(tmp_path):
 
 
 @pytest.mark.parametrize("marked", [True, False])
-def test_discover_and_freeze_existing_roots(tmp_path, marked):
+def test_discover_and_freeze_existing_roots(tmp_path, marked, monkeypatch):
+    from swe.app.conversation_storage.migration import discovery
+
+    def forbidden_fingerprints(_services):
+        pytest.fail(
+            "new discovery/freeze must not introduce full source hashing",
+        )
+
+    monkeypatch.setattr(discovery, "fingerprints", forbidden_fingerprints)
     services, shares, _ = inputs(tmp_path)
     output = tmp_path / "report.json"
     result = CliRunner().invoke(

@@ -140,8 +140,8 @@ async def _semantic_spooled(
     if base is None:
         raise ValueError("no work directory is separate from source roots")
     memory_bytes = memory_budget_mib * 1024 * 1024
-    baseline = fingerprints(data["services"])
-    if data.get("fingerprints") and baseline != data["fingerprints"]:
+    baseline = data.get("fingerprints")
+    if baseline and fingerprints(data["services"]) != baseline:
         raise ValueError("source changed during discovery")
     _preflight_share_budget(data, memory_bytes)
     protected = [
@@ -170,7 +170,7 @@ async def _semantic_spooled(
             source_boundary=None,
         )
         _inventory_shares(data, semantic)
-        if fingerprints(data["services"]) != baseline:
+        if baseline and fingerprints(data["services"]) != baseline:
             raise ValueError("source changed during discovery")
         return {
             "blockers": semantic["blockers"],
