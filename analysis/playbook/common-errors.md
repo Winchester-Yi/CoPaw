@@ -929,3 +929,12 @@
 ### 共享 Session reset 与并发删除授权
 
 历史正文 pin 只保护物理数据，在线历史返回前还须核对 Session.context_epoch；仅核对发起读取的 Chat 版本会漏掉另一 Chat 的 reset。删除授权时读取的归属必须传到持有 Chat 行锁的 tombstone 事务内重验，候选查询后的 Session 关联检查不能覆盖授权到候选查询之间的合法所有权转移。参见 `docs/superpowers/reports/2026-11-11-conversation-storage-fix-and-crud-review.md`。
+
+
+## 会话迁移被无关附件触发容量限制
+
+- 输入范围采用明确包含规则：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的对应入口），以及审核过的 `session_paths` 文件和对应 generation ledger。附件、代码、技能目录不递归枚举、不计入 `inventoried_source_bytes`；分享按记录指定路径读取。
+- 排查 `MigrationCapacityError` 时先看实际会话输入的单文件、累计字节和条目准入，不应只提高 workers 或内存参数。增加 workers 会缩小单 worker 额度；单文件 reader 硬上限不随总预算增加。
+- 容量、文件清单、只读检查和源变化检查应使用同一范围；配置证据父目录仅浅检查。未映射的 Session/ledger/归档仍需阻断，不能通过删除数据或手改成功状态绕过。
+- 旧清单有非空 `fingerprints` 时保留原全源哈希契约，可能仍读取业务文件。不能手工清空；需审核后重新 discovery/freeze。
+- 入口：`migration/source_inputs.py`、`inventory_parallel._preflight_workspace`、`inventory._source_files`、`inventory_v3.inventory_discovery`；操作说明见[并行迁移补充](../../docs/superpowers/plans/2026-11-12-conversation-parallel-migration-operations.md)。

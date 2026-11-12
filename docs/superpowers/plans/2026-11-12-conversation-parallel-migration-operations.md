@@ -24,7 +24,9 @@ chmod 700 "$AUDIT_DIR" "$WORK_DIR"
 
 以上资源参数可用于 discover/freeze/inventory/plan/inspect/preflight/import/resume/verify/finalize 的 direct v3 路径；旧 offline 工作流不能借此开启并行。单 workspace/Session/正文证据超过 reader 或单 worker 预算会明确拒绝；不允许跳过该项后 ready。worker 更多会缩小每项可用预算，并不总是更快。
 
-容量预检和 `inventoried_source_bytes` 只统计会话输入：`chats.json`、`sessions/`、`dialog/`，以及审核过的 `session_paths` 指定 Session 和对应 generation ledger。附件、代码、技能等业务目录不递归扫描或计入预算；分享正文按分享记录的明确路径读取。文件清单、只读及路径安全检查采用相同包含范围，配置证据检查明确文件及父目录本身。会话目录仍完整枚举，未知 Session、ledger 或归档缺少可信映射时阻断；迁移仍须全程停写和冻结。
+容量预检和 `inventoried_source_bytes` 只统计会话输入：`chats.json`、`sessions/`、`dialog/`（或清单明确配置的 `registry_path`、`sessions_dir`、`dialog_dir`），以及审核过的 `session_paths` 指定 Session 和对应 generation ledger。附件、代码、技能等业务目录不递归扫描或计入预算；分享正文按分享记录的明确路径读取。文件清单、只读及路径安全检查采用相同包含范围，配置证据检查明确文件及父目录本身。会话目录仍完整枚举，未知 Session、ledger 或归档缺少可信映射时阻断；迁移仍须全程停写和冻结。
+
+单 workspace 的输入条目上限为 `(预算字节 / workers) / 512`，包含选中会话路径的文件、目录及必要浅层父目录，重叠入口去重。枚举过程中即检查，防止大量空文件/空目录在计算正文总量之前耗尽内存；这是准入估算，不是进程 RSS 硬限制，也不是整个作业的 workspace 数量上限。文件单项及累计字节门禁仍保留，`inventoried_source_bytes` 只统计文件字节。
 
 旧 manifest 若带非空 `fingerprints`，仍按原全源哈希契约检查，可能读取非会话文件。不得手工清空旧指纹；需要新的枚举边界时，在审核后重新 discovery/freeze 创建新的迁移清单。
 

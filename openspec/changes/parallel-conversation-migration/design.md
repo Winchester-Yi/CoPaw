@@ -121,7 +121,9 @@ prepare/commit固定操作继续复用现有DML/PreparedInsert白名单，不能
 
 队列容量默认为2×workers，不另暴露旋钮；SQL请求队列有同样上限，并限制返回/请求正文总字节。仅任务数量限制不足，所有已提交到执行器但未结束的任务也计算在额度内。单任务可能占整个预算时单独执行，超过reader可分段上限则先失败。
 
-参数应用于discover/freeze/inventory/plan/inspect/preflight/import/resume/verify/finalize的源读取及各自并行阶段；预览仍不得连接或写业务DB。CLI新增参数统一注册，避免旧_command分派遗漏；旧offline路径不接受这些参数或明确报仅direct支持，不默默忽略。
+参数应用于discover/freeze/inventory/plan/inspect/preflight/import/resume/verify/finalize的源读取及各自并行阶段；inventory/plan/inspect及import/resume/finalize无apply的源端预览不得连接业务DB；preflight即使无apply仍连接目标并校验schema、分享与作业门禁，不写业务数据。CLI新增参数统一注册，避免旧_command分派遗漏；旧offline路径不接受这些参数或明确报仅direct支持，不默默忽略。
+
+2026-11-12 输入边界补充：各阶段共用明确会话入口（registry、sessions、dialog及审核的Session override和对应ledger），附件/代码/技能业务树不递归枚举或计量。配置证据和分享父目录只浅检查，未知workspace覆盖检查保留并在已登记workspace剪枝。旧非空fingerprints保持原全源契约。预检在枚举时按每worker额度检查文件单项/累计字节和去重entry数，entry包含必要目录，不能先全量构造路径列表后才拒绝；默认512MiB/4workers对应每workspace262144entry，预算不是整个作业workspace数限制。
 
 并发参数是运行策略，不属于作业绑定：同manifest resume允许调整workers/io-workers/预算，不得改变source、target、IDs、operation_key。不增加batch-size调优参数，本轮保留原批大小限制。
 

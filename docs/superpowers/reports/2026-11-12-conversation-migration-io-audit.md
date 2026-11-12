@@ -4,6 +4,8 @@
 
 结论：重正文读取和 bundle 发布已有有界线程并发，但并非全部 IO 都已并行。SQL 必须由进入 named_lock 的原 owner task 执行；本地 SQLite、spool 读取、manifest 镜像及部分源树完整性检查仍同步执行。发现 share freshness 可退化为二次扫描的路径，本次已做单次盘点局部缓存修复；仍不能把现状描述为所有 NAS IO 均不阻塞 owner。
 
+2026-11-12 后续范围更新：`f5b8344a2`、`9724ec7c9`、`8e8ccc9a4` 已将新清单的 workspace 枚举收窄到明确会话入口，配置证据和分享父目录仅浅检查，已登记 workspace 的 discovery 覆盖扫描剪枝。下文关于共享父树递归和全 workspace 文件扫描的描述仅代表上述旧基线；旧非空 fingerprints 仍保留全源检查。显式枚举器的准入早停已由隔离提交 `23bee5b7d` 和9项回归验证，逐条计数包含目录；仍不能由线程池数量或准入预算推断进程 RSS 硬上限。
+
 ## 执行位置与调用链
 
 这里的 CLI 主线程指同步 Click 命令/`run_v3_command` 的调用线程；SQL owner 指该线程上 `asyncio.run` 创建、进入持锁范围的原协程任务。benchmark 用 `asyncio.to_thread(run_v3_command, ...)` 只移动整个 CLI 到另一线程，不改变内部 owner 与 worker 的边界。
@@ -13,7 +15,7 @@
 | discover 的服务配置、agent.json、目录覆盖、share snapshot JSON | `discovery.discover_services` → `_profiles`、`_shares` 等；`conversation_storage_discovery_cmd.discover_command` | CLI 同步调用线程 | 独立发现阶段尚无作业 SQL owner；仍串行且会等待源存储。不能声称 `--workers` 并行整个 discover。 |
 | 全源只读权限、目录、文件 SHA256 指纹 | `discovery.fingerprints` | 调用者同步；旧manifest的非空fingerprints触发时：`inventory_v3_spooled` 在 async owner | 新 discovery 报告 fingerprints 默认为空，不主动计算此全树hash；旧报告带非空fingerprints时仍完整读取校验。去掉嵌套根重复覆盖，但触发时每次仍读取全源文件并扫描目录。是强一致性屏障，不应因性能直接删除。当前会阻塞 async progress/health 调度，允许保持语义不代表已满足性能目标。 |
 | freeze 重新发现、语义预检、manifest 原子写 | `freeze_discovery` 再调用 `discover_services`；`manifest._persist` | 发现外层同步；语义预检内部另起 asyncio inventory；持久化同步 | 重新核对 frozen evidence 是刻意重复校验；不是每批导入都 freeze。写临时文件、fsync、replace、父目录 fsync 必须保留。 |
-| 单 workspace stat/scan、registry/session/archive JSON 解析 | `inventory_parallel.spool_workspaces` → `_preflight_workspace` / `inventory_workspace` | 每个 `MigrationCoordinator` workspace worker 提交 `MigrationIO.call` 线程 | 当前落盘版本预检也经 `io.call`；先预留 `memory_bytes // workers`，文件/总字节/文件数准入后解析。`inventory_workspace` 传单 workspace 且清空 fingerprints/shares，不会每个 workspace 重扫全服务指纹。 |
+| 单 workspace stat/scan、registry/session/archive JSON 解析 | `inventory_parallel.spool_workspaces` → `_preflight_workspace` / `inventory_workspace` | 每个 `MigrationCoordinator` workspace worker 提交 `MigrationIO.call` 线程 | 审计当时版本预检也经 `io.call`；先预留 `memory_bytes // workers`，文件/总字节/文件数准入后解析。`inventory_workspace` 传单 workspace 且清空 fingerprints/shares，不会每个 workspace 重扫全服务指纹。 |
 | 共用 evidence parent freshness | `inventory_parallel._shared_freshness` | inventory 前一次 `io.call` 线程 | 按 `(parent, cutoff)` 预扫描复用；缓存仅本次 inventory 有效，不跨运行跳过校验。独有 workspace 的检查仍在 parser 线程。 |
 | spool 编码、digest、写临时记录、replace | `spool_workspaces` → `spool.write` | `MigrationIO.call` 线程 | 有盘额及单记录上限，worker 数和 IO 提交数有界。不是先把全 inventory JSON 放内存。spool 生命周期创建与清理本身仍同步。 |
 | spool 回读、digest 核对、JSON 解码 | `spool_report.WorkspaceRecords._record` → `InventorySpool.read` | 访问 Sequence 的调用任务同步执行；常见为 owner，部分为 workspace worker 协程 | 单条缓存，换 workspace 会同步读本地临时盘并解码；`async worker` 并不自动等于 IO 线程。当前牺牲事件循环延迟以兼容同步 Sequence API，应单独测慢临时盘和大记录，不应以“本地盘”当作无成本。 |
