@@ -1188,50 +1188,57 @@ class ConversationImporter:
                 ),
             )
 
-    async def _shares(self, report):
+    async def _resolve_share(self, share):
         from ..identity import WorkspaceScope
+
+        cid = self.chat_ids.get(share["chat_position"])
+        sid = None
+        if cid is not None:
+            chat = await self.db.fetch_one(
+                "SELECT session_id,service_unit_key,tenant_key,source_key,agent_key FROM swe_conversation_chats WHERE id=%s",
+                (cid,),
+            )
+            sid = chat["session_id"]
+            scope = WorkspaceScope.from_row(chat)
+            if scope.service_unit_id != share["service_unit_id"]:
+                raise ValueError("share service differs from Chat")
+        else:
+            scope = WorkspaceScope(
+                share["record"]["tenant_id"],
+                "",
+                "",
+                service_unit_id=share["service_unit_id"],
+            )
+        return scope, sid, cid
+
+    async def _publish_share(self, share, scope, sid, cid):
         from ..shares import ShareInstall
         from ..commit_plan import CommitPlan
 
+        record = dict(share["record"])
+        record.pop("service_unit_id")
+        plan = CommitPlan(share=ShareInstall(**record))
+        await self._publish(
+            share["position"],
+            scope,
+            [],
+            [_block("share", "share", share["snapshot"])],
+            spec=ImportBatch(
+                scope_kind=share["scope_kind"],
+                session_id=sid,
+                chat_id=cid,
+                commit_plan=plan,
+                kind="share_import",
+                locks={
+                    "sessions": [sid] if sid else [],
+                    "chats": [cid] if cid else [],
+                },
+            ),
+        )
+
+    async def _shares(self, report):
         for share in report["shares"]:
-            record = dict(share["record"])
-            cid = self.chat_ids.get(share["chat_position"])
-            sid = None
-            if cid is not None:
-                chat = await self.db.fetch_one(
-                    "SELECT session_id,service_unit_key,tenant_key,source_key,agent_key FROM swe_conversation_chats WHERE id=%s",
-                    (cid,),
-                )
-                sid = chat["session_id"]
-                scope = WorkspaceScope.from_row(chat)
-                if scope.service_unit_id != share["service_unit_id"]:
-                    raise ValueError("share service differs from Chat")
-            else:
-                scope = WorkspaceScope(
-                    record["tenant_id"],
-                    "",
-                    "",
-                    service_unit_id=share["service_unit_id"],
-                )
-            record.pop("service_unit_id")
-            plan = CommitPlan(share=ShareInstall(**record))
-            await self._publish(
-                share["position"],
-                scope,
-                [],
-                [_block("share", "share", share["snapshot"])],
-                spec=ImportBatch(
-                    scope_kind=share["scope_kind"],
-                    session_id=sid,
-                    chat_id=cid,
-                    commit_plan=plan,
-                    kind="share_import",
-                    locks={
-                        "sessions": [sid] if sid else [],
-                        "chats": [cid] if cid else [],
-                    },
-                ),
-            )
+            await self._publish_share(share, *await self._resolve_share(share))
 
 
 class ParallelWorkspaceImporter(ConversationImporter):

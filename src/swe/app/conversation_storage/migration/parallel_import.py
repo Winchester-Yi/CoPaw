@@ -309,45 +309,50 @@ class ParallelImportPrototype:
         self._workers, self._health_check = workers, health_check
         self._io_workers = workers if io_workers is None else io_workers
 
-    async def run(self, workspaces, importer_factory):
-        async with MigrationIO(self._io_workers) as io:
-            coordinator = MigrationCoordinator(
-                self._router.handlers(),
-                workers=self._workers,
-                health_check=self._health_check,
-            )
+    async def run(self, workspaces, importer_factory, *, io=None):
+        if io is not None:
+            return await self._run(workspaces, importer_factory, io)
+        async with MigrationIO(self._io_workers) as owned_io:
+            return await self._run(workspaces, importer_factory, owned_io)
 
-            async def run_workspace(workspace, request):
-                scope = workspace["scope"]
-                if not isinstance(scope, (list, tuple)) or len(scope) < 2:
-                    raise ValueError(
-                        "workspace requires service and tenant scope",
-                    )
-                cutoff = self._manifest_data.get(
-                    "tenant_sync_started_at_ns",
-                    {},
-                ).get(tenant_key(scope[0], scope[1]))
-                if type(cutoff) is not int or cutoff <= 0:
-                    raise ValueError(
-                        "tenant cutoff must be fixed before parallel import",
-                    )
-                key, nas = await request("workspace.open", workspace)
-                context = ParallelWorkspaceContext(
-                    self._manifest_data,
-                    key,
-                    request,
-                    nas,
-                    io,
+    async def _run(self, workspaces, importer_factory, io):
+        coordinator = MigrationCoordinator(
+            self._router.handlers(),
+            workers=self._workers,
+            health_check=self._health_check,
+        )
+
+        async def run_workspace(workspace, request):
+            scope = workspace["scope"]
+            if not isinstance(scope, (list, tuple)) or len(scope) < 2:
+                raise ValueError(
+                    "workspace requires service and tenant scope",
                 )
-                try:
-                    importer = importer_factory(context)
-                    await importer.run_workspace(_freeze(workspace))
-                    await request("workspace.complete", key, importer.chat_ids)
-                finally:
-                    await request("workspace.close", key)
-
+            cutoff = self._manifest_data.get(
+                "tenant_sync_started_at_ns",
+                {},
+            ).get(tenant_key(scope[0], scope[1]))
+            if type(cutoff) is not int or cutoff <= 0:
+                raise ValueError(
+                    "tenant cutoff must be fixed before parallel import",
+                )
+            key, nas = await request("workspace.open", workspace)
+            context = ParallelWorkspaceContext(
+                self._manifest_data,
+                key,
+                request,
+                nas,
+                io,
+            )
             try:
-                await coordinator.run(workspaces, run_workspace)
+                importer = importer_factory(context)
+                await importer.run_workspace(_freeze(workspace))
+                await request("workspace.complete", key, importer.chat_ids)
             finally:
-                await self._router.close()
+                await request("workspace.close", key)
+
+        try:
+            await coordinator.run(workspaces, run_workspace)
+        finally:
+            await self._router.close()
         return deepcopy(self._router.chat_ids)

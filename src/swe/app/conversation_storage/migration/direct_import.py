@@ -281,6 +281,8 @@ class DirectImporter(ConversationImporter):
         """Run workspace bodies concurrently with SQL in the calling task."""
         from .importer import ParallelWorkspaceImporter, validate_inventory
         from .parallel_import import ParallelImportPrototype
+        from .parallel import MigrationIO
+        from .parallel_shares import run_parallel_shares
 
         validate_inventory(report)
         self._validate_source_binding(report)
@@ -330,15 +332,24 @@ class DirectImporter(ConversationImporter):
                 io_workers=io_workers,
                 health_check=health_check,
             )
-            self.chat_ids = await runner.run(
-                _workspace_inputs(report),
-                lambda context: ParallelWorkspaceImporter(
-                    context,
-                    self.target,
-                    batch_size=self.batch_size,
-                ),
-            )
-            await self._shares(report)
+            async with MigrationIO(io_workers) as io:
+                self.chat_ids = await runner.run(
+                    _workspace_inputs(report),
+                    lambda context: ParallelWorkspaceImporter(
+                        context,
+                        self.target,
+                        batch_size=self.batch_size,
+                    ),
+                    io=io,
+                )
+                await run_parallel_shares(
+                    self,
+                    report["shares"],
+                    store_factory,
+                    io=io,
+                    workers=workers,
+                    health_check=health_check,
+                )
             self._assert_source_fresh(report)
             await self.journal.capture_retentions()
             await self.journal.mark_state("imported")

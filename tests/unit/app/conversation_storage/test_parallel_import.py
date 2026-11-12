@@ -93,6 +93,25 @@ async def test_workspace_io_runs_concurrently_and_contexts_are_private():
     assert prototype._router._contexts == {}
 
 
+async def test_workspace_runner_borrows_io_without_closing_it():
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+
+    prototype, _journal = runner()
+
+    class Importer:
+        chat_ids = {}
+
+        def __init__(self, context):
+            assert context.io is io
+
+        async def run_workspace(self, _workspace):
+            await io.call(lambda: None)
+
+    async with MigrationIO(1) as io:
+        await prototype.run(workspaces(1), Importer, io=io)
+        assert await io.call(lambda: "open") == "open"
+
+
 async def test_workspace_context_is_closed_after_import_failure():
     prototype, _journal = runner(workers=1)
 
