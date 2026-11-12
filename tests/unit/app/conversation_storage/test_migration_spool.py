@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import stat
+import errno
 
 import pytest
 
@@ -66,6 +67,46 @@ def test_capacity_failure_does_not_leave_partial_record(tmp_path):
         assert spool.read(record) == [1]
         with pytest.raises(ValueError, match="unique"):
             spool.write(0, [2])
+
+
+def test_filesystem_enospc_rolls_back_record_and_disk_accounting(
+    tmp_path,
+    monkeypatch,
+):
+    from pathlib import Path
+
+    original = Path.open
+
+    class FullDiskWriter:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def write(self, value):
+            self.handle.write(value[:1])
+            raise OSError(errno.ENOSPC, "disk full")
+
+    def full_disk(path, *args, **kwargs):
+        # Ownership is transferred to the spool's existing with statement.
+        # pylint: disable-next=consider-using-with
+        handle = original(path, *args, **kwargs)
+        return FullDiskWriter(handle) if path.suffix == ".tmp" else handle
+
+    with InventorySpool(tmp_path, max_bytes=4096, record_limit=2048) as spool:
+        with monkeypatch.context() as fault:
+            fault.setattr(Path, "open", full_disk)
+            with pytest.raises(OSError) as caught:
+                spool.write(0, {"body": "sensitive inventory"})
+        assert caught.value.errno == errno.ENOSPC
+        assert list(spool.root.iterdir()) == []
+        assert spool.used_bytes == 0
+        record = spool.write(0, {"body": "retry"})
+        assert spool.read(record) == {"body": "retry"}
 
 
 def test_corrupt_record_fails_before_import(tmp_path):
