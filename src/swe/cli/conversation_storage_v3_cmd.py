@@ -561,7 +561,9 @@ def run_v3_command(
                     or source.is_relative_to(nas)
                 ):
                     raise ValueError("source and target NAS roots overlap")
-    if (operation in ("import", "resume") and apply) or operation == "verify":
+    if (
+        operation in ("import", "resume", "finalize") and apply
+    ) or operation == "verify":
         return asyncio.run(
             _execute_spooled(
                 operation,
@@ -644,7 +646,7 @@ def register_v3_commands(group):
         )(command)
         if operation in ("resume", "finalize"):
             command = click.option("--apply", is_flag=True)(command)
-        if operation in ("resume",):
+        if operation in ("resume", "finalize"):
             command = click.option(
                 "--io-workers",
                 type=click.IntRange(1, 32),

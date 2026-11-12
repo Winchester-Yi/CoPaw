@@ -164,6 +164,18 @@ def test_parallel_commands_expose_bounded_worker_options(command):
     assert "--work-dir DIRECTORY" in result.output
 
 
+def test_finalize_exposes_bounded_worker_options():
+    result = CliRunner().invoke(
+        cli,
+        ["conversation-storage", "finalize", "--help"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--workers INTEGER RANGE" in result.output
+    assert "--io-workers INTEGER RANGE" in result.output
+    assert "--memory-budget-mib INTEGER RANGE" in result.output
+    assert "--work-dir DIRECTORY" in result.output
+
+
 def test_missing_fixed_source_boundary_rejected(migration):
     del migration.data["source_boundary"]["snapshot_id"]
     migration._persist()
