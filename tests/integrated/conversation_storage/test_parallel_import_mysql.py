@@ -73,18 +73,37 @@ async def test_parallel_multiservice_import_resume_verify_finalize(
         verified.append(request.scope.service_unit_id)
         return ticket
 
-    async def parallel_run(self, report, *, workers=4, io_workers=4):
+    async def parallel_run(
+        self,
+        report,
+        *,
+        workers=4,
+        io_workers=4,
+        health_check=None,
+    ):
         nonlocal import_runs
         import_runs += 1
         owner = asyncio.current_task()
         entries.append(owner)
-        result = await run_parallel(self, report, workers=2, io_workers=2)
+        result = await run_parallel(
+            self,
+            report,
+            workers=2,
+            io_workers=2,
+            health_check=health_check,
+        )
         if import_runs == 1:
             raise RuntimeError("simulated stopped migration process")
         # A second complete pass must verify committed source plans/bodies.
         # This exercises the workspace retry path even when the interrupted
         # legacy fixture stops during its shared-artifact phase.
-        repeated = await run_parallel(self, report, workers=2, io_workers=2)
+        repeated = await run_parallel(
+            self,
+            report,
+            workers=2,
+            io_workers=2,
+            health_check=health_check,
+        )
         assert repeated == result
         return result
 
