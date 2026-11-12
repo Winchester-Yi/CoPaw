@@ -31,7 +31,10 @@ class MigrationProgress:
             "migration_id": migration_id,
             "stage": "starting",
             "position": None,
+            "failure_position": None,
             "completed": 0,
+            "counter_unit": "tasks",
+            "task_total": None,
             "sql_wait_seconds": 0.0,
             "sql_seconds": 0.0,
             "sql_queue_depth": 0,
@@ -81,8 +84,13 @@ class MigrationProgress:
                 json.dumps(self.snapshot(), sort_keys=True) + "\n",
             )
             self.stream.flush()
-        except OSError:
+        except (OSError, ValueError):
             pass
+
+    def failed_at(self, position):
+        if self.data["failure_position"] is None and position is not None:
+            self.data["failure_position"] = position
+            self.data["position"] = position
 
     async def _report(self):
         while True:

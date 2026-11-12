@@ -4,7 +4,7 @@
 import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import Context
+from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from functools import partial
 import time
@@ -12,6 +12,7 @@ import time
 from .progress import current_progress
 
 HEALTH_CHECK_INTERVAL = 15.0
+_WORK_POSITION = ContextVar("migration_work_position", default=None)
 
 
 async def _drain(task, *, propagate_cancel=False):
@@ -115,6 +116,7 @@ class _Command:
     arguments: tuple
     result: asyncio.Future
     queued_at: float
+    position: object
 
 
 class MigrationCoordinator:
@@ -147,7 +149,13 @@ class MigrationCoordinator:
                 raise MigrationStopped("migration coordinator is stopping")
             result = asyncio.get_running_loop().create_future()
             self._commands.append(
-                _Command(name, arguments, result, time.monotonic()),
+                _Command(
+                    name,
+                    arguments,
+                    result,
+                    time.monotonic(),
+                    _WORK_POSITION.get(),
+                ),
             )
             if self._progress:
                 data = self._progress.data
@@ -172,6 +180,12 @@ class MigrationCoordinator:
         if self._started:
             raise RuntimeError("migration coordinator cannot be reused")
         self._started = True
+        if self._progress:
+            self._progress.data.update(
+                completed=0,
+                task_total=len(items) if hasattr(items, "__len__") else None,
+                counter_unit="tasks",
+            )
         iterator = iter(items)
         tasks = [
             asyncio.create_task(self._worker(iterator, operation))
@@ -198,11 +212,21 @@ class MigrationCoordinator:
                 item = next(iterator)
             except StopIteration:
                 return
-            if self._progress:
-                self._progress.data["position"] = (
-                    item.get("position") if isinstance(item, dict) else None
-                )
-            await operation(item, self.request)
+            position = item.get("position") if isinstance(item, dict) else None
+            token = _WORK_POSITION.set(position)
+            if (
+                self._progress
+                and self._progress.data["failure_position"] is None
+            ):
+                self._progress.data["position"] = position
+            try:
+                await operation(item, self.request)
+            except Exception:
+                if self._progress:
+                    self._progress.failed_at(position)
+                raise
+            finally:
+                _WORK_POSITION.reset(token)
             if self._progress:
                 self._progress.data["completed"] += 1
 
@@ -239,6 +263,7 @@ class MigrationCoordinator:
                     )
                 except BaseException as error:
                     if self._progress:
+                        self._progress.failed_at(command.position)
                         self._progress.data["sql_seconds"] += (
                             time.monotonic() - started
                         )

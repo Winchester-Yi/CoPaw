@@ -110,3 +110,51 @@ async def test_progress_output_failure_preserves_operation_error():
 
     with pytest.raises(ValueError, match="original failure"):
         await progress.run(fail())
+
+
+async def test_closed_stream_preserves_original_exception():
+    stream = io.StringIO()
+    stream.close()
+    progress = MigrationProgress("verify", "migration", stream=stream)
+
+    async def fail():
+        raise RuntimeError("original failure")
+
+    with pytest.raises(RuntimeError, match="original failure"):
+        await progress.run(fail())
+
+
+async def test_concurrent_failure_records_failed_worker_not_last_started():
+    progress = MigrationProgress("import", "migration", stream=io.StringIO())
+    started = asyncio.Event()
+
+    async def work(item, _request):
+        if item["position"] == "A":
+            await started.wait()
+            raise ValueError("A failed")
+        started.set()
+        await asyncio.sleep(10)
+
+    with progress.activate():
+        with pytest.raises(ValueError, match="A failed"):
+            await MigrationCoordinator({}, workers=2).run(
+                [{"position": "A"}, {"position": "B"}],
+                work,
+            )
+    assert progress.snapshot()["failure_position"] == "A"
+    assert progress.snapshot()["position"] == "A"
+
+
+async def test_coordinator_counts_reset_for_each_task_phase():
+    progress = MigrationProgress("verify", "migration", stream=io.StringIO())
+
+    async def work(_item, _request):
+        pass
+
+    with progress.activate():
+        await MigrationCoordinator({}, workers=1).run(range(3), work)
+        assert progress.snapshot()["completed"] == 3
+        await MigrationCoordinator({}, workers=1).run(range(2), work)
+    assert progress.snapshot()["completed"] == 2
+    assert progress.snapshot()["task_total"] == 2
+    assert progress.snapshot()["counter_unit"] == "tasks"
