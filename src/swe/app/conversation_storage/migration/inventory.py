@@ -16,8 +16,9 @@ from ..identity import (
     service_unit_bytes,
 )
 from ..bundle import MAX_READ_BYTES
-from .legacy import read_archive, read_session, safe_files
+from .legacy import read_archive, read_session
 from .manifest import SourceBoundary
+from .source_inputs import safe_input_entries, workspace_entries
 
 
 @dataclass(frozen=True)
@@ -55,13 +56,13 @@ def _source_files(mapping):
     root = Path(mapping.root)
     if root.is_symlink():
         raise ValueError("source root is a symlink")
-    files = safe_files(root)
-    for path in [root, *root.rglob("*")]:
+    entries = workspace_entries(mapping)
+    for path in entries:
         if stat.S_IMODE(path.stat().st_mode) & 0o222:
             raise ValueError(
                 "source snapshot must be read-only before inventory",
             )
-    return files
+    return [path for path in entries if path.is_file()]
 
 
 def _block(report, code, position, error):
@@ -308,8 +309,24 @@ def _shares(mappings, shares, report):
                 raise ValueError(
                     "share service differs from snapshot workspace",
                 )
+            snapshot_path = mapping.path(source["snapshot_path"])
+            entries = safe_input_entries(
+                mapping.root,
+                [source["snapshot_path"]],
+                recursive=False,
+            )
+            if snapshot_path not in entries or not snapshot_path.is_file():
+                raise ValueError("share snapshot is not a regular file")
+            if snapshot_path.stat().st_size > MAX_READ_BYTES:
+                raise ValueError("share snapshot exceeds bounded reader size")
+            if any(
+                stat.S_IMODE(path.stat().st_mode) & 0o222 for path in entries
+            ):
+                raise ValueError(
+                    "source snapshot must be read-only before inventory",
+                )
             snapshot = load_metadata_json(
-                mapping.path(source["snapshot_path"]).read_text(
+                snapshot_path.read_text(
                     encoding="utf-8",
                 ),
             )

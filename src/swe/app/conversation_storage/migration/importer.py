@@ -405,6 +405,7 @@ class ConversationImporter:
                 workspace.get("source_paths", []),
                 cutoff,
                 checked=checked_by_cutoff.setdefault(cutoff, set()),
+                recursive=False,
             )
             if changed:
                 path, modified_at_ns = changed
@@ -434,6 +435,7 @@ class ConversationImporter:
                 ],
                 cutoff,
                 checked=checked_by_cutoff.setdefault(cutoff, set()),
+                recursive=False,
             )
             if changed:
                 path, modified_at_ns = changed

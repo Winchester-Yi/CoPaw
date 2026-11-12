@@ -52,8 +52,8 @@ def test_shared_freshness_scans_parent_once_and_retains_change(monkeypatch):
 
     calls = []
 
-    def changed(paths, cutoff):
-        calls.append((paths, cutoff))
+    def changed(paths, cutoff, *, recursive=True):
+        calls.append((paths, cutoff, recursive))
         return ("/source/new-file", cutoff + 1)
 
     monkeypatch.setattr(inventory_parallel, "changed_source", changed)
@@ -69,7 +69,7 @@ def test_shared_freshness_scans_parent_once_and_retains_change(monkeypatch):
         ],
     }
     cache = inventory_parallel._shared_freshness(data)
-    assert calls == [(["/source"], 100)]
+    assert calls == [(["/source"], 100, False)]
     result = _source_change(
         "workspace",
         ("SERVICE", "tenant"),
@@ -80,6 +80,7 @@ def test_shared_freshness_scans_parent_once_and_retains_change(monkeypatch):
     assert result["path"] == "/source/new-file"
     assert result["mtime_ns"] == 101
     inventory_parallel._shared_freshness(data)
+    assert calls[-1] == (["/source"], 100, False)
     assert len(calls) == 2
 
 

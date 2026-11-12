@@ -51,7 +51,7 @@ def make_readonly(root):
 
 @pytest.mark.parametrize(
     "artifact",
-    ["large-native.bin", "chats.json", "sessions/large.json"],
+    ["chats.json", "sessions/large.json"],
 )
 def test_inventory_blocks_oversized_native_artifact_before_import(
     tmp_path,
@@ -311,7 +311,8 @@ def test_inventory_rejects_symlink_and_records_orphan_share(tmp_path):
     assert result["shares"][0]["record"]["access_count"] == 4
     assert result["shares"][0]["snapshot"]["future"] == {"x": 1}
     root.chmod(0o755)
-    (root / "escape").symlink_to(tmp_path)
+    (root / "sessions").chmod(0o755)
+    (root / "sessions" / "escape").symlink_to(tmp_path)
     with pytest.raises(ValueError, match="symlink"):
         inventory(
             [

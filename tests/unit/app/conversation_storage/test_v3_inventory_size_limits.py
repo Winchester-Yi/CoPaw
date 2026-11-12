@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Reader-size checks also cover workspaces without registries and shares."""
 
+import os
+
 import pytest
 
 from swe.app.conversation_storage.migration import inventory_v3
@@ -18,12 +20,7 @@ def workspace(root):
 
 
 @pytest.mark.parametrize("size", [0, 16, 17])
-def test_native_only_workspace_checks_size_and_keeps_global_index(
-    tmp_path,
-    monkeypatch,
-    size,
-):
-    monkeypatch.setattr(inventory_v3, "MAX_READ_BYTES", 16)
+def test_native_file_outside_conversation_inputs_is_ignored(tmp_path, size):
     root = tmp_path / "workspace"
     root.mkdir()
     (root / "native.bin").write_bytes(b"x" * size)
@@ -31,15 +28,11 @@ def test_native_only_workspace_checks_size_and_keeps_global_index(
         {"workspaces": [workspace(root)], "shares": [], "fingerprints": []},
         workspace_offset=41,
     )
-    assert result["ready"] is (size <= 16)
-    assert result["files"] == [
-        {"workspace": 41, "path": "native.bin", "bytes": size},
-    ]
+    assert result["ready"]
+    assert result["files"] == []
     assert result["workspaces"][0]["sessions"] == []
     assert result["workspaces"][0]["chats"] == []
-    if size > 16:
-        assert result["blockers"][0]["code"] == "source_artifact_oversized"
-        assert result["blockers"][0]["position"] == "workspace-position"
+    assert result["blockers"] == []
 
 
 def test_empty_workspace_remains_valid(tmp_path):
@@ -81,3 +74,35 @@ def test_share_snapshot_rejected_before_read(tmp_path, monkeypatch):
             "detail": "share snapshot exceeds bounded reader size",
         },
     ]
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
+def test_share_snapshot_without_cutoff_rejects_unsafe_path_before_read(
+    tmp_path,
+    monkeypatch,
+    kind,
+):
+    path = tmp_path / "snapshot.json"
+    if kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}")
+        path.symlink_to(target)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.mkdir()
+
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("unsafe share snapshot must not be read")
+
+    monkeypatch.setattr(type(path), "read_bytes", unexpected_read)
+    with pytest.raises(ValueError, match="symlink|unsupported|regular file"):
+        inventory_v3.inventory_discovery(
+            {
+                "workspaces": [],
+                "shares": [
+                    {"snapshot_path": str(path), "position": "share"},
+                ],
+                "fingerprints": [],
+            },
+        )

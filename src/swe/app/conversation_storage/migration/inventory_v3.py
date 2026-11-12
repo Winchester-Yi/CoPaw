@@ -10,17 +10,27 @@ from ..identity import WorkspaceScope
 from .discovery import fingerprints, source_key, SHARE_FIELDS
 from .freshness import changed_source, tenant_key
 from .inventory import WorkspaceMapping, _workspace
-from .legacy import safe_files
+from .source_inputs import safe_input_entries, workspace_entries
 from .manifest import SourceBoundary
 
 
-def _source_change(position, scope, paths, cutoff, *, cached=None):
+def _source_change(
+    position,
+    scope,
+    paths,
+    cutoff,
+    *,
+    cached=None,
+    recursive=True,
+):
     cached = cached or {}
     changed = None
     for path in paths:
         key = (str(path), cutoff)
         result = (
-            cached[key] if key in cached else changed_source([path], cutoff)
+            cached[key]
+            if key in cached
+            else changed_source([path], cutoff, recursive=recursive)
         )
         if result is not None:
             changed = result
@@ -38,6 +48,21 @@ def _source_change(position, scope, paths, cutoff, *, cached=None):
     }
 
 
+def _has_unmapped_structure(mapping, entries):
+    allowed_empty = {mapping.root}
+    for relative in (
+        mapping.registry_path,
+        mapping.sessions_dir,
+        mapping.dialog_dir,
+    ):
+        fixed = mapping.root / relative
+        allowed_empty.update(fixed.parents)
+        allowed_empty.add(fixed)
+    return bool(mapping.session_paths) or any(
+        path not in allowed_empty for path in entries
+    )
+
+
 def _inventory_shares(data, report):
     # Per-pass only: final source rechecks must never reuse prior evidence.
     parent_freshness = {}
@@ -49,6 +74,41 @@ def _inventory_shares(data, report):
             ownership[key] = (count + 1, chat["position"])
     for source in data["shares"]:
         snapshot_path = Path(source["snapshot_path"])
+        cutoffs = data.get("tenant_sync_started_at_ns", {})
+        cutoff = (
+            cutoffs.get(
+                tenant_key(source["service_unit_id"], source["tenant_id"]),
+            )
+            if cutoffs
+            else None
+        )
+        if cutoff is not None:
+            parent = str(snapshot_path.parent)
+            key = (parent, cutoff)
+            if key not in parent_freshness:
+                parent_freshness[key] = changed_source(
+                    [parent],
+                    cutoff,
+                    recursive=False,
+                )
+            blocker = _source_change(
+                source["position"],
+                (source["service_unit_id"], source["tenant_id"]),
+                [str(snapshot_path), parent],
+                cutoff,
+                cached=parent_freshness,
+                recursive=False,
+            )
+            if blocker:
+                report["blockers"].append(blocker)
+                continue
+        safe_input_entries(
+            snapshot_path.parent,
+            [snapshot_path.name],
+            recursive=False,
+        )
+        if not snapshot_path.is_file():
+            raise ValueError("share snapshot must be a regular file")
         if snapshot_path.stat().st_size > MAX_READ_BYTES:
             report["blockers"].append(
                 {
@@ -58,24 +118,6 @@ def _inventory_shares(data, report):
                 },
             )
             continue
-        cutoff = data.get("tenant_sync_started_at_ns", {}).get(
-            tenant_key(source["service_unit_id"], source["tenant_id"]),
-        )
-        if cutoff is not None:
-            parent = str(snapshot_path.parent)
-            key = (parent, cutoff)
-            if key not in parent_freshness:
-                parent_freshness[key] = changed_source([parent], cutoff)
-            blocker = _source_change(
-                source["position"],
-                (source["service_unit_id"], source["tenant_id"]),
-                [str(snapshot_path), parent],
-                cutoff,
-                cached=parent_freshness,
-            )
-            if blocker:
-                report["blockers"].append(blocker)
-                continue
         record = {
             key: source[key] for key in (*SHARE_FIELDS, "service_unit_id")
         }
@@ -109,8 +151,8 @@ def _inventory_shares(data, report):
         )
 
 
-def _inventory_native_files(mapping, report, index, position):
-    for path in safe_files(mapping.root):
+def _inventory_native_files(mapping, report, index, position, files):
+    for path in files:
         size = path.stat().st_size
         relative = str(path.relative_to(mapping.root))
         report["files"].append(
@@ -154,6 +196,9 @@ def inventory_discovery(data, *, workspace_offset=0):
                 ),
                 Path(item["root"]),
                 session_paths=paths,
+                registry_path=item.get("registry_path", "chats.json"),
+                sessions_dir=item.get("sessions_dir", "sessions"),
+                dialog_dir=item.get("dialog_dir", "dialog"),
             ),
         )
     report = {
@@ -168,7 +213,10 @@ def inventory_discovery(data, *, workspace_offset=0):
         cutoff = data.get("tenant_sync_started_at_ns", {}).get(
             tenant_key(mapping.scope.service_unit_id, mapping.scope.tenant_id),
         )
-        source_paths = [str(mapping.root)]
+        entries = workspace_entries(mapping)
+        input_files = [path for path in entries if path.is_file()]
+        source_paths = [str(path) for path in entries]
+        has_unmapped_structure = _has_unmapped_structure(mapping, entries)
         for evidence in mapped.get("evidence_refs", []):
             source_paths.extend((evidence, str(Path(evidence).parent)))
         if cutoff is not None:
@@ -178,6 +226,7 @@ def inventory_discovery(data, *, workspace_offset=0):
                 source_paths,
                 cutoff,
                 cached=data.get("_freshness_cache"),
+                recursive=False,
             )
             if blocker:
                 report["blockers"].append(blocker)
@@ -244,14 +293,7 @@ def inventory_discovery(data, *, workspace_offset=0):
                     report,
                     index + workspace_offset,
                 )
-        elif any(
-            path.parts[0] in ("sessions", "dialog")
-            or "turn-ledger" in path.parts
-            for path in (
-                path.relative_to(mapping.root)
-                for path in safe_files(mapping.root)
-            )
-        ):
+        elif input_files or has_unmapped_structure:
             workspace = _workspace(mapping, report, index + workspace_offset)
         else:
             _inventory_native_files(
@@ -259,6 +301,7 @@ def inventory_discovery(data, *, workspace_offset=0):
                 report,
                 index + workspace_offset,
                 mapped["position"],
+                input_files,
             )
             workspace = {
                 "root": str(mapping.root),

@@ -33,7 +33,7 @@ async def test_preflight_uses_shared_io_and_inventory_counters(
         root = tmp_path / str(index)
         root.mkdir()
         content = b"source" * (index + 1)
-        (root / "input.json").write_bytes(content)
+        (root / "chats.json").write_bytes(content)
         source_bytes += len(content)
         mappings.append(
             {

@@ -351,6 +351,9 @@ def _coverage(service, known, report, overrides):
         followlinks=False,
     ):
         path = Path(directory)
+        if path in known:
+            names[:] = []
+            continue
         if any(name in files for name in ("chats.json", "agent.json")) or any(
             name in names for name in ("sessions", "dialog")
         ):

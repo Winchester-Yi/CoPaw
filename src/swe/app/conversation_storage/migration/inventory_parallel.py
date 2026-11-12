@@ -3,7 +3,6 @@
 
 from collections import Counter
 from dataclasses import dataclass
-import os
 from pathlib import Path
 
 from ..bundle import MAX_READ_BYTES
@@ -12,6 +11,7 @@ from .freshness import changed_source, tenant_key
 from .parallel import MigrationCoordinator, MigrationIO
 from .progress import current_progress
 from .spool import ByteBudget, MigrationCapacityError
+from .source_inputs import safe_input_entries, session_input_roots
 
 
 @dataclass(frozen=True)
@@ -119,7 +119,7 @@ def _shared_freshness(data):
                 for value in workspace.get("evidence_refs", [])
             )
     return {
-        key: changed_source([key[0]], key[1])
+        key: changed_source([key[0]], key[1], recursive=False)
         for key, count in references.items()
         if count > 1
     }
@@ -132,20 +132,24 @@ def _preflight_workspace(workspace, allowance):
     count = 0
     source_limit = allowance // 16
     count_limit = allowance // 512
-    for directory, names, files in os.walk(root, followlinks=False):
-        names.sort()
-        for name in files:
-            path = Path(directory) / name
-            size = path.stat().st_size
-            if size > MAX_READ_BYTES:
-                raise MigrationCapacityError(
-                    "workspace source file exceeds the bounded reader limit: "
-                    + str(path),
-                )
-            total += size
-            count += 1
-            if total > source_limit or count > count_limit:
-                raise MigrationCapacityError(
-                    "workspace source exceeds its migration memory allowance",
-                )
+    roots = session_input_roots(
+        root,
+        [entry["path"] for entry in workspace.get("session_paths", [])],
+        max_session_bytes=min(MAX_READ_BYTES, source_limit),
+    )
+    for path in safe_input_entries(root, roots):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        if size > MAX_READ_BYTES:
+            raise MigrationCapacityError(
+                "workspace source file exceeds the bounded reader limit: "
+                + str(path),
+            )
+        total += size
+        count += 1
+        if total > source_limit or count > count_limit:
+            raise MigrationCapacityError(
+                "workspace source exceeds its migration memory allowance",
+            )
     return total

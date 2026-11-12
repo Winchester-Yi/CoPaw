@@ -145,7 +145,9 @@ def test_parent_scan_detects_directory_and_symlink_changes(tmp_path, mutation):
     elif mutation == "add":
         sibling.write_text("new")
     else:
-        sibling.symlink_to(parent / "0.json")
+        sibling = parent / "0.json"
+        sibling.unlink()
+        sibling.symlink_to(parent / "1.json")
     # Directory mtime detects creation/deletion. A symlink remains forbidden
     # even when its own and the parent's mtimes predate the cutoff.
     stamp = cutoff - 1 if mutation == "symlink" else cutoff + 1
@@ -154,7 +156,8 @@ def test_parent_scan_detects_directory_and_symlink_changes(tmp_path, mutation):
         os.utime(sibling, ns=(stamp, stamp), follow_symlinks=False)
     report = {"workspaces": [], "shares": [], "blockers": []}
     inventory._inventory_shares(data, report)
-    assert len(report["blockers"]) == len(data["shares"])
+    expected_count = 1 if mutation == "symlink" else len(data["shares"])
+    assert len(report["blockers"]) == expected_count
     expected = str(sibling) if mutation == "symlink" else str(parent)
     assert all(item["path"] == expected for item in report["blockers"])
 
