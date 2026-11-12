@@ -7,6 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import Context
 from dataclasses import dataclass
 from functools import partial
+import time
+
+from .progress import current_progress
 
 HEALTH_CHECK_INTERVAL = 15.0
 
@@ -38,6 +41,9 @@ class MigrationIO:
     def __init__(self, workers=4):
         if not 1 <= workers <= 32:
             raise ValueError("IO workers must be between 1 and 32")
+        self._progress = current_progress()
+        if self._progress:
+            self._progress.open_io += 1
         self._executor = ThreadPoolExecutor(
             max_workers=workers,
             thread_name_prefix="migration-io",
@@ -57,6 +63,12 @@ class MigrationIO:
                 partial(function, *args, **kwargs),
             )
             self._pending.add(future)
+            started = time.monotonic()
+            if self._progress:
+                data = self._progress.data
+                data["io_active"] += 1
+                data["io_calls"] += 1
+                data["io_peak"] = max(data["io_peak"], data["io_active"])
             try:
                 return await asyncio.shield(future)
             except asyncio.CancelledError:
@@ -67,8 +79,15 @@ class MigrationIO:
                 raise
             finally:
                 self._pending.discard(future)
+                if self._progress:
+                    self._progress.data["io_active"] -= 1
+                    self._progress.data["io_seconds"] += (
+                        time.monotonic() - started
+                    )
 
     async def close(self):
+        if self._closed:
+            return
         self._closed = True
         cleanup = asyncio.ensure_future(
             asyncio.gather(*tuple(self._pending), return_exceptions=True),
@@ -77,6 +96,11 @@ class MigrationIO:
             await _drain(cleanup, propagate_cancel=True)
         finally:
             self._executor.shutdown(wait=True)
+            if self._progress:
+                self._progress.open_io -= 1
+                self._progress.uncertain_io |= any(
+                    not item.done() for item in self._pending
+                )
 
     async def __aenter__(self):
         return self
@@ -90,6 +114,7 @@ class _Command:
     name: str
     arguments: tuple
     result: asyncio.Future
+    queued_at: float
 
 
 class MigrationCoordinator:
@@ -103,6 +128,7 @@ class MigrationCoordinator:
     def __init__(self, handlers, *, workers=4, health_check=None):
         if not 1 <= workers <= 32:
             raise ValueError("workers must be between 1 and 32")
+        self._progress = current_progress()
         self._handlers = dict(handlers)
         self._workers = workers
         self._commands = deque()
@@ -120,7 +146,16 @@ class MigrationCoordinator:
             if self._stopped:
                 raise MigrationStopped("migration coordinator is stopping")
             result = asyncio.get_running_loop().create_future()
-            self._commands.append(_Command(name, arguments, result))
+            self._commands.append(
+                _Command(name, arguments, result, time.monotonic()),
+            )
+            if self._progress:
+                data = self._progress.data
+                data["sql_queue_depth"] = len(self._commands)
+                data["sql_queue_peak"] = max(
+                    data["sql_queue_peak"],
+                    len(self._commands),
+                )
             self._wake.set()
             try:
                 return await asyncio.shield(result)
@@ -163,7 +198,13 @@ class MigrationCoordinator:
                 item = next(iterator)
             except StopIteration:
                 return
+            if self._progress:
+                self._progress.data["position"] = (
+                    item.get("position") if isinstance(item, dict) else None
+                )
             await operation(item, self.request)
+            if self._progress:
+                self._progress.data["completed"] += 1
 
     async def _serve(self, tasks):
         while True:
@@ -184,13 +225,29 @@ class MigrationCoordinator:
                     )
             if self._commands:
                 command = self._commands.popleft()
+                started = time.monotonic()
+                if self._progress:
+                    self._progress.data["sql_queue_depth"] = len(
+                        self._commands,
+                    )
+                    self._progress.data["sql_wait_seconds"] += (
+                        started - command.queued_at
+                    )
                 try:
                     value = await self._handlers[command.name](
                         *command.arguments,
                     )
                 except BaseException as error:
+                    if self._progress:
+                        self._progress.data["sql_seconds"] += (
+                            time.monotonic() - started
+                        )
                     command.result.set_exception(error)
                     raise
+                if self._progress:
+                    self._progress.data["sql_seconds"] += (
+                        time.monotonic() - started
+                    )
                 command.result.set_result(value)
                 continue
             self._wake.clear()
@@ -208,6 +265,8 @@ class MigrationCoordinator:
                     pass
 
     def _reject_pending(self):
+        if self._progress:
+            self._progress.data["sql_queue_depth"] = 0
         while self._commands:
             command = self._commands.popleft()
             command.result.set_exception(

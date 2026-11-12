@@ -67,6 +67,9 @@ class InventorySpool:
     """
 
     def __init__(self, directory, *, max_bytes, record_limit, protected=()):
+        from .progress import current_progress
+
+        self._progress = current_progress()
         base = Path(directory)
         if not base.is_absolute() or base.resolve() != base:
             raise ValueError("work directory must be canonical and absolute")
@@ -144,6 +147,8 @@ class InventorySpool:
                 raise MigrationCapacityError("inventory disk limit exceeded")
             self._records[index] = None
             self._used += size
+            if self._progress:
+                self._progress.disk_change(size)
         destination = self.root / (str(index) + ".json")
         temporary = self.root / (str(index) + ".tmp")
         digest = sha256()
@@ -168,6 +173,8 @@ class InventorySpool:
             with self._lock:
                 del self._records[index]
                 self._used -= size
+                if self._progress:
+                    self._progress.disk_change(-size)
             raise
         finally:
             temporary.unlink(missing_ok=True)
@@ -202,6 +209,8 @@ class InventorySpool:
             if not self._closed:
                 shutil.rmtree(self.root)
                 self._closed = True
+                if self._progress:
+                    self._progress.disk_change(-self._used)
 
     def __enter__(self):
         return self

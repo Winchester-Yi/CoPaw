@@ -226,6 +226,14 @@ async def _execute(
     source_recheck=None,
     memory_bytes=512 * 1024 * 1024,
 ):
+    from swe.app.conversation_storage.migration.progress import (
+        current_progress,
+    )
+
+    progress = current_progress()
+    if progress:
+        progress.stage(operation)
+        progress.data["workspace_total"] = len(inventory["workspaces"])
     from swe.database.config import get_database_config
     from swe.database.connection import DatabaseConnection
 
@@ -449,6 +457,14 @@ async def _execute_spooled(
         record_limit=record_limit,
         protected=protected,
     ) as spool:
+        from swe.app.conversation_storage.migration.progress import (
+            current_progress,
+        )
+
+        progress = current_progress()
+        if progress:
+            progress.stage("inventory")
+            progress.data["workspace_total"] = len(manifest.data["workspaces"])
         inventory = await inventory_v3_spooled(
             manifest,
             spool,
@@ -464,6 +480,8 @@ async def _execute_spooled(
             )
 
         async def recheck_source():
+            if progress:
+                progress.stage("source_recheck")
             if not await _recheck_spooled_inventory(
                 manifest,
                 inventory,
@@ -523,6 +541,15 @@ async def _recheck_spooled_inventory(
         return inventories_equal(actual, expected)
 
 
+def _run_migration_operation(operation):
+    from swe.app.conversation_storage.migration.progress import (
+        current_progress,
+    )
+
+    progress = current_progress()
+    return asyncio.run(progress.run(operation) if progress else operation)
+
+
 def run_v3_command(
     operation,
     manifest_path,
@@ -568,7 +595,7 @@ def run_v3_command(
     if (
         operation in ("import", "resume", "finalize") and apply
     ) or operation == "verify":
-        return asyncio.run(
+        return _run_migration_operation(
             _execute_spooled(
                 operation,
                 manifest,
@@ -621,7 +648,7 @@ def run_v3_command(
             "apply": False,
             "ready": True,
         }
-    return asyncio.run(
+    return _run_migration_operation(
         _execute(
             operation,
             manifest,
@@ -726,9 +753,25 @@ def run_v3_and_echo(operation, manifest_path, **options):
             "no index work directory is separate from source roots",
         )
     with disk_index_policy(base, max_bytes=shutil.disk_usage(base).free // 4):
-        result = run_v3_command(operation, manifest_path, **options)
-        echo_migration_report(result)
-        if result.get("passed") is False or result.get("blockers"):
-            raise click.ClickException(
-                "conversation storage verification has blockers",
-            )
+        from swe.app.conversation_storage.migration.progress import (
+            MigrationProgress,
+        )
+
+        progress = MigrationProgress(operation, header.get("migration_id"))
+        with progress.activate():
+            try:
+                result = run_v3_command(operation, manifest_path, **options)
+                echo_migration_report(result)
+                if result.get("passed") is False or result.get("blockers"):
+                    raise click.ClickException(
+                        "conversation storage verification has blockers",
+                    )
+            except BaseException as error:
+                try:
+                    progress.save_failure(manifest_path, error)
+                except OSError:
+                    click.echo(
+                        "unable to save migration failure report",
+                        err=True,
+                    )
+                raise
