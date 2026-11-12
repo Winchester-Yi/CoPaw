@@ -26,7 +26,7 @@
 
 ## 当前验证证据
 
-- 会话存储与 CLI 单元回归：**1,316 passed，55.35 秒**（guard 去重新增测试前）。
+- 会话存储与 CLI 单元回归：**1,317 passed，56.32 秒**（含 guard 去重和锁顺序回归）。
 - 最新小规模真实 MySQL 生命周期：**1 passed，206.822 秒**，覆盖双服务、中断、resume、重复运行、verify、finalize、分享字段及 authority；结果为 `/tmp/conversation-latest-lifecycle.xml`，2026-11-12 13:36 更新，覆盖 artifact worker 与 owner health check。后续 runtime prefetch 改动尚未包含。
 - 新进度/并发/spool/CLI 定向回归：**49 passed，0.60 秒**。
 - 代表性样本合法 inventory 与跨独立目录内容摘要一致性：**2 passed**。
