@@ -18,4 +18,12 @@
 | 一个失败不能 ready、只读预览 | verify auxiliary failure test、`test_finalize_rejects_missing_runtime_workspace_before_ready`；`test_preview_uses_spool_without_database_or_cutoff`、`test_preview_source_blocker_does_not_rewrite_manifest` | 仍需故意漏任务/覆盖集合不等的全 CLI 回归；最终 ready 由完整 verify 屏障控制 |
 | 恢复/跨 scope/万级数据 | `test_parallel_import_mysql.py::test_parallel_multiservice_import_resume_verify_finalize`；10k 四档基准含多服务、分享、空 workspace、长尾 Session、归档、独立 Session | 小规模真实生命周期通过不能代替四档 10k 最终结果；完整性能验收以独立报告记录 |
 
-当前明确剩余故障验收：实际数据库连接被终止、parallel importer 未知提交后重启、真实 ENOSPC、主动遗漏任务阻止 ready，以及万级四档最终性能/资源结果。不能把单元测试矩阵描述成全部失败组合已穷举。
+## 后续闭环（2026-11-12）
+
+- `bac7f5694` 的 `test_migration_lock_loss_mysql.py` 真实核验连接/schema/命名锁后 KILL，停止接单、IO 排空、同 manifest 票据复用及 verify/finalize ready，**1 passed，139.27 秒**。
+- `7107c6df2` 的 `test_migration_commit_loss_mysql.py` 在真实 driver COMMIT 成功后丢返回，生产 UnknownCommit 弃连接且不继续推进；同 manifest 恢复保留 ID/operation/path/正文摘要，无重复丢失且 ready，**1 passed，140.63 秒**。
+- `c98fee187` 附加正文 pipeline 明确核对完整任务覆盖集合；漏任务和等量重复任务均拒绝。`1b16e6d6c` 的 runtime 预取同样使用 DiskSet 校验准确覆盖及 DiskMap 稳定归并，保持完整 adapter 校验。
+- `a6a8e2ba5` 向真实临时文件部分写入后注入 errno.ENOSPC，文件与容量/index 预留回滚且同 index 可重试。它不等于填满真实磁盘或真实 NAS 故障。
+- `e162aedba` 对 20k/40k/80k JSON 进度条目做独立进程资源测量，边界详见 `2026-11-12-conversation-manifest-scale.md`；不含业务 V3 绑定校验或 SQL hydrate，不能把该项扩大为完整控制面 RSS 验收。
+
+上表“缺口”记录最初核对状态，以上后续结果闭环了其中部分条目。当前仍缺完整万级四档和可控 IO 延迟最终性能/资源结果；真实磁盘容量耗尽/真实 NAS 故障不在本地错误注入证明范围。不能把单元或这些有限集成场景描述成全部失败组合已穷举。

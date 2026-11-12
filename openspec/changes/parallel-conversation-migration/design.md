@@ -1,6 +1,6 @@
 # 万级 workspace 离线迁移并行设计
 
-日期：2026-11-11。状态：实施中，CLI尚未接入并行参数。基于 `.worktrees/conversation-mysql-nas` 当前实现及前述 CLI 修复。
+日期：2026-11-11，状态更新于 2026-11-12。状态：实施中，CLI 已接入并行参数；完整规模与故障验收未完成。基于 `.worktrees/conversation-mysql-nas` 当前实现及前述 CLI 修复。本文保留目标设计；实际进度和证据见 `docs/superpowers/reports/2026-11-12-conversation-parallel-implementation-validation.md`，不能把设计条目视为全部已验收。
 
 验收环境更新：用户已授权连接专用MySQL测试库，并明确本轮基于本地目录测试。因此本轮万级验收使用真实MySQL、独立本地目录及可控IO延迟；不把本地测量写成真实NAS性能结论。真实NAS参数在现场上线前复测，不再作为本轮完成的环境前置条件。连接凭据不得写入代码、文档或测试报告。
 
@@ -110,7 +110,7 @@ prepare/commit固定操作继续复用现有DML/PreparedInsert白名单，不能
 
 此项与并发同步实施，否则串行journal/重复遍历可能吞掉IO收益。
 
-## 7. 资源参数（拟新增，当前不可执行）
+## 7. 资源参数（CLI 已接入，现场定参待验收）
 
 | 参数 | 初始设计值 | 作用 |
 | --- | --- | --- |
@@ -125,7 +125,7 @@ prepare/commit固定操作继续复用现有DML/PreparedInsert白名单，不能
 
 并发参数是运行策略，不属于作业绑定：同manifest resume允许调整workers/io-workers/预算，不得改变source、target、IDs、operation_key。不增加batch-size调优参数，本轮保留原批大小限制。
 
-命令仅示意未来用法：
+当前 direct v3 CLI 用法（参数值为示例，非性能建议）：
 
 ```bash
 swe conversation-storage import --manifest /audit/manifest.json \
