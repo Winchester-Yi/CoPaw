@@ -28,7 +28,6 @@ async def test_parallel_multiservice_import_resume_verify_finalize(
     run_workspace = ParallelWorkspaceImporter.run_workspace
     publish = ParallelWorkspaceImporter._publish
     prepare_verify = OfflineVerifyStages.prepare
-    inventory_v3 = v3.inventory_v3
     execute = v3._execute
 
     async def spooled_execute(
@@ -62,11 +61,6 @@ async def test_parallel_multiservice_import_resume_verify_finalize(
         )
 
     monkeypatch.setattr(v3, "_execute", spooled_execute)
-
-    def begin_sync_inventory(manifest, *args, **kwargs):
-        return inventory_v3(manifest, *args, begin_sync=True, **kwargs)
-
-    monkeypatch.setattr(v3, "inventory_v3", begin_sync_inventory)
 
     async def verification(self, request, *args, **kwargs):
         ticket = await prepare_verify(self, request, *args, **kwargs)

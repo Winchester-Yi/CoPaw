@@ -214,12 +214,14 @@ async def test_v3_discovery_import_resume_verify_finalize(
         lambda: db.config,
     )
     assert (await _execute("preflight", manifest, inventory, None))["passed"]
-    from swe.app.conversation_storage.migration.direct_import import (
-        DirectImporter,
+    from swe.app.conversation_storage.migration.importer import (
+        ParallelWorkspaceImporter,
     )
     from swe.app.conversation_storage.migration.v3_manifest import V3Manifest
 
-    original_finish = DirectImporter._batch_finished
+    # The internal executor expects the same fixed cutoffs as the CLI spool path.
+    inventory = inventory_v3(manifest, begin_sync=True)
+    original_finish = ParallelWorkspaceImporter._batch_finished
 
     async def interrupt_after_commit(self, position):
         await original_finish(self, position)
@@ -227,7 +229,7 @@ async def test_v3_discovery_import_resume_verify_finalize(
 
     with monkeypatch.context() as interrupted:
         interrupted.setattr(
-            DirectImporter,
+            ParallelWorkspaceImporter,
             "_batch_finished",
             interrupt_after_commit,
         )
