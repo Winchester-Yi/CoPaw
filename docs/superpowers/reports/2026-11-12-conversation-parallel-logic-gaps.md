@@ -16,9 +16,9 @@
 
 同类等待窗口核对：domain handler 执行完毕后原有 `continue` 会回顶部观察 worker；队列唤醒等待与定时等待结束后也自然回顶部。上述路径不存在 health probe 返回后直接进入新 handler 的同一窗口。
 
-## 正在补充的跨层断言
+## 此前待补的跨层断言（完成结果见后文）
 
-以下三个方向正在由其他代理补充，尚待独立复核与验收，不把现有局部测试扩大为已经覆盖整条 CLI 链路：
+以下是本轮开始时识别的三个待补方向；相应跨层用例现已补齐、完成独立复核及真实MySQL验收，结果见后文。保留当时的问题描述，以说明新增断言的目的：
 
 1. **首次 import 与 resume 的 cutoff**：现有 `test_tenant_sync_batch.py::test_all_tenant_cutoffs_persist_once_and_resume_keeps_existing_values` 验证 manifest API，`test_parallel_import.py::test_parallel_import_requires_fixed_tenant_cutoff` 验证缺失拒绝。跨层断言需证明包含多 service/tenant 与 share-only tenant 的 cutoff 在首个 workspace 执行前均已落盘，中断后同 manifest resume 全部保持不变。
 2. **最终 ready 屏障**：已有 source freshness/recheck、辅助任务准确覆盖集合及 runtime root 拒绝的局部回归。跨层负例需证明 source 在最终重查前改变，或某个 service 的尾部验证失败/任务遗漏时，即使其他 service 已成功，job 仍不进入 ready，且不写出 completion/runtime 凭据。
