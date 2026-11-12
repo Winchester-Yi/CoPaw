@@ -107,7 +107,7 @@ def test_discover_and_freeze_existing_roots(tmp_path, marked):
             [operation, "--manifest", str(manifest)],
         )
         assert result.exit_code == 0, result.output
-        report = json.loads(result.output)
+        report = json.loads(result.stdout)
         assert report["version"] == 3
         assert report["operation"] == operation
         assert report["blockers"] == []

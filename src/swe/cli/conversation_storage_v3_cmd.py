@@ -235,7 +235,10 @@ async def _execute(
         progress.stage(operation)
         progress.data["workspace_total"] = len(inventory["workspaces"])
     from swe.database.config import get_database_config
-    from swe.database.connection import DatabaseConnection
+    from swe.database.connection import DatabaseConnection, _named_lock_name
+    from swe.app.conversation_storage.migration.lock_guard import (
+        MigrationLockGuard,
+    )
 
     config = get_database_config()
     schema = manifest.data["offline"]["application_schema"]
@@ -279,6 +282,12 @@ async def _execute(
                 raise ValueError(
                     "database identity differs from application target",
                 )
+            guard = await MigrationLockGuard.capture(
+                db,
+                _named_lock_name("conversation-migration:" + schema),
+                schema=schema,
+                server_uuid=identity["server_uuid"],
+            )
             journal = MigrationJournal(
                 db,
                 manifest,
@@ -310,6 +319,7 @@ async def _execute(
                     inventory,
                     workers=workers,
                     io_workers=io_workers,
+                    health_check=guard.check,
                 )
             else:
                 if job is None or job["state"] not in (
@@ -409,6 +419,7 @@ async def _execute_spooled(
     io_workers,
     memory_budget_mib,
     work_dir,
+    apply=True,
 ):
     protected = [
         service[key]
@@ -471,13 +482,24 @@ async def _execute_spooled(
             workers=workers,
             io_workers=io_workers,
             memory_bytes=memory_bytes,
-            begin_sync=operation in ("import", "resume"),
+            begin_sync=operation in ("import", "resume") and apply,
         )
+        if operation in ("inventory", "plan", "inspect"):
+            return _inventory_preview(operation, manifest, inventory)
         if not inventory.get("ready") or inventory.get("blockers"):
             raise ValueError(
                 "frozen inventory has blockers: "
                 + json.dumps(inventory["blockers"], ensure_ascii=False),
             )
+
+        if operation in ("import", "resume", "finalize") and not apply:
+            return {
+                "version": 3,
+                "operation": operation,
+                "migration_id": manifest.migration_id,
+                "apply": False,
+                "ready": True,
+            }
 
         async def recheck_source():
             if progress:
@@ -592,72 +614,43 @@ def run_v3_command(
                     or source.is_relative_to(nas)
                 ):
                     raise ValueError("source and target NAS roots overlap")
-    if (
-        operation in ("import", "resume", "finalize") and apply
-    ) or operation == "verify":
-        return _run_migration_operation(
-            _execute_spooled(
-                operation,
-                manifest,
-                output,
-                workers=workers,
-                io_workers=io_workers,
-                memory_budget_mib=memory_budget_mib,
-                work_dir=work_dir,
-            ),
-        )
-    inventory = inventory_v3(
-        manifest,
-        begin_sync=operation in ("import", "resume") and apply,
-    )
-    if operation in ("inventory", "plan", "inspect"):
-        return {
-            "version": 3,
-            "operation": operation,
-            "migration_id": manifest.migration_id,
-            "preview": True,
-            "application_schema": manifest.data["offline"][
-                "application_schema"
-            ],
-            "source_boundary": inventory["source_boundary"],
-            "source_scopes": [
-                {
-                    "scope": item["scope"],
-                    "root": item["root"],
-                    "sessions": len(item["sessions"]),
-                    "chats": len(item["chats"]),
-                }
-                for item in inventory["workspaces"]
-            ],
-            "files": len(inventory["files"]),
-            "workspaces": len(inventory["workspaces"]),
-            "shares": len(inventory["shares"]),
-            "blockers": inventory["blockers"],
-            "ready": inventory["ready"],
-        }
-    if not inventory.get("ready") or inventory.get("blockers"):
-        raise ValueError(
-            "frozen inventory has blockers: "
-            + json.dumps(inventory["blockers"], ensure_ascii=False),
-        )
-    if operation in ("import", "resume", "finalize") and not apply:
-        return {
-            "version": 3,
-            "operation": operation,
-            "migration_id": manifest.migration_id,
-            "apply": False,
-            "ready": True,
-        }
     return _run_migration_operation(
-        _execute(
+        _execute_spooled(
             operation,
             manifest,
-            inventory,
             output,
             workers=workers,
             io_workers=io_workers,
+            memory_budget_mib=memory_budget_mib,
+            work_dir=work_dir,
+            apply=apply,
         ),
     )
+
+
+def _inventory_preview(operation, manifest, inventory):
+    return {
+        "version": 3,
+        "operation": operation,
+        "migration_id": manifest.migration_id,
+        "preview": True,
+        "application_schema": manifest.data["offline"]["application_schema"],
+        "source_boundary": inventory["source_boundary"],
+        "source_scopes": [
+            {
+                "scope": item["scope"],
+                "root": item["root"],
+                "sessions": len(item["sessions"]),
+                "chats": len(item["chats"]),
+            }
+            for item in inventory["workspaces"]
+        ],
+        "files": sum(1 for _ in inventory["files"]),
+        "workspaces": len(inventory["workspaces"]),
+        "shares": len(inventory["shares"]),
+        "blockers": inventory["blockers"],
+        "ready": inventory["ready"],
+    }
 
 
 def register_v3_commands(group):
@@ -676,7 +669,7 @@ def register_v3_commands(group):
         )(command)
         if operation in ("resume", "finalize"):
             command = click.option("--apply", is_flag=True)(command)
-        if operation in ("resume", "finalize"):
+        if operation in ("preflight", "resume", "finalize"):
             command = click.option(
                 "--io-workers",
                 type=click.IntRange(1, 32),

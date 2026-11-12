@@ -125,3 +125,190 @@ def test_finalize_accepts_existing_canonical_runtime_roots(tmp_path):
             "workspaces": [{"runtime_root": str(tmp_path)}],
         },
     )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "inventory",
+        "plan",
+        "inspect",
+        "preflight",
+        "import",
+        "resume",
+        "verify",
+        "finalize",
+    ),
+)
+def test_direct_commands_expose_uniform_resource_options(operation):
+    from click.testing import CliRunner
+    from swe.cli.conversation_storage_cmd import conversation_storage_group
+
+    result = CliRunner().invoke(
+        conversation_storage_group,
+        [operation, "--help"],
+    )
+    assert result.exit_code == 0
+    for flag in (
+        "--workers",
+        "--io-workers",
+        "--memory-budget-mib",
+        "--work-dir",
+    ):
+        assert flag in result.output
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("inventory", "plan", "inspect", "import", "resume", "finalize"),
+)
+async def test_preview_uses_spool_without_database_or_cutoff(
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    from unittest.mock import AsyncMock
+    from swe.cli import conversation_storage_v3_cmd as command
+
+    source = tmp_path / "source"
+    nas = tmp_path / "nas"
+    work = tmp_path / "work"
+    for root in (source, nas, work):
+        root.mkdir()
+    manifest = SimpleNamespace(
+        migration_id="job",
+        data={
+            "services": [{"source_root": str(source), "nas_root": str(nas)}],
+            "workspaces": [],
+            "offline": {"application_schema": "application"},
+        },
+    )
+    inventory = {
+        "workspaces": [],
+        "files": iter(()),
+        "shares": [],
+        "source_boundary": {},
+        "blockers": [],
+        "ready": True,
+    }
+    parse = AsyncMock(return_value=inventory)
+    monkeypatch.setattr(command, "inventory_v3_spooled", parse)
+    execute = AsyncMock(
+        side_effect=AssertionError("preview connected to database"),
+    )
+    monkeypatch.setattr(command, "_execute", execute)
+    result = await command._execute_spooled(
+        operation,
+        manifest,
+        None,
+        workers=8,
+        io_workers=2,
+        memory_budget_mib=128,
+        work_dir=work,
+        apply=False,
+    )
+    assert result["ready"]
+    assert parse.call_args.kwargs["begin_sync"] is False
+    assert parse.call_args.kwargs["workers"] == 8
+    execute.assert_not_called()
+
+
+async def test_execute_captures_exact_named_lock_and_passes_owner_health(
+    monkeypatch,
+):
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+    import asyncio
+    from swe.cli import conversation_storage_v3_cmd as command
+    from swe.database.connection import _named_lock_name
+    from swe.app.conversation_storage.migration.lock_guard import (
+        MigrationLockGuard,
+    )
+
+    owner = asyncio.current_task()
+    lock_calls = []
+
+    class Connection:
+        def __init__(self, _config):
+            pass
+
+        connect = AsyncMock()
+        close = AsyncMock()
+
+        @asynccontextmanager
+        async def named_lock(self, name, **_options):
+            lock_calls.append(name)
+            yield
+
+    db = SimpleNamespace(
+        fetch_one=AsyncMock(
+            return_value={"schema_name": "app", "server_uuid": "server"},
+        ),
+    )
+    capture_calls = []
+
+    async def capture(database, lock_name, **identity):
+        assert asyncio.current_task() is owner
+        assert database is db
+        capture_calls.append((lock_name, identity))
+        return SimpleNamespace(check=health)
+
+    async def health():
+        assert asyncio.current_task() is owner
+
+    class Importer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run_parallel(self, _inventory, **options):
+            assert options["health_check"] is health
+            await options["health_check"]()
+            raise RuntimeError("health passed to importer")
+
+    monkeypatch.setattr(
+        "swe.database.connection.DatabaseConnection",
+        Connection,
+    )
+    monkeypatch.setattr(
+        "swe.database.config.get_database_config",
+        lambda: SimpleNamespace(database="app", model_copy=lambda **_: None),
+    )
+    monkeypatch.setattr(command, "DMLDatabase", lambda _control: db)
+    monkeypatch.setattr(
+        command,
+        "BundleStore",
+        lambda _path: SimpleNamespace(root=Path("/nas")),
+    )
+    monkeypatch.setattr(
+        command,
+        "MigrationJournal",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(command, "check_schema", AsyncMock(return_value={}))
+    monkeypatch.setattr(command, "compare_original_shares", AsyncMock())
+    monkeypatch.setattr(command, "_inspect_job", AsyncMock(return_value=None))
+    monkeypatch.setattr(command, "DirectImporter", Importer)
+    monkeypatch.setattr(MigrationLockGuard, "capture", capture)
+    binding = {
+        "schema": "app",
+        "migration_id": "job",
+        "nas_roots": {"svc": "/nas"},
+    }
+    manifest = SimpleNamespace(
+        migration_id="job",
+        _validate_target=lambda _value: None,
+        data={
+            "offline": {"application_schema": "app"},
+            "target": binding,
+            "services": [{"service_unit_id": "svc", "nas_root": "/nas"}],
+        },
+    )
+    with pytest.raises(RuntimeError, match="health passed to importer"):
+        await command._execute("import", manifest, {}, None)
+    assert lock_calls == ["conversation-migration:app"]
+    assert capture_calls == [
+        (
+            _named_lock_name(lock_calls[0]),
+            {"schema": "app", "server_uuid": "server"},
+        ),
+    ]
