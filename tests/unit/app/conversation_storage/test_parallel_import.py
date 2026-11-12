@@ -121,7 +121,6 @@ async def test_router_close_attempts_every_store_and_keeps_failed_context():
             self.name = name
 
         async def close_migration_stages(self):
-            nonlocal fail_first
             calls.append(self.name)
             if self.name == "first" and fail_first:
                 raise OSError("temporary cleanup failure")
@@ -253,7 +252,7 @@ async def test_router_verifies_already_committed_batch_with_real_stages(
     )
     from tests.unit.app.conversation_storage.test_offline_verify_stages import (
         committed,
-    )
+    )  # noqa: E501
 
     store, request, plan, expected, blocks = await committed(tmp_path)
     store.chat_session_id = None
