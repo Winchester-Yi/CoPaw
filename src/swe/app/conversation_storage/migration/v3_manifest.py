@@ -7,6 +7,7 @@ import time
 from uuid import UUID
 
 from ..identity import WorkspaceScope, service_unit_bytes
+from .disk_manifest import DiskSet, load_disk_manifest
 from .manifest import (
     MigrationManifest,
     SourceBoundary,
@@ -18,6 +19,10 @@ from .manifest import (
 
 class V3Manifest(MigrationManifest):
     """Retain the durable manifest API without a local integer allocator."""
+
+    @classmethod
+    def load(cls, path):
+        return cls(path, load_disk_manifest(path))
 
     def _validate(self):
         if self.data.get("version") != 3:
@@ -47,7 +52,7 @@ class V3Manifest(MigrationManifest):
         for kind, assignments in self.data["assignments"].items():
             if kind not in KINDS:
                 raise ValueError("unknown assignment kind")
-            identities = set()
+            identities = DiskSet()
             for source, assignment in assignments.items():
                 self._validate_assignment(
                     kind,
@@ -148,4 +153,4 @@ class V3Manifest(MigrationManifest):
             ).items()
         ):
             raise ValueError("tenant source mtime cutoff changed")
-        super()._refresh()
+        super()._refresh(current=current)

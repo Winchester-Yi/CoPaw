@@ -207,8 +207,8 @@ class MigrationManifest:
     def _lock(self):
         return _ManifestLock(self.path.with_suffix(self.path.suffix + ".lock"))
 
-    def _refresh(self):
-        current = self.load(self.path)
+    def _refresh(self, *, current=None):
+        current = self.load(self.path) if current is None else current
         if (
             migration_workflow(current.data) != migration_workflow(self.data)
             or current.migration_id != self.migration_id
@@ -243,13 +243,9 @@ class MigrationManifest:
                 encoding="utf-8",
             ) as handle:
                 temporary = Path(handle.name)
-                json.dump(
-                    self.data,
-                    handle,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    allow_nan=False,
-                )
+                from .disk_manifest import write_json
+
+                write_json(self.data, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)

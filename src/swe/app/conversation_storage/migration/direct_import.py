@@ -346,7 +346,7 @@ class DirectImporter(ConversationImporter):
             self.manifest._persist()
             return {
                 "migration_id": self.manifest.migration_id,
-                "batches": dict(self.manifest.data["batches"]),
+                "batches": self.manifest.data["batches"],
             }
         finally:
             self.journal.persist_updates = persist_updates

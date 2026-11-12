@@ -352,11 +352,17 @@ def _command(
             migration_workflow,
         )
 
-        document = load_metadata_json(path.read_bytes())
-        if migration_workflow(document) == "direct":
-            from swe.cli.conversation_storage_v3_cmd import run_v3_command
+        from swe.app.conversation_storage.migration.disk_manifest import (
+            read_manifest_header,
+        )
 
-            result = run_v3_command(
+        document = read_manifest_header(path)
+        if migration_workflow(document) == "direct":
+            from swe.cli.conversation_storage_v3_cmd import (
+                run_v3_and_echo,
+            )
+
+            run_v3_and_echo(
                 operation,
                 path,
                 apply=apply,
@@ -365,18 +371,6 @@ def _command(
                 memory_budget_mib=memory_budget_mib,
                 work_dir=work_dir,
             )
-            click.echo(
-                json.dumps(
-                    result,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    default=str,
-                ),
-            )
-            if result.get("passed") is False or result.get("blockers"):
-                raise click.ClickException(
-                    "conversation storage verification has blockers",
-                )
             return
         job = OfflineJob(path)
         if operation in ("import", "verify") and (

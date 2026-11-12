@@ -44,6 +44,7 @@ class MigrationJournal:
         self.server_uuid = server_uuid
         self.migration_id = manifest.migration_id.encode()
         self.persist_updates = True
+        self._known_scopes = None
 
     def _bindings(self):
         data = self.manifest.data
@@ -129,9 +130,7 @@ class MigrationJournal:
                 raise ValueError(
                     "unknown existing business row is not owned by this migration",
                 )
-        for row in await self.db.fetch_all(
-            "SELECT * FROM swe_conversation_retentions",
-        ):
+        async for row in self._retention_rows():
             await self._validate_retention(row)
 
     async def _validate_retention(self, row):
@@ -142,18 +141,19 @@ class MigrationJournal:
             "agent_key",
         )
         scope = tuple(row[key] for key in scope_keys)
-        known = {
-            tuple(
-                item[key].encode()
-                for key in (
-                    "service_unit_id",
-                    "tenant_id",
-                    "source_id",
-                    "agent_id",
+        if self._known_scopes is None:
+            self._known_scopes = {
+                tuple(
+                    item[key].encode()
+                    for key in (
+                        "service_unit_id",
+                        "tenant_id",
+                        "source_id",
+                        "agent_id",
+                    )
                 )
-            )
-            for item in self.manifest.data["workspaces"]
-        }
+                for item in self.manifest.data["workspaces"]
+            }
         legacy = (
             row["scope_kind"] == "legacy_share"
             and not row["source_key"]
@@ -164,7 +164,7 @@ class MigrationJournal:
                 for item in self.manifest.data.get("shares", [])
             )
         )
-        if scope not in known and not legacy:
+        if scope not in self._known_scopes and not legacy:
             raise ValueError("unknown retention workspace ownership")
         if row.get("publication_id") is not None:
             owner = await self.db.fetch_one(
@@ -331,9 +331,15 @@ class MigrationJournal:
                 scope=scope,
                 scope_kind=scope_kind,
             )
-        self.manifest.data["assignments"].setdefault(kind, {})[
-            position
-        ] = assignment
+        from .disk_manifest import DiskMap
+
+        if kind not in self.manifest.data["assignments"]:
+            self.manifest.data["assignments"][kind] = (
+                DiskMap()
+                if isinstance(self.manifest.data["batches"], DiskMap)
+                else {}
+            )
+        self.manifest.data["assignments"][kind][position] = assignment
         if self.persist_updates:
             self.manifest._persist()
         return dict(assignment)
@@ -493,7 +499,9 @@ class MigrationJournal:
                 return
 
     async def hydrate(self, *, persist=True):
-        assignments, batches = {}, {}
+        from .disk_manifest import DiskMap
+
+        assignments, batches = {}, DiskMap()
         async for row in self._hydration_entries():
             kind, key = _text(row["entry_kind"]), _text(row["source_key"])
             if kind in TICKET_KINDS:
@@ -511,7 +519,9 @@ class MigrationJournal:
                     )
                 else:
                     assignment = self._assignment(row, kind)
-                assignments.setdefault(kind, {})[key] = assignment
+                if kind not in assignments:
+                    assignments[kind] = DiskMap()
+                assignments[kind][key] = assignment
             elif kind == "batch":
                 batches[key] = (
                     "importing" if row["state"] == "prepared" else row["state"]
@@ -674,10 +684,21 @@ class MigrationJournal:
             ):
                 raise ValueError("retention identity or business key changed")
 
+    async def _retention_rows(self):
+        last_id = 0
+        while True:
+            rows = await self.db.fetch_all(
+                "SELECT * FROM swe_conversation_retentions WHERE id>%s ORDER BY id LIMIT %s",
+                (last_id, HYDRATE_PAGE_SIZE),
+            )
+            for row in rows:
+                yield row
+            if len(rows) < HYDRATE_PAGE_SIZE:
+                return
+            last_id = rows[-1]["id"]
+
     async def capture_retentions(self):
-        for row in await self.db.fetch_all(
-            "SELECT * FROM swe_conversation_retentions",
-        ):
+        async for row in self._retention_rows():
             await self.record_retention(row)
 
     async def mark_state(self, state, verification=None):

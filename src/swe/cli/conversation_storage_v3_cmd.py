@@ -634,10 +634,9 @@ def register_v3_commands(group):
 
         def command(manifest, _operation=operation, **options):
             try:
-                report = run_v3_command(_operation, manifest, **options)
+                run_v3_and_echo(_operation, manifest, **options)
             except (ValueError, OSError, RuntimeError) as error:
                 raise click.ClickException(str(error)) from error
-            click.echo(json.dumps(report, ensure_ascii=False, default=str))
 
         command = click.option(
             "--manifest",
@@ -680,3 +679,52 @@ def register_v3_commands(group):
                 required=True,
             )(command)
         group.command(operation)(command)
+
+
+def echo_migration_report(report):
+    from swe.app.conversation_storage.migration.disk_manifest import iter_json
+
+    stream = click.get_text_stream("stdout")
+    for chunk in iter_json(report, default=str):
+        stream.write(chunk)
+    stream.write("\n")
+    stream.flush()
+
+
+def run_v3_and_echo(operation, manifest_path, **options):
+    from swe.app.conversation_storage.migration.disk_manifest import (
+        disk_index_policy,
+        read_manifest_header,
+    )
+
+    header = read_manifest_header(manifest_path)
+    V3Manifest(
+        manifest_path,
+        {**header, "assignments": {}, "batches": {}},
+    )
+    requested = options.get("work_dir")
+    candidates = (
+        (Path(requested),)
+        if requested is not None
+        else (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
+    )
+    base = None
+    for candidate in candidates:
+        try:
+            candidate = validate_output(candidate, header)
+        except ValueError:
+            continue
+        if candidate.is_dir():
+            base = candidate
+            break
+    if base is None:
+        raise ValueError(
+            "no index work directory is separate from source roots",
+        )
+    with disk_index_policy(base, max_bytes=shutil.disk_usage(base).free // 4):
+        result = run_v3_command(operation, manifest_path, **options)
+        echo_migration_report(result)
+        if result.get("passed") is False or result.get("blockers"):
+            raise click.ClickException(
+                "conversation storage verification has blockers",
+            )

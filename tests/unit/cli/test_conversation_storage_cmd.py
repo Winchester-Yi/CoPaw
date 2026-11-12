@@ -14,6 +14,28 @@ from swe.app.conversation_storage.migration.manifest import (
 from swe.cli.main import cli
 
 
+def test_report_serializes_disk_batches_as_json_object():
+    import click
+    from swe.app.conversation_storage.migration.disk_manifest import DiskMap
+    from swe.cli.conversation_storage_v3_cmd import echo_migration_report
+
+    batches = DiskMap()
+    try:
+        batches["workspace/session"] = "committed"
+
+        @click.command()
+        def report():
+            echo_migration_report({"batches": batches})
+
+        result = CliRunner().invoke(report)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {
+            "batches": {"workspace/session": "committed"},
+        }
+    finally:
+        batches.close()
+
+
 @pytest.fixture
 def migration(tmp_path):
     source = tmp_path / "frozen"
