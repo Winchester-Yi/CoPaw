@@ -305,3 +305,99 @@ async def test_full_rpc_slots_cancel_settles_acquirers_queued_and_active(
     assert not coordinator._commands
     assert not coordinator._slots._waiters
     assert coordinator._slots._value == 2
+
+
+@pytest.mark.parametrize("stop_mode", ["failure", "cancel"])
+async def test_worker_stop_during_health_probe_prevents_queued_commit(
+    stop_mode,
+):
+    from collections import deque
+
+    health_started, release_health, release_worker = (
+        asyncio.Event() for _ in range(3)
+    )
+    queued = asyncio.Event()
+    commands, calls, failed_workers = [], [], []
+    failure = ValueError("worker failed during health probe")
+
+    class ObservedCommands(deque):
+        def append(self, x):
+            commands.append(x)
+            super().append(x)
+            queued.set()
+
+    async def health():
+        health_started.set()
+        await release_health.wait()
+
+    async def commit():
+        calls.append("commit")
+
+    async def workspace(item, request):
+        if item == 0:
+            failed_workers.append(asyncio.current_task())
+            await release_worker.wait()
+            if stop_mode == "cancel":
+                raise asyncio.CancelledError
+            raise failure
+        await request("commit")
+
+    coordinator = MigrationCoordinator(
+        {"commit": commit},
+        workers=2,
+        health_check=health,
+    )
+    coordinator._commands = ObservedCommands()
+    running = asyncio.create_task(coordinator.run([0, 1], workspace))
+    await asyncio.wait_for(health_started.wait(), 1)
+    await asyncio.wait_for(queued.wait(), 1)
+    release_worker.set()
+    done, _pending = await asyncio.wait(failed_workers, timeout=1)
+    assert len(done) == 1
+    release_health.set()
+    error = asyncio.CancelledError if stop_mode == "cancel" else ValueError
+    with pytest.raises(error) as stopped:
+        await asyncio.wait_for(running, 1)
+    if stop_mode == "failure":
+        assert stopped.value is failure
+    assert calls == []
+    assert all(command.result.done() for command in commands)
+    assert not coordinator._commands
+    assert coordinator._slots._value == 4
+
+
+async def test_worker_failure_preserves_inflight_transaction_and_rejects_next():
+    entered, release = asyncio.Event(), asyncio.Event()
+    failed_workers, committed = [], []
+    failure = ValueError("NAS worker failed during current transaction")
+
+    async def commit(value):
+        assert value == "accepted", "started another transaction after failure"
+        entered.set()
+        await release.wait()
+        committed.append(value)
+
+    async def workspace(item, request):
+        if item == 0:
+            await request("commit", "accepted")
+        elif item == 1:
+            failed_workers.append(asyncio.current_task())
+            await entered.wait()
+            raise failure
+        else:
+            await entered.wait()
+            await request("commit", "queued")
+
+    coordinator = MigrationCoordinator({"commit": commit}, workers=3)
+    running = asyncio.create_task(coordinator.run([0, 1, 2], workspace))
+    await asyncio.wait_for(entered.wait(), 1)
+    done, _pending = await asyncio.wait(failed_workers, timeout=1)
+    assert len(done) == 1
+    assert not running.done() and committed == []
+    release.set()
+    with pytest.raises(ValueError) as stopped:
+        await asyncio.wait_for(running, 1)
+    assert stopped.value is failure
+    assert committed == ["accepted"]
+    assert not coordinator._commands
+    assert coordinator._slots._value == 6

@@ -247,6 +247,9 @@ class MigrationCoordinator:
                         asyncio.get_running_loop().time()
                         + HEALTH_CHECK_INTERVAL
                     )
+                    # A worker may fail while the health probe awaits SQL.
+                    # Observe it before admitting another domain transaction.
+                    continue
             if self._commands:
                 command = self._commands.popleft()
                 started = time.monotonic()
