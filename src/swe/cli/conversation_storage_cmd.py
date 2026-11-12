@@ -379,7 +379,7 @@ def _command(
                 )
             return
         job = OfflineJob(path)
-        if operation == "import" and (
+        if operation in ("import", "verify") and (
             (workers, io_workers) != (4, 4)
             or memory_budget_mib != 512
             or work_dir is not None
@@ -459,7 +459,7 @@ def _register(operation, mutable=False):
             is_flag=True,
             help="Apply the reviewed offline operation.",
         )(command)
-    if operation == "import":
+    if operation in ("import", "verify"):
         command = click.option(
             "--io-workers",
             type=click.IntRange(1, 32),
@@ -480,12 +480,13 @@ def _register(operation, mutable=False):
                 path_type=Path,
             ),
         )(command)
-        command = click.option(
-            "--workers",
-            type=click.IntRange(1, 32),
-            default=4,
-            show_default=True,
-        )(command)
+        if operation == "import":
+            command = click.option(
+                "--workers",
+                type=click.IntRange(1, 32),
+                default=4,
+                show_default=True,
+            )(command)
     conversation_storage_group.add_command(command)
 
 

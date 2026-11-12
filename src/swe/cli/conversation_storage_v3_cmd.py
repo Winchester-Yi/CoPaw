@@ -317,13 +317,20 @@ async def _execute(
                     migration_id=manifest.migration_id,
                     set_batch_state=lambda *_: None,
                 )
-                result = await verify_import(
-                    db,
-                    bundles,
-                    readonly_manifest,
-                    inventory,
-                    target,
+                from swe.app.conversation_storage.migration.parallel import (
+                    MigrationIO,
                 )
+
+                async with MigrationIO(io_workers) as verify_io:
+                    result = await verify_import(
+                        db,
+                        bundles,
+                        readonly_manifest,
+                        inventory,
+                        target,
+                        io=verify_io,
+                        io_workers=io_workers,
+                    )
                 if not result["passed"]:
                     raise ValueError(
                         "semantic verification failed: "
@@ -445,7 +452,7 @@ async def _execute_spooled(
             workers=workers,
             io_workers=io_workers,
             memory_bytes=memory_bytes,
-            begin_sync=True,
+            begin_sync=operation in ("import", "resume"),
         )
         if not inventory.get("ready") or inventory.get("blockers"):
             raise ValueError(
@@ -554,7 +561,7 @@ def run_v3_command(
                     or source.is_relative_to(nas)
                 ):
                     raise ValueError("source and target NAS roots overlap")
-    if operation in ("import", "resume") and apply:
+    if (operation in ("import", "resume") and apply) or operation == "verify":
         return asyncio.run(
             _execute_spooled(
                 operation,

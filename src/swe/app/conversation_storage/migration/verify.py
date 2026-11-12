@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Full semantic comparisons from committed SQL locators and immutable bodies."""
 
+import asyncio
+
 from ..chat_repository import MySQLChatRepository
 from ..chat_mutations import (
     load_metadata_json,
@@ -30,7 +32,16 @@ VERIFY_ERRORS = (
 )
 
 
-async def _payload(database, bundles, row, offset, length, *, service_unit_id):
+async def _payload(
+    database,
+    bundles,
+    row,
+    offset,
+    length,
+    *,
+    service_unit_id,
+    io=None,
+):
     service = service_unit_id.encode("utf-8")
     if row["service_unit_key"] != service:
         raise ValueError("referencing row service ownership differs")
@@ -42,16 +53,85 @@ async def _payload(database, bundles, row, offset, length, *, service_unit_id):
         raise ValueError("referenced publication service ownership differs")
     if publication is None:
         raise ValueError("referenced publication is not committed/live")
-    value = bundles.read_extent(
+    arguments = (
         bundles.validate_publication_locator(publication),
         row[offset],
         row[length],
-        expected_length=publication["byte_length"],
+    )
+    kwargs = {"expected_length": publication["byte_length"]}
+    value = (
+        await io.call(bundles.read_extent, *arguments, **kwargs)
+        if io is not None
+        else bundles.read_extent(*arguments, **kwargs)
     )
     return load_metadata_json(value)
 
 
-async def verify_import(database, bundles, manifest, inventory, target):
+async def _payloads(
+    database,
+    bundles,
+    rows,
+    offset,
+    length,
+    *,
+    service_unit_id,
+    io,
+    io_workers,
+):
+    service = service_unit_id.encode("utf-8")
+    publications = {}
+    identifiers = list(dict.fromkeys(row["publication_id"] for row in rows))
+    for start in range(0, len(identifiers), 128):
+        chunk = identifiers[start : start + 128]
+        placeholders = ",".join(["%s"] * len(chunk))
+        found = await database.fetch_all(
+            "SELECT * FROM swe_conversation_publications "
+            "WHERE id IN (" + placeholders + ") "
+            "AND state='committed' AND gc_state='live'",
+            tuple(chunk),
+        )
+        for publication in found:
+            if publication["service_unit_key"] != service:
+                raise ValueError(
+                    "referenced publication service ownership differs",
+                )
+            publications[publication["id"]] = publication
+    if set(publications) != set(identifiers):
+        raise ValueError("referenced publication is not committed/live")
+    for row in rows:
+        if row["service_unit_key"] != service:
+            raise ValueError("referencing row service ownership differs")
+    result = []
+    for start in range(0, len(rows), io_workers):
+        pending = []
+        for row in rows[start : start + io_workers]:
+            publication = publications[row["publication_id"]]
+            pending.append(
+                io.call(
+                    bundles.read_extent,
+                    bundles.validate_publication_locator(publication),
+                    row[offset],
+                    row[length],
+                    expected_length=publication["byte_length"],
+                ),
+            )
+        result.extend(
+            load_metadata_json(value)
+            for value in await asyncio.gather(*pending)
+        )
+    return result
+
+
+async def verify_import(
+    database,
+    bundles,
+    manifest,
+    inventory,
+    target,
+    *,
+    io=None,
+    io_workers=4,
+):
     report = {
         "version": 2,
         "migration_id": manifest.migration_id,
@@ -121,19 +201,34 @@ async def verify_import(database, bundles, manifest, inventory, target):
                     manifest,
                     workspace,
                     session,
+                    io=io,
+                    io_workers=io_workers,
                 ),
             )
         for chat in workspace["chats"]:
             await _checked(
                 report,
                 chat["position"],
-                _verify_chat(database, bundles, manifest, workspace, chat),
+                _verify_chat(
+                    database,
+                    bundles,
+                    manifest,
+                    workspace,
+                    chat,
+                    io=io,
+                    io_workers=io_workers,
+                ),
             )
     for share in inventory["shares"]:
         await _checked(
             report,
             share["position"],
-            _verify_share(database, stores[share["service_unit_id"]], share),
+            _verify_share(
+                database,
+                stores[share["service_unit_id"]],
+                share,
+                io=io,
+            ),
         )
     for item in inventory.get("files", []):
         from .importer import artifact_is_reconstructed
@@ -158,6 +253,7 @@ async def verify_import(database, bundles, manifest, inventory, target):
                 manifest,
                 inventory,
                 item,
+                io=io,
             ),
         )
     report["passed"] = not report["blockers"]
@@ -168,7 +264,15 @@ async def verify_import(database, bundles, manifest, inventory, target):
     return report
 
 
-async def _verify_artifact(database, bundles, manifest, inventory, item):
+async def _verify_artifact(
+    database,
+    bundles,
+    manifest,
+    inventory,
+    item,
+    *,
+    io=None,
+):
     from pathlib import Path
 
     position = (
@@ -204,26 +308,51 @@ async def _verify_artifact(database, bundles, manifest, inventory, item):
         "bytes": item["bytes"],
         "snapshot_id": inventory["source_boundary"]["snapshot_id"],
     }
-    index = bundles.inspect(
-        assignment["relative_path"],
-        expected_length=publication["byte_length"],
-    )
+    if io is None:
+        index = bundles.inspect(
+            assignment["relative_path"],
+            expected_length=publication["byte_length"],
+        )
+    else:
+        index = await io.call(
+            bundles.inspect,
+            assignment["relative_path"],
+            expected_length=publication["byte_length"],
+        )
     meta = index.blocks["legacy_artifact_metadata"]
     body = index.blocks["legacy_artifact"]
-    if (
-        load_metadata_json(
-            bundles.read_extent(index.relative_path, meta.offset, meta.length),
-        )
-        != expected
-    ):
+    metadata_raw, body_raw = await _read_extents(
+        bundles,
+        index.relative_path,
+        (meta, body),
+        io=io,
+    )
+    if load_metadata_json(metadata_raw) != expected:
         raise ValueError("retained legacy artifact source identity differs")
     source = (Path(workspace["root"]) / item["path"]).read_bytes()
-    if (
-        len(source) != item["bytes"]
-        or bundles.read_extent(index.relative_path, body.offset, body.length)
-        != source
-    ):
+    if len(source) != item["bytes"] or body_raw != source:
         raise ValueError("retained native legacy artifact bytes differ")
+
+
+async def _read_extents(bundles, relative_path, extents, *, io):
+    if io is None:
+        return tuple(
+            bundles.read_extent(relative_path, item.offset, item.length)
+            for item in extents
+        )
+    return tuple(
+        await asyncio.gather(
+            *(
+                io.call(
+                    bundles.read_extent,
+                    relative_path,
+                    item.offset,
+                    item.length,
+                )
+                for item in extents
+            ),
+        ),
+    )
 
 
 async def _checked(report, position, check):
@@ -234,7 +363,16 @@ async def _checked(report, position, check):
         report["blockers"].append({"position": position, "detail": str(error)})
 
 
-async def _verify_session(database, bundles, manifest, workspace, session):
+async def _verify_session(
+    database,
+    bundles,
+    manifest,
+    workspace,
+    session,
+    *,
+    io=None,
+    io_workers=4,
+):
     scope = WorkspaceScope.from_values(workspace["scope"])
     identity = session["identity"]
     adapter = MySQLSessionAdapter(
@@ -255,7 +393,15 @@ async def _verify_session(database, bundles, manifest, workspace, session):
     sid = manifest.data["assignments"]["session"][session["position"]][
         "target_id"
     ]
-    await _verify_session_messages(database, bundles, workspace, session, sid)
+    await _verify_session_messages(
+        database,
+        bundles,
+        workspace,
+        session,
+        sid,
+        io=io,
+        io_workers=io_workers,
+    )
     await _verify_turns(adapter, identity, expected)
 
 
@@ -272,7 +418,16 @@ async def _verify_turns(adapter, identity, expected):
                 raise ValueError("runtime cold Turn state differs")
 
 
-async def _verify_session_messages(database, bundles, workspace, session, sid):
+async def _verify_session_messages(
+    database,
+    bundles,
+    workspace,
+    session,
+    sid,
+    *,
+    io=None,
+    io_workers=4,
+):
     identity = session["identity"]
     expected = session["legacy"]["state"]
     rows = await database.fetch_all(
@@ -300,15 +455,30 @@ async def _verify_session_messages(database, bundles, workspace, session, sid):
     messages = display_order_messages(messages)
     if len(rows) != len(messages):
         raise ValueError("Session Message occurrence count differs")
-    for row, message in zip(rows, messages):
-        body = await _payload(
+    if io is None:
+        bodies = [
+            await _payload(
+                database,
+                bundles,
+                row,
+                "byte_offset",
+                "byte_length",
+                service_unit_id=workspace["scope"][0],
+            )
+            for row in rows
+        ]
+    else:
+        bodies = await _payloads(
             database,
             bundles,
-            row,
+            rows,
             "byte_offset",
             "byte_length",
             service_unit_id=workspace["scope"][0],
+            io=io,
+            io_workers=io_workers,
         )
+    for row, message, body in zip(rows, messages, bodies):
         if (
             body != message_body(message)
             or row["layer"] != message["layer"]
@@ -341,7 +511,16 @@ async def _verify_chat_projection(database, scope, spec):
         raise ValueError("Chat summary SQL projection differs from source")
 
 
-async def _verify_chat(database, bundles, manifest, workspace, chat):
+async def _verify_chat(
+    database,
+    bundles,
+    manifest,
+    workspace,
+    chat,
+    *,
+    io=None,
+    io_workers=4,
+):
     scope = WorkspaceScope.from_values(workspace["scope"])
     await _verify_chat_projection(database, scope, chat["spec"])
     actual = await read_only_adapter(
@@ -357,13 +536,30 @@ async def _verify_chat(database, bundles, manifest, workspace, chat):
         "status": "idle",
     }:
         raise ValueError("Chat metadata/binding/identity/time differs")
-    await _verify_archive_rows(database, bundles, manifest, chat, scope)
-    await _verify_epochs(database, bundles, manifest, chat, scope)
+    await _verify_archive_rows(
+        database,
+        bundles,
+        manifest,
+        chat,
+        scope,
+        io=io,
+        io_workers=io_workers,
+    )
+    await _verify_epochs(database, bundles, manifest, chat, scope, io=io)
     if not chat["archive"]["deleted"]:
         await _verify_runtime_chat(database, bundles, scope, chat, workspace)
 
 
-async def _verify_archive_rows(database, bundles, manifest, chat, scope):
+async def _verify_archive_rows(
+    database,
+    bundles,
+    manifest,
+    chat,
+    scope,
+    *,
+    io=None,
+    io_workers=4,
+):
     cid = manifest.data["assignments"]["chat"][chat["position"]]["target_id"]
     rows = await database.fetch_all(
         "SELECT * FROM swe_conversation_messages WHERE archive_chat_id=%s ORDER BY archive_order",
@@ -376,8 +572,8 @@ async def _verify_archive_rows(database, bundles, manifest, chat, scope):
     ]
     if len(rows) != len(expected):
         raise ValueError("archive occurrence count differs")
-    for row, message in zip(rows, expected):
-        if (
+    if io is None:
+        bodies = [
             await _payload(
                 database,
                 bundles,
@@ -386,12 +582,25 @@ async def _verify_archive_rows(database, bundles, manifest, chat, scope):
                 "byte_length",
                 service_unit_id=scope.service_unit_id,
             )
-            != message
-        ):
+            for row in rows
+        ]
+    else:
+        bodies = await _payloads(
+            database,
+            bundles,
+            rows,
+            "byte_offset",
+            "byte_length",
+            service_unit_id=scope.service_unit_id,
+            io=io,
+            io_workers=io_workers,
+        )
+    for body, message in zip(bodies, expected):
+        if body != message:
             raise ValueError("archive message order/body differs")
 
 
-async def _verify_epochs(database, bundles, manifest, chat, scope):
+async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
     for epoch in chat["archive"]["epochs"]:
         position = chat["position"] + "/epoch:" + str(epoch["epoch"])
         assignment = manifest.data["assignments"]["publication"][position]
@@ -408,20 +617,24 @@ async def _verify_epochs(database, bundles, manifest, chat, scope):
             != epoch["record"]["applied_event_sequence"]
         ):
             raise ValueError("checkpoint epoch/revision/watermark differs")
-        index = bundles.inspect(assignment["relative_path"])
-        extent = index.blocks["legacy_epoch"]
-        actual_epoch = load_metadata_json(
-            bundles.read_extent(
-                index.relative_path,
-                extent.offset,
-                extent.length,
-            ),
+        index = (
+            bundles.inspect(assignment["relative_path"])
+            if io is None
+            else await io.call(bundles.inspect, assignment["relative_path"])
         )
+        extent = index.blocks["legacy_epoch"]
+        (raw_epoch,) = await _read_extents(
+            bundles,
+            index.relative_path,
+            (extent,),
+            io=io,
+        )
+        actual_epoch = load_metadata_json(raw_epoch)
         if actual_epoch != epoch:
             raise ValueError("full checkpoint/event/epoch semantics differ")
 
 
-async def _verify_share(database, bundles, share):
+async def _verify_share(database, bundles, share, *, io=None):
     actual = await database.fetch_one(
         "SELECT * FROM swe_chat_shares WHERE token=%s",
         (share["record"]["token"],),
@@ -448,6 +661,7 @@ async def _verify_share(database, bundles, share):
             "byte_offset",
             "byte_length",
             service_unit_id=share["service_unit_id"],
+            io=io,
         )
         != share["snapshot"]
     ):

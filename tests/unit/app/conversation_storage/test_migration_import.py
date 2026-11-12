@@ -429,6 +429,79 @@ def test_importer_rejects_changed_source_root_and_boundary_before_sql():
         )
 
 
+async def test_verification_payloads_overlap_bounded_nas_reads_on_owner_sql_task(
+    tmp_path,
+):
+    import asyncio
+    import json
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from swe.app.conversation_storage.migration.parallel import MigrationIO
+    from swe.app.conversation_storage.migration.verify import _payloads
+
+    publications = {
+        index: {
+            "id": index,
+            "service_unit_key": b"svc",
+            "relative_path": str(index),
+            "byte_length": 32,
+        }
+        for index in (1, 2, 3, 4)
+    }
+    sql_tasks = []
+
+    class Database:
+        async def fetch_all(self, _query, params):
+            sql_tasks.append(asyncio.current_task())
+            return [publications[index] for index in params]
+
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def read_extent(path, _offset, _length, **_kwargs):
+        nonlocal active, peak
+        identity = int(path)
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with guard:
+            active -= 1
+        return json.dumps({"publication": identity}).encode()
+
+    bundles = SimpleNamespace(
+        read_extent=read_extent,
+        validate_publication_locator=lambda row: row["relative_path"],
+    )
+    rows = [
+        {
+            "service_unit_key": b"svc",
+            "publication_id": index,
+            "byte_offset": 0,
+            "byte_length": 1,
+        }
+        for index in publications
+    ]
+    owner = asyncio.current_task()
+    async with MigrationIO(2) as io:
+        values = await _payloads(
+            Database(),
+            bundles,
+            rows,
+            "byte_offset",
+            "byte_length",
+            service_unit_id="svc",
+            io=io,
+            io_workers=2,
+        )
+    assert values == [{"publication": index} for index in publications]
+    assert peak == 2
+    assert sql_tasks == [owner]
+
+
 def test_large_recovery_is_explicitly_blocked_before_import():
     from swe.app.conversation_storage.migration.importer import _block
     from swe.app.conversation_storage.bundle import MAX_READ_BYTES

@@ -151,12 +151,14 @@ def test_readonly_verification_cannot_update_manifest(migration):
     [
         ["conversation-storage", "import"],
         ["conversation-storage", "resume"],
+        ["conversation-storage", "verify"],
     ],
 )
 def test_parallel_commands_expose_bounded_worker_options(command):
     result = CliRunner().invoke(cli, [*command, "--help"])
     assert result.exit_code == 0, result.output
-    assert "--workers INTEGER RANGE" in result.output
+    if command[-1] == "import":
+        assert "--workers INTEGER RANGE" in result.output
     assert "--io-workers INTEGER RANGE" in result.output
     assert "--memory-budget-mib INTEGER RANGE" in result.output
     assert "--work-dir DIRECTORY" in result.output
