@@ -21,6 +21,11 @@ from ..archive_reader import ArchiveReader
 from .importer import archive_batches, message_body, task_projections
 from .manifest import SourceBoundary
 from .readonly import ReadOnlyDatabase, ReadOnlyRetention, read_only_adapter
+from .verify_parallel import (
+    verify_workspace_messages as _parallel_message_checks,
+)
+
+from .verify_parallel import verify_auxiliary_bodies
 
 VERIFY_ERRORS = (
     ValueError,
@@ -131,6 +136,8 @@ async def verify_import(
     *,
     io=None,
     io_workers=4,
+    workers=1,
+    memory_bytes=512 * 1024 * 1024,
 ):
     report = {
         "version": 2,
@@ -189,6 +196,29 @@ async def verify_import(
             {"position": "migration", "detail": str(error)},
         )
         return report
+    if io is not None:
+        await _parallel_message_checks(
+            database,
+            stores,
+            manifest,
+            inventory,
+            report,
+            io=io,
+            workers=workers,
+            io_workers=io_workers,
+            memory_bytes=memory_bytes // workers,
+        )
+    if io is not None:
+        await verify_auxiliary_bodies(
+            database,
+            stores,
+            manifest,
+            inventory,
+            report,
+            io=io,
+            workers=workers,
+            memory_bytes=memory_bytes // workers,
+        )
     for workspace in inventory["workspaces"]:
         bundles = stores[workspace["scope"][0]]
         for session in workspace["sessions"]:
@@ -203,6 +233,7 @@ async def verify_import(
                     session,
                     io=io,
                     io_workers=io_workers,
+                    messages_verified=io is not None,
                 ),
             )
         for chat in workspace["chats"]:
@@ -217,6 +248,7 @@ async def verify_import(
                     chat,
                     io=io,
                     io_workers=io_workers,
+                    messages_verified=io is not None,
                 ),
             )
     for share in inventory["shares"]:
@@ -228,9 +260,10 @@ async def verify_import(
                 stores[share["service_unit_id"]],
                 share,
                 io=io,
+                snapshot_verified=io is not None,
             ),
         )
-    for item in inventory.get("files", []):
+    for item in (() if io is not None else inventory.get("files", [])):
         from .importer import artifact_is_reconstructed
 
         workspace = inventory["workspaces"][item["workspace"]]
@@ -329,7 +362,12 @@ async def _verify_artifact(
     )
     if load_metadata_json(metadata_raw) != expected:
         raise ValueError("retained legacy artifact source identity differs")
-    source = (Path(workspace["root"]) / item["path"]).read_bytes()
+    source_path = Path(workspace["root"]) / item["path"]
+    source = (
+        source_path.read_bytes()
+        if io is None
+        else await io.call(source_path.read_bytes)
+    )
     if len(source) != item["bytes"] or body_raw != source:
         raise ValueError("retained native legacy artifact bytes differ")
 
@@ -372,6 +410,7 @@ async def _verify_session(
     *,
     io=None,
     io_workers=4,
+    messages_verified=False,
 ):
     scope = WorkspaceScope.from_values(workspace["scope"])
     identity = session["identity"]
@@ -393,15 +432,16 @@ async def _verify_session(
     sid = manifest.data["assignments"]["session"][session["position"]][
         "target_id"
     ]
-    await _verify_session_messages(
-        database,
-        bundles,
-        workspace,
-        session,
-        sid,
-        io=io,
-        io_workers=io_workers,
-    )
+    if not messages_verified:
+        await _verify_session_messages(
+            database,
+            bundles,
+            workspace,
+            session,
+            sid,
+            io=io,
+            io_workers=io_workers,
+        )
     await _verify_turns(adapter, identity, expected)
 
 
@@ -520,6 +560,7 @@ async def _verify_chat(
     *,
     io=None,
     io_workers=4,
+    messages_verified=False,
 ):
     scope = WorkspaceScope.from_values(workspace["scope"])
     await _verify_chat_projection(database, scope, chat["spec"])
@@ -536,16 +577,18 @@ async def _verify_chat(
         "status": "idle",
     }:
         raise ValueError("Chat metadata/binding/identity/time differs")
-    await _verify_archive_rows(
-        database,
-        bundles,
-        manifest,
-        chat,
-        scope,
-        io=io,
-        io_workers=io_workers,
-    )
-    await _verify_epochs(database, bundles, manifest, chat, scope, io=io)
+    if not messages_verified:
+        await _verify_archive_rows(
+            database,
+            bundles,
+            manifest,
+            chat,
+            scope,
+            io=io,
+            io_workers=io_workers,
+        )
+    if not messages_verified:
+        await _verify_epochs(database, bundles, manifest, chat, scope, io=io)
     if not chat["archive"]["deleted"]:
         await _verify_runtime_chat(database, bundles, scope, chat, workspace)
 
@@ -634,7 +677,14 @@ async def _verify_epochs(database, bundles, manifest, chat, scope, *, io=None):
             raise ValueError("full checkpoint/event/epoch semantics differ")
 
 
-async def _verify_share(database, bundles, share, *, io=None):
+async def _verify_share(
+    database,
+    bundles,
+    share,
+    *,
+    io=None,
+    snapshot_verified=False,
+):
     actual = await database.fetch_one(
         "SELECT * FROM swe_chat_shares WHERE token=%s",
         (share["record"]["token"],),
@@ -653,19 +703,20 @@ async def _verify_share(database, bundles, share, *, io=None):
                 raise ValueError("share timestamp differs")
         elif actual[key] != value:
             raise ValueError("share token/ownership/counter differs")
-    if (
-        await _payload(
-            database,
-            bundles,
-            actual,
-            "byte_offset",
-            "byte_length",
-            service_unit_id=share["service_unit_id"],
-            io=io,
-        )
-        != share["snapshot"]
-    ):
-        raise ValueError("complete share snapshot differs")
+    if not snapshot_verified:
+        if (
+            await _payload(
+                database,
+                bundles,
+                actual,
+                "byte_offset",
+                "byte_length",
+                service_unit_id=share["service_unit_id"],
+                io=io,
+            )
+            != share["snapshot"]
+        ):
+            raise ValueError("complete share snapshot differs")
     if (
         await ShareStorage(
             database,

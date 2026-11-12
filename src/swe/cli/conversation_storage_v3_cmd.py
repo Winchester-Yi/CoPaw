@@ -224,6 +224,7 @@ async def _execute(
     workers=4,
     io_workers=4,
     source_recheck=None,
+    memory_bytes=512 * 1024 * 1024,
 ):
     from swe.database.config import get_database_config
     from swe.database.connection import DatabaseConnection
@@ -330,6 +331,8 @@ async def _execute(
                         target,
                         io=verify_io,
                         io_workers=io_workers,
+                        workers=workers,
+                        memory_bytes=memory_bytes,
                     )
                 if not result["passed"]:
                     raise ValueError(
@@ -482,6 +485,7 @@ async def _execute_spooled(
             workers=workers,
             io_workers=io_workers,
             source_recheck=recheck_source,
+            memory_bytes=memory_bytes,
         )
 
 
