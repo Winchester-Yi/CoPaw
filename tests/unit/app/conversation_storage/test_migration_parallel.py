@@ -246,3 +246,62 @@ async def test_close_drains_thread_then_propagates_repeated_cancel():
         await closing
     await writer
     assert finished.is_set()
+
+
+@pytest.mark.parametrize("stop_mode", ("cancel", "failure"))
+async def test_full_rpc_slots_cancel_settles_acquirers_queued_and_active(
+    stop_mode,
+):
+    from collections import deque
+
+    entered = asyncio.Event()
+    fail = asyncio.Event()
+    commands = []
+    callers = []
+    coordinator = MigrationCoordinator({}, workers=1)
+
+    class ObservedCommands(deque):
+        def append(self, x):
+            commands.append(x)
+            super().append(x)
+
+    coordinator._commands = ObservedCommands()
+
+    async def commit(_value):
+        entered.set()
+        await fail.wait()
+        raise ValueError("active SQL command failed")
+
+    coordinator._handlers["commit"] = commit
+
+    async def workspace(_item, request):
+        callers.extend(
+            asyncio.create_task(request("commit", i)) for i in range(8)
+        )
+        await asyncio.gather(*callers)
+
+    running = asyncio.create_task(coordinator.run([1], workspace))
+    await entered.wait()
+    for _ in range(20):
+        if len(coordinator._slots._waiters or ()) == 6:
+            break
+        await asyncio.sleep(0)
+    # One handler active, one command queued, six callers blocked on capacity.
+    assert len(commands) == 2
+    assert len(coordinator._commands) == 1
+    assert len(coordinator._slots._waiters) == 6
+    if stop_mode == "cancel":
+        running.cancel()
+        await asyncio.sleep(0)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, 1)
+    else:
+        fail.set()
+        with pytest.raises(ValueError, match="active SQL command failed"):
+            await asyncio.wait_for(running, 1)
+    assert all(caller.done() for caller in callers)
+    assert all(command.result.done() for command in commands)
+    assert not coordinator._commands
+    assert not coordinator._slots._waiters
+    assert coordinator._slots._value == 2
