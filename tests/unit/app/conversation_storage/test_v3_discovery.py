@@ -294,7 +294,7 @@ def test_deferred_journal_mirror_preserves_source_change_error(
     monkeypatch.setattr(
         freshness,
         "changed_source",
-        lambda paths, timestamp: (paths[0], timestamp + 1),
+        lambda paths, timestamp, **_options: (paths[0], timestamp + 1),
     )
     workspace = discovered["workspaces"][0]
     report = {
