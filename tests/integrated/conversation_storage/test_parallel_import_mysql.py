@@ -46,14 +46,15 @@ async def test_parallel_multiservice_import_resume_verify_finalize(
                 output,
                 **options,
             )
-        from swe.cli.conversation_storage_v3_cmd import _execute_spooled
+        from swe.cli.conversation_storage_v3_cmd import run_v3_command
 
         work_dir = tmp_path / "migration-spool"
         work_dir.mkdir(exist_ok=True)
-        return await _execute_spooled(
+        return await asyncio.to_thread(
+            run_v3_command,
             operation,
-            manifest,
-            output,
+            manifest.path,
+            apply=True,
             workers=2,
             io_workers=2,
             memory_budget_mib=512,
