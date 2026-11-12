@@ -71,7 +71,7 @@ def _block(report, code, position, error):
     )
 
 
-def _sessions(mapping, chats, report, position):
+def _sessions(mapping, chats, report, position, files):
     grouped, paths, result = {}, {}, []
     candidates = [
         (chat.user_id, chat.channel, chat.session_id, index)
@@ -124,16 +124,37 @@ def _sessions(mapping, chats, report, position):
         except (OSError, ValueError, KeyError, TypeError) as error:
             _block(report, "session_invalid", record["position"], error)
         result.append(record)
-    session_root = mapping.path(mapping.sessions_dir)
-    for path in sorted(session_root.glob("*.json")):
-        if path not in paths:
-            _block(
-                report,
-                "unmapped_session",
-                position,
-                str(path.relative_to(Path(mapping.root).resolve())),
-            )
+    for path in _unmapped_session_files(mapping, files, paths, result):
+        _block(
+            report,
+            "unmapped_session",
+            position,
+            str(path.relative_to(Path(mapping.root).resolve())),
+        )
     return result
+
+
+def _unmapped_session_files(mapping, files, mapped_paths, sessions):
+    session_root = mapping.path(mapping.sessions_dir)
+    # The default ledger entrance has its own complete generation checks.
+    ledger_roots = [session_root / ".turn-ledger"]
+    for session in sessions:
+        legacy_root = session.get("legacy", {}).get("root", {})
+        generation = legacy_root.get("session_generation")
+        if legacy_root.get("schema_version") == 3 and generation:
+            ledger_roots.append(
+                mapping.path(session["path"]).parent
+                / ".turn-ledger"
+                / generation,
+            )
+    return (
+        path
+        for path in files
+        if path.suffix == ".json"
+        and path.is_relative_to(session_root)
+        and path not in mapped_paths
+        and not any(path.is_relative_to(ledger) for ledger in ledger_roots)
+    )
 
 
 def _archive_records(mapping, chats, report, position):
@@ -239,7 +260,7 @@ def _workspace(mapping, report, index):
         _block(report, "registry_invalid", position, error)
         return empty_workspace
     try:
-        sessions = _sessions(mapping, chats, report, position)
+        sessions = _sessions(mapping, chats, report, position, files)
     except (ValueError, TypeError) as error:
         _block(report, "identity_invalid", position, error)
         sessions = []
