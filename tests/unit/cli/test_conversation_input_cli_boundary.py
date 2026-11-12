@@ -17,7 +17,7 @@ def _write_json(path, data):
     return str(path)
 
 
-def _source(tmp_path):
+def _source(tmp_path, request):
     source = tmp_path / "source"
     tenant = source / "default_SRC"
     workspace = tenant / "workspaces/agent"
@@ -64,17 +64,37 @@ def _source(tmp_path):
         if not path.is_symlink():
             path.chmod(0o555 if path.is_dir() else 0o444)
     source.chmod(0o555)
+    _restore_after_test(request, source)
     return source, workspace, nas, (attachments, code), registry, session
+
+
+def _restore_after_test(request, source):
+    fixture_directories = [
+        path
+        for path in source.rglob("*")
+        if not path.is_symlink() and path.is_dir()
+    ]
+
+    def restore_permissions():
+        source.chmod(0o755)
+        for path in fixture_directories:
+            path.chmod(0o755)
+
+    request.addfinalizer(restore_permissions)
 
 
 def test_cli_semantic_spools_ignore_unrelated_business_inputs(
     tmp_path,
     monkeypatch,
+    request,
 ):
     from swe.cli import conversation_storage_v3_cmd as command
     from swe.database.connection import DatabaseConnection
 
-    source, workspace, nas, ignored, registry, session = _source(tmp_path)
+    source, workspace, nas, ignored, registry, session = _source(
+        tmp_path,
+        request,
+    )
     expected_bytes = registry.stat().st_size + session.stat().st_size
     services = _write_json(
         tmp_path / "services.json",
