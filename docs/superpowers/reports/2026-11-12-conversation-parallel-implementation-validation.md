@@ -1,6 +1,6 @@
 # 会话迁移并行实现与验证记录
 
-状态：本轮逻辑与输入边界验证已完成；万级端到端四档验收按用户要求停止，未通过。测试使用用户授权的隔离 MySQL schema 和本地目录；不代表业务 NAS 性能。
+状态：输入边界及列明专项已有通过证据；当前固定源码完整逻辑验收尚未完成，首轮两组失败项单进程复跑通过，去重剩余327项执行中，初次故障根因待诊断。万级端到端四档验收按用户要求停止，未通过。测试使用用户授权的隔离 MySQL schema 和本地目录；不代表业务 NAS 性能。
 
 ## 已提交实现
 
@@ -83,4 +83,16 @@
 隔离最终代码（含nested与entry早停）真实MySQL双服务生命周期：**1 passed，163.15 秒**，`/tmp/conversation-input-capacity-lifecycle.xml`，覆盖import/resume/reentry/verify/finalize及分享/authority，runner退出0且隔离库清理成功。该测试使用本地目录，不是NAS性能验收。
 
 
-本轮完成结论：会话输入枚举边界、容量准入早停、未知嵌套Session候选阻断及canonical保留根校验已实现并小步提交，提交后均完成独立复核。最终版本单元/CLI **1408通过**，专项真实MySQL屏障与只读性 **4+2通过**，最终版本双服务完整生命周期 **1通过**，旧完整进程失败项及未执行范围新进程续跑 **98通过**。旧进程的255通过与1skip仍按各自加载版本记录，不能合称当前HEAD的一次性全量通过；既有工作区/secret真实app bootstrap仍未验收。万级四档及真实NAS性能未验收，不作生产放行结论。
+此前定向收尾结论（不代表下述当前全量验收已完成）：会话输入枚举边界、容量准入早停、未知嵌套Session候选阻断及canonical保留根校验已实现并小步提交，提交后均完成独立复核。最终版本单元/CLI **1408通过**，专项真实MySQL屏障与只读性 **4+2通过**，最终版本双服务完整生命周期 **1通过**，旧完整进程失败项及未执行范围新进程续跑 **98通过**。旧进程的255通过与1skip仍按各自加载版本记录，不能合称当前HEAD的一次性全量通过；既有工作区/secret真实app bootstrap仍未验收。万级四档及真实NAS性能未验收，不作生产放行结论。
+
+
+## 当前固定源码完整逻辑验收追加状态
+
+在上述历史/定向证据之后，固定当前源码补跑完整逻辑suite（排除万级），首轮两个分组均遇首个失败停止：
+
+- shard 1：**11 passed、1 failed、1 error，270.16秒**，`test_chat_repository_mysql.py::test_atomic_rebind_and_busy_target_rejection` 出现 `get_autocommit` 超时及teardown连接丢失；日志 `/tmp/conversation-current-shard-1.log`。
+- shard 2：**20 passed、1 failed，272.85秒**，`test_api_mysql.py::test_http_context_numeric_stale_and_sql_failure_are_distinct` 的context-usage返回503而非200；日志 `/tmp/conversation-current-shard-2.log`。
+- 两个失败项单进程复跑：**2 passed，23.548秒**，JUnit `/tmp/conversation-current-failure-repro.xml`，runner退出0，隔离库finally清理成功。初次失败保留，根因未定；不能仅因复跑通过就归因为环境问题。
+- 首轮31个不同用例通过，加两项复跑通过，本轮已有去重33项通过记录。去重剩余327项已由主代理在单进程执行，日志 `/tmp/conversation-current-remaining.log`，目标JUnit `/tmp/conversation-current-remaining.xml`；结果 **pending**。
+
+当前完整逻辑验收尚未完成，不把33项或历史1408/98/4+2+1证据写成当前HEAD一次全量通过。等待剩余结果及初次故障诊断；万级保持停止，不作生产放行。
