@@ -5,6 +5,8 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from swe.app.conversation_storage.migration import verify
 from swe.app.conversation_storage.migration.parallel import MigrationIO
 from swe.app.conversation_storage.migration.verify_parallel import (
@@ -177,3 +179,51 @@ async def test_auxiliary_epoch_reads_overlap_and_failure_is_reported(
     assert report["blockers"] == [
         {"position": "chat-1", "detail": "bad epoch"},
     ]
+
+
+@pytest.mark.parametrize("dispatch", ("omit", "duplicate"))
+async def test_auxiliary_verification_rejects_incomplete_dispatch(
+    monkeypatch,
+    dispatch,
+):
+    from swe.app.conversation_storage.migration import verify_parallel
+
+    original = verify_parallel.MigrationCoordinator.run
+
+    async def damaged_run(self, jobs, check):
+        jobs = list(jobs)
+        selected = jobs[:-1] if dispatch == "omit" else [jobs[0], jobs[0]]
+        return await original(self, selected, check)
+
+    class Database:
+        async def fetch_one(self, _query, _params):
+            return None
+
+    monkeypatch.setattr(
+        verify_parallel.MigrationCoordinator,
+        "run",
+        damaged_run,
+    )
+    inventory = {
+        "workspaces": [],
+        "files": [],
+        "shares": [
+            {
+                "position": "share-" + str(index),
+                "record": {"token": "token-" + str(index)},
+                "service_unit_id": "SERVICE",
+            }
+            for index in range(2)
+        ],
+    }
+    async with MigrationIO(2) as io:
+        with pytest.raises(ValueError, match="coverage differs"):
+            await verify_parallel.verify_auxiliary_bodies(
+                Database(),
+                {},
+                SimpleNamespace(data={}),
+                inventory,
+                {"checked": [], "blockers": []},
+                io=io,
+                workers=2,
+            )

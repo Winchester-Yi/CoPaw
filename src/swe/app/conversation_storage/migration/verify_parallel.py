@@ -263,7 +263,8 @@ async def verify_auxiliary_bodies(
             positions[0] if kind == "artifact" else value["position"]
         ), PublicationEvidence(rows)
 
-    async def check(job, request):
+    async def check(indexed_job, request):
+        index, job = indexed_job
         kind, workspace, value = job
         prepared, evidence = await request("collect_auxiliary_body", job)
         if kind == "share":
@@ -308,19 +309,33 @@ async def verify_auxiliary_bodies(
         local = {"checked": [], "blockers": []}
         await _checked(local, position, check_body)
         # A single event-loop append is atomic; sort only after the barrier.
-        results.append((kind, local))
+        results.append((index, kind, local))
 
     results = []
     await MigrationCoordinator(
         {"collect_auxiliary_body": prepare},
         workers=workers,
         health_check=health_check,
-    ).run(_auxiliary_jobs(inventory), check)
-    for kind, local in sorted(
+    ).run(enumerate(_auxiliary_jobs(inventory)), check)
+    _merge_auxiliary_results(inventory, report, results)
+
+
+def _merge_auxiliary_results(inventory, report, results):
+    expected = sum(1 for _ in _auxiliary_jobs(inventory))
+    if len(results) != expected or any(
+        result[0] != index
+        for index, result in enumerate(
+            sorted(results, key=lambda item: item[0]),
+        )
+    ):
+        raise ValueError(
+            "auxiliary verification coverage differs from inventory",
+        )
+    for _index, kind, local in sorted(
         results,
         key=lambda item: (
-            item[0],
-            item[1]["checked"] or [b["position"] for b in item[1]["blockers"]],
+            item[1],
+            item[2]["checked"] or [b["position"] for b in item[2]["blockers"]],
         ),
     ):
         report["blockers"].extend(local["blockers"])
