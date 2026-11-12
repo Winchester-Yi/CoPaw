@@ -6,6 +6,19 @@ from types import SimpleNamespace
 import pytest
 
 
+async def test_retention_pagination_includes_zero_identity():
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    class Retentions:
+        async def fetch_all(self, query, params):
+            assert "WHERE id>" not in query
+            assert len(params) == 1
+            return [{"id": 0}]
+
+    journal = MigrationJournal(Retentions(), manifest(), server_uuid="server")
+    assert [row async for row in journal._retention_rows()] == [{"id": 0}]
+
+
 def manifest():
     return SimpleNamespace(
         migration_id="00000000-0000-0000-0000-000000000001",

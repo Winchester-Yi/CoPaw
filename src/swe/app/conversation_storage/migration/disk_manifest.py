@@ -348,11 +348,15 @@ class DiskSet:
 
 def read_manifest_header(path, *, max_value_bytes=64 * 1024 * 1024):
     """Parse bindings without retaining progress; JSON field order is arbitrary."""
-    result = load_disk_manifest(
-        path,
-        retain_mirrors=False,
-        max_value_bytes=max_value_bytes,
-    )
-    result.pop("assignments", None)
-    result.pop("batches", None)
+    with disk_index_policy(
+        Path(tempfile.gettempdir()).resolve(),
+        max_bytes=64 * 1024 * 1024,
+    ):
+        result = load_disk_manifest(
+            path,
+            retain_mirrors=False,
+            max_value_bytes=max_value_bytes,
+        )
+        result.pop("assignments", None)
+        result.pop("batches", None)
     return result

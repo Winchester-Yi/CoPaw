@@ -115,3 +115,24 @@ def test_manifest_reader_rejects_oversized_value_before_decoding(tmp_path):
     with pytest.raises(MigrationCapacityError, match="reader memory limit"):
         load_disk_manifest(path, max_value_bytes=65536)
     assert load_disk_manifest(path, max_value_bytes=200000)["workspaces"]
+
+
+def test_header_scan_has_bounded_indexes_and_closes_them(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.conversation_storage.migration import disk_manifest
+
+    indexes = []
+    original = DiskMap.__init__
+
+    def track(mapping):
+        original(mapping)
+        assert mapping._policy.max_bytes == 64 * 1024 * 1024
+        indexes.append(mapping)
+
+    monkeypatch.setattr(DiskMap, "__init__", track)
+    path = tmp_path / "manifest.json"
+    path.write_text('{"version":3,"batches":{"sample":"committed"}}')
+    assert disk_manifest.read_manifest_header(path) == {"version": 3}
+    assert indexes and all(mapping._db is None for mapping in indexes)

@@ -685,12 +685,18 @@ class MigrationJournal:
                 raise ValueError("retention identity or business key changed")
 
     async def _retention_rows(self):
-        last_id = 0
+        last_id = None
         while True:
-            rows = await self.db.fetch_all(
-                "SELECT * FROM swe_conversation_retentions WHERE id>%s ORDER BY id LIMIT %s",
-                (last_id, HYDRATE_PAGE_SIZE),
-            )
+            if last_id is None:
+                rows = await self.db.fetch_all(
+                    "SELECT * FROM swe_conversation_retentions ORDER BY id LIMIT %s",
+                    (HYDRATE_PAGE_SIZE,),
+                )
+            else:
+                rows = await self.db.fetch_all(
+                    "SELECT * FROM swe_conversation_retentions WHERE id>%s ORDER BY id LIMIT %s",
+                    (last_id, HYDRATE_PAGE_SIZE),
+                )
             for row in rows:
                 yield row
             if len(rows) < HYDRATE_PAGE_SIZE:
