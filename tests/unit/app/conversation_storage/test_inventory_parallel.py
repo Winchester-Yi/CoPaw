@@ -260,6 +260,20 @@ def test_share_snapshot_budget_is_checked_before_json_read(tmp_path):
         inventory_v3._preflight_share_budget(data, 1024)
 
 
+def test_share_count_budget_covers_small_snapshot_metadata(tmp_path):
+    import pytest
+    from swe.app.conversation_storage.migration import inventory_v3
+
+    snapshot = tmp_path / "share.json"
+    snapshot.write_text("{}")
+    data = {
+        "shares": [{"snapshot_path": str(snapshot)}] * 17,
+    }
+
+    with pytest.raises(ValueError, match="memory budget"):
+        inventory_v3._preflight_share_budget(data, 256 * 1024)
+
+
 async def test_spooled_recheck_compares_before_temporary_records_close(
     tmp_path,
 ):

@@ -363,7 +363,7 @@ def _preflight_share_budget(data, memory_bytes):
     total = 0
     count = 0
     byte_limit = memory_bytes // 64
-    count_limit = memory_bytes // 512
+    count_limit = memory_bytes // 16384
     for share in data.get("shares", []):
         size = Path(share["snapshot_path"]).stat().st_size
         if size > MAX_READ_BYTES:
