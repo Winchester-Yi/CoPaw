@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 import json
+import io
+import threading
+
+import pytest
 
 from swe.app.conversation_storage.migration.discovery import source_key
 from swe.app.conversation_storage.migration.inventory_parallel import (
@@ -9,6 +13,93 @@ from swe.app.conversation_storage.migration.inventory_v3 import (
     inventory_discovery,
 )
 from swe.app.conversation_storage.migration.spool import InventorySpool
+from swe.app.conversation_storage.migration.progress import MigrationProgress
+
+
+@pytest.mark.parametrize("count", [2, 4])
+async def test_preflight_uses_shared_io_and_inventory_counters(
+    tmp_path,
+    monkeypatch,
+    count,
+):
+    from swe.app.conversation_storage.migration import inventory_parallel
+
+    owner_thread = threading.get_ident()
+    barrier, lock = threading.Barrier(2), threading.Lock()
+    active = peak = 0
+    source_bytes = 0
+    mappings = []
+    for index in range(count):
+        root = tmp_path / str(index)
+        root.mkdir()
+        content = b"source" * (index + 1)
+        (root / "input.json").write_bytes(content)
+        source_bytes += len(content)
+        mappings.append(
+            {
+                "root": str(root),
+                "position": str(index),
+                "service_unit_id": "svc",
+                "tenant_id": "tenant",
+            },
+        )
+    original = inventory_parallel._preflight_workspace
+
+    def preflight(workspace, allowance):
+        nonlocal active, peak
+        assert threading.get_ident() != owner_thread
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait(timeout=5)
+            return original(workspace, allowance)
+        finally:
+            with lock:
+                active -= 1
+
+    def parse(_data, index):
+        return {
+            "workspaces": [
+                {
+                    "scope": ["svc", "tenant", "source", str(index)],
+                    "position": str(index),
+                    "sessions": [{}] * (index + 1),
+                    "chats": [{}] * (index + 2),
+                },
+            ],
+            "files": [],
+            "blockers": [{"code": "fixture"}] if index == 0 else [],
+        }
+
+    monkeypatch.setattr(inventory_parallel, "_preflight_workspace", preflight)
+    monkeypatch.setattr(inventory_parallel, "inventory_workspace", parse)
+    progress = MigrationProgress(
+        "inventory",
+        "migration",
+        stream=io.StringIO(),
+    )
+    with progress.activate():
+        for _pass in range(2):
+            with InventorySpool(
+                tmp_path,
+                max_bytes=1024 * 1024,
+                record_limit=128 * 1024,
+            ) as spool:
+                await spool_workspaces(
+                    {"workspaces": mappings},
+                    spool,
+                    workers=4,
+                    io_workers=2,
+                )
+            snapshot = progress.snapshot()
+            assert snapshot["inventory_completed_workspaces"] == count
+            assert snapshot["inventoried_sessions"] == sum(range(1, count + 1))
+            assert snapshot["inventoried_chats"] == sum(range(2, count + 2))
+            assert snapshot["inventoried_source_bytes"] == source_bytes
+            assert snapshot["inventory_blocker_count"] == 1
+            assert snapshot["counter_unit"] == "tasks"
+    assert peak == 2
 
 
 async def test_parallel_workspace_spool_matches_serial_inventory(tmp_path):

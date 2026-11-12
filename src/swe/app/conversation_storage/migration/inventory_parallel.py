@@ -10,6 +10,7 @@ from ..bundle import MAX_READ_BYTES
 from .inventory_v3 import inventory_workspace
 from .freshness import changed_source, tenant_key
 from .parallel import MigrationCoordinator, MigrationIO
+from .progress import current_progress
 from .spool import ByteBudget, MigrationCapacityError
 
 
@@ -45,6 +46,16 @@ async def spool_workspaces(
     if allowance < 1:
         raise ValueError("memory budget is smaller than worker count")
     summaries = [None] * len(data["workspaces"])
+    progress = current_progress()
+    if progress:
+        # These counters describe this inventory pass, including source rechecks.
+        progress.data.update(
+            inventory_completed_workspaces=0,
+            inventoried_sessions=0,
+            inventoried_chats=0,
+            inventoried_source_bytes=0,
+            inventory_blocker_count=0,
+        )
     async with MigrationIO(io_workers) as io:
         data = {
             **data,
@@ -53,7 +64,11 @@ async def spool_workspaces(
 
         async def parse(index, _request):
             async with budget.reserve(allowance):
-                _preflight_workspace(data["workspaces"][index], allowance)
+                source_bytes = await io.call(
+                    _preflight_workspace,
+                    data["workspaces"][index],
+                    allowance,
+                )
                 result = await io.call(inventory_workspace, data, index)
                 record = await io.call(spool.write, index, result)
                 workspace = result["workspaces"][0]
@@ -67,6 +82,15 @@ async def spool_workspaces(
                     files=len(result["files"]),
                     blockers=tuple(result["blockers"]),
                 )
+                if progress:
+                    summary = summaries[index]
+                    progress.data["inventory_completed_workspaces"] += 1
+                    progress.data["inventoried_sessions"] += summary.sessions
+                    progress.data["inventoried_chats"] += summary.chats
+                    progress.data["inventoried_source_bytes"] += source_bytes
+                    progress.data["inventory_blocker_count"] += len(
+                        summary.blockers,
+                    )
 
         await MigrationCoordinator({}, workers=workers).run(
             range(len(summaries)),
@@ -124,3 +148,4 @@ def _preflight_workspace(workspace, allowance):
                 raise MigrationCapacityError(
                     "workspace source exceeds its migration memory allowance",
                 )
+    return total
