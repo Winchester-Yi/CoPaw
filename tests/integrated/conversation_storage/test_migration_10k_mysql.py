@@ -24,7 +24,6 @@ from swe.app.conversation_storage.migration.discovery import (
     freeze_discovery,
     source_key,
 )
-from swe.app.conversation_storage.migration.direct_import import DirectImporter
 from swe.app.conversation_storage.migration.manifest import SourceBoundary
 from swe.app.conversation_storage.migration.spool import InventorySpool
 from swe.cli.conversation_storage_v3_cmd import run_v3_command
@@ -229,7 +228,9 @@ async def _interrupt_import_and_resume(
     work_dir,
     monkeypatch,
 ):
-    original_finish = DirectImporter._batch_finished
+    from swe.app.conversation_storage.migration.journal import MigrationJournal
+
+    original_finish = MigrationJournal.refresh_batch
     interrupted = [False]
 
     async def interrupt_after_first_commit(importer, position):
@@ -241,8 +242,8 @@ async def _interrupt_import_and_resume(
     started = time.perf_counter()
     with monkeypatch.context() as interruption:
         interruption.setattr(
-            DirectImporter,
-            "_batch_finished",
+            MigrationJournal,
+            "refresh_batch",
             interrupt_after_first_commit,
         )
         with pytest.raises(RuntimeError, match="benchmark interruption"):

@@ -358,7 +358,14 @@ def _workspace_inputs(report):
     if not hasattr(files, "for_workspace"):
         by_workspace = {}
         for item in files:
-            by_workspace.setdefault(item["workspace"], []).append(item)
+            index = item["workspace"]
+            if type(index) is not int or not 0 <= index < len(
+                report["workspaces"],
+            ):
+                raise ValueError(
+                    "artifact workspace index is outside inventory",
+                )
+            by_workspace.setdefault(index, []).append(item)
     for index in range(len(report["workspaces"])):
         workspace = report["workspaces"][index]
         artifacts = (

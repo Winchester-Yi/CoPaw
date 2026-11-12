@@ -370,3 +370,20 @@ async def test_parallel_artifact_reads_use_bounded_io_threads(monkeypatch):
             *[worker._read_source_artifact({}, {}) for _ in range(2)],
         )
     assert values == [b"artifact", b"artifact"]
+
+
+@pytest.mark.parametrize("index", [-1, 1, True, "0"])
+def test_workspace_inputs_reject_unmapped_artifacts(index):
+    from swe.app.conversation_storage.migration.direct_import import (
+        _workspace_inputs,
+    )
+
+    with pytest.raises(ValueError, match="artifact workspace index"):
+        list(
+            _workspace_inputs(
+                {
+                    "workspaces": [{}],
+                    "files": [{"workspace": index, "path": "agent.json"}],
+                },
+            ),
+        )
