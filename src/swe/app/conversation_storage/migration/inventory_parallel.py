@@ -135,6 +135,9 @@ def _preflight_workspace(workspace, allowance):
     roots = session_input_roots(
         root,
         [entry["path"] for entry in workspace.get("session_paths", [])],
+        registry_path=workspace.get("registry_path", "chats.json"),
+        sessions_dir=workspace.get("sessions_dir", "sessions"),
+        dialog_dir=workspace.get("dialog_dir", "dialog"),
         max_session_bytes=min(MAX_READ_BYTES, source_limit),
     )
     for path in safe_input_entries(root, roots):
