@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..bundle import MAX_READ_BYTES
 from .inventory_v3 import inventory_workspace
+from .freshness import changed_source, tenant_key
 from .parallel import MigrationCoordinator, MigrationIO
 from .spool import ByteBudget, MigrationCapacityError
 
@@ -45,6 +46,10 @@ async def spool_workspaces(
         raise ValueError("memory budget is smaller than worker count")
     summaries = [None] * len(data["workspaces"])
     async with MigrationIO(io_workers) as io:
+        data = {
+            **data,
+            "_freshness_cache": await io.call(_shared_freshness, data),
+        }
 
         async def parse(index, _request):
             async with budget.reserve(allowance):
@@ -71,6 +76,29 @@ async def spool_workspaces(
     if any(count != 1 for count in positions.values()):
         raise ValueError("duplicate workspace inventory position")
     return summaries
+
+
+def _shared_freshness(data):
+    """Scan shared evidence parents once per inventory, never across runs.
+
+    Whole-source fingerprints still bracket the inventory. Unique workspace
+    paths retain their own checks, including the workspace directory mtime.
+    """
+    references = Counter()
+    for workspace in data["workspaces"]:
+        cutoff = data.get("tenant_sync_started_at_ns", {}).get(
+            tenant_key(workspace["service_unit_id"], workspace["tenant_id"]),
+        )
+        if cutoff is not None:
+            references.update(
+                (str(Path(value).parent), cutoff)
+                for value in workspace.get("evidence_refs", [])
+            )
+    return {
+        key: changed_source([key[0]], key[1])
+        for key, count in references.items()
+        if count > 1
+    }
 
 
 def _preflight_workspace(workspace, allowance):

@@ -14,8 +14,17 @@ from .legacy import safe_files
 from .manifest import SourceBoundary
 
 
-def _source_change(position, scope, paths, cutoff):
-    changed = changed_source(paths, cutoff)
+def _source_change(position, scope, paths, cutoff, *, cached=None):
+    cached = cached or {}
+    changed = None
+    for path in paths:
+        key = (str(path), cutoff)
+        result = (
+            cached[key] if key in cached else changed_source([path], cutoff)
+        )
+        if result is not None:
+            changed = result
+            break
     if changed is None:
         return None
     path, modified_at_ns = changed
@@ -56,6 +65,7 @@ def _inventory_shares(data, report):
                 (source["service_unit_id"], source["tenant_id"]),
                 [str(snapshot_path), str(snapshot_path.parent)],
                 cutoff,
+                cached=data.get("_freshness_cache"),
             )
             if blocker:
                 report["blockers"].append(blocker)
@@ -161,6 +171,7 @@ def inventory_discovery(data, *, workspace_offset=0):
                 (mapping.scope.service_unit_id, mapping.scope.tenant_id),
                 source_paths,
                 cutoff,
+                cached=data.get("_freshness_cache"),
             )
             if blocker:
                 report["blockers"].append(blocker)

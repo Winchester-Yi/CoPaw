@@ -12,6 +12,45 @@ from swe.app.conversation_storage.migration.parallel import (
 )
 
 
+def test_shared_freshness_scans_parent_once_and_retains_change(monkeypatch):
+    from swe.app.conversation_storage.migration import inventory_parallel
+    from swe.app.conversation_storage.migration.inventory_v3 import (
+        _source_change,
+    )
+
+    calls = []
+
+    def changed(paths, cutoff):
+        calls.append((paths, cutoff))
+        return ("/source/new-file", cutoff + 1)
+
+    monkeypatch.setattr(inventory_parallel, "changed_source", changed)
+    data = {
+        "tenant_sync_started_at_ns": {"SERVICE\x00tenant": 100},
+        "workspaces": [
+            {
+                "service_unit_id": "SERVICE",
+                "tenant_id": "tenant",
+                "evidence_refs": ["/source/config.json"],
+            }
+            for _ in range(10000)
+        ],
+    }
+    cache = inventory_parallel._shared_freshness(data)
+    assert calls == [(["/source"], 100)]
+    result = _source_change(
+        "workspace",
+        ("SERVICE", "tenant"),
+        ["/source"],
+        100,
+        cached=cache,
+    )
+    assert result["path"] == "/source/new-file"
+    assert result["mtime_ns"] == 101
+    inventory_parallel._shared_freshness(data)
+    assert len(calls) == 2
+
+
 async def test_sql_commands_run_in_original_task_with_bounded_workers():
     owner = asyncio.current_task()
     active = peak = 0
