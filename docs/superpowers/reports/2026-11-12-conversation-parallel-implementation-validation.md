@@ -47,10 +47,14 @@
 
 早期旧代码的万级运行不可作为成功证据：一次因共享目录平方级扫描在首次 inventory 阶段被有序停止；一次在旧全局 artifact 串行阶段遭遇 MySQL 连接丢失并产生 UnknownCommit，**1 failed、1 error**。另一次完整四档进程在 workers=1 输出 FE 后继续 workers=4，14:37 有序 Ctrl+C 结束，**1 failed、1 error、2 deselected，5400.01 秒**，`/tmp/conversation-10k-final.xml`：workers1 的 resume 数据库操作超时，fixture 清理在 acquire/session-state 剩余预算内超时。该进程启动早于分享流水线和 runtime 预取改动，不能算全量通过。
 
-最新完整四档已以 `41afd601b` 启动，日志 `/tmp/conversation-10k-current.log`，结果预期 `/tmp/conversation-10k-current-final.xml`，独立本地目录 `/tmp/conversation-10k-current-run`。使用 `-x`：任一档失败即停，不继续执行无法整体验收通过的后续档；没有自动重连绕过未知提交。尚未通过，不能据此宣布性能目标达成。
+最新完整四档以 `41afd601b` 启动后，用户明确要求停止万级基线、先验证逻辑正确性。已单次 Ctrl+C 并等待进程退出；该次记录为主动取消，不能记为通过或逻辑失败。日志 `/tmp/conversation-10k-current.log`、JUnit `/tmp/conversation-10k-current-final.xml`。取消时累计 934.253 秒（不含清理），9,419 次 cursor 查询、0 次查询异常，committed 部分数据按停止语义保留到 fixture 收尾；该次隔离子 schema 已只读确认清理。以上仅是未完成运行的观测，不是性能验收结果。
+
+当前使用用户指定远端 MySQL，对 `tests/integrated/conversation_storage` 排除万级文件的 **354 项**逻辑集成验证；每项使用随机独立测试库，遇首个失败暂停定位。日志 `/tmp/conversation-logic-full-mysql.log`，最终 JUnit `/tmp/conversation-logic-full-mysql.xml`，仍运行中。没有启动本地容器数据库。
 
 ## 未闭环事项
 
 完整四档端到端与可控 IO 延迟的吞吐/资源/恢复验收；最终运行手册、设计状态、任务清单及放行证据更新。只有这些事项具有当前源码和运行证据后才能标记完成。
 
-最新 workers=1 档开始运行。静态调用链核对显示 artifact 新发布执行数十次串行 SQL 往返，包括多个阶段重复的 target/guard/publication 查询；没有发现每 artifact 全表 hydrate 或全 JSON 写出。新增观测仅记录 cursor 调用次数、累计耗时及 bundle 方法计数，不记录 SQL/参数；SQL 不含连接池等待和驱动 BEGIN/COMMIT，bundle 方法嵌套耗时不可相加当作互斥墙钟时间。初始化/fixture teardown 失败由 pytest/JUnit 记录，verify/finalize 的 SQL/IO 快照合并。实际最新代码完整运行数据尚待收集，不能仅凭静态估算宣称瓶颈已消除。
+静态调用链核对显示 artifact 新发布执行数十次串行 SQL 往返；没有发现每 artifact 全表 hydrate 或全 JSON 写出。新增观测仅记录 cursor 调用次数、累计耗时及 bundle 方法计数，不记录 SQL/参数；SQL 不含连接池等待和驱动 BEGIN/COMMIT，bundle 方法嵌套耗时不可相加当作互斥墙钟时间。初始化/fixture teardown 失败由 pytest/JUnit 记录，verify/finalize 的 SQL/IO 快照合并。万级性能验证按用户要求停止，不能宣称瓶颈已消除。
+
+逻辑验证补充：`b8c3f8532` 将源预检扫描移入共享 MigrationIO，增加明确标注的本轮 inventory workspace/Session/Chat/源字节/blocker 计数；单次扫描复用字节统计，不新增扫描，提交后 **30 项定向通过**。`c38eac57d` 修复同目录分享 freshness 平方级重复扫描，缓存仅单轮 parent/cutoff，逐 snapshot 检查和最终全量重查保留，混合 cutoff/目录增删/软链接/只读边界 **40 项提交后定向通过**。最新全范围单元快照 **1,321 passed，55.21 秒**，早于补充的分享边界测试；最终收尾将再汇总。
