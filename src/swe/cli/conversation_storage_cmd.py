@@ -334,7 +334,15 @@ def _readonly_manifest(manifest):
     return ReadOnlyManifest(manifest.path, manifest.data)
 
 
-def _command(operation, path, apply=False, workers=4, io_workers=4):
+def _command(
+    operation,
+    path,
+    apply=False,
+    workers=4,
+    io_workers=4,
+    memory_budget_mib=512,
+    work_dir=None,
+):
     try:
         from swe.app.conversation_storage.chat_mutations import (
             load_metadata_json,
@@ -354,6 +362,8 @@ def _command(operation, path, apply=False, workers=4, io_workers=4):
                 apply=apply,
                 workers=workers,
                 io_workers=io_workers,
+                memory_budget_mib=memory_budget_mib,
+                work_dir=work_dir,
             )
             click.echo(
                 json.dumps(
@@ -369,7 +379,11 @@ def _command(operation, path, apply=False, workers=4, io_workers=4):
                 )
             return
         job = OfflineJob(path)
-        if operation == "import" and (workers, io_workers) != (4, 4):
+        if operation == "import" and (
+            (workers, io_workers) != (4, 4)
+            or memory_budget_mib != 512
+            or work_dir is not None
+        ):
             raise ValueError(
                 "parallel worker options are supported only for "
                 "v3 direct migrations",
@@ -435,6 +449,8 @@ def _register(operation, mutable=False):
             options.get("apply", False),
             options.get("workers", 4),
             options.get("io_workers", 4),
+            options.get("memory_budget_mib", 512),
+            options.get("work_dir"),
         )
 
     if mutable:
@@ -449,6 +465,20 @@ def _register(operation, mutable=False):
             type=click.IntRange(1, 32),
             default=4,
             show_default=True,
+        )(command)
+        command = click.option(
+            "--memory-budget-mib",
+            type=click.IntRange(128, 65536),
+            default=512,
+            show_default=True,
+        )(command)
+        command = click.option(
+            "--work-dir",
+            type=click.Path(
+                exists=True,
+                file_okay=False,
+                path_type=Path,
+            ),
         )(command)
         command = click.option(
             "--workers",

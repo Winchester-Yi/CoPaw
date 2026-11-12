@@ -33,8 +33,10 @@ async def test_parallel_workspace_spool_matches_serial_inventory(tmp_path):
         )
     data = {"workspaces": mappings, "shares": [], "fingerprints": []}
     expected = inventory_discovery(data)
+    spool_base = tmp_path / "spool-base"
+    spool_base.mkdir()
     with InventorySpool(
-        tmp_path,
+        spool_base,
         max_bytes=1024 * 1024,
         record_limit=128 * 1024,
     ) as spool:
@@ -128,3 +130,117 @@ async def test_invalid_workers_rejected_before_parsing(tmp_path):
     with InventorySpool(tmp_path, max_bytes=1024, record_limit=1024) as spool:
         with pytest.raises(ValueError, match="workers"):
             await spool_workspaces({"workspaces": []}, spool, workers=0)
+
+
+async def test_workspace_input_limit_fails_before_parser_allocation(
+    tmp_path,
+    monkeypatch,
+):
+    import pytest
+    from swe.app.conversation_storage.migration import inventory_parallel
+    from swe.app.conversation_storage.migration.spool import (
+        MigrationCapacityError,
+    )
+
+    root = tmp_path / "large-workspace"
+    root.mkdir()
+    (root / "chats.json").write_bytes(b"x" * 2048)
+    mapping = {
+        "service_unit_id": "service",
+        "tenant_id": "tenant",
+        "source_id": "source",
+        "agent_id": "agent",
+        "root": str(root),
+        "position": source_key("workspace", "large"),
+    }
+    data = {"workspaces": [mapping], "shares": [], "fingerprints": []}
+
+    def forbidden(*_args):
+        pytest.fail("oversized workspace reached the legacy parser")
+
+    monkeypatch.setattr(inventory_parallel, "inventory_workspace", forbidden)
+    spool_base = tmp_path / "spool"
+    spool_base.mkdir()
+    with InventorySpool(
+        spool_base,
+        max_bytes=1024 * 1024,
+        record_limit=1024 * 1024,
+    ) as spool:
+        with pytest.raises(MigrationCapacityError, match="memory allowance"):
+            await spool_workspaces(
+                data,
+                spool,
+                workers=1,
+                memory_bytes=16 * 1024,
+            )
+
+
+async def test_spooled_v3_inventory_matches_serial_inventory(tmp_path):
+    from swe.app.conversation_storage.migration.inventory_v3 import (
+        inventories_equal,
+        inventory_v3_spooled,
+    )
+    from swe.app.conversation_storage.migration.spool_report import (
+        spool_report,
+    )
+
+    roots = []
+    mappings = []
+    for index in range(5):
+        root = tmp_path / ("workspace-" + str(index))
+        root.mkdir()
+        (root / "chats.json").write_text(json.dumps({"chats": []}))
+        (root / "agent.json").write_text(json.dumps({"id": str(index)}))
+        for path in root.iterdir():
+            path.chmod(0o444)
+        root.chmod(0o555)
+        roots.append(root)
+        mappings.append(
+            {
+                "service_unit_id": "service",
+                "tenant_id": "tenant",
+                "source_id": "source",
+                "agent_id": str(index),
+                "root": str(root),
+                "position": source_key("workspace", str(index)),
+            },
+        )
+
+    class Manifest:
+        data = {
+            "workspaces": mappings,
+            "services": [],
+            "shares": [],
+            "fingerprints": [],
+            "source_boundary": {
+                "snapshot_id": "snapshot",
+                "captured_at": "2026-11-12T00:00:00Z",
+                "old_image_digest": "old@sha256:" + "a" * 64,
+                "freeze_evidence": ["stopped", "readonly"],
+            },
+        }
+
+    manifest = Manifest()
+    expected = inventory_discovery(manifest.data)
+    expected["source_boundary"] = manifest.data["source_boundary"]
+    spool_base = tmp_path / "inventory-spool"
+    spool_base.mkdir()
+    with InventorySpool(
+        spool_base,
+        max_bytes=1024 * 1024,
+        record_limit=128 * 1024,
+        protected=roots,
+    ) as spool:
+        summaries = await spool_workspaces(
+            manifest.data,
+            spool,
+            workers=2,
+            io_workers=2,
+        )
+        actual = spool_report(
+            spool,
+            summaries,
+            shares=[],
+            source_boundary=manifest.data["source_boundary"],
+        )
+        assert inventories_equal(actual, expected)

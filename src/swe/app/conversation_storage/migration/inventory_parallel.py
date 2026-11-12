@@ -3,10 +3,13 @@
 
 from collections import Counter
 from dataclasses import dataclass
+import os
+from pathlib import Path
 
+from ..bundle import MAX_READ_BYTES
 from .inventory_v3 import inventory_workspace
 from .parallel import MigrationCoordinator, MigrationIO
-from .spool import ByteBudget
+from .spool import ByteBudget, MigrationCapacityError
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ async def spool_workspaces(
 
         async def parse(index, _request):
             async with budget.reserve(allowance):
+                _preflight_workspace(data["workspaces"][index], allowance)
                 result = await io.call(inventory_workspace, data, index)
                 record = await io.call(spool.write, index, result)
                 workspace = result["workspaces"][0]
@@ -67,3 +71,28 @@ async def spool_workspaces(
     if any(count != 1 for count in positions.values()):
         raise ValueError("duplicate workspace inventory position")
     return summaries
+
+
+def _preflight_workspace(workspace, allowance):
+    """Bound raw inputs before legacy parsers allocate decoded object graphs."""
+    root = Path(workspace["root"])
+    total = 0
+    count = 0
+    source_limit = allowance // 16
+    count_limit = allowance // 512
+    for directory, names, files in os.walk(root, followlinks=False):
+        names.sort()
+        for name in files:
+            path = Path(directory) / name
+            size = path.stat().st_size
+            if size > MAX_READ_BYTES:
+                raise MigrationCapacityError(
+                    "workspace source file exceeds the bounded reader limit: "
+                    + str(path),
+                )
+            total += size
+            count += 1
+            if total > source_limit or count > count_limit:
+                raise MigrationCapacityError(
+                    "workspace source exceeds its migration memory allowance",
+                )

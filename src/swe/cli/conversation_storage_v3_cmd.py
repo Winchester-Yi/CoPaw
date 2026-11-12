@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 import tempfile
 
@@ -17,7 +18,10 @@ from swe.app.conversation_storage.migration.direct_import import (
     DirectImporter,
     DirectTarget,
 )
-from swe.app.conversation_storage.migration.inventory_v3 import inventory_v3
+from swe.app.conversation_storage.migration.inventory_v3 import (
+    inventory_v3,
+    inventory_v3_spooled,
+)
 from swe.app.conversation_storage.migration.journal import (
     MigrationJournal,
     JOBS,
@@ -29,6 +33,7 @@ from swe.app.conversation_storage.migration.preflight import (
 )
 from swe.app.conversation_storage.migration.v3_manifest import V3Manifest
 from swe.app.conversation_storage.migration.verify import verify_import
+from swe.app.conversation_storage.migration.spool import InventorySpool
 
 
 def authority_receipt(manifest):
@@ -218,6 +223,7 @@ async def _execute(
     *,
     workers=4,
     io_workers=4,
+    source_recheck=None,
 ):
     from swe.database.config import get_database_config
     from swe.database.connection import DatabaseConnection
@@ -324,8 +330,13 @@ async def _execute(
                         + json.dumps(result["blockers"]),
                     )
             # Re-read the complete frozen source and old SQL shares before completion.
-            if inventory_v3(manifest) != inventory:
-                raise ValueError("source inventory changed during operation")
+            if source_recheck is None:
+                if inventory_v3(manifest) != inventory:
+                    raise ValueError(
+                        "source inventory changed during operation",
+                    )
+            else:
+                await source_recheck()
             await compare_original_shares(db, manifest.data)
             if (
                 await check_schema(
@@ -371,6 +382,113 @@ async def _execute(
         await control.close()
 
 
+async def _execute_spooled(
+    operation,
+    manifest,
+    output,
+    *,
+    workers,
+    io_workers,
+    memory_budget_mib,
+    work_dir,
+):
+    protected = [
+        service[key]
+        for service in manifest.data["services"]
+        for key in ("source_root", "config_root", "snapshot_root", "nas_root")
+        if service.get(key)
+    ]
+    protected.extend(item["root"] for item in manifest.data["workspaces"])
+    if work_dir is not None:
+        base = Path(work_dir)
+    else:
+        candidates = (
+            Path(tempfile.gettempdir()).resolve(),
+            Path("/tmp").resolve(),
+        )
+        base = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.is_dir()
+                and all(
+                    candidate != Path(root).resolve()
+                    and not candidate.is_relative_to(Path(root).resolve())
+                    and not Path(root).resolve().is_relative_to(candidate)
+                    for root in protected
+                )
+            ),
+            None,
+        )
+        if base is None:
+            raise ValueError(
+                "no default work directory is separate from source roots",
+            )
+    if not base.is_absolute() or base.resolve() != base or not base.is_dir():
+        raise ValueError(
+            "work directory must be an existing canonical directory",
+        )
+    memory_bytes = memory_budget_mib * 1024 * 1024
+    record_limit = memory_bytes // workers
+    disk_limit = shutil.disk_usage(base).free * 3 // 4
+    if record_limit > disk_limit:
+        raise ValueError("work directory has insufficient free space")
+    with InventorySpool(
+        base,
+        max_bytes=disk_limit,
+        record_limit=record_limit,
+        protected=protected,
+    ) as spool:
+        inventory = await inventory_v3_spooled(
+            manifest,
+            spool,
+            workers=workers,
+            io_workers=io_workers,
+            memory_bytes=memory_bytes,
+            begin_sync=True,
+        )
+        if not inventory.get("ready") or inventory.get("blockers"):
+            raise ValueError(
+                "frozen inventory has blockers: "
+                + json.dumps(inventory["blockers"], ensure_ascii=False),
+            )
+
+        async def recheck_source():
+            from swe.app.conversation_storage.migration.inventory_v3 import (
+                inventories_equal,
+                inventory_v3_spooled,
+            )
+            from swe.app.conversation_storage.migration.spool import (
+                InventorySpool,
+            )
+
+            with InventorySpool(
+                base,
+                max_bytes=disk_limit,
+                record_limit=record_limit,
+                protected=protected,
+            ) as verification_spool:
+                verified = await inventory_v3_spooled(
+                    manifest,
+                    verification_spool,
+                    workers=workers,
+                    io_workers=io_workers,
+                    memory_bytes=memory_bytes,
+                )
+            if not inventories_equal(verified, inventory):
+                raise ValueError("source inventory changed during operation")
+
+        return await _execute(
+            operation,
+            manifest,
+            inventory,
+            output,
+            workers=workers,
+            io_workers=io_workers,
+            source_recheck=recheck_source,
+        )
+
+
 def run_v3_command(
     operation,
     manifest_path,
@@ -378,6 +496,8 @@ def run_v3_command(
     output_dir=None,
     workers=4,
     io_workers=4,
+    memory_budget_mib=512,
+    work_dir=None,
 ):
     if operation not in (
         "inventory",
@@ -392,6 +512,8 @@ def run_v3_command(
         raise ValueError("unsupported v3 command")
     if not 1 <= workers <= 32 or not 1 <= io_workers <= 32:
         raise ValueError("workers and io-workers must be between 1 and 32")
+    if not 128 <= memory_budget_mib <= 65536:
+        raise ValueError("memory budget must be between 128 and 65536 MiB")
     manifest = V3Manifest.load(manifest_path)
     output = None
     if operation == "finalize":
@@ -409,6 +531,18 @@ def run_v3_command(
                     or source.is_relative_to(nas)
                 ):
                     raise ValueError("source and target NAS roots overlap")
+    if operation in ("import", "resume") and apply:
+        return asyncio.run(
+            _execute_spooled(
+                operation,
+                manifest,
+                output,
+                workers=workers,
+                io_workers=io_workers,
+                memory_budget_mib=memory_budget_mib,
+                work_dir=work_dir,
+            ),
+        )
     inventory = inventory_v3(
         manifest,
         begin_sync=operation in ("import", "resume") and apply,
@@ -480,7 +614,7 @@ def register_v3_commands(group):
         )(command)
         if operation in ("resume", "finalize"):
             command = click.option("--apply", is_flag=True)(command)
-        if operation == "resume":
+        if operation in ("resume",):
             command = click.option(
                 "--io-workers",
                 type=click.IntRange(1, 32),
@@ -492,6 +626,20 @@ def register_v3_commands(group):
                 type=click.IntRange(1, 32),
                 default=4,
                 show_default=True,
+            )(command)
+            command = click.option(
+                "--memory-budget-mib",
+                type=click.IntRange(128, 65536),
+                default=512,
+                show_default=True,
+            )(command)
+            command = click.option(
+                "--work-dir",
+                type=click.Path(
+                    exists=True,
+                    file_okay=False,
+                    path_type=Path,
+                ),
             )(command)
         if operation == "finalize":
             command = click.option(

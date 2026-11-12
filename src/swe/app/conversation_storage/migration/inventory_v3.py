@@ -2,6 +2,7 @@
 """Semantic inventory with frozen discovery coverage and stable identities."""
 
 from pathlib import Path
+from itertools import zip_longest
 
 from ..chat_mutations import load_metadata_json
 from ..bundle import MAX_READ_BYTES
@@ -282,15 +283,7 @@ def inventory_discovery(data, *, workspace_offset=0):
 def inventory_v3(manifest, *, begin_sync=False):
     """Re-read frozen source semantics and retain the old importer shape."""
     if begin_sync:
-        tenants = {
-            (item["service_unit_id"], item["tenant_id"])
-            for item in manifest.data["workspaces"]
-        }
-        tenants.update(
-            (item["service_unit_id"], item["tenant_id"])
-            for item in manifest.data.get("shares", [])
-        )
-        manifest.begin_tenant_syncs(tenants)
+        _begin_tenant_syncs(manifest)
     report = inventory_discovery(manifest.data)
     for blocker in report["blockers"]:
         if blocker["code"] == "source_modified_after_sync_started":
@@ -298,6 +291,103 @@ def inventory_v3(manifest, *, begin_sync=False):
     report["source_boundary"] = manifest.data["source_boundary"]
     SourceBoundary(**report["source_boundary"])
     return report
+
+
+def _begin_tenant_syncs(manifest):
+    tenants = {
+        (item["service_unit_id"], item["tenant_id"])
+        for item in manifest.data["workspaces"]
+    }
+    tenants.update(
+        (item["service_unit_id"], item["tenant_id"])
+        for item in manifest.data.get("shares", [])
+    )
+    manifest.begin_tenant_syncs(tenants)
+
+
+async def inventory_v3_spooled(
+    manifest,
+    spool,
+    *,
+    workers=4,
+    io_workers=4,
+    memory_bytes=512 * 1024 * 1024,
+    begin_sync=False,
+):
+    """Build the import report from bounded, independently parsed records."""
+    from .inventory_parallel import spool_workspaces
+    from .spool_report import spool_report
+
+    if begin_sync:
+        _begin_tenant_syncs(manifest)
+    data = manifest.data
+    if (
+        data.get("fingerprints")
+        and fingerprints(data["services"]) != data["fingerprints"]
+    ):
+        raise ValueError("source changed since discovery freeze")
+    summaries = await spool_workspaces(
+        data,
+        spool,
+        workers=workers,
+        io_workers=io_workers,
+        memory_bytes=memory_bytes,
+    )
+    if (
+        data.get("fingerprints")
+        and fingerprints(data["services"]) != data["fingerprints"]
+    ):
+        raise ValueError("source changed while building inventory")
+    report = spool_report(
+        spool,
+        summaries,
+        shares=[],
+        source_boundary=data["source_boundary"],
+    )
+    _inventory_shares(data, report)
+    if (
+        data.get("fingerprints")
+        and fingerprints(data["services"]) != data["fingerprints"]
+    ):
+        raise ValueError("source changed while building inventory")
+    for blocker in report["blockers"]:
+        if blocker["code"] == "source_modified_after_sync_started":
+            manifest.record_source_change(blocker)
+    SourceBoundary(**report["source_boundary"])
+    return report
+
+
+def inventories_equal(left, right):
+    """Compare spool-backed reports without retaining decoded workspaces."""
+    if any(
+        left.get(key) != right.get(key)
+        for key in (
+            "version",
+            "shares",
+            "blockers",
+            "ready",
+            "source_boundary",
+        )
+    ):
+        return False
+    if len(left["workspaces"]) != len(right["workspaces"]):
+        return False
+    marker = object()
+    for first, second in zip_longest(
+        left["workspaces"],
+        right["workspaces"],
+        fillvalue=marker,
+    ):
+        if first is marker or second is marker or first != second:
+            return False
+    return all(
+        first == second
+        for first, second in zip_longest(
+            left["files"],
+            right["files"],
+            fillvalue=marker,
+        )
+    )
 
 
 def inventory_workspace(data, index):
