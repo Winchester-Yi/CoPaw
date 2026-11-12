@@ -39,6 +39,8 @@ def _source_change(position, scope, paths, cutoff, *, cached=None):
 
 
 def _inventory_shares(data, report):
+    # Per-pass only: final source rechecks must never reuse prior evidence.
+    parent_freshness = {}
     ownership = {}
     for workspace in report["workspaces"] if data["shares"] else ():
         for chat in workspace["chats"]:
@@ -60,12 +62,16 @@ def _inventory_shares(data, report):
             tenant_key(source["service_unit_id"], source["tenant_id"]),
         )
         if cutoff is not None:
+            parent = str(snapshot_path.parent)
+            key = (parent, cutoff)
+            if key not in parent_freshness:
+                parent_freshness[key] = changed_source([parent], cutoff)
             blocker = _source_change(
                 source["position"],
                 (source["service_unit_id"], source["tenant_id"]),
-                [str(snapshot_path), str(snapshot_path.parent)],
+                [str(snapshot_path), parent],
                 cutoff,
-                cached=data.get("_freshness_cache"),
+                cached=parent_freshness,
             )
             if blocker:
                 report["blockers"].append(blocker)
