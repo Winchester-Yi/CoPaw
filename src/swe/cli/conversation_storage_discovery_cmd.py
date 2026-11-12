@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import tempfile
+import shutil
 from pathlib import Path
 
 import click
@@ -67,10 +69,123 @@ async def read_original_shares():
         await database.close()
 
 
+def _resource_options(command):
+    for name, limit, default in (
+        ("workers", click.IntRange(1, 32), 4),
+        ("io-workers", click.IntRange(1, 32), 4),
+        ("memory-budget-mib", click.IntRange(128, 65536), 512),
+    ):
+        command = click.option(
+            "--" + name,
+            type=limit,
+            default=default,
+            show_default=True,
+        )(command)
+    return click.option(
+        "--work-dir",
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+    )(command)
+
+
+def _semantic_validator(*, workers, io_workers, memory_budget_mib, work_dir):
+    def validate(data):
+        return asyncio.run(
+            _semantic_spooled(
+                data,
+                workers,
+                io_workers,
+                memory_budget_mib,
+                work_dir,
+            ),
+        )
+
+    return validate
+
+
+async def _semantic_spooled(
+    data,
+    workers,
+    io_workers,
+    memory_budget_mib,
+    work_dir,
+):
+    from swe.cli.conversation_storage_v3_cmd import validate_output
+    from swe.app.conversation_storage.migration.inventory_parallel import (
+        spool_workspaces,
+    )
+    from swe.app.conversation_storage.migration.inventory_v3 import (
+        _preflight_share_budget,
+        _inventory_shares,
+    )
+    from swe.app.conversation_storage.migration.discovery import fingerprints
+    from swe.app.conversation_storage.migration.spool import InventorySpool
+    from swe.app.conversation_storage.migration.spool_report import (
+        spool_report,
+    )
+
+    candidates = (
+        (Path(work_dir),)
+        if work_dir is not None
+        else (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
+    )
+    base = None
+    for candidate in candidates:
+        try:
+            candidate = validate_output(candidate, data)
+        except ValueError:
+            continue
+        if candidate.is_dir():
+            base = candidate
+            break
+    if base is None:
+        raise ValueError("no work directory is separate from source roots")
+    memory_bytes = memory_budget_mib * 1024 * 1024
+    baseline = fingerprints(data["services"])
+    if data.get("fingerprints") and baseline != data["fingerprints"]:
+        raise ValueError("source changed during discovery")
+    _preflight_share_budget(data, memory_bytes)
+    protected = [
+        item[key]
+        for item in data["services"]
+        for key in ("source_root", "config_root", "snapshot_root", "nas_root")
+        if item.get(key)
+    ]
+    with InventorySpool(
+        base,
+        max_bytes=shutil.disk_usage(base).free * 3 // 4,
+        record_limit=memory_bytes // workers,
+        protected=protected,
+    ) as spool:
+        summaries = await spool_workspaces(
+            data,
+            spool,
+            workers=workers,
+            io_workers=io_workers,
+            memory_bytes=memory_bytes,
+        )
+        semantic = spool_report(
+            spool,
+            summaries,
+            shares=[],
+            source_boundary=None,
+        )
+        _inventory_shares(data, semantic)
+        if fingerprints(data["services"]) != baseline:
+            raise ValueError("source changed during discovery")
+        return {
+            "blockers": semantic["blockers"],
+            "workspaces": [
+                {"sessions": range(item.sessions), "chats": range(item.chats)}
+                for item in summaries
+            ],
+        }
+
+
 def register_discovery_commands(group):
     """Attach discover/freeze without initializing business services."""
 
     @group.command("discover")
+    @_resource_options
     @click.option(
         "--services",
         required=True,
@@ -82,7 +197,13 @@ def register_discovery_commands(group):
         type=click.Path(exists=True, dir_okay=False),
     )
     @click.option("--overrides", type=click.Path(exists=True, dir_okay=False))
-    def discover_command(services, output, shares_file, overrides):
+    def discover_command(
+        services,
+        output,
+        shares_file,
+        overrides,
+        **resources,
+    ):
         try:
             declared = _list(_read(services), "services")
             destination = _output(output, declared)
@@ -98,6 +219,7 @@ def register_discovery_commands(group):
                 declared,
                 shares=shares,
                 overrides=exceptions,
+                semantic_validator=_semantic_validator(**resources),
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
             # Existing evidence is never silently overwritten.
@@ -126,6 +248,7 @@ def register_discovery_commands(group):
             raise click.ClickException(str(error)) from error
 
     @group.command("freeze")
+    @_resource_options
     @click.option(
         "--discovery",
         required=True,
@@ -138,7 +261,13 @@ def register_discovery_commands(group):
     )
     @click.option("--application-schema", required=True)
     @click.option("--manifest", required=True, type=click.Path(dir_okay=False))
-    def freeze_command(discovery, boundary, application_schema, manifest):
+    def freeze_command(
+        discovery,
+        boundary,
+        application_schema,
+        manifest,
+        **resources,
+    ):
         try:
             report = _read(discovery)
             _output(manifest, report["services"])
@@ -147,6 +276,7 @@ def register_discovery_commands(group):
                 manifest,
                 SourceBoundary(**_read(boundary)),
                 application_schema,
+                semantic_validator=_semantic_validator(**resources),
             )
             click.echo(
                 json.dumps(

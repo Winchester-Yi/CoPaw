@@ -324,6 +324,7 @@ async def inventory_v3_spooled(
     io_workers=4,
     memory_bytes=512 * 1024 * 1024,
     begin_sync=False,
+    record_source_changes=True,
 ):
     """Build the import report from bounded, independently parsed records."""
     from .inventory_parallel import spool_workspaces
@@ -363,7 +364,10 @@ async def inventory_v3_spooled(
     ):
         raise ValueError("source changed while building inventory")
     for blocker in report["blockers"]:
-        if blocker["code"] == "source_modified_after_sync_started":
+        if (
+            record_source_changes
+            and blocker["code"] == "source_modified_after_sync_started"
+        ):
             manifest.record_source_change(blocker)
     SourceBoundary(**report["source_boundary"])
     return report

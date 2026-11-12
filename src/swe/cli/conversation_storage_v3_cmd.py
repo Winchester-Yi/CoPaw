@@ -351,6 +351,7 @@ async def _execute(
                         io_workers=io_workers,
                         workers=workers,
                         memory_bytes=memory_bytes,
+                        health_check=guard.check,
                     )
                 if not result["passed"]:
                     raise ValueError(
@@ -483,6 +484,8 @@ async def _execute_spooled(
             io_workers=io_workers,
             memory_bytes=memory_bytes,
             begin_sync=operation in ("import", "resume") and apply,
+            record_source_changes=apply
+            and operation in ("import", "resume", "finalize"),
         )
         if operation in ("inventory", "plan", "inspect"):
             return _inventory_preview(operation, manifest, inventory)
@@ -559,6 +562,7 @@ async def _recheck_spooled_inventory(
             workers=workers,
             io_workers=io_workers,
             memory_bytes=memory_bytes,
+            record_source_changes=False,
         )
         return inventories_equal(actual, expected)
 

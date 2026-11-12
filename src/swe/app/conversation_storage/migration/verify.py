@@ -138,6 +138,7 @@ async def verify_import(
     io_workers=4,
     workers=1,
     memory_bytes=512 * 1024 * 1024,
+    health_check=None,
 ):
     report = {
         "version": 2,
@@ -207,6 +208,7 @@ async def verify_import(
             workers=workers,
             io_workers=io_workers,
             memory_bytes=memory_bytes // workers,
+            health_check=health_check,
         )
     if io is not None:
         await verify_auxiliary_bodies(
@@ -218,6 +220,7 @@ async def verify_import(
             io=io,
             workers=workers,
             memory_bytes=memory_bytes // workers,
+            health_check=health_check,
         )
     for workspace in inventory["workspaces"]:
         bundles = stores[workspace["scope"][0]]

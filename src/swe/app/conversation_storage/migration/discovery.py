@@ -540,7 +540,13 @@ def _unique_workspaces(report):
             )
 
 
-def discover_services(services, *, shares=(), overrides=()):
+def discover_services(
+    services,
+    *,
+    shares=(),
+    overrides=(),
+    semantic_validator=None,
+):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
     report = {
         "version": 3,
@@ -613,7 +619,7 @@ def discover_services(services, *, shares=(), overrides=()):
     if not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
-        semantic = inventory_discovery(report)
+        semantic = (semantic_validator or inventory_discovery)(report)
         report["blockers"].extend(semantic["blockers"])
         for item, workspace in zip(
             report["workspaces"],
@@ -628,7 +634,14 @@ def discover_services(services, *, shares=(), overrides=()):
     return report
 
 
-def freeze_discovery(report, path, boundary, application_schema):
+def freeze_discovery(
+    report,
+    path,
+    boundary,
+    application_schema,
+    *,
+    semantic_validator=None,
+):
     """Revalidate discovery and atomically save a v3 manifest outside the source."""
     if not report.get("ready") or report.get("blockers"):
         raise ValueError("discovery contains blockers")
@@ -636,6 +649,7 @@ def freeze_discovery(report, path, boundary, application_schema):
         report["services"],
         shares=report["shares"],
         overrides=report.get("overrides", ()),
+        semantic_validator=semantic_validator,
     )
     if current["fingerprints"] != report["fingerprints"]:
         raise ValueError("source changed since discovery")

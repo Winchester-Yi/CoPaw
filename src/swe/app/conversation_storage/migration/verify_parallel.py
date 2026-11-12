@@ -99,6 +99,7 @@ async def verify_workspace_messages(
     workers,
     io_workers=4,
     memory_bytes=64 * 1024 * 1024,
+    health_check=None,
 ):
     # Import lazily to avoid a module cycle with the existing semantic checks.
     from .verify import (
@@ -162,6 +163,7 @@ async def verify_workspace_messages(
     await MigrationCoordinator(
         {"collect_workspace_messages": prepare},
         workers=workers,
+        health_check=health_check,
     ).run(range(len(inventory["workspaces"])), check)
     for index in range(len(inventory["workspaces"])):
         report["blockers"].extend(results[index])
@@ -202,6 +204,7 @@ async def verify_auxiliary_bodies(
     io,
     workers,
     memory_bytes=64 * 1024 * 1024,
+    health_check=None,
 ):
     from .verify import _checked, _verify_epochs, _verify_artifact, _payload
     from ..identity import WorkspaceScope
@@ -311,6 +314,7 @@ async def verify_auxiliary_bodies(
     await MigrationCoordinator(
         {"collect_auxiliary_body": prepare},
         workers=workers,
+        health_check=health_check,
     ).run(_auxiliary_jobs(inventory), check)
     for kind, local in sorted(
         results,

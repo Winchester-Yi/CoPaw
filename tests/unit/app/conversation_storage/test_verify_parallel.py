@@ -18,6 +18,11 @@ async def test_workspace_message_checks_overlap_without_worker_database(
     owner = asyncio.current_task()
     barrier = threading.Barrier(2)
     checked = []
+    health_checks = []
+
+    async def health_check():
+        assert asyncio.current_task() is owner
+        health_checks.append(True)
 
     class Database:
         async def fetch_all(self, _query, _params):
@@ -78,9 +83,11 @@ async def test_workspace_message_checks_overlap_without_worker_database(
             report,
             io=io,
             workers=2,
+            health_check=health_check,
         )
     assert sorted(checked) == ["session-0", "session-1"]
     assert report["blockers"] == []
+    assert health_checks
 
 
 async def test_sql_evidence_budget_rejects_before_unbounded_rows():

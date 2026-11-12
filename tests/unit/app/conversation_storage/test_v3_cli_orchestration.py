@@ -312,3 +312,88 @@ async def test_execute_captures_exact_named_lock_and_passes_owner_health(
             {"schema": "app", "server_uuid": "server"},
         ),
     ]
+
+
+@pytest.mark.parametrize("operation", ("discover", "freeze"))
+def test_discovery_commands_expose_resource_limits(operation):
+    from click.testing import CliRunner
+    from swe.cli.conversation_storage_cmd import conversation_storage_group
+
+    result = CliRunner().invoke(
+        conversation_storage_group,
+        [operation, "--help"],
+    )
+    assert result.exit_code == 0
+    for flag in (
+        "--workers",
+        "--io-workers",
+        "--memory-budget-mib",
+        "--work-dir",
+    ):
+        assert flag in result.stdout
+
+
+async def test_preview_source_blocker_does_not_rewrite_manifest(
+    tmp_path,
+    monkeypatch,
+):
+    from unittest.mock import AsyncMock
+    from swe.cli import conversation_storage_v3_cmd as command
+    from swe.app.conversation_storage.migration import (
+        inventory_v3 as inventory,
+    )
+
+    source = tmp_path / "source"
+    nas = tmp_path / "nas"
+    work = tmp_path / "work"
+    for root in (source, nas, work):
+        root.mkdir()
+    path = tmp_path / "manifest.json"
+    path.write_bytes(b'{"immutable":"source binding"}')
+    original = path.read_bytes()
+
+    def record_change(_blocker):
+        path.write_bytes(b"unexpected mutation")
+
+    manifest = SimpleNamespace(
+        migration_id="job",
+        data={
+            "services": [{"source_root": str(source), "nas_root": str(nas)}],
+            "workspaces": [],
+            "shares": [],
+            "fingerprints": [],
+            "source_boundary": {
+                "snapshot_id": "snapshot",
+                "captured_at": "2026-11-01T00:00:00Z",
+                "old_image_digest": "old@sha256:" + "a" * 64,
+                "evidence_refs": ["stop"],
+            },
+            "offline": {"application_schema": "app"},
+        },
+        record_source_change=record_change,
+    )
+    blocker = {
+        "code": "source_modified_after_sync_started",
+        "position": "workspace",
+    }
+    monkeypatch.setattr(
+        "swe.app.conversation_storage.migration.inventory_parallel.spool_workspaces",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        inventory,
+        "_inventory_shares",
+        lambda _data, report: report["blockers"].append(blocker),
+    )
+    result = await command._execute_spooled(
+        "inventory",
+        manifest,
+        None,
+        workers=4,
+        io_workers=4,
+        memory_budget_mib=128,
+        work_dir=work,
+        apply=False,
+    )
+    assert result["blockers"] == [blocker]
+    assert path.read_bytes() == original
