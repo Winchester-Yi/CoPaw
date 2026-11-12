@@ -486,6 +486,14 @@ async def _verify_session(
     expected = session["legacy"]["state"]
     if actual != {**expected, "revision": expected.get("revision", 0)}:
         raise ValueError("complete Session recovery modules differ")
+    await _verify_legacy_session_root(
+        database,
+        bundles,
+        manifest,
+        workspace,
+        session,
+        io=io,
+    )
     sid = manifest.data["assignments"]["session"][session["position"]][
         "target_id"
     ]
@@ -500,6 +508,56 @@ async def _verify_session(
             io_workers=io_workers,
         )
     await _verify_turns(adapter, identity, expected)
+
+
+async def _verify_legacy_session_root(
+    database,
+    bundles,
+    manifest,
+    workspace,
+    session,
+    *,
+    io=None,
+):
+    """Validate canonical export evidence as well as runtime recovery state."""
+    scope = WorkspaceScope.from_values(workspace["scope"])
+    assignment = manifest.data["assignments"]["publication"][
+        session["position"] + "/recovery"
+    ]
+    publication = await database.fetch_one(
+        "SELECT * FROM swe_conversation_publications WHERE id=%s AND state='committed' AND gc_state='live'",
+        (assignment["target_id"],),
+    )
+    if (
+        publication is None
+        or publication["scope_kind"] != "workspace"
+        or WorkspaceScope.from_row(publication) != scope
+        or publication["operation_key"].decode() != assignment["operation_key"]
+    ):
+        raise ValueError("canonical Session publication identity differs")
+    path = bundles.validate_publication_locator(publication)
+    if path != assignment["relative_path"]:
+        raise ValueError("canonical Session publication path differs")
+    retention = ReadOnlyRetention(database, scope)
+    batch = await retention.pin([publication["id"]], kind="reader")
+    try:
+        index = (
+            bundles.inspect(path, expected_length=publication["byte_length"])
+            if io is None
+            else await io.call(
+                bundles.inspect,
+                path,
+                expected_length=publication["byte_length"],
+            )
+        )
+        block = index.blocks["legacy_root"]
+        if block.kind != "legacy_root":
+            raise ValueError("canonical Session root block kind differs")
+        (body,) = await _read_extents(bundles, path, (block,), io=io)
+        if load_metadata_json(body) != session["legacy"]["root"]:
+            raise ValueError("complete canonical Session root differs")
+    finally:
+        await retention.finish_reader(batch)
 
 
 async def _verify_turns(adapter, identity, expected):
