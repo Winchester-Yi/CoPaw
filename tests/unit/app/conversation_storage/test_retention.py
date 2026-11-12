@@ -213,6 +213,23 @@ async def test_guard_initialization_is_unique_and_has_no_publication():
     assert first["guard_marker"] == 1
 
 
+async def test_lock_guard_uses_one_validated_locked_select():
+    db = RetentionDatabase()
+    service = store(db)
+    async with db.transaction():
+        row = await service.lock_guard()
+    selects = [
+        query for query in db.queries if "guard_marker=1 FOR UPDATE" in query
+    ]
+    assert len(selects) == 1
+    assert row["kind"] == "gc_guard"
+    assert row["state"] == "active"
+    db.pins[0]["state"] = "released"
+    with pytest.raises(IntegrityError, match="guard"):
+        async with db.transaction():
+            await service.lock_guard()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

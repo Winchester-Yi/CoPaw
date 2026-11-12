@@ -268,11 +268,9 @@ class RetentionStore:
 
     async def lock_guard(self):
         """Use inside the caller transaction before publication row locks."""
-        await self.ensure_guard()
-        return await self.db.fetch_one(
-            f"SELECT * FROM {TABLE} WHERE {SCOPE_WHERE} AND guard_marker=1 FOR UPDATE",
-            self.scope_values,
-        )
+        # Nested transactions retain the caller's lock; ensure_guard already
+        # selects FOR UPDATE and validates the scope and fixed metadata.
+        return await self.ensure_guard()
 
     async def assert_writes_allowed(self):
         """Call inside a short write transaction before Session/publication locks."""
