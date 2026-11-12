@@ -454,28 +454,17 @@ async def _execute_spooled(
             )
 
         async def recheck_source():
-            from swe.app.conversation_storage.migration.inventory_v3 import (
-                inventories_equal,
-                inventory_v3_spooled,
-            )
-            from swe.app.conversation_storage.migration.spool import (
-                InventorySpool,
-            )
-
-            with InventorySpool(
+            if not await _recheck_spooled_inventory(
+                manifest,
+                inventory,
                 base,
-                max_bytes=disk_limit,
+                disk_limit=disk_limit,
                 record_limit=record_limit,
                 protected=protected,
-            ) as verification_spool:
-                verified = await inventory_v3_spooled(
-                    manifest,
-                    verification_spool,
-                    workers=workers,
-                    io_workers=io_workers,
-                    memory_bytes=memory_bytes,
-                )
-            if not inventories_equal(verified, inventory):
+                workers=workers,
+                io_workers=io_workers,
+                memory_bytes=memory_bytes,
+            ):
                 raise ValueError("source inventory changed during operation")
 
         return await _execute(
@@ -487,6 +476,40 @@ async def _execute_spooled(
             io_workers=io_workers,
             source_recheck=recheck_source,
         )
+
+
+async def _recheck_spooled_inventory(
+    manifest,
+    expected,
+    base,
+    *,
+    disk_limit,
+    record_limit,
+    protected,
+    workers,
+    io_workers,
+    memory_bytes,
+):
+    from swe.app.conversation_storage.migration.inventory_v3 import (
+        inventories_equal,
+        inventory_v3_spooled,
+    )
+    from swe.app.conversation_storage.migration.spool import InventorySpool
+
+    with InventorySpool(
+        base,
+        max_bytes=disk_limit,
+        record_limit=record_limit,
+        protected=protected,
+    ) as spool:
+        actual = await inventory_v3_spooled(
+            manifest,
+            spool,
+            workers=workers,
+            io_workers=io_workers,
+            memory_bytes=memory_bytes,
+        )
+        return inventories_equal(actual, expected)
 
 
 def run_v3_command(

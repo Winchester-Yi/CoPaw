@@ -244,3 +244,77 @@ async def test_spooled_v3_inventory_matches_serial_inventory(tmp_path):
             source_boundary=manifest.data["source_boundary"],
         )
         assert inventories_equal(actual, expected)
+
+
+def test_share_snapshot_budget_is_checked_before_json_read(tmp_path):
+    import pytest
+    from swe.app.conversation_storage.migration import inventory_v3
+
+    snapshot = tmp_path / "share.json"
+    snapshot.write_bytes(b"x" * 32)
+    data = {
+        "shares": [{"snapshot_path": str(snapshot)}],
+    }
+
+    with pytest.raises(ValueError, match="memory budget"):
+        inventory_v3._preflight_share_budget(data, 1024)
+
+
+async def test_spooled_recheck_compares_before_temporary_records_close(
+    tmp_path,
+):
+    from swe.app.conversation_storage.migration.inventory_v3 import (
+        inventory_discovery,
+    )
+    from swe.cli.conversation_storage_v3_cmd import (
+        _recheck_spooled_inventory,
+    )
+
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "chats.json").write_text(json.dumps({"chats": []}))
+    (root / "agent.json").write_text(json.dumps({"id": "agent"}))
+    for path in root.iterdir():
+        path.chmod(0o444)
+    root.chmod(0o555)
+    mappings = [
+        {
+            "service_unit_id": "service",
+            "tenant_id": "tenant",
+            "source_id": "source",
+            "agent_id": "agent",
+            "root": str(root),
+            "position": source_key("workspace", "agent"),
+        },
+    ]
+    boundary = {
+        "snapshot_id": "snapshot",
+        "captured_at": "2026-11-12T00:00:00Z",
+        "old_image_digest": "old@sha256:" + "a" * 64,
+        "evidence_refs": ["stopped", "readonly"],
+    }
+
+    class Manifest:
+        data = {
+            "workspaces": mappings,
+            "services": [],
+            "shares": [],
+            "fingerprints": [],
+            "source_boundary": boundary,
+        }
+
+    expected = inventory_discovery(Manifest.data)
+    expected["source_boundary"] = boundary
+    base = tmp_path / "verification-spool"
+    base.mkdir()
+    assert await _recheck_spooled_inventory(
+        Manifest(),
+        expected,
+        base,
+        disk_limit=1024 * 1024,
+        record_limit=128 * 1024,
+        protected=[root],
+        workers=1,
+        io_workers=1,
+        memory_bytes=1024 * 1024,
+    )

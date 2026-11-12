@@ -29,6 +29,38 @@ async def test_parallel_multiservice_import_resume_verify_finalize(
     publish = ParallelWorkspaceImporter._publish
     prepare_verify = OfflineVerifyStages.prepare
     inventory_v3 = v3.inventory_v3
+    execute = v3._execute
+
+    async def spooled_execute(
+        operation,
+        manifest,
+        inventory,
+        output,
+        **options,
+    ):
+        if operation not in ("import", "resume"):
+            return await execute(
+                operation,
+                manifest,
+                inventory,
+                output,
+                **options,
+            )
+        from swe.cli.conversation_storage_v3_cmd import _execute_spooled
+
+        work_dir = tmp_path / "migration-spool"
+        work_dir.mkdir(exist_ok=True)
+        return await _execute_spooled(
+            operation,
+            manifest,
+            output,
+            workers=2,
+            io_workers=2,
+            memory_budget_mib=512,
+            work_dir=work_dir,
+        )
+
+    monkeypatch.setattr(v3, "_execute", spooled_execute)
 
     def begin_sync_inventory(manifest, *args, **kwargs):
         return inventory_v3(manifest, *args, begin_sync=True, **kwargs)

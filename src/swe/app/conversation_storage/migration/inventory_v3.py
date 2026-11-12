@@ -326,6 +326,7 @@ async def inventory_v3_spooled(
         and fingerprints(data["services"]) != data["fingerprints"]
     ):
         raise ValueError("source changed since discovery freeze")
+    _preflight_share_budget(data, memory_bytes)
     summaries = await spool_workspaces(
         data,
         spool,
@@ -355,6 +356,22 @@ async def inventory_v3_spooled(
             manifest.record_source_change(blocker)
     SourceBoundary(**report["source_boundary"])
     return report
+
+
+def _preflight_share_budget(data, memory_bytes):
+    """Bound decoded share snapshots before materializing the share list."""
+    total = 0
+    count = 0
+    byte_limit = memory_bytes // 64
+    count_limit = memory_bytes // 512
+    for share in data.get("shares", []):
+        size = Path(share["snapshot_path"]).stat().st_size
+        if size > MAX_READ_BYTES:
+            raise ValueError("share snapshot exceeds the bounded reader limit")
+        total += size
+        count += 1
+        if total > byte_limit or count > count_limit:
+            raise ValueError("share snapshots exceed migration memory budget")
 
 
 def inventories_equal(left, right):
