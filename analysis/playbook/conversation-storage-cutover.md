@@ -2,9 +2,11 @@
 
 适用：旧文件实现 → 七张 MySQL 元数据表及原 NAS 上的不可变 bundle。整个过程是一次连续停机；不做双写，不启新 workspace，不把 `SWE_DB_NAME` 改为源快照，也不备份/恢复整个共享业务库。
 
-## 待实施的操作简化方案
+## 当前操作入口与历史说明
 
-自动发现与人工预建表的 v3 改造见 [设计稿](../../docs/superpowers/specs/2026-11-02-conversation-discovery-precreated-import-design.md)。该方案要求 CLI 零 DDL、原分享表就地回填及 SQL 日志续跑，尚未实现。下文记录当前 v2 工具约束，不能用 v2 写命令执行 v3 操作，也不能把 staging/换表当作迁移业务本身的必需条件。
+当前 v3 全量严格迁移以 [全量手册](../../docs/superpowers/plans/2026-11-02-conversation-migration-and-launch-runbook.md) 为准；显式租户隔离与独立上线以 [租户操作增补](../../docs/superpowers/plans/2026-11-13-conversation-tenant-migration-operations.md) 为准。`discover --tenant-isolation` 的有效 partial_success 报告允许正常账号继续；失败/未登记账号仍不可用。共享 SQL/IO/锁故障不能当作坏租户跳过，verify/finalize 失败先 resume，修改已有导入数据的输入不支持直接 retry-review。
+
+以下 v2 安装/换表内容仅供历史排查，不能用于当前 v3 写入、授权配置或权限准备。v3 CLI 使用预建表与 DML 连接，不要求迁移执行账号拥有 CREATE/ALTER/DROP。
 
 ## 准备和清单
 
