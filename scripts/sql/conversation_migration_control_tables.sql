@@ -38,3 +38,18 @@ CREATE TABLE swe_conversation_migration_entries (
     KEY ix_conv_migration_entry_state (migration_id, state, id),
     KEY ix_conv_migration_target (entry_kind, target_id)
 ) ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COMMENT='源到业务ID的事务映射和批次日志，不替代publication协议';
+
+-- Optional tenant-isolation contract. Runtime publication is granted only by SQL.
+CREATE TABLE IF NOT EXISTS swe_conversation_migration_tenants (
+  migration_id VARBINARY(36) NOT NULL,
+  service_unit_key VARBINARY(256) NOT NULL,
+  tenant_key VARBINARY(256) NOT NULL,
+  state VARCHAR(24) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  evidence_text LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  verification_text LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  failure_text LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+  attempts INT UNSIGNED NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  published_at DATETIME(6) NULL,
+  PRIMARY KEY (migration_id, service_unit_key, tenant_key)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;

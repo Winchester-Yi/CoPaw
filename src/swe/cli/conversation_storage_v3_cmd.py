@@ -585,6 +585,8 @@ def run_v3_command(
     io_workers=4,
     memory_budget_mib=512,
     work_dir=None,
+    reviewed_discovery=None,
+    rollback_inputs=None,
 ):
     if operation not in (
         "inventory",
@@ -595,6 +597,8 @@ def run_v3_command(
         "resume",
         "verify",
         "finalize",
+        "retry-review",
+        "rollback-tenants",
     ):
         raise ValueError("unsupported v3 command")
     if not 1 <= workers <= 32 or not 1 <= io_workers <= 32:
@@ -603,7 +607,7 @@ def run_v3_command(
         raise ValueError("memory budget must be between 128 and 65536 MiB")
     manifest = V3Manifest.load(manifest_path)
     output = None
-    if operation == "finalize":
+    if operation in ("finalize", "rollback-tenants"):
         if output_dir is None:
             raise ValueError("finalize requires --output-dir")
         output = validate_output(output_dir, manifest.data)
@@ -618,6 +622,27 @@ def run_v3_command(
                     or source.is_relative_to(nas)
                 ):
                     raise ValueError("source and target NAS roots overlap")
+    if manifest.data.get("tenant_isolation"):
+        from .conversation_storage_tenants import run_tenants
+
+        return _run_migration_operation(
+            run_tenants(
+                operation,
+                manifest,
+                output,
+                workers=workers,
+                io_workers=io_workers,
+                memory_budget_mib=memory_budget_mib,
+                work_dir=work_dir,
+                apply=apply,
+                reviewed_discovery=reviewed_discovery,
+                rollback_inputs=rollback_inputs,
+            ),
+        )
+    if operation in ("retry-review", "rollback-tenants"):
+        raise ValueError(
+            "tenant management command requires a tenant-isolated manifest",
+        )
     return _run_migration_operation(
         _execute_spooled(
             operation,
@@ -658,7 +683,13 @@ def _inventory_preview(operation, manifest, inventory):
 
 
 def register_v3_commands(group):
-    for operation in ("preflight", "resume", "finalize"):
+    for operation in (
+        "preflight",
+        "resume",
+        "finalize",
+        "retry-review",
+        "rollback-tenants",
+    ):
 
         def command(manifest, _operation=operation, **options):
             try:
@@ -671,9 +702,20 @@ def register_v3_commands(group):
             type=click.Path(exists=True, dir_okay=False),
             required=True,
         )(command)
-        if operation in ("resume", "finalize"):
+        if operation in (
+            "resume",
+            "finalize",
+            "retry-review",
+            "rollback-tenants",
+        ):
             command = click.option("--apply", is_flag=True)(command)
-        if operation in ("preflight", "resume", "finalize"):
+        if operation in (
+            "preflight",
+            "resume",
+            "finalize",
+            "retry-review",
+            "rollback-tenants",
+        ):
             command = click.option(
                 "--io-workers",
                 type=click.IntRange(1, 32),
@@ -700,11 +742,23 @@ def register_v3_commands(group):
                     path_type=Path,
                 ),
             )(command)
-        if operation == "finalize":
+        if operation in ("finalize", "rollback-tenants"):
             command = click.option(
                 "--output-dir",
                 type=click.Path(file_okay=False),
                 required=True,
+            )(command)
+        if operation == "retry-review":
+            command = click.option(
+                "--reviewed-discovery",
+                required=True,
+                type=click.Path(exists=True, dir_okay=False),
+            )(command)
+        if operation == "rollback-tenants":
+            command = click.option(
+                "--rollback-inputs",
+                required=True,
+                type=click.Path(exists=True, dir_okay=False),
             )(command)
         group.command(operation)(command)
 
@@ -759,10 +813,14 @@ def run_v3_and_echo(operation, manifest_path, **options):
             try:
                 result = run_v3_command(operation, manifest_path, **options)
                 echo_migration_report(result)
+                if result.get("status") == "partial_success":
+                    raise click.exceptions.Exit(2)
                 if result.get("passed") is False or result.get("blockers"):
                     raise click.ClickException(
                         "conversation storage verification has blockers",
                     )
+            except click.exceptions.Exit:
+                raise
             except BaseException as error:
                 try:
                     progress.save_failure(manifest_path, error)

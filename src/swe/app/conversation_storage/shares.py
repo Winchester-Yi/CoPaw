@@ -365,7 +365,9 @@ class ShareStorage:
         scope=None,
         service_unit_id=None,
         retention_factory=RetentionStore,
+        admission=None,
     ):
+        self.admission = admission
         self.db = database
         self.bundles = bundles
         self.scope = scope
@@ -641,6 +643,8 @@ class ShareStorage:
                 if record is None:
                     missing_token = True
                     raise KeyError("Share not found")
+                if self.admission is not None:
+                    await self.admission.require(record.tenant_id)
                 if any(
                     value is None
                     for value in (

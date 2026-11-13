@@ -19,6 +19,10 @@ class MigrationCapacityError(ValueError):
     """The run cannot fit a record within its declared resource limits."""
 
 
+class MigrationDiskCapacityError(MigrationCapacityError):
+    """The shared temporary disk budget is exhausted; stop the entire run."""
+
+
 class ByteBudget:
     """Reserve weighted in-flight bytes before allocating or submitting work."""
 
@@ -144,7 +148,9 @@ class InventorySpool:
             if type(index) is not int or index < 0 or index in self._records:
                 raise ValueError("inventory record index must be unique")
             if self._used + size > self._max_bytes:
-                raise MigrationCapacityError("inventory disk limit exceeded")
+                raise MigrationDiskCapacityError(
+                    "inventory disk limit exceeded",
+                )
             self._records[index] = None
             self._used += size
             if self._progress:

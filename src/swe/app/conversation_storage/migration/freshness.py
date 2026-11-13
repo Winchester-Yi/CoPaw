@@ -6,6 +6,11 @@ from pathlib import Path
 import stat
 
 
+def _walk_error(error):
+    # Incomplete scans can never prove source freshness, including legacy jobs.
+    raise error
+
+
 def tenant_key(service_unit_id, tenant_id):
     return service_unit_id + "\x00" + tenant_id
 
@@ -27,7 +32,11 @@ def changed_source(paths, cutoff_ns, *, checked=None, recursive=True):
             return root, root_details.st_mtime_ns
         candidates = [root]
         if recursive and root.is_dir():
-            for directory, names, files in os.walk(root, followlinks=False):
+            for directory, names, files in os.walk(
+                root,
+                followlinks=False,
+                onerror=_walk_error,
+            ):
                 names.sort()
                 files.sort()
                 candidates.extend(Path(directory) / name for name in names)

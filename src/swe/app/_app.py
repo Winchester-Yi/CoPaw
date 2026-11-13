@@ -1062,6 +1062,12 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
+from .conversation_storage.tenant_admission import (
+    TenantNotPublished,
+    tenant_maintenance_response,
+)
+
+app.add_exception_handler(TenantNotPublished, tenant_maintenance_response)
 app.state.runtime_diagnostic_manager = runtime_diagnostic_manager
 
 # Apply CORS middleware if CORS_ORIGINS is set

@@ -116,6 +116,19 @@ class ConversationRuntime:
         authority_validated=False,
     ):
         service_unit_bytes(service_unit_id)
+        self.admission = None
+        if document.get("version") == 3:
+            from .tenant_admission import TenantAdmission
+            from .runtime_ids import SharedIdDatabase
+
+            self.admission = TenantAdmission(database, document)
+            database = SharedIdDatabase(database, document["migration_id"])
+            document = {
+                "version": 2,
+                "service_unit_id": document["service_unit_id"],
+                "nas_root": document["nas_root"],
+                "workspaces": [],
+            }
         if document.get("version") != 2 or set(document) - {
             "migration_authority",
         } != {
@@ -131,6 +144,7 @@ class ConversationRuntime:
         self.database = database
         self.nas_root = existing_root(document["nas_root"])
         self.cursor_secret = cursor_secret
+        self._admitted_tenants = set()
         self.mappings = {}
         self._workspaces = {}
         scopes = set()
@@ -145,15 +159,32 @@ class ConversationRuntime:
                 raise ValueError("duplicate installed workspace identity")
             self.mappings[root] = scope
             scopes.add(scope)
-        if not self.mappings and not (
-            authority_validated and document.get("migration_authority")
+        if (
+            not self.mappings
+            and self.admission is None
+            and not (
+                authority_validated and document.get("migration_authority")
+            )
         ):
             raise ValueError("conversation scope manifest has no workspaces")
         self.shares = ShareStorage(
             database,
             BundleStore(self.nas_root),
             service_unit_id=service_unit_id,
+            admission=self.admission,
         )
+
+    async def admit(self, tenant_id):
+        if self.admission is None:
+            return
+        mappings = await self.admission.require(tenant_id)
+        self._admitted_tenants.add(tenant_id)
+        for item in mappings:
+            root = existing_root(item["root"])
+            scope = WorkspaceScope.from_values(item["scope"])
+            if root in self.mappings and self.mappings[root] != scope:
+                raise ValueError("tenant workspace binding changed")
+            self.mappings[root] = scope
 
     def for_workspace(self, workspace):
         root = existing_root(workspace.workspace_dir)
@@ -163,6 +194,13 @@ class ConversationRuntime:
             scope,
             service_unit_id=self.service_unit_id,
         )
+        if (
+            self.admission is not None
+            and resolved.tenant_id not in self._admitted_tenants
+        ):
+            from .tenant_admission import TenantNotPublished
+
+            raise TenantNotPublished()
         if scope is None:
             require_empty_conversation(root)
             if resolved in self.mappings.values():
@@ -180,6 +218,7 @@ class ConversationRuntime:
                 root,
                 cursor_secret=self.cursor_secret,
                 nas_root=self.nas_root,
+                admission=self.admission,
             )
         return self._workspaces[root]
 
@@ -202,6 +241,7 @@ class ConversationRuntime:
             root,
             cursor_secret=self.cursor_secret,
             nas_root=self.nas_root,
+            partial_schema=self.admission is not None,
         ).verify_schema()
 
 
@@ -224,7 +264,17 @@ async def configure_runtime(database):
     service_unit_id = service_unit_from_env()
     from .migration.authority import validate_authority
 
-    authority = await validate_authority(database, document)
+    if document.get("version") == 3:
+        from .tenant_admission import TenantAdmission
+
+        from .migration.preflight import check_tenant_schema
+
+        identity = await database.fetch_one("SELECT DATABASE() AS schema_name")
+        await check_tenant_schema(database, identity["schema_name"])
+        await TenantAdmission(database, document).validate()
+        authority = None
+    else:
+        authority = await validate_authority(database, document)
     candidate = ConversationRuntime(
         database,
         document,
@@ -256,3 +306,18 @@ def runtime_shares():
     if _runtime is None:
         raise RuntimeError("conversation database authority is not ready")
     return _runtime.shares
+
+
+async def require_tenant_published(tenant_id):
+    """Call before tenant initialization; logical identity comes from trusted scope."""
+    if mysql_authority():
+        if _runtime is None:
+            raise RuntimeError("conversation database authority is not ready")
+        if _runtime.admission is not None:
+            from ...config.context import decode_scope_id
+
+            try:
+                tenant_id, _source = decode_scope_id(tenant_id)
+            except ValueError:
+                pass
+            await _runtime.admit(tenant_id)

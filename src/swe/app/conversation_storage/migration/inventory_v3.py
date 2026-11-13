@@ -12,6 +12,7 @@ from .freshness import changed_source, tenant_key
 from .inventory import WorkspaceMapping, _workspace
 from .source_inputs import safe_input_entries, workspace_entries
 from .manifest import SourceBoundary
+from .failure_scope import isolated_inventory, raise_shared_failure
 
 
 def _source_change(
@@ -168,16 +169,7 @@ def _inventory_native_files(mapping, report, index, position, files):
             )
 
 
-def inventory_discovery(data, *, workspace_offset=0):
-    """Parse source semantics without manufacturing a frozen source boundary."""
-    if (
-        data.get("fingerprints")
-        and fingerprints(
-            data["services"],
-        )
-        != data["fingerprints"]
-    ):
-        raise ValueError("source changed since discovery freeze")
+def _workspace_mappings(data):
     mappings = []
     for item in data["workspaces"]:
         paths = {
@@ -201,6 +193,21 @@ def inventory_discovery(data, *, workspace_offset=0):
                 dialog_dir=item.get("dialog_dir", "dialog"),
             ),
         )
+    return mappings
+
+
+@isolated_inventory
+def inventory_discovery(data, *, workspace_offset=0):
+    """Parse source semantics without manufacturing a frozen source boundary."""
+    if (
+        data.get("fingerprints")
+        and fingerprints(
+            data["services"],
+        )
+        != data["fingerprints"]
+    ):
+        raise ValueError("source changed since discovery freeze")
+    mappings = _workspace_mappings(data)
     report = {
         "version": 2,
         "workspaces": [],
@@ -251,7 +258,8 @@ def inventory_discovery(data, *, workspace_offset=0):
         elif registry.exists():
             try:
                 raw = load_metadata_json(registry.read_bytes())
-            except (OSError, ValueError, UnicodeError):
+            except (OSError, ValueError, UnicodeError) as error:
+                raise_shared_failure(error)
                 raw = None
             required = {
                 "id",

@@ -15,6 +15,12 @@ from ..chat_mutations import load_metadata_json
 from ..identity import WorkspaceScope, service_unit_bytes
 from .legacy import safe_files
 from .v3_manifest import V3Manifest
+from .failure_scope import (
+    config_candidates,
+    isolated_discovery,
+    raise_shared_failure,
+    source_walk_error,
+)
 
 SHARE_FIELDS = (
     "token",
@@ -112,6 +118,7 @@ def fingerprints(services):
 
 
 def _block(report, code, position, error):
+    raise_shared_failure(error)
     report["blockers"].append(
         {"code": code, "position": position, "detail": str(error)},
     )
@@ -201,8 +208,7 @@ def _workspace_path(value, config_path, service):
 
 def _profiles(service, report):
     workspaces = []
-    configs = [Path(service["config_root"]) / "config.json"]
-    configs.extend(sorted(Path(service["config_root"]).glob("*/config.json")))
+    configs = config_candidates(service["config_root"])
     for config in configs:
         if config.is_symlink():
             _block(
@@ -349,6 +355,7 @@ def _coverage(service, known, report, overrides):
     for directory, names, files in os.walk(
         service["source_root"],
         followlinks=False,
+        onerror=source_walk_error,
     ):
         path = Path(directory)
         if path in known:
@@ -543,12 +550,14 @@ def _unique_workspaces(report):
             )
 
 
+@isolated_discovery
 def discover_services(
     services,
     *,
     shares=(),
     overrides=(),
     semantic_validator=None,
+    tenant_isolation=False,
 ):
     """Return complete discovery evidence without opening a DB or modifying inputs."""
     report = {
@@ -562,6 +571,15 @@ def discover_services(
         "ready": False,
         "overrides": deepcopy(list(overrides)),
     }
+    if tenant_isolation:
+        report.update(
+            tenant_isolation=True,
+            declared_services=deepcopy(list(services)),
+            source_shares=[
+                {key: _json_time(value) for key, value in row.items()}
+                for row in shares
+            ],
+        )
     for item in services:
         try:
             report["services"].append(_service(item))
@@ -619,7 +637,11 @@ def discover_services(
         key=lambda item: item["position"].encode("utf-8"),
     )
     _shares(report["services"], shares, report)
-    if not report["blockers"]:
+    if tenant_isolation:
+        from .tenant_discovery import isolate_discovery
+
+        isolate_discovery(report, shares, semantic_validator)
+    elif not report["blockers"]:
         from .inventory_v3 import inventory_discovery
 
         semantic = (semantic_validator or inventory_discovery)(report)
@@ -646,13 +668,16 @@ def freeze_discovery(
     semantic_validator=None,
 ):
     """Revalidate discovery and atomically save a v3 manifest outside the source."""
-    if not report.get("ready") or report.get("blockers"):
+    if (not report.get("ready") or report.get("blockers")) and not report.get(
+        "tenant_isolation",
+    ):
         raise ValueError("discovery contains blockers")
     current = discover_services(
-        report["services"],
-        shares=report["shares"],
+        report.get("declared_services", report["services"]),
+        shares=report.get("source_shares", report["shares"]),
         overrides=report.get("overrides", ()),
         semantic_validator=semantic_validator,
+        tenant_isolation=report.get("tenant_isolation", False),
     )
     if current["fingerprints"] != report["fingerprints"]:
         raise ValueError("source changed since discovery")

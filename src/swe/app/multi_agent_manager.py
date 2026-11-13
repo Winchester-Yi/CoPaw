@@ -177,6 +177,9 @@ class MultiAgentManager:
         Raises:
             ValueError: If agent ID not found in configuration
         """
+        from .conversation_storage.runtime import require_tenant_published
+
+        await require_tenant_published(tenant_id or "default")
         started_at = time.perf_counter()
         cache_key = self._cache_key(agent_id, tenant_id)
         async with self._lock:

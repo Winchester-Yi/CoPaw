@@ -40,7 +40,34 @@ class V3Manifest(MigrationManifest):
             raise ValueError("unique explicit migration services are required")
         for name in names:
             service_unit_bytes(name)
+        if (
+            "tenant_isolation" in self.data
+            and type(self.data["tenant_isolation"]) is not bool
+        ):
+            raise ValueError("tenant isolation must be an explicit boolean")
+        tenant_scopes = set()
+        if self.data.get("tenant_isolation"):
+            tenants = self.data.get("tenants")
+            if not isinstance(tenants, list):
+                raise ValueError("tenant isolation requires frozen tenants")
+            for tenant in tenants:
+                scope = WorkspaceScope(
+                    tenant["tenant_id"],
+                    "",
+                    "",
+                    service_unit_id=tenant["service_unit_id"],
+                )
+                key = (scope.service_unit_id, scope.tenant_id)
+                if key in tenant_scopes or scope.service_unit_id not in names:
+                    raise ValueError("duplicate or undeclared frozen tenant")
+                tenant_scopes.add(key)
         for item in self.data["workspaces"]:
+            if (
+                self.data.get("tenant_isolation")
+                and (item["service_unit_id"], item["tenant_id"])
+                not in tenant_scopes
+            ):
+                raise ValueError("workspace tenant is not declared")
             if item["service_unit_id"] not in names:
                 raise ValueError("workspace service is not declared")
             WorkspaceScope(
@@ -141,7 +168,17 @@ class V3Manifest(MigrationManifest):
 
     def _refresh(self):
         current = self.load(self.path)
-        for key in ("services", "fingerprints", "shares", "discovery_version"):
+        for key in (
+            "services",
+            "fingerprints",
+            "shares",
+            "discovery_version",
+            "tenant_isolation",
+            "tenants",
+            "source_shares",
+            "declared_services",
+            "tenant_review_revision",
+        ):
             if current.data.get(key) != self.data.get(key):
                 raise ValueError("frozen source discovery binding changed")
         current_timestamps = current.data.get("tenant_sync_started_at_ns", {})

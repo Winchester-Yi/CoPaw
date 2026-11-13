@@ -27,6 +27,8 @@ from .verify_parallel import (
 
 from .verify_parallel import verify_auxiliary_bodies
 
+from .failure_scope import isolated_verification, raise_shared_failure
+
 VERIFY_ERRORS = (
     ValueError,
     KeyError,
@@ -127,6 +129,7 @@ async def _payloads(
     return result
 
 
+@isolated_verification
 async def verify_import(
     database,
     bundles,
@@ -193,6 +196,7 @@ async def verify_import(
             SourceBoundary(**manifest.data["source_boundary"]),
         )
     except VERIFY_ERRORS as error:
+        raise_shared_failure(error)
         report["blockers"].append(
             {"position": "migration", "detail": str(error)},
         )
@@ -455,6 +459,7 @@ async def _checked(report, position, check):
         await check
         report["checked"].append(position)
     except VERIFY_ERRORS as error:
+        raise_shared_failure(error)
         report["blockers"].append({"position": position, "detail": str(error)})
 
 

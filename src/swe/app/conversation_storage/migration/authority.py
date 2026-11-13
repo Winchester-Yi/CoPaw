@@ -152,6 +152,28 @@ async def validate_authority(database, document):
 
 async def backup_authority(database, scope):
     """Return the receipt's service-local workspace proof for one scope backup."""
+    from ..tenant_admission import partial_admission
+
+    partial = await partial_admission(database, scope)
+    if partial is not None:
+        workspaces = await partial.require(scope.tenant_id)
+        selected = [
+            item for item in workspaces if item["scope"] == list(scope.values)
+        ]
+        if not selected:
+            raise IntegrityError(
+                "backup scope is outside tenant publication proof",
+            )
+        return {
+            "version": 1,
+            "migration_id": partial.document["migration_id"],
+            "services": {
+                scope.service_unit_id: {
+                    "nas_root": partial.document["nas_root"],
+                    "workspaces": selected,
+                },
+            },
+        }
     tables = await database.fetch_one(
         "SELECT COUNT(*) AS n FROM information_schema.TABLES "
         "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "
@@ -214,6 +236,10 @@ async def restore_authorities(
     workspace_roots=None,
 ):
     """Install a new non-resumable ready proof for the exact restored scopes."""
+    from ..tenant_admission import partial_jobs
+
+    if await partial_jobs(database):
+        raise IntegrityError("restore target has an active partial migration")
     grouped = {}
     source_ids = set()
     for receipt in receipts:

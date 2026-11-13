@@ -192,6 +192,14 @@ class GarbageCollector:
     async def _protections(self, row):
         identity = row["id"]
         reasons = []
+        from .tenant_admission import partial_admission, TenantNotPublished
+
+        partial = await partial_admission(self.db, self.scope)
+        if partial is not None:
+            try:
+                await partial.require(self.scope.tenant_id)
+            except TenantNotPublished:
+                reasons.append("migration_tenant_unpublished")
         if row["state"] not in ("committed", "aborted"):
             reasons.append("operation_not_terminal")
         if row["retained_history"]:

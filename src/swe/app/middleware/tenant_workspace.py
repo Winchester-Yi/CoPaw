@@ -35,6 +35,10 @@ from swe.app.middleware.provider_models_timing import (
     log_provider_models_middleware_error,
 )
 from swe.app.identity_resolver import resolve_user_identity
+from swe.app.conversation_storage.tenant_admission import (
+    TenantNotPublished,
+    tenant_maintenance_response,
+)
 
 if TYPE_CHECKING:
     from swe.app.workspace.bootstrap_state import (
@@ -236,6 +240,8 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 )
             return response
 
+        except TenantNotPublished as exc:
+            return await tenant_maintenance_response(request, exc)
         except _TenantBootstrapUnavailable as exc:
             return JSONResponse(
                 status_code=503,

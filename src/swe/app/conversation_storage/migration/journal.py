@@ -45,9 +45,11 @@ class MigrationJournal:
         self.migration_id = manifest.migration_id.encode()
         self.persist_updates = True
         self._known_scopes = None
+        self.active_tenant = None
+        self.frozen_bindings_data = None
 
     def _bindings(self):
-        data = self.manifest.data
+        data = self.frozen_bindings_data or self.manifest.data
         if data.get("target") is None:
             raise ValueError(
                 "migration target must be bound before preparing SQL journal",
@@ -62,6 +64,11 @@ class MigrationJournal:
                 "tenant_sync_started_at_ns",
                 "shares",
                 "discovery_version",
+                "tenant_isolation",
+                "tenant_review_revision",
+                "tenants",
+                "source_shares",
+                "declared_services",
             )
             if key in data
         }
@@ -72,6 +79,7 @@ class MigrationJournal:
 
     async def prepare(self):
         target, source = self._bindings()
+        await self._require_unpublished_tenant()
         async with self.db.transaction():
             jobs = await self.db.fetch_all(
                 "SELECT * FROM " + JOBS + " FOR UPDATE",
@@ -116,15 +124,62 @@ class MigrationJournal:
         await self.validate_ownership()
         return current
 
+    async def _require_unpublished_tenant(self):
+        if not self.manifest.data.get("tenant_isolation"):
+            return
+        if self.active_tenant is None:
+            raise ValueError("tenant isolation requires an active tenant")
+        from .tenant_state import TenantState
+
+        row = await TenantState(self.db, self.manifest.migration_id).get(
+            *self.active_tenant,
+        )
+        if row is None or row["state"] == "published":
+            raise ValueError("unknown or published tenant cannot migrate")
+
+    def _tenant_filter(self, alias=""):
+        if not self.manifest.data.get("tenant_isolation"):
+            return "", ()
+        if self.active_tenant is None:
+            raise ValueError("tenant isolation requires an active tenant")
+        prefix = alias + "." if alias else ""
+        return (
+            " AND "
+            + prefix
+            + "service_unit_key=%s AND "
+            + prefix
+            + "tenant_key=%s",
+            tuple(value.encode() for value in self.active_tenant),
+        )
+
     async def validate_ownership(self):
+        clause, scope_values = self._tenant_filter("b")
         for kind, table in ENTITY_TABLES.items():
+            owned_clause = clause
+            if scope_values and kind in ("turn", "message"):
+                orphan = await self.db.fetch_one(
+                    "SELECT b.id FROM "
+                    + table
+                    + " b LEFT JOIN swe_conversation_sessions ts"
+                    + " ON ts.id=b.session_id AND ts.service_unit_key=b.service_unit_key"
+                    + " WHERE ts.id IS NULL LIMIT 1",
+                )
+                if orphan:
+                    raise ValueError("unattributable orphan conversation row")
+                owned_clause = (
+                    " AND EXISTS (SELECT 1 FROM swe_conversation_sessions ts"
+                    " WHERE ts.id=b.session_id AND ts.service_unit_key=b.service_unit_key"
+                    " AND ts.service_unit_key=%s AND ts.tenant_key=%s)"
+                )
             unknown = await self.db.fetch_one(
                 "SELECT b.id FROM "
                 + table
                 + " b LEFT JOIN "
                 + ENTRIES
-                + " e ON e.migration_id=%s AND e.entry_kind=%s AND e.target_id=b.id AND e.target_id=e.id WHERE e.id IS NULL LIMIT 1",
-                (self.migration_id, kind.encode()),
+                + " e ON e.migration_id=%s AND e.entry_kind=%s AND e.target_id=b.id AND e.target_id=e.id WHERE e.id IS NULL"
+                + owned_clause
+                + " LIMIT 1",
+                (self.migration_id, kind.encode(), *scope_values),
             )
             if unknown:
                 raise ValueError(
@@ -686,16 +741,25 @@ class MigrationJournal:
 
     async def _retention_rows(self):
         last_id = None
+        clause, scope_values = self._tenant_filter()
         while True:
             if last_id is None:
                 rows = await self.db.fetch_all(
-                    "SELECT * FROM swe_conversation_retentions ORDER BY id LIMIT %s",
-                    (HYDRATE_PAGE_SIZE,),
+                    (
+                        "SELECT * FROM swe_conversation_retentions WHERE 1=1"
+                        if clause
+                        else "SELECT * FROM swe_conversation_retentions"
+                    )
+                    + clause
+                    + " ORDER BY id LIMIT %s",
+                    (*scope_values, HYDRATE_PAGE_SIZE),
                 )
             else:
                 rows = await self.db.fetch_all(
-                    "SELECT * FROM swe_conversation_retentions WHERE id>%s ORDER BY id LIMIT %s",
-                    (last_id, HYDRATE_PAGE_SIZE),
+                    "SELECT * FROM swe_conversation_retentions WHERE id>%s"
+                    + clause
+                    + " ORDER BY id LIMIT %s",
+                    (last_id, *scope_values, HYDRATE_PAGE_SIZE),
                 )
             for row in rows:
                 yield row
@@ -708,6 +772,20 @@ class MigrationJournal:
             await self.record_retention(row)
 
     async def mark_state(self, state, verification=None):
+        if self.manifest.data.get("tenant_isolation"):
+            from .tenant_state import TenantState
+
+            if self.active_tenant is None:
+                raise ValueError("tenant isolation requires an active tenant")
+            states = {"blocked": "failed", "ready": "published"}
+            return await TenantState(
+                self.db,
+                self.manifest.migration_id,
+            ).transition(
+                *self.active_tenant,
+                states.get(state, state),
+                verification,
+            )
         async with self.db.transaction():
             row = await self.db.fetch_one(
                 "SELECT * FROM " + JOBS + " WHERE migration_id=%s FOR UPDATE",

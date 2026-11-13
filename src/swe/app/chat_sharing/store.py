@@ -43,7 +43,7 @@ class ChatShareStore:
             """,
         )
 
-    async def verify_locator_schema(self) -> None:
+    async def verify_locator_schema(self, *, partial=False) -> None:
         """New authority mode validates installed schema and never performs DDL."""
         columns = await self.db.fetch_all(
             "SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,GENERATION_EXPRESSION,CHARACTER_SET_NAME,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
@@ -84,9 +84,21 @@ class ChatShareStore:
             )
         else:
             actual.pop("service_unit_key", None)
+        if partial and self.service_unit_key is not None:
+            service_column = actual.get("service_unit_key")
+            if service_column and service_column[1] == "YES":
+                required["service_unit_key"] = (
+                    "varbinary(256)",
+                    "YES",
+                    None,
+                    "",
+                    "",
+                    None,
+                    None,
+                )
         if actual != required:
             raise RuntimeError("Chat share locator schema is not installed")
-        if await self.db.fetch_one(
+        if not partial and await self.db.fetch_one(
             f"SELECT token FROM {_TABLE} WHERE publication_id IS NULL OR byte_offset IS NULL OR byte_length IS NULL"
             + (
                 " OR service_unit_key IS NULL OR OCTET_LENGTH(service_unit_key)=0"

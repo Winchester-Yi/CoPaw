@@ -9,6 +9,7 @@ import secrets
 
 from anyio import fail_after
 
+from .runtime_ids import runtime_identity
 from .bundle import BundleBlock, BundleStore
 from .errors import (
     ConflictError,
@@ -240,6 +241,9 @@ class ExecutionStore:
             "generation": generation,
             "state": "reserved",
         }
+        identity_ticket = await runtime_identity(self.db)
+        if identity_ticket is not None:
+            values = {"id": identity_ticket, **values}
         turn_id = await self.db.insert(
             f"INSERT INTO swe_conversation_turns ({','.join(values)}) VALUES ({','.join(['%s'] * len(values))})",
             tuple(values.values()),

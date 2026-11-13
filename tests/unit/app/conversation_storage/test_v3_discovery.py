@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+from pathlib import Path
 
 import pytest
 
@@ -104,10 +105,7 @@ def test_new_discovery_avoids_fingerprints_and_keeps_service_authority(
     assert inventory_v3(manifest)["ready"]
     assert "tenant_sync_started_at_ns" not in manifest.data
     assert inventory_v3(manifest, begin_sync=True)["ready"]
-    registry = (
-        __import__("pathlib").Path(report["workspaces"][0]["root"])
-        / "chats.json"
-    )
+    registry = Path(report["workspaces"][0]["root"]) / "chats.json"
     cutoff = manifest.data["tenant_sync_started_at_ns"]["SERVICE\x00default"]
     registry.chmod(0o644)
     registry.write_text("{changed")
@@ -131,7 +129,7 @@ def test_unregistered_workspace_is_blocker(tmp_path):
     )
 
     service = fixture_service(tmp_path)
-    root = __import__("pathlib").Path(service["source_root"])
+    root = Path(service["source_root"])
     root.chmod(0o755)
     extra = root / "orphan"
     extra.mkdir()
@@ -645,3 +643,91 @@ def test_symlink_config_is_rejected_before_any_metadata_read(
     report = discovery.discover_services([service])
     assert not report["ready"]
     assert any(item["code"] == "source_invalid" for item in report["blockers"])
+
+
+def test_tenant_isolation_preserves_failed_config_and_parses_healthy(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+    source = Path(service["source_root"])
+    source.chmod(0o755)
+    broken = source / "broken"
+    broken.mkdir()
+    (broken / "config.json").write_text("{invalid")
+    service["tenant_sources"] = {"broken": ["SRC"]}
+    report = discover_services([service], tenant_isolation=True)
+    assert not report["ready"]
+    assert report["status"] == "partial_success"
+    states = {t["tenant_id"]: t["state"] for t in report["tenants"]}
+    assert states == {"broken": "failed", "default": "discovered"}
+    assert report["workspaces"][0]["counts"] == {"sessions": 0, "chats": 0}
+    assert report["declared_services"] == [service]
+
+
+def test_tenant_isolation_rejects_mutable_original_inputs(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+    service["original_root"] = service["source_root"]
+    with pytest.raises(ValueError, match="frozen inputs separate"):
+        discover_services([service], tenant_isolation=True)
+
+
+def test_tenant_isolation_does_not_swallow_shared_io_failure(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+    )
+
+    service = fixture_service(tmp_path)
+
+    def shared_failure(_report):
+        raise OSError(5, "storage unavailable")
+
+    with pytest.raises(OSError, match="storage unavailable"):
+        discover_services(
+            [service],
+            tenant_isolation=True,
+            semantic_validator=shared_failure,
+        )
+
+
+def test_partial_freeze_keeps_failed_tenant_evidence(tmp_path):
+    from swe.app.conversation_storage.migration.discovery import (
+        discover_services,
+        freeze_discovery,
+    )
+
+    service = fixture_service(tmp_path)
+    source = Path(service["source_root"])
+    source.chmod(0o755)
+    broken = source / "broken"
+    broken.mkdir()
+    (broken / "config.json").write_text("{invalid")
+    service["tenant_sources"] = {"broken": ["SRC"]}
+    report = discover_services([service], tenant_isolation=True)
+    boundary = SourceBoundary(
+        "snapshot",
+        "2026-11-02T00:00:00Z",
+        "old@sha256:" + "a" * 64,
+        ("stop", "readonly"),
+    )
+    manifest = freeze_discovery(
+        report,
+        tmp_path / "partial.json",
+        boundary,
+        "business",
+    )
+    assert manifest.data["tenant_isolation"] is True
+    assert manifest.data["tenants"] == report["tenants"]
+    (broken / "config.json").write_text('{"agents": {"profiles": {}}}')
+    with pytest.raises(ValueError, match="differs"):
+        freeze_discovery(
+            report,
+            tmp_path / "changed.json",
+            boundary,
+            "business",
+        )

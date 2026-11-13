@@ -9,6 +9,7 @@ operation unknown; they never imply rollback and never unlink final bundles.
 import asyncio
 from dataclasses import dataclass
 
+from .runtime_ids import runtime_identity
 from .bundle import BundleBlock, BundleStore
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
 from .identity import (
@@ -249,6 +250,9 @@ class PublicationStore(PublicationAssociations):
             "event_first": None,
             "event_last": None,
         }
+        identity_ticket = await runtime_identity(self.db)
+        if identity_ticket is not None:
+            fields = {"id": identity_ticket, **fields}
         columns = ",".join(fields)
         placeholders = ",".join(["%s"] * len(fields))
         await self.db.insert(

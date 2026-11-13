@@ -42,11 +42,18 @@ class WorkspaceConversationStorage:
         *,
         cursor_secret,
         nas_root=None,
+        admission=None,
+        partial_schema=False,
     ):
         if not isinstance(scope, WorkspaceScope):
             raise TypeError(
                 "conversation storage requires a trusted workspace scope",
             )
+        self.partial_schema = partial_schema or admission is not None
+        if admission is not None:
+            from .tenant_admission import TenantDatabase
+
+            database = TenantDatabase(database, admission, scope.tenant_id)
         root = Path(workspace_root).absolute()
         try:
             mode = root.lstat().st_mode
@@ -212,7 +219,9 @@ class WorkspaceConversationStorage:
             raise RuntimeError(
                 "Conversation metadata schema requires InnoDB base tables",
             )
-        await self.shares.store.verify_locator_schema()
+        await self.shares.store.verify_locator_schema(
+            partial=self.partial_schema,
+        )
 
 
 def existing_root(path):

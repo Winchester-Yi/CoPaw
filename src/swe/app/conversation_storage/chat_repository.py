@@ -7,6 +7,7 @@ import asyncio
 import json
 import secrets
 
+from .runtime_ids import runtime_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ..runner.expert_binding import (
     EXPERT_BINDING_META_KEY,
@@ -661,14 +662,20 @@ class MySQLChatRepository(BaseChatRepository):
         )
         async with self.db.transaction():
             await self.retentions.assert_writes_allowed()
+            ticket = await runtime_identity(self.db)
+            id_column = "id," if ticket is not None else ""
+            id_value = "%s," if ticket is not None else ""
             await self.db.insert(
                 "INSERT INTO swe_conversation_sessions "
-                "(service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,"
+                "("
+                + id_column
+                + "service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,"
                 "external_session_key,created_at,updated_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,"
+                "VALUES (" + id_value + "%s,%s,%s,%s,%s,%s,%s,"
                 "UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) "
                 "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
-                identity.sql_values,
+                ((ticket,) if ticket is not None else ())
+                + identity.sql_values,
             )
             return await self.db.fetch_one(
                 "SELECT * FROM swe_conversation_sessions WHERE "

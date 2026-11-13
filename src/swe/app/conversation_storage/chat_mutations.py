@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 import json
 
+from .runtime_ids import runtime_identity
 from .errors import ConflictError, IntegrityError
 from .identity import chat_key_bytes, identity_bytes
 
@@ -279,6 +280,10 @@ async def _create_chat(db, request, plan, locator, session, *, existing=None):
         utc_datetime(plan.created_at),
         utc_datetime(plan.updated_at),
     )
+    identity = await runtime_identity(db)
+    if identity is not None:
+        columns = ("id", *columns)
+        values = (identity, *values)
     chat_id = await db.insert(
         f"INSERT INTO swe_conversation_chats ({','.join(columns)}) VALUES ({','.join(['%s'] * len(columns))})",
         values,

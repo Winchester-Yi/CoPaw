@@ -66,6 +66,9 @@ def _source_files(mapping):
 
 
 def _block(report, code, position, error):
+    from .failure_scope import raise_shared_failure
+
+    raise_shared_failure(error)
     report["blockers"].append(
         {"code": code, "position": position, "detail": str(error)},
     )

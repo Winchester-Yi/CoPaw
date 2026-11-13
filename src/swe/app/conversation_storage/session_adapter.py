@@ -9,6 +9,7 @@ import asyncio
 import json
 import time
 
+from .runtime_ids import runtime_identity
 from .bundle import BundleBlock, BundleStore, new_operation_key
 from .chat_mutations import load_metadata_json
 from .errors import ConflictError, IntegrityError, StorageError, UnknownCommit
@@ -318,9 +319,16 @@ class MySQLSessionAdapter:
         )
 
     async def _ensure_session(self, identity):
+        ticket = await runtime_identity(self.db)
+        id_column = "id," if ticket is not None else ""
+        id_value = "%s," if ticket is not None else ""
         await self.db.insert(
-            "INSERT INTO swe_conversation_sessions (service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,external_session_key,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
-            identity.sql_values,
+            "INSERT INTO swe_conversation_sessions ("
+            + id_column
+            + "service_unit_key,tenant_key,source_key,agent_key,user_key,channel_key,external_session_key,created_at,updated_at) VALUES ("
+            + id_value
+            + "%s,%s,%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
+            ((ticket,) if ticket is not None else ()) + identity.sql_values,
         )
         return await self._row(identity, lock=True)
 

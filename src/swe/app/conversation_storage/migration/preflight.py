@@ -268,3 +268,62 @@ async def check_control_schema(database, schema, *, tables=None):
                 )
         if await _indexes(database, schema, table) != CONTROL_INDEXES[table]:
             raise ValueError("precreated migration indexes differ: " + table)
+
+
+TENANT_CONTROL_COLUMNS = {
+    "migration_id": ("varbinary(36)", "NO", ""),
+    "service_unit_key": ("varbinary(256)", "NO", ""),
+    "tenant_key": ("varbinary(256)", "NO", ""),
+    "state": ("varchar(24)", "NO", ""),
+    "evidence_text": ("longtext", "NO", ""),
+    "verification_text": ("longtext", "NO", ""),
+    "failure_text": ("longtext", "YES", ""),
+    "attempts": ("int unsigned", "NO", ""),
+    "updated_at": ("datetime(6)", "NO", ""),
+    "published_at": ("datetime(6)", "YES", ""),
+}
+
+
+async def check_tenant_schema(database, schema):
+    """Explicit opt-in contract; legacy control schemas remain supported."""
+    table = "swe_conversation_migration_tenants"
+    rows = await _columns(database, schema, table)
+    actual = {
+        row["COLUMN_NAME"]: (
+            row["COLUMN_TYPE"].lower(),
+            row["IS_NULLABLE"],
+            row["EXTRA"].lower(),
+        )
+        for row in rows
+    }
+    if actual != TENANT_CONTROL_COLUMNS:
+        raise ValueError("precreated tenant migration columns differ")
+    for row in rows:
+        kind = row["COLUMN_TYPE"].lower()
+        charset, collation = row["CHARACTER_SET_NAME"], row["COLLATION_NAME"]
+        if kind == "varchar(24)":
+            encoding = (charset, collation) == ("ascii", "ascii_bin")
+        elif kind == "longtext":
+            encoding = (charset, collation) == ("utf8mb4", "utf8mb4_bin")
+        else:
+            encoding = charset is None and collation is None
+        if (
+            row["COLUMN_DEFAULT"] is not None
+            or row["GENERATION_EXPRESSION"]
+            or not encoding
+        ):
+            raise ValueError("precreated tenant migration definition differs")
+    if await _indexes(database, schema, table) != {
+        "PRIMARY": (0, ("migration_id", "service_unit_key", "tenant_key")),
+    }:
+        raise ValueError("precreated tenant migration indexes differ")
+    info = await database.fetch_one(
+        "SELECT ENGINE,ROW_FORMAT FROM information_schema.TABLES WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s",
+        (schema, table),
+    )
+    if (
+        not info
+        or info["ENGINE"] != "InnoDB"
+        or info["ROW_FORMAT"].lower() != "dynamic"
+    ):
+        raise ValueError("tenant migration table requires InnoDB DYNAMIC")

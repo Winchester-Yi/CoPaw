@@ -856,13 +856,33 @@ class ConversationBackup:
                 )
             return snapshot
 
+    async def _check_capture_admission(self, rollback_authorization):
+        from .tenant_admission import partial_admission
+
+        partial = await partial_admission(self.db, self.scope)
+        if partial is not None:
+            if rollback_authorization is None:
+                await partial.require(self.scope.tenant_id)
+            else:
+                from .migration.tenant_rollback import (
+                    validate_backup_authorization,
+                )
+
+                await validate_backup_authorization(
+                    rollback_authorization,
+                    self.db,
+                    self.scope,
+                )
+
     async def capture(
         self,
         destination,
         *,
         backup_id=None,
         restore_verifier=None,
+        rollback_authorization=None,
     ):
+        await self._check_capture_admission(rollback_authorization)
         destination = _new_directory(destination)
         backup_id = backup_id or new_operation_key()
         snapshot_ref = str(destination)
@@ -918,7 +938,14 @@ class ConversationBackup:
         }
         from .migration.authority import backup_authority
 
-        authority = await backup_authority(self.db, self.scope)
+        if rollback_authorization is None:
+            authority = await backup_authority(self.db, self.scope)
+        else:
+            authority = None
+            document["rollback_authorization"] = {
+                "evidence_ref": rollback_authorization.evidence.current_config_review_ref,
+                "scope": list(self.scope.values),
+            }
         if authority is not None:
             document.update(version=3, migration_authority=authority)
         await asyncio.to_thread(
@@ -1282,6 +1309,10 @@ async def restore_backup(
 
     if not isinstance(evidence, RestoreEvidence):
         raise ValueError("restore requires explicit evidence")
+    from .tenant_admission import partial_jobs
+
+    if await partial_jobs(database):
+        raise IntegrityError("restore target has an active partial migration")
     documents, captured, sources = await asyncio.to_thread(
         load_restore_set,
         backup_path,

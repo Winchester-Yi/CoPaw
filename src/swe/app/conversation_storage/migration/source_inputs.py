@@ -11,10 +11,16 @@ from ..chat_mutations import load_metadata_json
 from .spool import MigrationCapacityError
 
 
+class SourceInputInvalid(ValueError):
+    """Unsafe or malformed tenant source input, distinct from shared failures."""
+
+
 def _relative(value):
     path = Path(value)
     if not path.parts or path.is_absolute() or ".." in path.parts:
-        raise ValueError("source path must be relative to trusted workspace")
+        raise SourceInputInvalid(
+            "source path must be relative to trusted workspace",
+        )
     return path
 
 
@@ -34,7 +40,9 @@ def safe_input_entries(
     """
     root = Path(root).absolute()
     if root.resolve(strict=True) != root:
-        raise ValueError("source root contains a symlink or is not canonical")
+        raise SourceInputInvalid(
+            "source root contains a symlink or is not canonical",
+        )
     found = {}
     total_file_bytes = 0
 
@@ -42,13 +50,15 @@ def safe_input_entries(
         nonlocal total_file_bytes
         details = path.lstat()
         if stat.S_ISLNK(details.st_mode):
-            raise ValueError(
+            raise SourceInputInvalid(
                 "source contains symlink; explicit regular-file snapshot required",
             )
         if not (
             stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)
         ):
-            raise ValueError("source contains unsupported filesystem object")
+            raise SourceInputInvalid(
+                "source contains unsupported filesystem object",
+            )
         if path not in found:
             if entry_limit is not None and len(found) >= entry_limit:
                 raise MigrationCapacityError(
@@ -75,7 +85,7 @@ def safe_input_entries(
         return details
 
     if not stat.S_ISDIR(inspect(root).st_mode):
-        raise ValueError("source root must be a directory")
+        raise SourceInputInvalid("source root must be a directory")
 
     walked = set()
 
@@ -137,7 +147,9 @@ def session_input_roots(
         entries = safe_input_entries(root, [relative], recursive=False)
         path = root / relative
         if path in entries and not path.is_file():
-            raise ValueError("Session override must name a regular file")
+            raise SourceInputInvalid(
+                "Session override must name a regular file",
+            )
         if (
             path not in entries
             or not path.is_file()
@@ -151,7 +163,7 @@ def session_input_roots(
                 not isinstance(generation, str)
                 or str(uuid.UUID(generation)) != generation
             ):
-                raise ValueError("Invalid session ledger generation")
+                raise SourceInputInvalid("Invalid session ledger generation")
             roots.append(relative.parent / ".turn-ledger" / generation)
     return tuple(roots)
 

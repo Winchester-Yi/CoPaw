@@ -3,6 +3,7 @@
 
 from dataclasses import asdict, dataclass, fields
 
+from .runtime_ids import runtime_identity
 from ...database.prepared import PreparedInsert
 from .chat_mutations import load_metadata_json, utc_datetime
 from .errors import ConflictError, IntegrityError
@@ -268,9 +269,24 @@ async def install_messages(
     online = session["history_high"]
     archived = chat["history_high"] if chat is not None else 0
 
+    tickets = []
+    if messages:
+        first = await runtime_identity(db)
+        if first is not None:
+            tickets = [first] + [
+                await runtime_identity(db) for _ in range(len(messages) - 1)
+            ]
+    shared_ids = bool(tickets)
+    message_insert = MESSAGE_INSERT
+    if shared_ids:
+        message_insert = PreparedInsert(
+            f"INSERT INTO swe_conversation_messages (id,{','.join(MESSAGE_FIELDS)}) VALUES ",
+            "(" + ",".join(["%s"] * (len(MESSAGE_FIELDS) + 1)) + ")",
+        )
+
     def rows():
         nonlocal online, archived
-        for message in messages:
+        for ordinal, message in enumerate(messages):
             if (
                 message.layer != "archive"
                 and message.context_epoch != session.get("context_epoch", 0)
@@ -292,15 +308,16 @@ async def install_messages(
                 order,
                 sources=sources,
             )
-            yield tuple(values[field] for field in MESSAGE_FIELDS)
+            row = tuple(values[field] for field in MESSAGE_FIELDS)
+            yield (tickets[ordinal], *row) if shared_ids else row
 
     if len(messages) == 1:
         await db.insert(
-            MESSAGE_INSERT.prefix + MESSAGE_INSERT.row_template,
+            message_insert.prefix + message_insert.row_template,
             next(rows()),
         )
     elif messages:
-        await db.insert_prepared(MESSAGE_INSERT, rows())
+        await db.insert_prepared(message_insert, rows())
     if online != session["history_high"]:
         await db.execute(
             "UPDATE swe_conversation_sessions SET history_high=%s WHERE id=%s",

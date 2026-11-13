@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 import tempfile
 import shutil
 from pathlib import Path
@@ -181,6 +182,37 @@ async def _semantic_spooled(
         }
 
 
+def _write_failed_tenants(destination, report):
+    """Write account-only diagnostics; raw paths and parser errors stay private."""
+    path = destination.with_suffix(".failed-tenants.json")
+    reasons = {
+        "workspace_identity_invalid": "账号工作区配置不完整",
+        "session_invalid": "会话数据不完整",
+        "registry_invalid": "会话目录数据不完整",
+        "share_invalid": "账号分享数据或归属异常",
+        "source_modified_after_sync_started": "冻结会话输入发生变化",
+        "tenant_input_invalid": "账号会话输入不符合迁移限制",
+    }
+    failures = []
+    for tenant in report["tenants"]:
+        if tenant["state"] != "failed":
+            continue
+        for code in sorted({item["code"] for item in tenant["blockers"]}):
+            failures.append(
+                {
+                    "service_unit_id": tenant["service_unit_id"],
+                    "tenant_id": tenant["tenant_id"],
+                    "stage": "discover",
+                    "code": code,
+                    "reason": reasons.get(code, "账号迁移校验未通过"),
+                },
+            )
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(failures, handle, ensure_ascii=False, sort_keys=True)
+    return str(path)
+
+
 def register_discovery_commands(group):
     """Attach discover/freeze without initializing business services."""
 
@@ -197,11 +229,17 @@ def register_discovery_commands(group):
         type=click.Path(exists=True, dir_okay=False),
     )
     @click.option("--overrides", type=click.Path(exists=True, dir_okay=False))
+    @click.option(
+        "--tenant-isolation",
+        is_flag=True,
+        help="Isolate tenant data failures; requires independent frozen inputs.",
+    )
     def discover_command(
         services,
         output,
         shares_file,
         overrides,
+        tenant_isolation,
         **resources,
     ):
         try:
@@ -220,6 +258,7 @@ def register_discovery_commands(group):
                 shares=shares,
                 overrides=exceptions,
                 semantic_validator=_semantic_validator(**resources),
+                tenant_isolation=tenant_isolation,
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
             # Existing evidence is never silently overwritten.
@@ -231,15 +270,38 @@ def register_discovery_commands(group):
                     sort_keys=True,
                     allow_nan=False,
                 )
+            failures_path = (
+                _write_failed_tenants(destination, report)
+                if tenant_isolation
+                else None
+            )
             click.echo(
                 json.dumps(
                     {
                         "report": str(destination),
                         "ready": report["ready"],
                         "blockers": len(report["blockers"]),
+                        **(
+                            {
+                                "status": report["status"],
+                                "failed_tenants_report": failures_path,
+                                "successful_tenants": sum(
+                                    t["state"] == "discovered"
+                                    for t in report["tenants"]
+                                ),
+                                "failed_tenants": sum(
+                                    t["state"] == "failed"
+                                    for t in report["tenants"]
+                                ),
+                            }
+                            if tenant_isolation
+                            else {}
+                        ),
                     },
                 ),
             )
+            if not report["ready"] and tenant_isolation:
+                raise click.exceptions.Exit(2)
             if not report["ready"]:
                 raise click.ClickException(
                     "discovery contains blockers; inspect the report",
