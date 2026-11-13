@@ -2103,6 +2103,10 @@ _Avoid_: request routing affinity, automatic failover execution, permission to r
 The complete, internally consistent final legacy conversation state captured after legacy writers have drained and stopped. It includes every conversation change committed before that boundary and remains the source of truth for migration validation.
 _Avoid_: live working directory copy, earlier rehearsal snapshot, ordinary backup recovery point
 
+**Conversation Tenant Publication**:
+The admission of one service's tenant to the new conversation authority after all of that tenant's sources, Agents, workspaces and permanent shares have completed migration and validation. Other tenants may remain unavailable without reversing an already completed publication.
+_Avoid_: partial Agent migration, whole-service readiness, fallback to legacy
+
 **Conversation Rollback Export**:
 The complete conversation state prepared for the fixed pre-cutover application version, including changes committed after cutover. It is distinct from restoring the original Conversation Migration Snapshot.
 _Avoid_: image-only rollback, pre-cutover snapshot restore, older-version compatibility archive
