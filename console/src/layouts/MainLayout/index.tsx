@@ -52,12 +52,14 @@ import MyMCPPage from "../../pages/MyMCP";
 import WPlusSopWorkspace from "../../pages/WPlusSopWorkspace";
 import ExpertsPage from "../../pages/Experts";
 import ExpertCommunityPage from "../../pages/ExpertCommunity";
+import AgentObservability from "../../pages/AgentObservability";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
 
 const { Content } = Layout;
 
 const pathToKey: Record<string, string> = {
+  "/agent-observability/runs": "agent-observability",
   "/chat": "chat",
   "/channels": "channels",
   "/sessions": "sessions",
@@ -112,7 +114,9 @@ const pathToKey: Record<string, string> = {
 export default function MainLayout() {
   const location = useLocation();
   const currentPath = location.pathname;
-  const selectedKey = pathToKey[currentPath] || "chat";
+  const selectedKey = currentPath.startsWith("/agent-observability/runs/")
+    ? "agent-observability"
+    : pathToKey[currentPath] || "chat";
 
   // 动态渲染模版上下文
   const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
@@ -200,6 +204,14 @@ export default function MainLayout() {
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/environments" element={<EnvironmentsPage />} />
               <Route path="/agent-config" element={<AgentConfigPage />} />
+              <Route
+                path="/agent-observability/runs"
+                element={<AgentObservability />}
+              />
+              <Route
+                path="/agent-observability/runs/:runId"
+                element={<AgentObservability />}
+              />
               <Route
                 path="/system-config-page"
                 element={<SystemConfigPage />}

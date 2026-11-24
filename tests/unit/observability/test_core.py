@@ -438,10 +438,278 @@ async def test_assistant_evidence_does_not_guess_reused_response_id(
     events = [json.loads(line) for line in stream.getvalue().splitlines()]
     assert not any(
         event.get("event_type") == "evidence.linked"
-        and event.get("content_type") == "assistant_answer"
+        and event.get("content_type") == "tool_output"
         for event in events
     )
     assert "private answer" not in stream.getvalue()
+
+
+def test_pending_tool_evidence_binds_the_concrete_message(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import (
+        bind_tool_span,
+        mark_pending_message_evidence,
+    )
+    from swe.observability.outbox import verify_event
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "key1")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: True,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    message = Msg(
+        "system",
+        [{"type": "tool_result", "id": "call", "name": "tool", "output": []}],
+        "system",
+    )
+    with bind_context(context):
+        span = Observability(emitter).span("tool", "call")
+        with bind_tool_span(span):
+            mark_pending_message_evidence(message)
+            mark_pending_message_evidence(message)
+    emitter.close()
+    record = message.metadata["agent_observability_outbox"]
+    event = verify_event(record)
+    assert (
+        event["reference_id"]
+        == message.metadata["agent_observability_evidence_ref"]
+    )
+    assert event["saved_state"] == "available"
+    assert event["event_type"] == "evidence.linked"
+    assert (
+        sum(
+            '"event_type":"evidence.pending"' in line
+            for line in stream.getvalue().splitlines()
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_pending_evidence_reports_not_saved_when_recovery_unavailable(
+    monkeypatch,
+    registered,
+):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import (
+        bind_tool_span,
+        mark_pending_message_evidence,
+    )
+
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *args: registered,
+    )
+    monkeypatch.delenv("SWE_AGENTOBS_OUTBOX_KEY_ID", raising=False)
+    monkeypatch.delenv("SWE_AGENTOBS_OUTBOX_SECRET", raising=False)
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    message = Msg(
+        "system",
+        [
+            {
+                "type": "tool_result",
+                "id": "call",
+                "name": "tool",
+                "output": ["private-output"],
+            },
+        ],
+        "system",
+    )
+    with bind_context(context):
+        span = Observability(emitter).span("TOOL", "tool.execute")
+        with bind_tool_span(span):
+            mark_pending_message_evidence(message)
+    emitter.close()
+    assert not message.metadata
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence = [
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+        and event.get("content_type") == "tool_output"
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["saved_state"] == "not_saved"
+    assert evidence[0]["content_type"] == "tool_output"
+    assert "private-output" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_pending_answer_uses_model_invocation_span(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import mark_pending_message_evidence
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "key1")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: True,
+    )
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="invocation",
+                content=[{"type": "text", "text": "answer"}],
+            )
+
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        response = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="p",
+            model_key="m",
+        )([])
+        message = Msg("assistant", response.content, "assistant")
+        message.invocation_id = response.id
+        mark_pending_message_evidence(message)
+    emitter.close()
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    pending = [
+        event
+        for event in events
+        if event.get("event_type") == "evidence.pending"
+    ]
+    assert len(pending) == 1
+    assert (
+        pending[0]["reference_id"]
+        == message.metadata["agent_observability_evidence_ref"]
+    )
+    assert pending[0]["content_type"] == "assistant_answer"
+    assert "answer" not in json.dumps(
+        pending[0]["metadata"] if "metadata" in pending[0] else {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_unregistered_answer_reports_not_saved(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import mark_pending_message_evidence
+
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: False,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="invocation",
+                content=[{"type": "text", "text": "private-answer"}],
+            )
+
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        response = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="p",
+            model_key="m",
+        )([])
+        message = Msg("assistant", response.content, "assistant")
+        message.invocation_id = response.id
+        mark_pending_message_evidence(message)
+    emitter.close()
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence = [
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+        and event.get("content_type") == "assistant_answer"
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["saved_state"] == "not_saved"
+    assert evidence[0]["content_type"] == "assistant_answer"
+    assert not message.metadata
+    assert "private-answer" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_streamed_answer_retains_its_model_span(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import mark_pending_message_evidence
+    from swe.observability.outbox import verify_event
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "key1")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: True,
+    )
+    emitter = JsonlEmitter(EmitterConfig(), stream=io.StringIO())
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                yield SimpleNamespace(
+                    id="stream-id",
+                    content=[{"type": "text", "text": "answer"}],
+                )
+
+            return chunks()
+
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        response = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="p",
+            model_key="m",
+        )([])
+        async for chunk in response:
+            message = Msg("assistant", chunk.content, "assistant")
+            message.invocation_id = chunk.id
+        mark_pending_message_evidence(message)
+    event = verify_event(message.metadata["agent_observability_outbox"])
+    assert event["content_type"] == "assistant_answer"
+    emitter.close()
 
 
 @pytest.mark.asyncio

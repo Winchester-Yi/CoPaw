@@ -32,9 +32,9 @@ Hook 机制的埋点以运行时日志为入口，不写入 `swe_tracing_spans`�
 
 日志采集下游应以注册和诊断事件续租实例状态，租约为 75 分钟；注销事件立即将实例置为无效。诊断流水保留 30 天。Swe 本身不直接写诊断数据库，也不负责 Kafka 消费。
 
-## 独立 Agent 可观测（设计中）
+## 独立 Agent 可观测
 
-独立 Agent 可观测尚未实施。其设计使用专用logger向stdout输出受限单行JSON，与现有Tracing、Hook telemetry、Runtime Diagnostic分别独立；不得把这些日志的trace_id视为新Run/Attempt身份。排查设计中的数据缺口时，区分未入库/未投影、父节点尚未加载、确实缺失以及NAS正文未保存；缺少事件不能判定业务失败。入口见[实施设计](../../docs/superpowers/specs/2026-11-15-independent-agent-observability-design.md)第10节和[Trace视图对照](../../.scratch/agent-observability/trace-view-review.md)。
+独立 Agent 可观测向 stdout 输出受限单行 JSON，与现有 Tracing、Hook telemetry、Runtime Diagnostic 分别独立；不得把旧 trace_id 视为新 Run/Attempt 身份。排查时区分未入库/未投影、父节点尚未加载、确实缺失以及 NAS 正文未保存；缺少事件不能判定业务失败。部署、恢复日志、密钥、降级和离线迁移步骤见[正文证据运维](../../docs/deployment/agent-observability-operations.md)。
 
 ## query error dump
 

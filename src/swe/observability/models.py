@@ -65,6 +65,7 @@ class ObservabilityContext:
     attempt_started_at: str | None = None
     run_started_monotonic_ns: int | None = field(default=None, repr=False)
     run_clock_producer_id: str | None = field(default=None, repr=False)
+    workspace_binding: tuple[str, str] | None = field(default=None, repr=False)
 
     @classmethod
     def new_run(
@@ -124,6 +125,10 @@ class ObservabilityContext:
             run_clock_producer_id=updates.get(
                 "run_clock_producer_id",
                 self.run_clock_producer_id,
+            ),
+            workspace_binding=updates.get(
+                "workspace_binding",
+                self.workspace_binding,
             ),
         )
 

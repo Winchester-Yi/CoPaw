@@ -6,6 +6,8 @@ including lazy loading, lifecycle management, and hot reloading.
 """
 
 import asyncio
+import weakref
+from contextvars import Context
 import logging
 import os
 import time
@@ -123,7 +125,114 @@ class MultiAgentManager:
         self._source_system_config_service = source_system_config_service
         self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
+        self._outbox_register = None
+        self._outbox_initialization = None
+        self._outbox_tasks = {}
+        self._outbox_registered = {}
         logger.debug("MultiAgentManager initialized")
+
+    def set_outbox_register(self, register) -> None:
+        for task in self._outbox_tasks.values():
+            task.cancel()
+        self._outbox_tasks.clear()
+        self._outbox_registered.clear()
+        self._outbox_register = register
+        if register is not None:
+            for key, workspace in self.agents.items():
+                self._schedule_outbox_registration(key, workspace)
+
+    def set_outbox_initialization(self, task) -> None:
+        self._outbox_initialization = task
+
+    def _schedule_outbox_registration(self, key, workspace):
+        if self._outbox_register is None:
+            return
+        previous = self._outbox_registered.get(key)
+        if previous is not None and previous() is workspace:
+            return
+        pending = self._outbox_tasks.get(key)
+        if pending is not None and not pending.done():
+            if getattr(pending, "_outbox_workspace", None) is workspace:
+                return
+            pending.cancel()
+        register = self._outbox_register
+
+        async def run():
+            while (
+                self._outbox_register is register
+                and self.agents.get(key) is workspace
+            ):
+                try:
+                    await register(workspace)
+                    if (
+                        self._outbox_register is register
+                        and self.agents.get(key) is workspace
+                    ):
+                        self._outbox_registered[key] = weakref.ref(workspace)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Evidence recovery registration failed: %s",
+                        type(exc).__name__,
+                    )
+                    await asyncio.sleep(5)
+
+        task = Context().run(asyncio.create_task, run())
+        task._outbox_workspace = workspace
+        self._outbox_tasks[key] = task
+
+        def done(completed):
+            if self._outbox_tasks.get(key) is completed:
+                self._outbox_tasks.pop(key, None)
+
+        task.add_done_callback(done)
+
+    async def _wait_outbox_registration(self, key, workspace):
+        deadline = asyncio.get_running_loop().time() + 1.0
+        initialization = self._outbox_initialization
+        if self._outbox_register is None and initialization is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(initialization),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Evidence capture is unavailable for this request",
+                )
+                return
+            except asyncio.CancelledError:
+                if (
+                    not initialization.cancelled()
+                    or asyncio.current_task().cancelling()
+                ):
+                    raise
+                return
+            except Exception:
+                logger.warning(
+                    "Evidence recovery initialization failed for this request",
+                )
+                return
+        self._schedule_outbox_registration(key, workspace)
+        task = self._outbox_tasks.get(key)
+        if task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=max(
+                        0,
+                        deadline - asyncio.get_running_loop().time(),
+                    ),
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Evidence capture is unavailable for this request",
+                )
+            except asyncio.CancelledError:
+                if not task.cancelled() or asyncio.current_task().cancelling():
+                    raise
 
     def set_source_system_config_service(
         self,
@@ -185,6 +294,7 @@ class MultiAgentManager:
         async with self._lock:
             instance = self.agents.get(cache_key)
             if instance is not None:
+                self._schedule_outbox_registration(cache_key, instance)
                 self._touch_cache_entry(cache_key, instance)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 logger.debug(
@@ -192,26 +302,31 @@ class MultiAgentManager:
                     cache_key,
                     duration_ms,
                 )
-                return instance
-
-            start_task = self._agent_start_tasks.get(cache_key)
-            if start_task is None:
-                start_task = asyncio.create_task(
-                    self._start_agent_for_cache_key(
-                        cache_key,
-                        agent_id,
-                        tenant_id,
-                    ),
-                    name=f"workspace-start-{cache_key}",
+            else:
+                start_task = self._agent_start_tasks.get(cache_key)
+                if start_task is None:
+                    start_task = asyncio.create_task(
+                        self._start_agent_for_cache_key(
+                            cache_key,
+                            agent_id,
+                            tenant_id,
+                        ),
+                        name=f"workspace-start-{cache_key}",
+                    )
+                    self._agent_start_tasks[cache_key] = start_task
+                self._agent_start_waiters[cache_key] = (
+                    self._agent_start_waiters.get(cache_key, 0) + 1
                 )
-                self._agent_start_tasks[cache_key] = start_task
-            self._agent_start_waiters[cache_key] = (
-                self._agent_start_waiters.get(cache_key, 0) + 1
-            )
-            self._agent_start_eviction_protected_keys.add(cache_key)
+                self._agent_start_eviction_protected_keys.add(cache_key)
 
+        if instance is not None:
+            await self._wait_outbox_registration(cache_key, instance)
+            return instance
+
+        assert start_task is not None
         try:
             instance = await asyncio.shield(start_task)
+            await self._wait_outbox_registration(cache_key, instance)
             await self._evict_workspace_cache(protected_keys={cache_key})
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             logger.debug(
@@ -304,6 +419,7 @@ class MultiAgentManager:
                 await duplicate_to_stop.stop()
 
             if instance_cached:
+                self._schedule_outbox_registration(cache_key, instance)
                 await self._evict_workspace_cache(protected_keys={cache_key})
 
             logger.info(f"Workspace created and started: {cache_key}")
@@ -916,6 +1032,7 @@ class MultiAgentManager:
                 # Swap instances atomically
                 old_instance = self.agents[cache_key]
                 self.agents[cache_key] = new_instance
+                self._schedule_outbox_registration(cache_key, new_instance)
                 new_instance_swapped = True
                 self._touch_cache_entry(cache_key, new_instance)
                 logger.info(f"Workspace instance replaced: {cache_key}")
@@ -1004,6 +1121,11 @@ class MultiAgentManager:
         """
         logger.info(f"Stopping all agents ({len(self.agents)} running)...")
 
+        outbox_tasks = list(self._outbox_tasks.values())
+        self.set_outbox_register(None)
+        self.set_outbox_initialization(None)
+        if outbox_tasks:
+            await asyncio.gather(*outbox_tasks, return_exceptions=True)
         await self.stop_workspace_cleanup_loop()
         await self._cancel_start_tasks()
 

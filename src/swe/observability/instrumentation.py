@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import threading
 import time
 from contextlib import contextmanager
@@ -263,6 +264,32 @@ _current_model_request_attempt: ContextVar[SpanHandle | None] = ContextVar(
 )
 
 
+def attach_evidence_capture(memory: Any) -> None:
+    """Observe message additions on a default memory without adding an archive."""
+    if memory is None or getattr(memory, "_chat_checkpoint_chat_id", None):
+        return
+    if getattr(memory, "_agentobs_evidence_capture", False):
+        return
+    original_add = getattr(memory, "add", None)
+    if not callable(original_add):
+        return
+
+    async def add(*args: Any, **kwargs: Any) -> Any:
+        messages = (
+            args[0] if args else kwargs.get("memories", kwargs.get("message"))
+        )
+        for message in messages if isinstance(messages, list) else [messages]:
+            try:
+                mark_pending_message_evidence(message)
+            except Exception:
+                pass
+        result = original_add(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    memory.add = add
+    memory._agentobs_evidence_capture = True
+
+
 @contextmanager
 def bind_tool_span(span: SpanHandle | None):
     """Expose the active Tool Span to durable message publication hooks."""
@@ -416,6 +443,125 @@ def emit_assistant_answer_evidence(
         )
     except Exception:
         return False
+
+
+def mark_pending_message_evidence(message: Any) -> None:
+    """Attach a unique locator to the concrete message before memory accepts it."""
+    context = current_context()
+    if context is None or not context.capture_enabled:
+        return
+    chat_id = context.business_ref.get("chat_id")
+    message_id = getattr(message, "id", None)
+    if not isinstance(chat_id, str) or not isinstance(message_id, str):
+        return
+    blocks = getattr(message, "content", None)
+    if not isinstance(blocks, list):
+        return
+    existing_metadata = getattr(message, "metadata", None)
+    if (
+        isinstance(existing_metadata, dict)
+        and "agent_observability_evidence_ref" in existing_metadata
+    ):
+        return
+    reference_id = new_id()
+    role = getattr(message, "role", None)
+    if role == "system" and any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in blocks
+    ):
+        span = _current_tool_span.get()
+        content_type = "tool_output"
+    elif role == "assistant":
+        if any(
+            isinstance(block, dict) and block.get("type") == "tool_use"
+            for block in blocks
+        ) or not any(
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and bool(block.get("text"))
+            for block in blocks
+        ):
+            return
+        invocation = getattr(message, "invocation_id", "") or ""
+        span = (_pending_model_response_spans.get() or {}).get(
+            (context.obs_run_id, invocation),
+        )
+        content_type = "assistant_answer"
+    else:
+        return
+    if span is None or span._context.business_ref.get("chat_id") != chat_id:
+        return
+    from .emitter import _project
+    from .outbox import sign_event
+    from .outbox_recovery import scope_registered
+
+    def not_saved() -> None:
+        span.event(
+            "evidence.linked",
+            chat_id=chat_id,
+            message_id=message_id,
+            content_type=content_type,
+            saved_state="not_saved",
+            reference_id=reference_id,
+        )
+
+    if not scope_registered(
+        context.scope.to_dict(),
+        context.workspace_binding,
+    ):
+        not_saved()
+        return
+
+    sequence = span._event_sequence
+    attributes = {
+        **span._base,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "content_type": content_type,
+        "reference_id": reference_id,
+    }
+    pending = MetadataEvent(
+        event_name="span.event",
+        obs_context=span._context,
+        entity_kind="span",
+        entity_id=span.span_id,
+        phase_key="event",
+        local_seq=sequence,
+        attributes={
+            **attributes,
+            "event_type": "evidence.pending",
+            "saved_state": "pending",
+        },
+    )
+    linked = MetadataEvent(
+        event_name="span.event",
+        obs_context=span._context,
+        entity_kind="span",
+        entity_id=span.span_id,
+        phase_key="event",
+        local_seq=sequence + 1,
+        attributes={
+            **attributes,
+            "event_type": "evidence.linked",
+            "saved_state": "available",
+        },
+    )
+    try:
+        record = sign_event(_project(linked.to_dict()))
+    except (ValueError, TypeError):
+        not_saved()
+        return
+    metadata = getattr(message, "metadata", None)
+    if metadata is None:
+        metadata = {}
+        message.metadata = metadata
+    if not isinstance(metadata, dict):
+        not_saved()
+        return
+    metadata["agent_observability_evidence_ref"] = reference_id
+    metadata["agent_observability_outbox"] = record
+    span._event_sequence += 2
+    span._emitter.emit(_project(pending.to_dict()))
 
 
 _RUN_TERMINAL_STATUSES = frozenset(

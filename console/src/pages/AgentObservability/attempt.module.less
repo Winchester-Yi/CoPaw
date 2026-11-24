@@ -1,0 +1,143 @@
+.root {
+  margin-top: 20px;
+  min-width: 0;
+}
+.attempts {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.timeline {
+  flex: 1;
+  min-width: 0;
+}
+.header,
+.row {
+  display: grid;
+  grid-template-columns: minmax(260px, 40%) minmax(280px, 1fr);
+  min-width: 540px;
+}
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #fff;
+  padding: 10px 0;
+  border-bottom: 1px solid #d9dfe8;
+}
+.scroll {
+  overflow: auto;
+  max-height: 600px;
+  border-bottom: 1px solid #d9dfe8;
+}
+.scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background: #b9c2ce;
+  border-radius: 4px;
+}
+.row {
+  min-height: 40px;
+  align-items: center;
+  border-bottom: 1px solid #edf0f4;
+  cursor: pointer;
+}
+.row:hover {
+  background: #f5f8fc;
+}
+.row:focus-visible {
+  outline: 2px solid #3769fc;
+  outline-offset: -2px;
+}
+.selected {
+  background: #eaf1ff;
+}
+.name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+.name > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toggle {
+  border: 0;
+  background: transparent;
+  width: 24px;
+  flex: none;
+  cursor: pointer;
+}
+.toggle:disabled {
+  cursor: default;
+}
+.track {
+  position: relative;
+  height: 100%;
+  border-left: 1px solid #e6eaf0;
+  display: flex;
+  align-items: center;
+}
+.bar {
+  position: absolute;
+  top: 12px;
+  min-width: 4px;
+  height: 16px;
+  background: #5683dd;
+  border-radius: 3px;
+}
+.barLabel {
+  position: relative;
+  margin-left: 6px;
+  font-size: 12px;
+  color: #334155;
+  background: rgba(255, 255, 255, 0.8);
+}
+.inspector {
+  flex: 0 0 300px;
+  min-width: 0;
+  border-left: 1px solid #d9dfe8;
+  padding-left: 16px;
+}
+.root dl,
+:global(.ant-drawer-body) dl {
+  margin: 0;
+}
+.root dl div,
+:global(.ant-drawer-body) dl div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  padding: 6px 0;
+}
+.root dt,
+:global(.ant-drawer-body) dt {
+  color: #64748b;
+}
+.root dd,
+:global(.ant-drawer-body) dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.toolbar,
+.results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.toolbar input {
+  width: 260px;
+  max-width: 100%;
+}

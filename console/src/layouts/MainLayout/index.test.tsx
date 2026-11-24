@@ -21,10 +21,16 @@ vi.mock(
     ),
 );
 vi.mock("../../pages/Chat", () => ({ default: () => null }));
+vi.mock("../../pages/AgentObservability", () => ({
+  default: () => <div>可观测路由</div>,
+}));
 
 vi.mock("../../stores/iframeStore", () => ({
-  useIframeStore: (selector: (state: typeof iframeState) => unknown) =>
-    selector(iframeState),
+  useIframeStore: Object.assign(
+    (selector: (state: typeof iframeState) => unknown) => selector(iframeState),
+    { subscribe: vi.fn(), getState: () => iframeState },
+  ),
+  getIframeContext: () => iframeState,
 }));
 
 vi.mock("../../stores/chatPresentationStore", () => ({
@@ -48,10 +54,17 @@ vi.mock("../Header", () => ({
 }));
 
 vi.mock("../Sidebar", () => ({
-  default: ({ withoutHeader }: { withoutHeader?: boolean }) => (
+  default: ({
+    withoutHeader,
+    selectedKey,
+  }: {
+    withoutHeader?: boolean;
+    selectedKey: string;
+  }) => (
     <aside
       data-testid="global-sidebar"
       data-without-header={String(Boolean(withoutHeader))}
+      data-selected-key={selectedKey}
     />
   ),
 }));
@@ -68,6 +81,21 @@ afterEach(() => {
 });
 
 describe("MainLayout global shell", () => {
+  it.each(["/agent-observability/runs", "/agent-observability/runs/run-id"])(
+    "registers the observability route %s",
+    (path) => {
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <MainLayout />
+        </MemoryRouter>,
+      );
+      expect(screen.getByText("可观测路由")).toBeInTheDocument();
+      expect(screen.getByTestId("global-sidebar")).toHaveAttribute(
+        "data-selected-key",
+        "agent-observability",
+      );
+    },
+  );
   it("hides only the Header when source is ruice", () => {
     render(
       <MemoryRouter initialEntries={["/chat"]}>

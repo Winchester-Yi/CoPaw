@@ -60,6 +60,7 @@ _CHECKPOINT_EPOCHS_NAME = "epochs.json"
 _CHECKPOINT_EVIDENCE_EPOCHS_NAME = "evidence-epochs.json"
 _CHECKPOINT_CANDIDATES_DIR = "candidates"
 _MAX_PAGE_SIZE = 50
+_MAX_EVIDENCE_SCAN_BYTES = 64 * 1024 * 1024
 _CURSOR_SIGNATURE_SIZE = hashlib.sha256().digest_size
 _CURSOR_SECRET_ENV_VAR = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
 _CURSOR_SECRET_FILE_NAME = "conversation-archive-cursor-secret"
@@ -1697,6 +1698,128 @@ class ConversationArchiveStore:
         start, end = bounds
         return start <= parsed <= end
 
+    async def read_evidence_occurrence(
+        self,
+        chat_id: str,
+        reference_id: str,
+        message_id: str,
+        *,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        """Find one token in a complete, locked archive snapshot.
+
+        The snapshot digest supports a second read across session/archive
+        migration. Callers must also check the online session and Chat identity.
+        """
+        return await _durable_thread(
+            self._read_evidence_occurrence,
+            chat_id,
+            reference_id,
+            message_id,
+            max_bytes,
+        )
+
+    def _read_evidence_occurrence(
+        self,
+        chat_id,
+        reference_id,
+        message_id,
+        max_bytes,
+    ):
+        canonical = self._validate_chat_id(chat_id)
+        if (
+            not isinstance(reference_id, str)
+            or not reference_id
+            or not isinstance(message_id, str)
+            or not message_id
+        ):
+            raise ValueError("Invalid evidence identity or size limit")
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("Invalid evidence identity or size limit")
+        with self._chat_lock(canonical):
+            if self._tombstone_path(canonical).exists():
+                return {"status": "unavailable", "message": None}
+            try:
+                return self._scan_evidence_occurrence(
+                    canonical,
+                    reference_id,
+                    message_id,
+                    max_bytes,
+                )
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+                return {"status": "unavailable", "message": None}
+
+    def _scan_evidence_occurrence(
+        self,
+        chat_id,
+        reference_id,
+        message_id,
+        max_bytes,
+    ):
+        chat_dir = self.path_for(chat_id)
+        manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
+        boundaries = self._visible_boundaries(manifest, chat_id)
+        if len(boundaries) != len(manifest["boundaries"]) or len(
+            {b.id for b in boundaries},
+        ) != len(boundaries):
+            raise ValueError("Invalid evidence manifest")
+        digest = hashlib.sha256(canonical_bytes(manifest))
+        total = 0
+        matched = None
+        for boundary in boundaries:
+            path = chat_dir / f"{boundary.id}.jsonl"
+            with path.open("rb") as handle:
+                count = 0
+                while True:
+                    line = handle.readline(_MAX_EVIDENCE_SCAN_BYTES + 1)
+                    if not line:
+                        break
+                    total += len(line)
+                    if total > _MAX_EVIDENCE_SCAN_BYTES:
+                        raise ValueError("Evidence scan limit exceeded")
+                    digest.update(line)
+                    count += 1
+                    value = json.loads(line)
+                    if not isinstance(value, dict):
+                        raise ValueError("Invalid evidence record")
+                    message = Msg.from_dict(value)
+                    metadata = message.metadata
+                    if (
+                        isinstance(metadata, dict)
+                        and metadata.get("agent_observability_evidence_ref")
+                        == reference_id
+                    ):
+                        if matched is not None or message.id != message_id:
+                            return {"status": "unresolved", "message": None}
+                        matched = redact_hidden_context_for_display(message)
+                if count != boundary.archived_message_count:
+                    raise ValueError("Incomplete evidence batch")
+        snapshot = digest.hexdigest()
+        if matched is None:
+            return {
+                "status": "unavailable",
+                "message": None,
+                "snapshot": snapshot,
+            }
+        if (
+            len(
+                json.dumps(matched.to_dict(), ensure_ascii=False).encode(
+                    "utf-8",
+                ),
+            )
+            > max_bytes
+        ):
+            return {
+                "status": "truncated",
+                "message": None,
+                "snapshot": snapshot,
+            }
+        return {
+            "status": "available",
+            "message": matched,
+            "snapshot": snapshot,
+        }
+
     async def read_page(
         self,
         chat_id: str,
@@ -2564,10 +2687,19 @@ def attach_conversation_archive(
         """Append an event only after ReMe has accepted the message."""
         if original_add is None:
             raise TypeError("Attached memory must expose add")
+        message = args[0] if args else kwargs.get("message")
+        if isinstance(message, Msg):
+            try:
+                from ...observability.instrumentation import (
+                    mark_pending_message_evidence,
+                )
+
+                mark_pending_message_evidence(message)
+            except Exception:
+                pass
         result = original_add(*args, **kwargs)
         if inspect.isawaitable(result):
             result = await result
-        message = args[0] if args else kwargs.get("message")
         if not isinstance(message, Msg):
             return result
         async with append_lock:

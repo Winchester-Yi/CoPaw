@@ -1,19 +1,71 @@
 # -*- coding: utf-8 -*-
 from types import SimpleNamespace
+from typing import Any
 import uuid
 
 import pytest
 from agentscope.message import Msg
 
+from swe.app.chat_sharing.router import _load_share_messages
 from swe.app.runner.api import (
     _archive_metadata,
     _archive_page,
     _archive_store,
+    _build_chat_history,
     _filter_archived_turn_messages,
     _messages_from_memory_state,
     get_chat_history_page,
 )
 from swe.app.runner.models import ChatMessage, ChatSpec
+
+
+@pytest.mark.asyncio
+async def test_public_history_removes_internal_evidence_refs_without_mutation(
+    tmp_path,
+) -> None:
+    key = "agent_observability_evidence_ref"
+    outbox = "agent_observability_outbox"
+    metadata: dict[str, Any] = {
+        key: "secret",
+        outbox: {"payload": "private"},
+        "nested": [{key: "nested-secret", outbox: ["private"], "keep": 0}],
+    }
+    message = Msg("assistant", "visible", "assistant", metadata=metadata)
+    message.id = "message-1"
+    raw = message.to_dict()
+    state = {"agent": {"memory": {"content": [[raw, []]]}}}
+    workspace = SimpleNamespace(workspace_dir=tmp_path)
+    chat_id = str(uuid.uuid4())
+    chat = ChatSpec(
+        id=chat_id,
+        session_id="session",
+        user_id="user",
+        channel="console",
+    )
+
+    history = await _build_chat_history(
+        chat,
+        session=None,
+        workspace=workspace,
+        state=state,
+        status_override="idle",
+    )
+    store = _archive_store(workspace)
+    await store.commit(chat_id, [message])
+    archived = await _archive_page(workspace, chat_id, None, 50)
+    shared = await _load_share_messages(chat, workspace, history)
+
+    for result in (history.messages[0], archived.messages[0], *shared):
+        assert result.metadata["metadata"] == {"nested": [{"keep": 0}]}
+        assert result.content[0].text == "visible"
+    assert raw["metadata"] == metadata
+    assert message.metadata == metadata
+    assert metadata[key] == "secret"
+    assert metadata[outbox] == {"payload": "private"}
+    assert metadata["nested"][0][key] == "nested-secret"
+    assert metadata["nested"][0][outbox] == ["private"]
+    stored = await store.read_page(chat_id, limit=50)
+    assert stored.messages[0].metadata == metadata
 
 
 def _message(index: int) -> Msg:

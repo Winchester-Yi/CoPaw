@@ -7,6 +7,7 @@
 
 | 文档 | 摘要 |
 |------|------|
+| [独立 Agent 可观测正文证据运维](../../docs/deployment/agent-observability-operations.md) | outbox 部署、密钥轮换、恢复降级与工作区离线 rebind |
 | [HTML 批注入口隐藏与报告意见空壳](location-paths.md#html-批注入口隐藏与报告意见空壳) | 聊天批注开关、后端发布链路、报告意见占位代码与验证入口 |
 | [智拓入口 JS 加载隔离](location-paths.md#智拓入口-js-加载隔离) | 智拓与 Console 的加载边界、首屏 JS 统计口径与构建复核方式 |
 | [ai-coding-session-retrospective.md](ai-coding-session-retrospective.md) | 近一周 AI Coding 会话复盘：返工原因、异步验收矩阵、测试选择与跨会话交接 |

@@ -21,6 +21,21 @@ from .instrumentation import Observability
 from .models import ObservabilityContext, Scope
 
 _OBSERVABILITY = Observability()
+
+
+def _trusted_workspace_binding(owner):
+    from pathlib import Path
+    from ..app.conversation_storage.runtime import storage_authority
+
+    workspace_dir = getattr(owner, "workspace_dir", None)
+    if workspace_dir is None:
+        return None
+    return (
+        str(Path(workspace_dir).expanduser().resolve(strict=True)),
+        storage_authority(),
+    )
+
+
 _APPROVAL_RESOLUTION_OBSERVER: ContextVar[
     Callable[[ObservabilityContext | None, str, bool], None] | None
 ] = ContextVar("agentobs_approval_resolution_observer", default=None)
@@ -106,7 +121,7 @@ def prepare_query_run(
     if isinstance(session_id, str) and session_id:
         business_ref["session_id"] = session_id
     try:
-        return _OBSERVABILITY.prepare_run(
+        context = _OBSERVABILITY.prepare_run(
             scope=Scope(
                 service_unit_id=service_unit_id(),
                 source_id=str(source_id),
@@ -117,6 +132,11 @@ def prepare_query_run(
             ),
             business_ref=business_ref,
         )
+        if context is not None:
+            context = context.with_updates(
+                workspace_binding=_trusted_workspace_binding(owner),
+            )
+        return context
     except Exception:
         return None
 
@@ -184,7 +204,9 @@ def restore_approval_context(
         )
         if actual_scope != carrier_scope:
             return None
-        return context
+        return context.with_updates(
+            workspace_binding=_trusted_workspace_binding(owner),
+        )
     except Exception:
         return None
 

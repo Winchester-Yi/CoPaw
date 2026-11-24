@@ -21,6 +21,8 @@ from swe.observability.query import (
     _decode_cursor,
     _encode_cursor,
     _is_mysql_query_timeout,
+    _read_admitted_question,
+    _read_pending_online,
     capabilities,
     business_population,
     health,
@@ -30,6 +32,246 @@ from swe.observability.query import (
     span_ancestors,
 )
 from swe.observability.store import _span_for_api
+
+
+def test_scope_matches_logical_and_runtime_tenant_only_within_source():
+    from swe.config.context import resolve_runtime_tenant_id
+    from swe.observability.identity import same_observability_scope
+
+    logical = {
+        "service_unit_id": "swe",
+        "tenant_id": "alice",
+        "source_id": "source-a",
+        "agent_id": "agent",
+    }
+    runtime = {
+        **logical,
+        "tenant_id": resolve_runtime_tenant_id("alice", "source-a"),
+    }
+    assert same_observability_scope(logical, runtime)
+    assert same_observability_scope(
+        {**logical, "tenant_id": "default"},
+        {**logical, "tenant_id": "default_source-a"},
+    )
+    assert not same_observability_scope(
+        logical,
+        {**runtime, "source_id": "source-b"},
+    )
+    assert not same_observability_scope(
+        logical,
+        {**runtime, "tenant_id": resolve_runtime_tenant_id("bob", "source-a")},
+    )
+    assert not same_observability_scope(
+        {**logical, "tenant_id": "default"},
+        {**logical, "tenant_id": "default_source-b"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_admitted_question_requires_exact_run_and_rechecks_turn():
+    from swe.app.conversation_storage.identity import WorkspaceScope
+
+    scope = {
+        "service_unit_id": "swe",
+        "source_id": "source",
+        "tenant_id": "tenant",
+        "agent_id": "agent",
+    }
+    run = {
+        "run_id": "run",
+        "service_unit_key": b"swe",
+        "source_key": b"source",
+        "tenant_key": b"tenant",
+        "agent_key": b"agent",
+        "session_key": b"session",
+        "root_question_key": b"question",
+    }
+    turn = {
+        "chat_id": "chat",
+        "message": {"id": "question", "role": "user", "content": "hello"},
+        "agent_observability_context": {
+            "obs_run_id": "run",
+            "scope": scope,
+            "business_ref": {
+                "chat_id": "chat",
+                "root_question_msgid": "question",
+            },
+        },
+    }
+    chat = SimpleNamespace(
+        id="chat",
+        session_id="session",
+        user_id="user",
+        meta={"source_id": "source", "agent_id": "agent"},
+    )
+    session = SimpleNamespace(
+        get_persisted_session_state_dict=AsyncMock(return_value={}),
+        get_turn_state=AsyncMock(return_value=turn),
+    )
+    workspace = SimpleNamespace(
+        agent_id="agent",
+        conversation_scope=WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="swe",
+        ),
+        chat_manager=SimpleNamespace(get_chat=AsyncMock(return_value=chat)),
+        runner=SimpleNamespace(session=session),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(source_id="source"))
+    result = await _read_admitted_question(
+        workspace,
+        request,
+        run,
+        "chat",
+        "question",
+    )
+    assert result["status"] == "available"
+    assert result["message"]["content"][0]["text"] == "hello"
+
+    session.get_turn_state.side_effect = [turn, {**turn, "status": "changed"}]
+    result = await _read_admitted_question(
+        workspace,
+        request,
+        run,
+        "chat",
+        "question",
+    )
+    assert result["status"] == "unavailable"
+
+    session.get_turn_state.side_effect = None
+    run["run_id"] = "different"
+    result = await _read_admitted_question(
+        workspace,
+        request,
+        run,
+        "chat",
+        "question",
+    )
+    assert result["status"] == "unresolved"
+
+
+@pytest.mark.asyncio
+async def test_pending_output_requires_unique_committed_occurrence(
+    monkeypatch,
+):
+    from agentscope.message import Msg
+    from swe.app.conversation_storage.identity import WorkspaceScope
+    from swe.observability.outbox import sign_event
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "test")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "s" * 32)
+
+    archive = SimpleNamespace(
+        read_evidence_occurrence=AsyncMock(
+            return_value={
+                "status": "unavailable",
+                "message": None,
+                "snapshot": "stable",
+            },
+        ),
+    )
+    monkeypatch.setattr("swe.app.runner.api._archive_store", lambda _: archive)
+
+    message = Msg(
+        "system",
+        [{"type": "tool_result", "id": "tool", "name": "t", "output": []}],
+        "system",
+        metadata={"agent_observability_evidence_ref": "token"},
+    )
+    message.metadata["agent_observability_outbox"] = sign_event(
+        {
+            "event_id": "event-id",
+            "event_type": "evidence.linked",
+            "saved_state": "available",
+            "obs_run_id": "run",
+            "obs_span_id": "span",
+            "chat_id": "chat",
+            "message_id": message.id,
+            "reference_id": "token",
+            "content_type": "tool_output",
+            "scope": {
+                "service_unit_id": "swe",
+                "source_id": "source",
+                "tenant_id": "tenant",
+                "agent_id": "agent",
+            },
+        },
+    )
+    state = {"agent": {"memory": {"content": [[message.to_dict(), []]]}}}
+    session = SimpleNamespace(
+        get_persisted_session_state_dict=AsyncMock(return_value=state),
+    )
+    chat = SimpleNamespace(
+        id="chat",
+        session_id="session",
+        user_id="user",
+        meta={"source_id": "source", "agent_id": "agent"},
+    )
+    workspace = SimpleNamespace(
+        agent_id="agent",
+        conversation_scope=WorkspaceScope(
+            "tenant",
+            "source",
+            "agent",
+            service_unit_id="swe",
+        ),
+        chat_manager=SimpleNamespace(get_chat=AsyncMock(return_value=chat)),
+        runner=SimpleNamespace(session=session),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(source_id="source"))
+    run = {
+        "run_id": "run",
+        "service_unit_key": b"swe",
+        "source_key": b"source",
+        "tenant_key": b"tenant",
+        "agent_key": b"agent",
+        "chat_key": b"chat",
+        "session_key": b"session",
+    }
+    ref = {
+        "evidence_ref": "event:event-id",
+        "saved_state": "available",
+        "chat_id": "chat",
+        "message_id": message.id,
+        "reference_id": "token",
+        "content_type": "tool_output",
+    }
+    assert (await _read_pending_online(workspace, request, run, ref, "span"))[
+        "status"
+    ] == "available"
+    archive.read_evidence_occurrence.return_value = {
+        "status": "available",
+        "message": message,
+        "snapshot": "stable",
+    }
+    assert (await _read_pending_online(workspace, request, run, ref, "span"))[
+        "status"
+    ] == "unresolved"
+    archive.read_evidence_occurrence.return_value = {
+        "status": "unavailable",
+        "message": None,
+        "snapshot": "stable",
+    }
+    state["agent"]["memory"]["content"].append([message.to_dict(), []])
+    assert (await _read_pending_online(workspace, request, run, ref, "span"))[
+        "status"
+    ] == "unresolved"
+    state["agent"]["memory"]["content"].clear()
+    assert (await _read_pending_online(workspace, request, run, ref, "span"))[
+        "status"
+    ] == "pending"
+    archive.read_evidence_occurrence.return_value = {
+        "status": "available",
+        "message": message,
+        "snapshot": "stable",
+    }
+    result = await _read_pending_online(workspace, request, run, ref, "span")
+    assert result["status"] == "compacted"
+    assert "agent_observability_evidence_ref" not in json.dumps(
+        result["message"],
+    )
 
 
 def test_business_population_counts_only_exact_settled_run_links():

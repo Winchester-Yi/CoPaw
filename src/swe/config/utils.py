@@ -498,15 +498,23 @@ def _read_config_data(config_path: Path) -> Optional[dict]:
         _backup_config_file(config_path, "encoding error")
         return None
 
+    return _parse_config_data(raw, config_path)
+
+
+def _parse_config_data(
+    raw: str,
+    config_path: Optional[Path],
+) -> Optional[dict]:
+    def backup(reason: str) -> None:
+        if config_path is not None:
+            _backup_config_file(config_path, reason)
+
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         data = repair_json(raw, return_objects=True)
         if not isinstance(data, dict):
-            _backup_config_file(
-                config_path,
-                "JSON syntax error, repair failed",
-            )
+            backup("JSON syntax error, repair failed")
             return None
         logger.warning(
             "Config %s had JSON syntax issues that were auto-repaired.",
@@ -514,7 +522,7 @@ def _read_config_data(config_path: Path) -> Optional[dict]:
         )
 
     if not isinstance(data, dict):
-        _backup_config_file(config_path, "root value is not a JSON object")
+        backup("root value is not a JSON object")
         return None
     return data
 
@@ -527,6 +535,24 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         return Config()
 
     data = _read_config_data(config_path)
+    return _config_from_data(data, config_path)
+
+
+def load_config_bytes(content: bytes | None) -> Config:
+    """Load a snapshot with normal compatibility rules and no file writes."""
+    if content is None:
+        return Config()
+    try:
+        data = _parse_config_data(content.decode("utf-8"), None)
+    except UnicodeDecodeError:
+        return Config()
+    return _config_from_data(data, None)
+
+
+def _config_from_data(
+    data: Optional[dict],
+    config_path: Optional[Path],
+) -> Config:
     if data is None:
         return Config()
 
@@ -548,16 +574,18 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             if loc and _remove_bad_field(data, loc):
                 fixed_any = True
         if not fixed_any:
-            _backup_config_file(config_path, "validation error")
+            if config_path is not None:
+                _backup_config_file(config_path, "validation error")
             return Config()
 
     try:
         return Config.model_validate(data)
     except ValidationError:
-        _backup_config_file(
-            config_path,
-            "validation error after field removal",
-        )
+        if config_path is not None:
+            _backup_config_file(
+                config_path,
+                "validation error after field removal",
+            )
         return Config()
 
 

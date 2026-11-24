@@ -7,10 +7,15 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import UUID
+
+from pydantic import ValidationError
 
 from swe.runtime_workers import run_runtime_state_work
 
@@ -27,6 +32,7 @@ from ...channels.schema import DEFAULT_CHANNEL
 from ..models import ChatSpec, ChatsFile
 
 _LOAD_STABLE_READ_ATTEMPTS = 3
+logger = logging.getLogger(__name__)
 
 
 class _UnstableChatRepositoryReadError(RuntimeError):
@@ -183,6 +189,107 @@ class JsonChatRepository(BaseChatRepository):
             "unstable chats repository read after "
             f"{_LOAD_STABLE_READ_ATTEMPTS} attempts: {self._path}",
         )
+
+    def _load_recovery_directory_sync(self, strict=False):
+        """Read valid, unambiguous records without weakening normal reads."""
+        for _ in range(_LOAD_STABLE_READ_ATTEMPTS):
+            state = self._read_file_state()
+            if state is not None:
+                break
+        else:
+            raise _UnstableChatRepositoryReadError(
+                "unstable recovery directory read",
+            )
+        signature, contents = state
+        if not signature.exists:
+            return signature, []
+        data = json.loads(contents.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(
+            data.get("chats"),
+            list,
+        ):
+            raise ValueError("invalid recovery directory")
+        ChatsFile.model_validate(
+            {"version": data.get("version", 1), "chats": []},
+        )
+        records = data["chats"]
+        ids = [row.get("id") for row in records if isinstance(row, dict)]
+        counts = {}
+        for chat_id in ids:
+            if isinstance(chat_id, str):
+                counts[chat_id] = counts.get(chat_id, 0) + 1
+        chats = []
+        for row in records:
+            chat_id = row.get("id") if isinstance(row, dict) else None
+            try:
+                valid_id = (
+                    isinstance(chat_id, str) and str(UUID(chat_id)) == chat_id
+                )
+            except (ValueError, AttributeError):
+                valid_id = False
+            if not valid_id:
+                if strict:
+                    raise ValueError("invalid Chat directory identity")
+                logger.warning(
+                    "Evidence recovery skipped invalid Chat directory entry",
+                )
+                continue
+            if counts[chat_id] != 1:
+                if strict:
+                    raise ValueError("duplicate Chat directory identity")
+                logger.warning(
+                    "Evidence recovery skipped ambiguous Chat directory entry",
+                )
+                continue
+            try:
+                stable = dict(row)
+                # Validation-time defaults would move records between pages.
+                stable.setdefault("created_at", "1970-01-01T00:00:00+00:00")
+                stable.setdefault("updated_at", "1970-01-01T00:00:00+00:00")
+                chats.append(ChatSpec.model_validate(stable))
+            except ValidationError:
+                if strict:
+                    raise ValueError("invalid Chat directory entry") from None
+                logger.warning(
+                    "Evidence recovery skipped invalid Chat directory entry",
+                )
+        return signature, chats
+
+    async def list_recovery_chats_cursor(self, *, page_size, cursor=None):
+        _, chats = await run_runtime_state_work(
+            self._load_recovery_directory_sync,
+        )
+        version, boundary = (
+            self._decode_cursor(cursor) if cursor else ("v2", None)
+        )
+        sort_key = (
+            self._creation_sort_key
+            if version == "v1"
+            else self._recency_sort_key
+        )
+        ordered = sorted(chats, key=sort_key, reverse=True)
+        if boundary:
+            ordered = [chat for chat in ordered if sort_key(chat) < boundary]
+        items = ordered[:page_size]
+        next_cursor = (
+            self._encode_cursor(sort_key(items[-1]), version=version)
+            if len(ordered) > len(items)
+            else None
+        )
+        return SimpleNamespace(items=items, next_cursor=next_cursor)
+
+    async def get_recovery_chat(self, chat_id):
+        _, chats = await run_runtime_state_work(
+            self._load_recovery_directory_sync,
+        )
+        return next((chat for chat in chats if chat.id == chat_id), None)
+
+    async def validate_recovery_directory(self):
+        signature, _ = await run_runtime_state_work(
+            self._load_recovery_directory_sync,
+            True,
+        )
+        return signature
 
     def _save_sync(self, chats_file: ChatsFile) -> _FileSignature | None:
         with self._write_lock_sync():

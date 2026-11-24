@@ -904,6 +904,26 @@ async def _shutdown_lifespan_resources_impl(
         await stop_service_heartbeat()
     except Exception as e:
         logger.warning("Error stopping service heartbeat: %s", e)
+    recovery_start = getattr(
+        app.state,
+        "agent_observability_recovery_start",
+        None,
+    )
+    if recovery_start is not None:
+        recovery_start.cancel()
+        await asyncio.gather(recovery_start, return_exceptions=True)
+    try:
+        from ..observability.outbox_runtime import stop_recovery
+
+        await stop_recovery(
+            app,
+            getattr(app.state, "multi_agent_manager", None),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Error stopping evidence recovery: %s",
+            type(exc).__name__,
+        )
     manager_stopped = await _stop_multi_agent_manager(app)
     pool_stopped = await _stop_tenant_workspace_pool(app)
     try:
@@ -1018,6 +1038,49 @@ async def _shutdown_lifespan_resources_impl(
     shutdown_logger()
 
 
+async def _supervise_evidence_recovery(app, manager, db_connection):
+    """Retry recovery initialization without delaying conversation startup."""
+    from ..observability.outbox_runtime import start_recovery
+    from ..observability.store import ObservabilityStore
+    from ..observability.projector import InboxProjector
+
+    while True:
+        try:
+            connection = getattr(
+                app.state,
+                "agent_observability_connection",
+                None,
+            )
+            if connection is None:
+                await _initialize_agent_observability_storage(app)
+                connection = getattr(
+                    app.state,
+                    "agent_observability_connection",
+                    None,
+                )
+            if (
+                connection is not None
+                and getattr(app.state, "agent_observability_store", None)
+                is None
+            ):
+                store = ObservabilityStore(connection)
+                if (await store.readiness())["ready"]:
+                    projector = InboxProjector(store)
+                    await projector.start()
+                    app.state.agent_observability_store = store
+                    app.state.agent_observability_projector = projector
+            if await start_recovery(app, manager, db_connection):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Evidence recovery unavailable: %s",
+                type(exc).__name__,
+            )
+        await asyncio.sleep(5)
+
+
 async def _stop_system_cron_tasks(app: FastAPI) -> None:
     """先停止系统业务并留存待核实事实，再关闭工作区与共库连接。"""
     tasks = list(getattr(app.state, "system_cron_tasks", {}).values())
@@ -1099,6 +1162,19 @@ async def lifespan(
         from .conversation_storage.runtime import configure_runtime
 
         await configure_runtime(db_connection)
+        app.state.agent_observability_recovery_start = asyncio.create_task(
+            _supervise_evidence_recovery(
+                app,
+                multi_agent_manager,
+                db_connection,
+            ),
+        )
+        from ..observability.config import capture_enabled
+
+        if capture_enabled():
+            multi_agent_manager.set_outbox_initialization(
+                app.state.agent_observability_recovery_start,
+            )
         await _initialize_tracing_manager(db_connection)
         logger.info("Instance module initialized")
 

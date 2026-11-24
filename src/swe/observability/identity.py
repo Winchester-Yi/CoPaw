@@ -21,3 +21,39 @@ def service_unit_id() -> str:
         if value:
             return value
     return DEFAULT_SERVICE_UNIT
+
+
+def same_tenant_scope(left: object, right: object, source: object) -> bool:
+    """Compare logical and runtime tenant forms within one trusted Source."""
+    from ..config.context import resolve_runtime_tenant_id
+
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    if not isinstance(source, str) or not left or not right or not source:
+        return False
+    try:
+        return resolve_runtime_tenant_id(
+            left,
+            source,
+        ) == resolve_runtime_tenant_id(right, source)
+    except ValueError:
+        return False
+
+
+def same_observability_scope(left: object, right: object) -> bool:
+    """Compare scope identities while accepting the equivalent runtime tenant."""
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    fields = ("service_unit_id", "source_id", "agent_id")
+    if any(
+        not isinstance(left.get(k), str)
+        or not left[k]
+        or left[k] != right.get(k)
+        for k in fields
+    ):
+        return False
+    return same_tenant_scope(
+        left.get("tenant_id"),
+        right.get("tenant_id"),
+        left["source_id"],
+    )

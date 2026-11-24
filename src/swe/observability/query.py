@@ -1592,6 +1592,352 @@ def _authorize_evidence_chat(
         raise KeyError("chat agent is outside the request scope")
 
 
+async def _read_admitted_question(
+    workspace,
+    request,
+    run,
+    chat_id,
+    message_id,
+):
+    """Read a question only when its durable admission identifies this Run."""
+    from ..app.runner.api import (
+        _redact_hidden_context_messages,
+        _turn_state_to_message,
+    )
+
+    def text(value):
+        return value.decode("utf-8") if isinstance(value, bytes) else value
+
+    from ..app.conversation_storage.runtime import resolved_scope
+    from .identity import same_tenant_scope
+
+    workspace_scope = resolved_scope(
+        workspace,
+        service_unit_id=text(run.get("service_unit_key")),
+    )
+    if any(
+        getattr(workspace_scope, field) != text(run.get(column))
+        for field, column in (
+            ("service_unit_id", "service_unit_key"),
+            ("source_id", "source_key"),
+            ("agent_id", "agent_key"),
+        )
+    ) or not same_tenant_scope(
+        workspace_scope.tenant_id,
+        text(run.get("tenant_key")),
+        workspace_scope.source_id,
+    ):
+        return {"status": "unresolved"}
+    if message_id != text(run.get("root_question_key")):
+        return {"status": "unresolved"}
+    chat = await workspace.chat_manager.get_chat(chat_id)
+    if chat is None or chat.id != chat_id:
+        return {"status": "unavailable"}
+    _authorize_evidence_chat(request, workspace, chat)
+    if chat.session_id != text(run.get("session_key")):
+        return {"status": "unresolved"}
+    session = workspace.runner.session
+    state = await session.get_persisted_session_state_dict(
+        chat.session_id,
+        chat.user_id,
+    )
+    turn = await session.get_turn_state(
+        chat.session_id,
+        chat.user_id,
+        state,
+        message_id,
+    )
+    if not isinstance(turn, dict) or turn.get("chat_id") != chat_id:
+        return {"status": "unresolved"}
+    carrier = turn.get("agent_observability_context")
+    if not isinstance(carrier, dict) or carrier.get("obs_run_id") != run.get(
+        "run_id",
+    ):
+        return {"status": "unresolved"}
+    business = carrier.get("business_ref")
+    raw_message = turn.get("message")
+    if (
+        not isinstance(business, dict)
+        or business.get("chat_id") != chat_id
+        or business.get("root_question_msgid") != message_id
+        or not isinstance(raw_message, dict)
+        or raw_message.get("id") != message_id
+    ):
+        return {"status": "unresolved"}
+    scope = carrier.get("scope")
+    if not isinstance(scope, dict) or any(
+        scope.get(field) != text(run.get(column))
+        for field, column in (
+            ("service_unit_id", "service_unit_key"),
+            ("source_id", "source_key"),
+            ("tenant_id", "tenant_key"),
+            ("agent_id", "agent_key"),
+        )
+    ):
+        return {"status": "unresolved"}
+    message = _turn_state_to_message(message_id, turn, chat_id=chat_id)
+    if message is None:
+        return {"status": "unavailable"}
+    from ..app.runner.hidden_context_injection import (
+        HIDDEN_CONTEXT_METADATA_KEY,
+    )
+
+    metadata = message.metadata
+    nested = metadata.get("metadata") if isinstance(metadata, dict) else None
+    for value in (metadata, nested):
+        if isinstance(value, dict) and HIDDEN_CONTEXT_METADATA_KEY in value:
+            marker = value[HIDDEN_CONTEXT_METADATA_KEY]
+            if not isinstance(marker, dict) or not all(
+                isinstance(marker.get(key), str)
+                for key in ("visible_text", "suffix")
+            ):
+                return {"status": "unavailable"}
+    messages = _redact_hidden_context_messages([message])
+    # Recheck the binding after reading: deletion or a metadata change must
+    # not leave an authorized snapshot usable under a different Chat.
+    current = await workspace.chat_manager.get_chat(chat_id)
+    if current is None or current != chat:
+        return {"status": "unavailable"}
+    _authorize_evidence_chat(request, workspace, current)
+    latest = await session.get_persisted_session_state_dict(
+        chat.session_id,
+        chat.user_id,
+    )
+    if (
+        await session.get_turn_state(
+            chat.session_id,
+            chat.user_id,
+            latest,
+            message_id,
+        )
+        != turn
+    ):
+        return {"status": "unavailable"}
+    payload = messages[0].model_dump(mode="json")
+    if (
+        len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        > _MAX_EVIDENCE_SOURCE_BYTES
+    ):
+        return {"status": "truncated"}
+    return {"status": "available", "message": payload}
+
+
+def _evidence_message_payload(raw, session_id):
+    """Build the exact public projection used for evidence and migration."""
+    from agentscope.message import Msg
+    from ..app.runner.api import _history_msg_to_messages
+
+    raw = dict(raw)
+    raw["metadata"] = {
+        key: value
+        for key, value in raw["metadata"].items()
+        if key
+        not in {
+            "agent_observability_evidence_ref",
+            "agent_observability_outbox",
+        }
+    }
+    # Tool-output projection serializes nested objects into JSON strings.
+    # Normalize their key order before conversion so archive serialization
+    # cannot change the public output or its migration digest.
+    raw = json.loads(
+        json.dumps(raw, ensure_ascii=False, sort_keys=True, allow_nan=False),
+    )
+    return [
+        message.model_dump(mode="json")
+        for message in _history_msg_to_messages(
+            [Msg.from_dict(raw)],
+            session_id=session_id,
+        )
+    ]
+
+
+# Keep the session/archive revalidation sequence together.
+async def _read_pending_online(  # pylint: disable=too-many-statements
+    workspace,
+    request,
+    run,
+    reference,
+    span_id,
+):
+    """Prove a pending locator against a stable, committed session root."""
+    from ..app.conversation_storage.runtime import resolved_scope
+    from ..app.runner.api import _archive_store
+    from .identity import same_observability_scope, same_tenant_scope
+
+    def text(value):
+        return value.decode("utf-8") if isinstance(value, bytes) else value
+
+    scope = resolved_scope(
+        workspace,
+        service_unit_id=text(run.get("service_unit_key")),
+    )
+    if any(
+        getattr(scope, field) != text(run.get(column))
+        for field, column in (
+            ("service_unit_id", "service_unit_key"),
+            ("source_id", "source_key"),
+            ("agent_id", "agent_key"),
+        )
+    ) or not same_tenant_scope(
+        scope.tenant_id,
+        text(run.get("tenant_key")),
+        scope.source_id,
+    ):
+        return {"status": "unresolved"}
+    chat_id = reference["chat_id"]
+    if chat_id != text(run.get("chat_key")):
+        return {"status": "unresolved"}
+    chat = await workspace.chat_manager.get_chat(chat_id)
+    if chat is None or chat.id != chat_id:
+        return {"status": "pending"}
+    _authorize_evidence_chat(request, workspace, chat)
+    if chat.session_id != text(run.get("session_key")):
+        return {"status": "unresolved"}
+    session = workspace.runner.session
+    state = await session.get_persisted_session_state_dict(
+        chat.session_id,
+        chat.user_id,
+    )
+    archive = _archive_store(workspace)
+    if archive is None:
+        return {"status": "unavailable"}
+    archived = await archive.read_evidence_occurrence(
+        chat_id,
+        reference["reference_id"],
+        reference["message_id"],
+        max_bytes=_MAX_EVIDENCE_SOURCE_BYTES,
+    )
+    if not archived.get("snapshot"):
+        return {
+            "status": (
+                "unresolved"
+                if archived.get("status") == "unresolved"
+                else "unavailable"
+            ),
+        }
+    memory = state.get("agent", {}).get("memory", {})
+    entries = memory.get("content", []) if isinstance(memory, dict) else []
+    if not isinstance(entries, list):
+        return {"status": "unresolved"}
+    matches = []
+    for entry in entries:
+        raw = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+        if not isinstance(raw, dict) or not isinstance(
+            raw.get("metadata"),
+            dict,
+        ):
+            continue
+        if (
+            raw["metadata"].get("agent_observability_evidence_ref")
+            == reference["reference_id"]
+        ):
+            matches.append(raw)
+    archived_again = await archive.read_evidence_occurrence(
+        chat_id,
+        reference["reference_id"],
+        reference["message_id"],
+        max_bytes=_MAX_EVIDENCE_SOURCE_BYTES,
+    )
+
+    def archive_identity(value):
+        message = value.get("message")
+        return (
+            value.get("status"),
+            value.get("snapshot"),
+            message.to_dict() if message is not None else None,
+        )
+
+    if archive_identity(archived_again) != archive_identity(archived):
+        return {"status": "pending"}
+    latest = await session.get_persisted_session_state_dict(
+        chat.session_id,
+        chat.user_id,
+    )
+    if latest != state:
+        return {"status": "pending"}
+    current = await workspace.chat_manager.get_chat(chat_id)
+    if current is None or current != chat:
+        return {"status": "pending"}
+    _authorize_evidence_chat(request, workspace, current)
+    archive_status = archived.get("status")
+    if len(matches) > 1 or (matches and archive_status != "unavailable"):
+        return {"status": "unresolved"}
+    if not matches and archive_status == "unavailable":
+        return {"status": "pending"}
+    if not matches and archive_status == "truncated":
+        return {"status": "truncated"}
+    if matches:
+        raw = matches[0]
+    elif archive_status == "available":
+        raw = archived["message"].to_dict()
+    else:
+        return {"status": "unresolved"}
+    if raw.get("id") != reference["message_id"]:
+        return {"status": "unresolved"}
+    from .outbox import verify_event
+
+    event = verify_event(raw["metadata"].get("agent_observability_outbox"))
+    if (
+        any(
+            event.get(key) != expected
+            for key, expected in (
+                ("obs_run_id", text(run.get("run_id"))),
+                ("obs_span_id", span_id),
+                ("chat_id", chat_id),
+                ("message_id", reference["message_id"]),
+                ("reference_id", reference["reference_id"]),
+                ("content_type", reference["content_type"]),
+                ("event_type", "evidence.linked"),
+                ("saved_state", "available"),
+            )
+        )
+        or not same_observability_scope(
+            event.get("scope"),
+            {
+                "service_unit_id": scope.service_unit_id,
+                "source_id": scope.source_id,
+                "tenant_id": scope.tenant_id,
+                "agent_id": scope.agent_id,
+            },
+        )
+        or (
+            reference.get("saved_state") != "pending"
+            and event.get("event_id")
+            != str(reference["evidence_ref"]).removeprefix("event:")
+        )
+    ):
+        return {"status": "unresolved"}
+    expected_role = {"tool_output": "system", "assistant_answer": "assistant"}
+    if raw.get("role") != expected_role.get(reference.get("content_type")):
+        return {"status": "unresolved"}
+    blocks = raw.get("content")
+    if not isinstance(blocks, list):
+        return {"status": "unresolved"}
+    block_types = {
+        block.get("type") for block in blocks if isinstance(block, dict)
+    }
+    if (
+        reference["content_type"] == "tool_output"
+        and "tool_result" not in block_types
+    ):
+        return {"status": "unresolved"}
+    if reference["content_type"] == "assistant_answer" and (
+        "text" not in block_types or "tool_use" in block_types
+    ):
+        return {"status": "unresolved"}
+    payload = _evidence_message_payload(raw, chat.session_id)
+    if (
+        len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        > _MAX_EVIDENCE_SOURCE_BYTES
+    ):
+        return {"status": "truncated"}
+    return {
+        "status": "compacted" if not matches else "available",
+        "message": payload,
+    }
+
+
 async def _load_evidence_item(
     reference: dict[str, Any],
     *,
@@ -1618,7 +1964,13 @@ async def _load_evidence_item(
     }
     status = _evidence_status(reference.get("saved_state"))
     item["status"] = status
-    if status not in {"available", "compacted"}:
+    pending_reference = (
+        status in {"pending", "available", "compacted"}
+        and reference.get("content_type")
+        in {"tool_output", "assistant_answer"}
+        and isinstance(reference.get("reference_id"), str)
+    )
+    if status not in {"available", "compacted"} and not pending_reference:
         return item, history, workspace
     chat_id = reference.get("chat_id")
     message_id = reference.get("message_id")
@@ -1651,21 +2003,43 @@ async def _load_evidence_item(
             )
         except Exception:
             history = None
-    if history is None or not hasattr(history, "message_occurrence"):
-        item["status"] = "unavailable"
-        return item, history, workspace
     try:
-        result = await history.message_occurrence(
-            chat_id,
-            message_id,
-            occurrence_no=occurrence_no,
-            max_bytes=_MAX_EVIDENCE_SOURCE_BYTES,
-            authorize=lambda chat: _authorize_evidence_chat(
-                request,
+        if pending_reference and workspace is not None:
+            result = await _read_pending_online(
                 workspace,
-                chat,
-            ),
-        )
+                request,
+                run,
+                reference,
+                authority["span_id"],
+            )
+        elif history is not None and hasattr(history, "message_occurrence"):
+            result = await history.message_occurrence(
+                chat_id,
+                message_id,
+                occurrence_no=occurrence_no,
+                max_bytes=_MAX_EVIDENCE_SOURCE_BYTES,
+                authorize=lambda chat: _authorize_evidence_chat(
+                    request,
+                    workspace,
+                    chat,
+                ),
+            )
+        elif (
+            workspace is not None
+            and reference.get("content_type") == "user_question"
+            and occurrence_no is None
+        ):
+            result = await _read_admitted_question(
+                workspace,
+                request,
+                run,
+                chat_id,
+                message_id,
+            )
+        else:
+            result = {
+                "status": "pending" if pending_reference else "unavailable",
+            }
     except Exception:
         result = {"status": "unavailable", "message": None}
     result_status = _evidence_status(result.get("status"))
@@ -1677,7 +2051,7 @@ async def _load_evidence_item(
     if result_status == "truncated":
         item["truncated"] = True
     payload = result.get("message")
-    if result_status == "available":
+    if result_status in {"available", "compacted"}:
         _set_evidence_content(
             item,
             payload,
