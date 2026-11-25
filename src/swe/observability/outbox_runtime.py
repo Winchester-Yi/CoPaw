@@ -255,10 +255,8 @@ async def recovery_worker_for_scope(
         if storage_authority() == METADATA_AUTHORITY:
             from ..app.conversation_storage.metadata_repository import (
                 MySQLMetadataRepository,
-                SOURCES,
                 WORKSPACES,
                 SCOPE_PREDICATE,
-                SOURCE_PREDICATE,
             )
 
             if metadata_db is None:
@@ -268,17 +266,11 @@ async def recovery_worker_for_scope(
                 + SCOPE_PREDICATE,
                 scope.sql_values,
             )
-            source = await metadata_db.fetch_one(
-                f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
-                scope.sql_values[:3],
-            )
             if (
                 not binding
                 or bytes(binding["workspace_root"]) != str(root).encode()
-                or not source
-                or not source["published"]
             ):
-                raise ValueError("recovery workspace publication mismatch")
+                raise ValueError("recovery workspace binding mismatch")
             repo = MySQLMetadataRepository(metadata_db, scope)
         else:
             repo = JsonChatRepository(root / "chats.json")

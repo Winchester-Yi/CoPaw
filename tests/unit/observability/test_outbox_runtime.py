@@ -9,6 +9,10 @@ import threading
 import pytest
 
 from swe.app.conversation_storage.identity import WorkspaceScope
+from swe.app.conversation_storage.metadata_repository import (
+    SCOPE_PREDICATE,
+    WORKSPACES,
+)
 from swe.observability import outbox_runtime
 from swe.observability.outbox_recovery import (
     clear_registered_scopes,
@@ -443,9 +447,11 @@ async def test_factory_rejects_symlinked_config(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_metadata_factory_rejects_unpublished_or_mismatched_workspace(
+@pytest.mark.parametrize("binding_status", ["matches", "wrong_root", "absent"])
+async def test_mysql_recovery_checks_only_workspace_binding(
     monkeypatch,
     tmp_path,
+    binding_status,
 ):
     config_path = tmp_path / "config.json"
     config_path.write_text("{}")
@@ -477,48 +483,32 @@ async def test_metadata_factory_rejects_unpublished_or_mismatched_workspace(
         lambda: outbox_runtime.METADATA_AUTHORITY,
     )
 
-    class Database:
-        published = True
-        root = b"/wrong"
+    async def fetch_one(query, params):
+        assert query == (
+            f"SELECT workspace_root FROM {WORKSPACES} WHERE {SCOPE_PREDICATE}"
+        )
+        assert params == scope.sql_values
+        if binding_status == "absent":
+            return None
+        bound_root = root if binding_status == "matches" else root / "other"
+        return {"workspace_root": str(bound_root).encode()}
 
-        async def fetch_one(self, query, _params):
-            return (
-                {"workspace_root": self.root}
-                if "workspace_root" in query
-                else {"published": self.published}
-            )
-
-    db = Database()
-    with pytest.raises(ValueError, match="publication mismatch"):
-        await outbox_runtime.recovery_worker_for_scope(
+    async def build_worker():
+        return await outbox_runtime.recovery_worker_for_scope(
             scope,
-            metadata_db=db,
+            metadata_db=SimpleNamespace(fetch_one=fetch_one),
             observability_db=object(),
             emitter=object(),
             expected_root=str(root),
             expected_authority="mysql-metadata",
         )
-    db.root = str(root).encode()
-    db.published = False
-    with pytest.raises(ValueError, match="publication mismatch"):
-        await outbox_runtime.recovery_worker_for_scope(
-            scope,
-            metadata_db=db,
-            observability_db=object(),
-            emitter=object(),
-            expected_root=str(root),
-            expected_authority="mysql-metadata",
-        )
-    db.published = True
-    worker = await outbox_runtime.recovery_worker_for_scope(
-        scope,
-        metadata_db=db,
-        observability_db=object(),
-        emitter=object(),
-        expected_root=str(root),
-        expected_authority="mysql-metadata",
-    )
-    assert worker.scanner.scope == scope
+
+    if binding_status == "matches":
+        worker = await build_worker()
+        assert worker.scanner.scope == scope
+    else:
+        with pytest.raises(ValueError, match="workspace binding mismatch"):
+            await build_worker()
 
 
 @pytest.mark.asyncio
