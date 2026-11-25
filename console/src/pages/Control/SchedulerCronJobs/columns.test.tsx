@@ -93,6 +93,7 @@ it("父任务批入口暂停时，菜单显示不可用的运行整批", async (
   const parent = {
     ...job("batch_paused", false),
     has_distributed_children: true,
+    has_undeleted_children: false,
   };
   render(<>{column("action").render?.(null, parent, 0)}</>);
   fireEvent.click(screen.getByRole("button", { name: "更多操作 任务" }));
@@ -186,15 +187,24 @@ it.each(["hover", "focus"] as const)(
   },
 );
 
-it("没有实际分发过的独立任务不显示父任务标识", () => {
+it("父任务标签随未删除的子任务变化", () => {
   const record = job("batch_enabled", false);
   const { rerender } = render(
     <>{column("name").render?.(record.name, record, 0)}</>,
   );
   expect(screen.queryByText("父任务")).toBeNull();
-  const parent = { ...record, has_distributed_children: true };
+  const parent = {
+    ...record,
+    has_distributed_children: true,
+    has_undeleted_children: true,
+  };
   rerender(<>{column("name").render?.(parent.name, parent, 0)}</>);
   expect(screen.getByText("父任务")).toBeVisible();
+  const withoutChildren = { ...parent, has_undeleted_children: false };
+  rerender(
+    <>{column("name").render?.(withoutChildren.name, withoutChildren, 0)}</>,
+  );
+  expect(screen.queryByText("父任务")).toBeNull();
 });
 
 it.each(["技能任务执行失败 [workflow=http_status, HTTP=502]", ""])(

@@ -82,7 +82,8 @@ export function buildPlanModeMeta(
       ([key]) =>
         key !== "goal_draft_subagent_delegation_enabled" &&
         key !== "multi_agent_mode_enabled" &&
-        key !== "expert_main_binding",
+        key !== "expert_main_binding" &&
+        key !== "session_title_edited",
     ),
   );
   return {
@@ -210,12 +211,12 @@ export async function persistPlanModeState<
     }
 
     const updated = await updateChat(targetChatId, {
-      meta: nextMeta,
+      meta: { plan_mode_enabled: enabled },
     });
 
     await updateSession({
       id: session?.id || targetChatId,
-      meta: updated.meta || nextMeta,
+      meta: updated.meta || { ...session?.meta, plan_mode_enabled: enabled },
     });
   } catch (error) {
     setPlanModeEnabled(getPlanModeEnabled(session));

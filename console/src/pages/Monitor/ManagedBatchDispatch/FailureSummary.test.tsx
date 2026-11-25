@@ -21,9 +21,40 @@ it("只在hover时按完整全局筛选加载，展示每种具体错误和数�
   fireEvent.mouseOver(trigger);
   expect(await screen.findByText("缺少用户信息")).toBeInTheDocument();
   expect(screen.getByText("绑定配置不存在")).toBeInTheDocument();
-  expect(screen.getByText("配置错误 · 3")).toBeInTheDocument();
+  expect(
+    screen.getByRole("heading", { name: "配置错误" }).parentElement,
+  ).toHaveTextContent("3");
   expect(managedBatchBoard.failureSummary).toHaveBeenCalledWith("bank", filters, expect.any(AbortSignal));
   expect(screen.getByText("缺少用户信息").parentElement).toHaveTextContent("2");
+});
+
+it("子任务失败展示类型计数，省略原始原因入口", async () => {
+  vi.mocked(managedBatchBoard.failureSummary).mockResolvedValue({
+    ...result,
+    groups: [
+      {
+        failure_type: "subtask_failed",
+        label: "子任务失败",
+        count: 3,
+        error_types: [
+          { error_type: "API,Prompt", count: 2 },
+          { error_type: null, count: 1 },
+        ],
+        details: [{ message: "子任务执行失败", count: 3 }],
+      },
+    ],
+  });
+  render(<FailureSummary source="bank" filters={filters} refresh={0} value={3} />);
+  fireEvent.mouseOver(screen.getByRole("button", { name: /失败任务 3/ }));
+  const types = await screen.findByRole("list", { name: "子任务失败类型" });
+  expect(
+    within(types).getByText("API + Prompt").parentElement,
+  ).toHaveTextContent("2");
+  expect(
+    within(types).getByText("未记录类型").parentElement,
+  ).toHaveTextContent("1");
+  expect(screen.queryByText("子任务执行失败")).not.toBeInTheDocument();
+  expect(screen.queryByText("查看原始失败原因")).not.toBeInTheDocument();
 });
 
 it("查询失败不是零失败，支持原条件重试", async () => {

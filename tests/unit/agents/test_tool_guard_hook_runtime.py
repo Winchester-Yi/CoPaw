@@ -457,6 +457,8 @@ async def test_tool_guard_pending_extra_carries_goal_id_only_in_goal_mode(
 ) -> None:
     agent = _FakeAgent(tmp_path)
     agent._request_context["goal_id"] = "goal-1"
+    agent._request_context["chat_id"] = "chat-a"
+    agent._request_context.pop("msgid", None)
     approval_service = _RecordingApprovalService()
     agent._tool_guard_approval_service = approval_service
     monkeypatch.setattr(
@@ -471,9 +473,10 @@ async def test_tool_guard_pending_extra_carries_goal_id_only_in_goal_mode(
     )
 
     assert approval_service.create_pending_kwargs is not None
-    assert (
-        approval_service.create_pending_kwargs["extra"]["goal_id"] == "goal-1"
-    )
+    extra = approval_service.create_pending_kwargs["extra"]
+    assert extra["goal_id"] == "goal-1"
+    assert extra["chat_id"] == "chat-a"
+    assert "msgid" not in extra
 
 
 @pytest.mark.asyncio

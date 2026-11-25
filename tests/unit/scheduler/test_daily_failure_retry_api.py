@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""外部平台只传来源的受理/查询契约和脱敏错误日志。"""
+"""外部平台补跑的受理/查询契约和脱敏错误日志。"""
 
 import logging
 
@@ -74,6 +74,8 @@ async def test_invalid_body_runtime_and_storage_have_no_fake_acceptance(
             {"source_id": ""},
             {"source_id": "bank", "tenant_id": "private-user"},
             {"source_id": " bank"},
+            {"source_id": "bank", "task_scope": "invalid"},
+            {"source_id": "bank", "job_ids": [""]},
         ):
             assert (await client.post(PATH, json=body)).status_code == 422
         app.state.managed_cron_runtime_prepared = True
@@ -90,6 +92,100 @@ async def test_invalid_body_runtime_and_storage_have_no_fake_acceptance(
         }
     assert "补跑接口失败" in caplog.text
     assert "private-user" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_filtered_call_persists_scope_and_targets_batch_parent(
+    scenario,
+    monkeypatch,
+):
+    from scheduler.app.services.cron.managed import daily_retry_scan
+
+    monkeypatch.setattr(daily_retry_scan, "CRON_BATCH_MAX_ATTEMPTS", 1)
+    ordinary = await scenario.run()
+    another = await scenario.run()
+    await scenario.run()
+    parent, _, child = await scenario.batch(
+        children=True,
+        fail_all_children=True,
+    )
+    await scenario.db.execute(
+        "UPDATE swe_cron_execution_runs SET kind='ordinary' WHERE execution_id=%s",
+        (child["execution_id"],),
+    )
+    await scenario.batch()
+    service = DailyFailureRetry(scenario.db, clock=scenario.clock, page_size=1)
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api")
+    app.dependency_overrides[api.daily_service] = lambda: service
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        for scope, job_ids, count in (
+            ("batch", [parent["job_id"], ordinary["job_id"]], 2),
+            (
+                "ordinary",
+                [ordinary["job_id"], another["job_id"], parent["job_id"]],
+                2,
+            ),
+            ("all", [], 0),
+        ):
+            response = await client.post(
+                PATH,
+                json={
+                    "source_id": "bank",
+                    "task_scope": scope,
+                    "job_ids": job_ids,
+                },
+            )
+            assert response.status_code == 202, response.text
+            call_id = response.json()["call"]["call_id"]
+            assert response.json()["call"]["status"] == "queued"
+            stored = await scenario.db.fetch_one(
+                "SELECT status FROM swe_cron_failure_retry_calls WHERE call_id=%s",
+                (call_id,),
+            )
+            assert stored["status"] == "filtered_queued"
+            resumed = DailyFailureRetry(
+                scenario.db,
+                clock=scenario.clock,
+                page_size=1,
+            )
+            for _ in range(count + 1):
+                await resumed.tick()
+            result = await resumed.detail("bank", call_id)
+            assert result["call"]["status"] == "completed"
+            assert result["call"]["scanned_count"] == count
+            assert result["call"]["queued_count"] == count
+            if scope == "batch":
+                assert {item["tenant_id"] for item in result["items"]} == {
+                    "bob",
+                    "carol",
+                }
+            elif scope == "ordinary":
+                assert {item["job_id"] for item in result["items"]} == {
+                    ordinary["job_id"],
+                    another["job_id"],
+                }
+
+
+@pytest.mark.asyncio
+async def test_filtered_call_never_expands_if_scope_event_is_missing(scenario):
+    await scenario.run()
+    service = DailyFailureRetry(scenario.db, clock=scenario.clock)
+    call = await service.calls.submit("bank", task_scope="ordinary")
+    await scenario.db.execute(
+        "DELETE FROM swe_cron_managed_dispatch_events "
+        "WHERE event_type='daily_retry_scope'",
+    )
+
+    assert await service.tick() == 0
+    result = await service.detail("bank", call["call_id"])
+    assert result["call"]["status"] == "queued"
+    assert result["call"]["error_code"] == "cron_daily_retry_scan_failed"
+    assert result["call"]["scanned_count"] == 0
+    assert result["items"] == []
 
 
 @pytest.mark.asyncio

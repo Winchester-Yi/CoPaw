@@ -24,9 +24,8 @@ class SystemSweClient:
             "X-Scope-Id": encode_scope(tenant, source),
         }
 
-    async def _request(self, method, action, row, **kwargs):
+    async def _request(self, method, action, *, headers, **kwargs):
         url = f"{self.base_url}/api/internal/cron/system/{action}"
-        headers = self._headers(row)
         if self.http is not None:
             response = await self.http.request(
                 method,
@@ -56,11 +55,19 @@ class SystemSweClient:
         return await self._request(
             "GET",
             "config",
-            row,
+            headers=self._headers(row),
             params={
                 "job_id": row["job_id"],
                 "operation_id": row["operation_id"],
             },
+        )
+
+    async def get_batch_retry_overrides(self, token=None):
+        return await self._request(
+            "GET",
+            "batch-retry-overrides",
+            headers={"X-Internal-Token": f"Bearer {token}"} if token else {},
+            timeout=3,
         )
 
     async def execute(self, job, run):
@@ -68,7 +75,7 @@ class SystemSweClient:
         return await self._request(
             "POST",
             "execute",
-            job,
+            headers=self._headers(job),
             json={
                 "execution_id": run["execution_id"],
                 "job_id": job["job_id"],

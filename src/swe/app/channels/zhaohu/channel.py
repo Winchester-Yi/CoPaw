@@ -1307,6 +1307,8 @@ class ZhaohuChannel(BaseChannel):
     async def _query_user_info_by_sap(
         self,
         sap_id: str,
+        *,
+        redact_logs: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Query user info to convert openId to sapId.
 
@@ -1345,31 +1347,38 @@ class ZhaohuChannel(BaseChannel):
                 data = response.json()
 
             if data.get("code") != "200":
-                logger.warning(
-                    "zhaohu user query failed: code=%s message=%s",
-                    data.get("code"),
-                    data.get("message"),
-                )
+                if not redact_logs:
+                    logger.warning(
+                        "zhaohu user query failed: code=%s message=%s",
+                        data.get("code"),
+                        data.get("message"),
+                    )
                 return None
 
             user_list = data.get("data") or []
             if not user_list or not isinstance(user_list, list):
-                logger.warning(
-                    "zhaohu user query: no user found for openId=%s",
-                    sap_id,
-                )
+                if not redact_logs:
+                    logger.warning(
+                        "zhaohu user query: no user found for openId=%s",
+                        sap_id,
+                    )
                 return None
 
             user_info = user_list[0]
-            logger.info(
-                "zhaohu user query: openId=%s -> sapId=%s",
-                sap_id,
-                user_info.get("sapId"),
-            )
+            if not redact_logs:
+                logger.info(
+                    "zhaohu user query: openId=%s -> sapId=%s",
+                    sap_id,
+                    user_info.get("sapId"),
+                )
             return user_info
 
         except Exception:
-            logger.exception("zhaohu user query failed for openId=%s", sap_id)
+            if not redact_logs:
+                logger.exception(
+                    "zhaohu user query failed for openId=%s",
+                    sap_id,
+                )
             return None
 
     async def enqueue_callback_message(self, callback_body: Any) -> None:
@@ -2429,6 +2438,76 @@ class ZhaohuChannel(BaseChannel):
         _raise_cron_delivery_failure(meta, "identity not configured")
         return False
 
+    async def send_batch_status_report(
+        self,
+        employee_id: str,
+        text: str,
+        delivery_id: str,
+    ) -> dict:
+        """Send one report part with a structured channel outcome."""
+        if not self._validate_send_configuration("batch-status-report", None):
+            return {
+                "status": "failed",
+                "error_code": "zhaohu_channel_unavailable",
+            }
+        user_info = await self._query_user_info_by_sap(
+            employee_id,
+            redact_logs=True,
+        )
+        if (
+            not isinstance(user_info, dict)
+            or str(user_info.get("sapId")) != employee_id
+        ):
+            return {
+                "status": "failed",
+                "error_code": "zhaohu_address_unresolved",
+            }
+        address = str(user_info.get("ystId") or "").strip()
+        if not address:
+            return {
+                "status": "failed",
+                "error_code": "zhaohu_address_unresolved",
+            }
+        payload = await self._build_push_payload(
+            address,
+            text,
+            {
+                "batch_id": delivery_id,
+                "send_pk": delivery_id,
+                "notification_summary": "定时任务批调度简报",
+            },
+            address_resolved=True,
+        )
+        try:
+            result = await self._post_push_payload(payload)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return {"status": "failed", "error_code": "zhaohu_connect_failed"}
+        except httpx.HTTPError:
+            return {
+                "status": "outcome_unknown",
+                "error_code": "zhaohu_response_unknown",
+            }
+
+        code = result.get("returnCode") if isinstance(result, dict) else None
+        if not isinstance(code, str) or not code.strip():
+            return {
+                "status": "outcome_unknown",
+                "error_code": "zhaohu_response_unknown",
+            }
+        if code != "SUC0000":
+            return {"status": "failed", "error_code": "zhaohu_rejected"}
+        body = result.get("body")
+        receipts = (
+            [
+                str(item["expMsgId"])[:128]
+                for item in body
+                if isinstance(item, dict) and item.get("expMsgId")
+            ]
+            if isinstance(body, list)
+            else []
+        )
+        return {"status": "sent", "receipt_ids": receipts[:10]}
+
     async def _post_push_payload(self, payload: dict) -> dict:
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
@@ -2482,6 +2561,8 @@ class ZhaohuChannel(BaseChannel):
         to_handle: str,
         text: str,
         meta: dict,
+        *,
+        address_resolved: bool = False,
     ) -> dict:
         # send_addr: prefer meta["send_addr"] (yst_id), then meta["yst_id"],
         # then to_handle as fallback
@@ -2489,13 +2570,43 @@ class ZhaohuChannel(BaseChannel):
             meta.get("send_addr") or meta.get("yst_id") or to_handle,
         ).strip()
         # 如果send_addr是8位，则可能是sapId，需要查询ystId
-        send_addr = await self.deal_eight_sap(send_addr)
+        if not address_resolved:
+            send_addr = await self.deal_eight_sap(send_addr)
         session_id = str(meta.get("session_id") or "").strip()
         send_pk = str(
             meta.get("send_pk")
             or f"{session_id}_{send_addr}".strip("_")
             or send_addr,
         ).strip()
+        message_content = await self._build_push_message_content(text, meta)
+        payload = {
+            "baseInfo": {
+                "sysId": self.sys_id,
+                "ssnId": meta.get("ssn_id") or session_id or "",
+                "ssnNo": meta.get("ssn_no") or "",
+                "msgBigCls": meta.get("msg_big_cls") or "",
+                "msgSmlCls": meta.get("msg_sml_cls") or "",
+                "channel": self.channel_code,
+                "robotOpenId": self.robot_open_id,
+                "sendAddrs": [
+                    {
+                        "sendAddr": send_addr,
+                        "sendPk": send_pk,
+                    },
+                ],
+                "net": self.net,
+            },
+            "msgCtlInfo": {
+                "configId": meta.get("config_id") or "",
+                "batchId": (
+                    meta.get("cron_delivery_key") or meta.get("batch_id") or ""
+                ),
+            },
+            "msgContent": message_content,
+        }
+        return _clean_payload(payload)
+
+    async def _build_push_message_content(self, text: str, meta: dict) -> dict:
         summary = "小助消息提醒"
         # text_values = [{"type": "txt", "text": chunk} for chunk in _chunk_text_values(text)]
         text_values = "\n".join(_chunk_text_values(text))
@@ -2552,37 +2663,11 @@ class ZhaohuChannel(BaseChannel):
 
         # 支持自定义 summary
         notification_summary = meta.get("notification_summary") or summary
-
-        payload = {
-            "baseInfo": {
-                "sysId": self.sys_id,
-                "ssnId": meta.get("ssn_id") or session_id or "",
-                "ssnNo": meta.get("ssn_no") or "",
-                "msgBigCls": meta.get("msg_big_cls") or "",
-                "msgSmlCls": meta.get("msg_sml_cls") or "",
-                "channel": self.channel_code,
-                "robotOpenId": self.robot_open_id,
-                "sendAddrs": [
-                    {
-                        "sendAddr": send_addr,
-                        "sendPk": send_pk,
-                    },
-                ],
-                "net": self.net,
-            },
-            "msgCtlInfo": {
-                "configId": meta.get("config_id") or "",
-                "batchId": (
-                    meta.get("cron_delivery_key") or meta.get("batch_id") or ""
-                ),
-            },
-            "msgContent": {
-                "summary": notification_summary,
-                "pushContent": notification_summary,
-                "message": message_blocks,
-            },
+        return {
+            "summary": notification_summary,
+            "pushContent": notification_summary,
+            "message": message_blocks,
         }
-        return _clean_payload(payload)
 
     async def deal_eight_sap(self, send_addr):
         if send_addr and len(send_addr) == 8:

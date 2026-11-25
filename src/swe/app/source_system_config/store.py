@@ -106,6 +106,20 @@ class SourceSystemConfigStore:
             return None
         return int(row["version"])
 
+    async def list_cron_batch_retry_overrides(self) -> dict[str, int]:
+        """只读取已保存的批调度尝试上限，不返回其他来源配置。"""
+        db = self._require_db()
+        path = "$.cron_batch_max_attempts"
+        rows = await self._call_db(
+            "list cron batch retry overrides",
+            db.fetch_all,
+            "SELECT source_id, JSON_UNQUOTE(JSON_EXTRACT(config_text, %s)) "
+            "AS max_attempts FROM swe_source_system_config "
+            "WHERE JSON_TYPE(JSON_EXTRACT(config_text, %s)) = 'INTEGER'",
+            (path, path),
+        )
+        return {row["source_id"]: int(row["max_attempts"]) for row in rows}
+
     async def upsert_config(
         self,
         source_id: str,

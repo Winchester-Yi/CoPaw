@@ -4,7 +4,7 @@
 from .batch_failures import member_rows
 
 
-async def lane_for_batch(db, batch_id):
+async def lane_for_batch(db, batch_id, max_attempts):
     """复用自动重试资格，避免把等待下一次业务尝试的批次误认为已结束。"""
     joined = "FROM swe_cron_managed_batch_members m JOIN swe_cron_execution_runs r ON r.execution_id=m.current_execution_id WHERE m.batch_id=%s"
     prior = await db.fetch_one(
@@ -36,6 +36,6 @@ async def lane_for_batch(db, batch_id):
     from .auto_retry import AutoBatchRetry
 
     for row in rows:
-        if await AutoBatchRetry._eligible(db, row):
+        if await AutoBatchRetry._eligible(db, row, max_attempts):
             return "normal"
     return "urgent"

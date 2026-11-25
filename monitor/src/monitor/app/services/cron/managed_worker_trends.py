@@ -18,6 +18,7 @@ pool AS (
       AND r.model_id=%s AND r.model_id COLLATE utf8mb4_bin=%s
       AND r.created_at<b.until_time
       AND JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))='scheduler_managed_v1'
+      AND NOT {sql.TEXT_RUN}
       AND (r.kind='batch' OR (r.kind='ordinary' AND EXISTS (
           SELECT 1 FROM {sql.MEMBERS} m WHERE m.source_id=r.source_id
           AND m.current_execution_id=r.execution_id

@@ -24,6 +24,7 @@ from ...tracing.models import TraceStatus
 from ...tracing.agent_trace_capture import mark_turn_cancelled
 from ...tracing.agent_trace_sdk import OperationName, start_child_span
 from ..agent_context import set_current_agent_id
+from ..channels.schema import DEFAULT_CHANNEL
 from .query_contracts import (
     QueryPersistenceResult,
     _QueryPreflight,
@@ -1234,7 +1235,11 @@ async def _query_session_execution(
     manager = getattr(owner, "_chat_manager", None)
     claim = getattr(manager, "claim_session_path", None)
     if claim is not None and request is not None:
-        await claim(session_id, user_id, request.channel or "console")
+        await claim(
+            session_id,
+            user_id,
+            getattr(request, "channel", None) or DEFAULT_CHANNEL,
+        )
     async with session.execution(
         session_id,
         user_id=user_id,

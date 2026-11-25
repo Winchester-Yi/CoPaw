@@ -6,7 +6,8 @@ import logging
 from datetime import timedelta
 from uuid import uuid4
 
-from .daily_retry_audit import decision_items, record_decision
+from .batch_retry_policy import BatchRetryPolicyUnavailable, max_batch_attempts
+from .daily_retry_audit import decision_items, read_filters, record_decision
 from .daily_retry_enqueue import (
     eligible_reason,
     enqueue_retry,
@@ -14,6 +15,7 @@ from .daily_retry_enqueue import (
     prepare_retry,
 )
 from .daily_retry_scan import candidates, latest_reason
+from .daily_retry_filters import matches_locked_scope
 from .daily_retry_store import CALLS, DailyRetryCalls
 from .diagnostics import format_management_error
 from .executions import ExecutionConflict
@@ -32,6 +34,7 @@ class DailyFailureRetry:
         clock=None,
         page_size=100,
         dispatch_ordinary=None,
+        retry_overrides=None,
     ):
         if type(page_size) is not int or not 1 <= page_size <= 200:
             raise ValueError("invalid_cron_daily_retry_page_size")
@@ -40,6 +43,7 @@ class DailyFailureRetry:
         self.calls = DailyRetryCalls(db, clock=self.clock)
         self.page_size = page_size
         self.dispatch_ordinary = dispatch_ordinary
+        self.retry_overrides = retry_overrides
         self.next_probe = None
 
     async def detail(self, source, call_id, *, after=0, limit=50):
@@ -107,10 +111,16 @@ class DailyFailureRetry:
             f"SELECT * FROM {CALLS} WHERE call_id=%s",
             (call_id,),
         )
-        page = await candidates(self.db, row, self.page_size)
+        filters = await read_filters(self.db, row)
+        page = await candidates(self.db, row, self.page_size, filters)
         ordinary = []
         for candidate in page:
-            execution_id = await self._process_one(call_id, owner, candidate)
+            execution_id = await self._process_one(
+                call_id,
+                owner,
+                candidate,
+                filters,
+            )
             if execution_id is not None:
                 ordinary.append(execution_id)
         await self.calls.release(
@@ -135,22 +145,36 @@ class DailyFailureRetry:
                     )
         return len(page)
 
-    async def _process_one(self, call_id, owner, row):
+    async def _process_one(self, call_id, owner, row, filters):
         try:
             early = await latest_reason(self.db, row)
             if early:
                 await self._decision(call_id, owner, row, "skipped", early)
                 return
             prepared = await prepare_retry(self.db, row)
+            overrides = (
+                await self.retry_overrides()
+                if prepared.member and self.retry_overrides
+                else {}
+            )
+            max_attempts = max_batch_attempts(overrides, row["source_id"])
             async with transaction(self.db) as tx:
                 call = await self.calls.locked(tx, call_id, owner)
                 current, locked, member, receipt = await lock_retry(
                     tx,
                     row,
                     prepared,
+                    verify_membership=filters is not None,
                 )
                 if locked is None:
                     reason = "cron_daily_retry_execution_missing"
+                elif not matches_locked_scope(
+                    filters,
+                    locked,
+                    member,
+                    receipt,
+                ):
+                    reason = "cron_daily_retry_outside_task_scope"
                 else:
                     reason = await eligible_reason(
                         tx,
@@ -160,6 +184,7 @@ class DailyFailureRetry:
                         member,
                         receipt,
                         prepared,
+                        max_attempts=max_attempts,
                     )
                 result, decision = row, "skipped"
                 if reason is None:
@@ -171,6 +196,7 @@ class DailyFailureRetry:
                         member,
                         prepared,
                         self.clock(),
+                        max_attempts=max_attempts,
                     )
                 await self._commit_decision(
                     tx,
@@ -183,6 +209,8 @@ class DailyFailureRetry:
                 )
             if decision == "queued" and result["kind"] == "ordinary":
                 return result["execution_id"]
+        except BatchRetryPolicyUnavailable:
+            raise
         except ExecutionConflict as error:
             await self._decision(call_id, owner, row, "skipped", str(error))
         except Exception as error:

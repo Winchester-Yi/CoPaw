@@ -105,7 +105,7 @@ export type ManagedFailureFilters = {
   start_time?: string;
   end_time?: string;
   status?: string;
-  child_status?: string;
+  has_members?: boolean;
   query?: string;
 };
 export interface ManagedFailureSummary {
@@ -212,7 +212,7 @@ export interface ManagedWorkerTrends {
   points: ManagedWorkerTrendPoint[];
 }
 
-type Filters = Record<string, string | number | undefined>;
+type Filters = Record<string, string | number | boolean | undefined>;
 const MONITOR = "/monitor/cron/managed-dispatch";
 const SCHEDULER = "/scheduler/cron/managed-dispatch/batches";
 const idPath = (id: string) => encodeURIComponent(id);

@@ -9,7 +9,6 @@ import { useNavigate } from "react-router-dom";
 import { DatePicker, Tooltip } from "antd";
 import cx from "classnames";
 import dayjs from "dayjs";
-import type { CronType } from "@/utils/parseCron";
 import styles from "../index.module.less";
 import { useIframeStore } from "../../../stores/iframeStore";
 import { Icon } from "../components/Icon";
@@ -108,12 +107,13 @@ const CYCLES = ["本月", "本季", "今日", "T+1日", "自定义"];
 
 type CustomRepeatMode = "daily" | "weekly" | "monthly" | "yearly" | "frequency";
 
-const SCHEDULE_TYPES: { value: CronType; label: string }[] = [
-  { value: "hourly", label: "每小时" },
-  { value: "daily", label: "每日" },
-  { value: "weekly", label: "每周" },
-  { value: "custom", label: "自定义" },
-];
+const SCHEDULE_TYPES: { value: PlanItem["schedule"]["type"]; label: string }[] =
+  [
+    { value: "hourly", label: "每小时" },
+    { value: "weekdays", label: "工作日" },
+    { value: "weekly", label: "每周" },
+    { value: "custom", label: "自定义" },
+  ];
 
 const CUSTOM_REPEAT_OPTIONS: { value: CustomRepeatMode; label: string }[] = [
   { value: "daily", label: "每日" },
@@ -223,10 +223,24 @@ function SceneName({ name }: { name: string }) {
 }
 
 export function SceneDescription({ description }: { description: string }) {
+  const descriptionRef = useRef<HTMLParagraphElement>(null);
+  const [open, setOpen] = useState(false);
+
   return (
-    <p className={styles.sceneDescription} title={description}>
-      {description}
-    </p>
+    <Tooltip
+      title={description}
+      open={open}
+      onOpenChange={(visible) => {
+        const element = descriptionRef.current;
+        setOpen(
+          visible && !!element && element.scrollHeight > element.clientHeight,
+        );
+      }}
+    >
+      <p ref={descriptionRef} className={styles.sceneDescription}>
+        {description}
+      </p>
+    </Tooltip>
   );
 }
 
@@ -263,6 +277,10 @@ export function ScheduleEditor({
   const updateSchedule = useWealthStore((s) => s.updateSchedule);
   const schedule = item.schedule;
   const type = schedule.type;
+  const options =
+    type === "daily"
+      ? [...SCHEDULE_TYPES, { value: "daily", label: "每日" } as const]
+      : SCHEDULE_TYPES;
   const customConfig =
     type === "custom" ? parseCustomSchedule(schedule.rawCron) : null;
   const customRepeatMode: CustomRepeatMode | "" =
@@ -312,7 +330,7 @@ export function ScheduleEditor({
           role="group"
           aria-label={`${sceneName}执行频率`}
         >
-          {SCHEDULE_TYPES.map((option) => (
+          {options.map((option) => (
             <button
               key={option.value}
               type="button"
@@ -337,7 +355,7 @@ export function ScheduleEditor({
           ))}
         </div>
       </div>
-      {(type === "daily" || type === "weekly") && (
+      {(type === "daily" || type === "weekdays" || type === "weekly") && (
         <div className={styles.scheduleField}>
           <span>{PUSH_TIME_LABEL}</span>
           <TimeField
@@ -348,6 +366,9 @@ export function ScheduleEditor({
             }
             ariaLabel={`${sceneName}${PUSH_TIME_LABEL}`}
           />
+          {type === "weekdays" && (
+            <small className={styles.taskRangeLabel}>每周一至周五</small>
+          )}
         </div>
       )}
       {type === "weekly" && (
@@ -1367,9 +1388,6 @@ export default function Create() {
                 />
               </div>
             </div>
-            {/* <p className={styles.pageNote}>
-              任务周期是场景的有效期，执行频率决定定时任务的触发节奏（每小时/每日/每周/自定义）；经营名单生成后自动下发。
-            </p> */}
           </section>
 
           {needsTargets && (

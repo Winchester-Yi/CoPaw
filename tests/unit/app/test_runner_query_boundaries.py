@@ -1503,3 +1503,38 @@ async def test_cancelled_attempt_cancels_trace_then_runs_finally_cleanup_and_res
         "blocked cleanup",
         "qa cleanup",
     ]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_request_without_channel_can_open_session(tmp_path):
+    from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
+    from swe.app.crons.executor import CronExecutor
+    from swe.app.crons.models import CronJobRequest
+    from swe.app.runner.manager import ChatManager
+    from swe.app.runner.query_attempt import _query_session_execution
+    from swe.app.runner.repo.json_repo import JsonChatRepository
+    from swe.app.runner.session import SafeJSONSession
+
+    job = SimpleNamespace(
+        id="job",
+        request=CronJobRequest(input=[]),
+        runtime=SimpleNamespace(timeout_seconds=60),
+    )
+    request = AgentRequest.model_validate(
+        CronExecutor._build_base_agent_request(job, "user-1", "session-1"),
+    )
+    assert not hasattr(request, "channel")
+    owner = SimpleNamespace(
+        _chat_manager=ChatManager(
+            repo=JsonChatRepository(tmp_path / "chats.json"),
+        ),
+        session=SafeJSONSession(str(tmp_path / "sessions")),
+    )
+    async with _query_session_execution(
+        owner,
+        "session-1",
+        "user-1",
+        request=request,
+    ) as execution:
+        assert execution.state == {}

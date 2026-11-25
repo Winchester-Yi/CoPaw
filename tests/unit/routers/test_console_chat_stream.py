@@ -100,6 +100,12 @@ class _FakeCoordinator:
         )
 
     async def start_or_attach(self, chat_id, payload, producer, **kwargs):
+        if (
+            kwargs.get("attach_current")
+            and getattr(self.tracker, "status_value", None)
+            == TurnStatus.STOPPING
+        ):
+            raise console_router.TurnStoppingError("Chat is stopping")
         if getattr(self.tracker, "is_new", True):
             msgid = kwargs.get("msgid") or self.identity.msgid
             self.identity = TurnIdentity(

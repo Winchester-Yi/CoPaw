@@ -8,7 +8,6 @@
  */
 import { create } from "zustand";
 import type { ReactNode } from "react";
-import type { CronParts } from "@/utils/parseCron";
 import { useIframeStore } from "../../stores/iframeStore";
 import * as api from "./api";
 import {
@@ -52,6 +51,7 @@ import type {
   Draft,
   Plan,
   PlanItem,
+  PlanSchedule,
   Scene,
 } from "./types";
 
@@ -173,7 +173,7 @@ interface WealthState {
   dropScene: (dragId: string, targetId: string) => void;
   setTaskCycle: (id: string, cycle: string) => void;
   setItemDates: (id: string, field: "start" | "end", value: string) => void;
-  updateSchedule: (id: string, patch: Partial<CronParts>) => void;
+  updateSchedule: (id: string, patch: Partial<PlanSchedule>) => void;
   setItemMonitoring: (id: string, patch: Partial<SceneMonitoring>) => void;
   setItemDirection: (id: string, direction: string) => void;
   setItemCustNum: (id: string, custNum: number | undefined) => void;

@@ -40,6 +40,39 @@ async def scan(scenario, service=None):
 
 
 @pytest.mark.asyncio
+async def test_daily_retry_uses_the_current_source_batch_limit(scenario):
+    from scheduler.app.services.cron.managed.batch_retry_policy import (
+        BatchRetryPolicy,
+    )
+
+    overrides = {"bank": 2, "BANK": 1}
+
+    async def fetch_overrides():
+        return dict(overrides)
+
+    now = [0]
+    policy = BatchRetryPolicy(fetch_overrides, clock=lambda: now[0])
+    service = DailyFailureRetry(
+        scenario.db,
+        clock=scenario.clock,
+        retry_overrides=policy.read_overrides,
+    )
+    assert await policy.read_overrides() == {"bank": 2, "BANK": 1}
+    await scenario.batch()
+    pending = await scan(scenario, service)
+    assert (
+        pending["items"][0]["reason"]
+        == "cron_daily_retry_native_retry_pending"
+    )
+
+    overrides["bank"] = 1
+    assert (await policy.read_overrides())["bank"] == 2
+    now[0] += 5
+    exhausted = await scan(scenario, service)
+    assert exhausted["call"]["queued_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_new_execution_latest_definition_and_no_fake_history(scenario):
     failed = await scenario.run()
     before = scenario.db.conn.execute(

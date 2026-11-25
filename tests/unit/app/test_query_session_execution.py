@@ -24,6 +24,89 @@ from swe.app.runner.query_contracts import (
 from swe.app.answer_turn.models import TurnIdentity, TurnStatus
 from swe.app.runner.runner import AgentRunner
 from swe.app.runner.session import SafeJSONSession
+from swe.observability.runner_lifecycle import terminal_turn_status
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_survives_session_close(tmp_path):
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    async with session.execution("session", user_id="user") as execution:
+        execution.observed_turn_id = "turn"
+        await execution.commit_state(
+            {"turn_states": {"turn": {"status": "completed"}}},
+        )
+        await execution.close()
+        assert terminal_turn_status(execution, "turn") == "completed"
+        assert terminal_turn_status(execution, "missing") is None
+    assert terminal_turn_status(execution, "turn") == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed"])
+async def test_admission_settles_after_session_close(
+    tmp_path,
+    monkeypatch,
+    status,
+):
+    from swe.app.runner.query_execution import admission
+
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    owner = SimpleNamespace(session=session)
+    settled = []
+
+    async def admit(execution, **_kwargs):
+        return "turn", True, None
+
+    async def stream(*_args, session_execution, **_kwargs):
+        await session_execution.commit_state(
+            {"turn_states": {"turn": {"status": status}}},
+        )
+        await session_execution.close()
+        yield Msg(name="agent", role="assistant", content="done"), True
+
+    monkeypatch.setattr(admission, "admit_user_turn_with_creation", admit)
+    monkeypatch.setattr(admission, "_stream_admitted_query", stream)
+    monkeypatch.setattr(
+        admission,
+        "finish_query_run",
+        lambda *args, **kwargs: settled.append(args[2]),
+    )
+    request = SimpleNamespace(user_id="user", channel="console")
+    frames = [
+        frame
+        async for frame in admission.stream_admission(
+            owner,
+            [],
+            request=request,
+            query="hello",
+            session_id="session",
+            user_id="user",
+        )
+    ]
+    assert len(frames) == 1
+    assert settled == [status]
+
+
+@pytest.mark.asyncio
+async def test_failed_commit_does_not_publish_terminal_status(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.app.runner import session as session_module
+
+    def fail_write(*_args):
+        raise OSError("write failed")
+
+    monkeypatch.setattr(session_module, "_write_json_state_sync", fail_write)
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    async with session.execution("session", user_id="user") as execution:
+        execution.observed_turn_id = "turn"
+        with pytest.raises(OSError, match="write failed"):
+            await execution.commit_state(
+                {"turn_states": {"turn": {"status": "completed"}}},
+            )
+        await execution.close()
+        assert terminal_turn_status(execution, "turn") is None
 
 
 class _RecordingExecution:

@@ -29,7 +29,7 @@ from ..expert_binding import (
     read_expert_binding,
 )
 from ...channels.schema import DEFAULT_CHANNEL
-from ..models import ChatSpec, ChatsFile
+from ..models import MANUAL_CHAT_TITLE_META_KEY, ChatSpec, ChatsFile
 
 _LOAD_STABLE_READ_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
@@ -514,12 +514,26 @@ class JsonChatRepository(BaseChatRepository):
         spec: ChatSpec,
         *,
         require_existing: bool = False,
+        expected_chat: ChatSpec | None = None,
     ) -> _SnapshotState | None:
         with self._write_lock_sync():
             _, chats_file = self._load_sync()
             for index, existing in enumerate(chats_file.chats):
                 if existing.id == spec.id:
+                    if expected_chat is not None and existing != expected_chat:
+                        from ...conversation_storage.errors import (
+                            ConflictError,
+                        )
+
+                        raise ConflictError(
+                            "Chat changed since patch was read",
+                        )
                     updated = spec.model_copy(deep=True)
+                    if expected_chat is None and existing.meta.get(
+                        MANUAL_CHAT_TITLE_META_KEY,
+                    ):
+                        updated.name = existing.name
+                        updated.meta[MANUAL_CHAT_TITLE_META_KEY] = True
                     if "multi_agent_mode_enabled" in existing.meta:
                         updated.meta["multi_agent_mode_enabled"] = (
                             existing.meta["multi_agent_mode_enabled"]
@@ -671,19 +685,32 @@ class JsonChatRepository(BaseChatRepository):
             self._set_snapshot(snapshot)
         return binding
 
-    def _update_chat_if_exists_sync(self, spec: ChatSpec):
-        return self._upsert_chat_sync(spec, require_existing=True)
-
     async def update_chat_if_exists(
         self,
         spec: ChatSpec,
+        *,
+        expected_chat: ChatSpec | None = None,
     ) -> ChatSpec | None:
         snapshot = await run_runtime_state_work(
-            self._update_chat_if_exists_sync,
+            self._upsert_chat_sync,
             spec,
+            require_existing=True,
+            expected_chat=expected_chat,
         )
+        if snapshot is None:
+            return None
         self._set_snapshot(snapshot)
         return await self.get_chat(spec.id)
+
+    async def update_chat_if_unchanged(
+        self,
+        spec: ChatSpec,
+        expected_chat: ChatSpec,
+    ) -> ChatSpec | None:
+        return await self.update_chat_if_exists(
+            spec,
+            expected_chat=expected_chat,
+        )
 
     async def compare_and_set_expert_binding(
         self,

@@ -3,7 +3,11 @@
 
 from .executions import RUN_TABLE
 from .operations import IDENTITY_FIELDS, utc_now
-from .run_accounting import occupied_run_sql, standalone_direct_sql
+from .run_accounting import (
+    direct_dispatch_sql,
+    occupied_run_sql,
+    standalone_direct_sql,
+)
 from .date_policy import BEIJING
 from datetime import timezone
 
@@ -16,11 +20,22 @@ INVALIDATED = (
 )
 
 
-def _batch_order():
+def _batch_order(*, direct=False):
     """新工作使用冻结元数据，存量工作仍由真实回执和成员关系确定顺序。"""
     received = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.batch_created_at')),(SELECT MIN(t.created_at) FROM swe_cron_managed_batch_members m JOIN swe_cron_managed_trigger_receipts t ON t.batch_id=m.batch_id AND t.source_id=m.source_id WHERE m.current_execution_id=r.execution_id AND m.source_id=r.source_id AND t.kind='batch' AND t.status='accepted'),'1000-01-01')"
     first = "COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.batch_queue_order')) AS UNSIGNED),(SELECT MIN(i.queue_order) FROM swe_cron_managed_batch_members m JOIN swe_cron_managed_batch_members b ON b.batch_id=m.batch_id JOIN swe_cron_execution_runs i ON i.execution_id=b.initial_execution_id WHERE m.current_execution_id=r.execution_id AND m.source_id=r.source_id),r.queue_order)"
-    return f" ORDER BY CASE WHEN r.dispatch_lane='urgent' THEN 0 ELSE 1 END,{received},{first},r.dispatch_order,r.queue_order"
+    standalone_order = ""
+    if direct:
+        standalone = standalone_direct_sql("r")
+        standalone_order = (
+            f"CASE WHEN {standalone} THEN 0 ELSE 1 END,"
+            f"CASE WHEN {standalone} THEN r.updated_at END,"
+            f"CASE WHEN {standalone} THEN r.queue_order END,"
+        )
+    return (
+        f" ORDER BY {standalone_order}CASE WHEN r.dispatch_lane='urgent' THEN 0 ELSE 1 END,"
+        f"{received},{first},r.dispatch_order,r.queue_order"
+    )
 
 
 def _identity_match(left, right):
@@ -54,29 +69,28 @@ def _base(running, now=None, *, direct=False):
     timestamp = moment.replace(tzinfo=None).isoformat(" ")
     params = [timestamp]
     if not running:
-        if direct:
-            sql += f" AND {standalone_direct_sql('r')}"
-        else:
-            sql += f" AND NOT {standalone_direct_sql('r')}"
-            # 分页前排除暂停的批次，避免挡住其他可执行工作。
-            sql += (
-                " AND (r.status='accepted' OR NOT EXISTS ("
-                "SELECT 1 FROM swe_cron_managed_trigger_receipts p "
-                "JOIN swe_cron_managed_batch_members pm ON pm.batch_id=p.batch_id AND pm.source_id=p.source_id "
-                "WHERE pm.current_execution_id=r.execution_id "
-                "AND p.source_id=r.source_id AND p.kind='batch' "
-                "AND p.status='accepted' AND p.batch_paused=1))"
-            )
+        direction = "" if direct else "NOT "
+        sql += f" AND {direction}{direct_dispatch_sql('r')}"
+        # 两条派发路径均须在分页前排除已暂停的批次。
+        sql += (
+            " AND (r.status='accepted' OR NOT EXISTS ("
+            "SELECT 1 FROM swe_cron_managed_trigger_receipts p "
+            "JOIN swe_cron_managed_batch_members pm ON pm.batch_id=p.batch_id AND pm.source_id=p.source_id "
+            "WHERE pm.current_execution_id=r.execution_id "
+            "AND p.source_id=r.source_id AND p.kind='batch' "
+            "AND p.status='accepted' AND p.batch_paused=1))"
+        )
         sql += f" AND (r.not_before_at<=%s OR r.not_before_at IS NULL OR {INVALIDATED})"
         today = moment.astimezone(BEIJING).date().isoformat()
         params.extend((timestamp, today, today))
-        if not direct:
-            sql += (
-                f" AND (r.status='accepted' OR {INVALIDATED} OR "
-                f"{_occupied_for_job()} "
-                "< CAST(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.runtime.max_concurrency')) AS UNSIGNED))"
-            )
-            params.extend((today, today))
+        # 独立任务照常交由 SWE 判断重叠；批内文本仍遵守任务级并发限制。
+        standalone = f"{standalone_direct_sql('r')} OR " if direct else ""
+        sql += (
+            f" AND ({standalone}r.status='accepted' OR {INVALIDATED} OR "
+            f"{_occupied_for_job()} "
+            "< CAST(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.runtime.max_concurrency')) AS UNSIGNED))"
+        )
+        params.extend((today, today))
     return sql, params
 
 
@@ -140,8 +154,8 @@ class ManagedWorkQuery:
             + sql
             + (
                 " ORDER BY r.updated_at,r.queue_order"
-                if running or direct
-                else _batch_order()
+                if running
+                else _batch_order(direct=direct)
             )
             + " LIMIT %s",
             (*params, self.limit),

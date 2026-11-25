@@ -101,6 +101,13 @@ async def test_shared_capacity_counts_new_and_old_occupants_under_same_scope_loc
         )
         assert await available() == 1
     db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET spec_json=JSON_SET(spec_json,'$.task_type','text')",
+    )
+    assert await available() == 2
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET spec_json=JSON_SET(spec_json,'$.task_type','agent')",
+    )
+    db.conn.execute(
         "INSERT INTO swe_cron_dispatch_intents VALUES (1,'bank','tenant-provider','tenant-model','dispatched')",
     )
     assert await available() == 0

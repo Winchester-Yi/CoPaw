@@ -2,7 +2,9 @@
 """实际领取事务共用模型池行锁，满额不超领，接管不重复占位。"""
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,6 +14,10 @@ from tests.unit.scheduler.test_managed_cron_executions import (
     execution_setup,
 )
 from tests.unit.scheduler.test_managed_cron_management import create_payload
+from tests.unit.scheduler.test_managed_cron_callbacks import (
+    callback_setup,
+    create_source,
+)
 
 
 class RuntimePolicy:
@@ -104,6 +110,68 @@ async def test_standalone_claim_bypasses_batch_capacity(
     assert await work.rows(running=False) == [
         {"execution_id": other["execution_id"]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_batch_bypasses_pool_and_keeps_batch_gates(callback_setup):
+    from scheduler.app.services.cron.managed.batch_pause import (
+        set_batch_paused,
+    )
+    from scheduler.app.services.cron.managed.dispatcher import (
+        ExecutionDispatcher,
+    )
+    from scheduler.app.services.cron.managed.executions import (
+        ExecutionRequest,
+        ExecutionStore,
+    )
+    from scheduler.app.services.cron.managed.operations import utc_now
+    from scheduler.app.services.cron.managed.scheduling import (
+        ManagedSchedulingService,
+    )
+    from scheduler.app.services.cron.managed.work_query import ManagedWorkQuery
+
+    db, caller, _ = callback_setup
+    caller = replace(caller, is_manager=True)
+    parent = await create_source(callback_setup, "batch_enabled")
+    batch = await ManagedSchedulingService(db).run_batch(
+        caller,
+        parent["job_id"],
+    )
+    row = await db.fetch_one("SELECT * FROM swe_cron_execution_runs")
+    capacity = AsyncMock()
+    capacity.prepare.return_value = None
+    service = ExecutionDispatcher(db, None, capacity=capacity)
+    work = ManagedWorkQuery(db, 10)
+
+    await set_batch_paused(db, caller, batch["batch_id"], True)
+    assert await work.rows(running=False, direct=True) == []
+    assert await service._claim(row, True) is None
+    await set_batch_paused(db, caller, batch["batch_id"], False)
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET not_before_at=?",
+        ((utc_now() + timedelta(minutes=5)).isoformat(" "),),
+    )
+    assert await work.rows(running=False, direct=True) == []
+    assert await service._claim(row, True) is None
+    db.conn.execute("UPDATE swe_cron_execution_runs SET not_before_at=NULL")
+    assert await work.scopes() == []
+    assert await work.rows(running=False, direct=True) == [
+        {"execution_id": row["execution_id"]},
+    ]
+    assert (await service._claim(row, True))["status"] == "dispatching"
+    capacity.prepare.assert_not_awaited()
+
+    next_run, _ = await ExecutionStore(db).enqueue(
+        caller,
+        parent["job_id"],
+        ExecutionRequest(
+            "batch",
+            "next",
+            utc_now().replace(tzinfo=timezone.utc),
+        ),
+    )
+    assert await work.rows(running=False, direct=True) == []
+    assert await service._claim(next_run, True) is None
 
 
 @pytest.mark.asyncio

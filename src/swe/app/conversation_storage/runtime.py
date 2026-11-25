@@ -117,12 +117,9 @@ async def configure_runtime(database):
 
 async def _configure_metadata_runtime(database):
     global _metadata_database
-    from .metadata_repository import SOURCES, WORKSPACES
+    from .metadata_repository import WORKSPACES
 
     service_unit_from_env()
-    await database.fetch_all(
-        f"SELECT published,manifest_digest FROM {SOURCES} LIMIT 0",
-    )
     await database.fetch_all(
         f"SELECT workspace_root FROM {WORKSPACES} LIMIT 0",
     )
@@ -140,10 +137,8 @@ async def workspace_metadata_repository(workspace):
         return None
     from .metadata_repository import (
         MySQLMetadataRepository,
-        SOURCES,
         WORKSPACES,
         SCOPE_PREDICATE,
-        SOURCE_PREDICATE,
     )
     from .tenant_admission import TenantNotPublished
 
@@ -173,12 +168,6 @@ async def workspace_metadata_repository(workspace):
         f"SELECT workspace_root FROM {WORKSPACES} WHERE " + SCOPE_PREDICATE,
         scope.sql_values,
     )
-    source = await _metadata_database.fetch_one(
-        f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
-        scope.sql_values[:3],
-    )
-    if source is None or not source["published"]:
-        raise TenantNotPublished()
     if binding is None:
         require_empty_conversation(root)
         await _metadata_database.execute(
@@ -201,40 +190,3 @@ def reset_runtime():
     """Discard process adapters when their application database shuts down."""
     global _metadata_database
     _metadata_database = None
-
-
-async def require_tenant_published(
-    tenant_id,
-    *,
-    source_id=None,
-    scope_id=None,
-):
-    """Call before tenant initialization; logical identity comes from trusted scope."""
-    if storage_authority() == METADATA_AUTHORITY:
-        from ...config.context import decode_scope_id, get_current_source_id
-        from .metadata_repository import SOURCES, SOURCE_PREDICATE
-        from .tenant_admission import TenantNotPublished
-
-        if _metadata_database is None:
-            raise RuntimeError("conversation metadata authority is not ready")
-        try:
-            logical_tenant, source = decode_scope_id(scope_id or tenant_id)
-        except ValueError:
-            logical_tenant = tenant_id
-            source = (
-                source_id if source_id is not None else get_current_source_id()
-            )
-        if source is not None:
-            scope = WorkspaceScope(
-                logical_tenant,
-                source,
-                "",
-                service_unit_id=service_unit_from_env(),
-            )
-            result = await _metadata_database.fetch_one(
-                f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
-                scope.sql_values[:3],
-            )
-            if result is None or not result["published"]:
-                raise TenantNotPublished()
-        return

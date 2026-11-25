@@ -85,6 +85,8 @@ async def stream_admission(
                 )
                 if is_new_turn:
                     accept_query_run(run_context)
+                if hasattr(session_execution, "observed_turn_id"):
+                    session_execution.observed_turn_id = turn_id
             else:
                 run_context = None
             attempt_context = (

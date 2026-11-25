@@ -326,11 +326,12 @@ export default function BatchDetail({
       {detail.error && <Alert type="error" showIcon message={detail.error} />}
       <Tabs
         defaultActiveKey="members"
-        className={styles.detailTabs}
+        className={`${styles.detailTabs} ${styles.managedDetailTabs}`}
         items={[
           {
             key: "failures",
             label: "失败类型与重试",
+            className: styles.failureTab,
             children: (
               <FailurePanel
                 source={source}

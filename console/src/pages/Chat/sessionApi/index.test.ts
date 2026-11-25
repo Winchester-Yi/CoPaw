@@ -12,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   listChats: vi.fn(),
   listChatSummaries: vi.fn(),
   getChat: vi.fn(),
+  updateChat: vi.fn(),
   deleteChat: vi.fn(),
 }));
 
@@ -32,6 +33,7 @@ vi.mock("../../../api", () => ({
     listChats: apiMocks.listChats,
     listChatSummaries: apiMocks.listChatSummaries,
     getChat: apiMocks.getChat,
+    updateChat: apiMocks.updateChat,
     deleteChat: apiMocks.deleteChat,
   },
 }));
@@ -1894,6 +1896,174 @@ describe("SessionApi identity mapping", () => {
     ).toMatchObject({
       session_title_generated: true,
     });
+  });
+
+  it("keeps a saved title when auto-title events and an older history reply arrive", async () => {
+    const sessionApi = new SessionApi();
+    const chat = {
+      id: "chat-1",
+      name: "旧标题",
+      session_id: "session-1",
+      user_id: "user-1",
+      channel: "console",
+    };
+    const page = {
+      items: [chat],
+      has_more: false,
+      next_cursor: null,
+      total: 1,
+    };
+    apiMocks.listChatSummaries.mockResolvedValueOnce(page);
+    await sessionApi.getSessionList();
+
+    let reply!: (value: typeof page) => void;
+    apiMocks.listChatSummaries.mockReturnValueOnce(
+      new Promise<typeof page>((resolve) => {
+        reply = resolve;
+      }),
+    );
+    const refresh = sessionApi.getSessionList();
+    const oldDetail = {
+      chat: { ...chat, meta: {} },
+      messages: [],
+      status: "idle",
+    };
+    let replyDetail!: (value: typeof oldDetail) => void;
+    apiMocks.getChat.mockReturnValueOnce(
+      new Promise<typeof oldDetail>((resolve) => {
+        replyDetail = resolve;
+      }),
+    );
+    const detail = sessionApi.getSession(chat.id);
+    apiMocks.updateChat.mockResolvedValueOnce({
+      ...chat,
+      name: "手动标题",
+      meta: { session_title_edited: true },
+    });
+    await sessionApi.renameSession(chat.id, "手动标题");
+    expect(apiMocks.updateChat).toHaveBeenCalledWith(chat.id, {
+      name: "手动标题",
+    });
+    reply(page);
+    expect((await refresh)[0]?.name).toBe("手动标题");
+    replyDetail(oldDetail);
+    expect(await detail).toMatchObject({
+      name: "手动标题",
+      meta: { session_title_edited: true },
+    });
+    const synced = await sessionApi.updateSession(
+      {
+        id: chat.id,
+        name: "首条提问",
+        meta: { plan_mode_enabled: true },
+      } as Parameters<SessionApi["updateSession"]>[0] & {
+        meta: Record<string, unknown>;
+      },
+      { refreshList: false },
+    );
+    expect(synced[0]).toMatchObject({
+      name: "手动标题",
+      meta: { session_title_edited: true, plan_mode_enabled: true },
+    });
+    expect(
+      sessionApi.patchSessionTitle({
+        chat_id: chat.id,
+        session_id: chat.session_id,
+        session_title: "迟到的自动标题",
+      })[0]?.name,
+    ).toBe("手动标题");
+  });
+
+  it("keeps unavailable chats out of a history page that was already loading", async () => {
+    const sessionApi = new SessionApi();
+    const chat = {
+      id: "unavailable-chat",
+      name: "已加载会话",
+      session_id: "session-2",
+      user_id: "user-1",
+      channel: "console",
+    };
+    const page = {
+      items: [chat],
+      has_more: true,
+      next_cursor: "cursor",
+      total: 2,
+    };
+    apiMocks.listChatSummaries.mockResolvedValueOnce(page);
+    const loaded = await sessionApi.getSessionList();
+    let reply!: (value: typeof page) => void;
+    apiMocks.listChatSummaries.mockReturnValueOnce(
+      new Promise<typeof page>((resolve) => {
+        reply = resolve;
+      }),
+    );
+    const loading = sessionApi.loadMoreSessions();
+    apiMocks.updateChat.mockRejectedValueOnce(
+      Object.assign(new Error(), { status: 404 }),
+    );
+    await expect(sessionApi.renameSession(chat.id, "新标题")).resolves.toBe(
+      "unavailable",
+    );
+    expect(sessionApi.projectSessionView(loaded)).toEqual([]);
+    reply(page);
+    expect(await loading).toEqual([]);
+  });
+
+  it("ignores a late chat detail after switching workspaces", async () => {
+    const sessionApi = new SessionApi();
+    const chat = {
+      id: "chat-a",
+      name: "工作区 A",
+      session_id: "session-a",
+      user_id: "user-a",
+      channel: "console",
+    };
+    apiMocks.listChatSummaries.mockResolvedValueOnce({
+      items: [chat],
+      has_more: false,
+      next_cursor: null,
+    });
+    await sessionApi.getSessionList();
+
+    const detail = { chat, messages: [] };
+    let reply!: (value: typeof detail) => void;
+    apiMocks.getChat.mockReturnValueOnce(
+      new Promise<typeof detail>((resolve) => {
+        reply = resolve;
+      }),
+    );
+    const pending = sessionApi.getSession(chat.id);
+    sessionApi.resetForIdentityChange();
+    apiMocks.listChatSummaries.mockResolvedValueOnce({
+      items: [{ ...chat, id: "chat-b", user_id: "user-b" }],
+      has_more: false,
+      next_cursor: null,
+    });
+    await sessionApi.getSessionList();
+    reply(detail);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(sessionApi.getLoadedSessionView().map(({ id }) => id)).toEqual([
+      "chat-b",
+    ]);
+  });
+
+  it("ignores a rename 404 from the previous identity", async () => {
+    const sessionApi = new SessionApi();
+    let rejectRename!: (reason: unknown) => void;
+    apiMocks.updateChat.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectRename = reject;
+      }),
+    );
+    const rename = sessionApi.renameSession("chat-1", "新标题");
+    sessionApi.resetForIdentityChange();
+    rejectRename(Object.assign(new Error(), { status: 404 }));
+    await expect(rename).resolves.toBeNull();
+    expect(
+      sessionApi.projectSessionView([
+        { id: "chat-1", name: "会话", messages: [] },
+      ]),
+    ).toHaveLength(1);
   });
 
   it("filters stale task sessions from later pages", async () => {

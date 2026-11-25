@@ -4,11 +4,10 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from .....config.constant import CRON_BATCH_MAX_ATTEMPTS
-
 from .batch_failures import display_error_messages, member_rows
 from .batch_members import MEMBERS, RECEIPTS, BatchRelationUnavailable
 from .batch_retry import BatchRetryGrant, BatchRetryService, _utc
+from .batch_retry_policy import BatchRetryPolicyUnavailable, max_batch_attempts
 from .definition import request_hash
 from .dispatch_events import append_run_event
 from .failure_policy import is_model_failure
@@ -29,22 +28,34 @@ def _naive(value):
 
 
 class AutoBatchRetry:
-    def __init__(self, db, *, limit=32, clock=None):
+    def __init__(self, db, *, limit=32, clock=None, retry_overrides=None):
         self.db = db
         self.limit = limit
         self.clock = clock or utc_now
+        self.retry_overrides = retry_overrides
         self.after = 0
 
     async def tick(self):
-        rows = await self._candidates(self.after)
+        try:
+            overrides = (
+                await self.retry_overrides() if self.retry_overrides else {}
+            )
+        except BatchRetryPolicyUnavailable:
+            # 无法确认上限时只处理仍需结算的超时执行。
+            logger.warning("批调度自动重试暂缓，来源配置读取失败")
+            overrides = None
+        rows = await self._candidates(self.after, overrides)
         if not rows and self.after:
-            rows = await self._candidates(0)
+            rows = await self._candidates(0, overrides)
         if rows:
             self.after = rows[-1]["queue_order"]
         count = 0
         for row in rows:
             try:
-                count += await self._retry(row)
+                count += await self._retry(
+                    row,
+                    max_batch_attempts(overrides, row["source_id"]),
+                )
             except (ExecutionConflict, BatchRelationUnavailable):
                 # 执行条件或批关联不满足时静默跳过，后续巡检仍可重新检查。
                 continue
@@ -56,19 +67,29 @@ class AutoBatchRetry:
                 )
         return count
 
-    async def _candidates(self, after):
+    async def _candidates(self, after, overrides):
+        attempt_limit, params = "%s", (max_batch_attempts(overrides, None),)
+        if overrides:
+            cases = " WHEN %s THEN %s" * len(overrides)
+            attempt_limit = (
+                f"CASE m.source_id COLLATE utf8mb4_bin{cases} ELSE %s END"
+            )
+            params = (
+                tuple(value for item in overrides.items() for value in item)
+                + params
+            )
         return await self.db.fetch_all(
             f"SELECT m.*,r.queue_order FROM {MEMBERS} m "
             f"JOIN {RUN_TABLE} r ON r.execution_id=m.current_execution_id "
             f"WHERE r.queue_order>%s AND {PROTOCOL} "
-            "AND (m.business_attempt<%s OR (r.status='success' AND r.settled_status IS NULL)) "
+            f"AND (m.business_attempt<{attempt_limit} OR (r.status='success' AND r.settled_status IS NULL)) "
             "AND (r.status='error' OR r.settled_status='error' OR "
             "(r.status='success' AND r.settled_status IS NULL AND "
             "COALESCE(r.started_at,r.accepted_at,r.created_at)<=%s)) "
             "ORDER BY r.queue_order LIMIT %s",
             (
                 after,
-                CRON_BATCH_MAX_ATTEMPTS,
+                *params,
                 self.clock() - timedelta(seconds=SUBTASK_TIMEOUT_SECONDS),
                 self.limit,
             ),
@@ -81,7 +102,7 @@ class AutoBatchRetry:
             (batch_id,),
         )
 
-    async def _retry(self, candidate):
+    async def _retry(self, candidate, max_attempts):
         receipt = await self._receipt(self.db, candidate["batch_id"])
         if receipt is None:
             return False
@@ -108,7 +129,7 @@ class AutoBatchRetry:
             # 单任务暂停也会作废队列版本，先记录本次重试被拦截的原因。
             pause_reason = row["current_pause_reason"]
             if pause_reason in {"auto_unread_threshold", "manual"}:
-                if await self._eligible(tx, row):
+                if await self._eligible(tx, row, max_attempts):
                     await append_run_event(
                         tx,
                         {**row, "updated_at": self.clock()},
@@ -124,7 +145,7 @@ class AutoBatchRetry:
             ):
                 return False
             timed_out = await self._expire_subtasks(tx, row)
-            if not await self._eligible(tx, row):
+            if not await self._eligible(tx, row, max_attempts):
                 return False
             return await self._enqueue(tx, receipt, row, timed_out)
 
@@ -179,11 +200,11 @@ class AutoBatchRetry:
         return True
 
     @staticmethod
-    async def _eligible(tx, row):
+    async def _eligible(tx, row, max_attempts):
         failed = row["status"] == "error" or (
             row["status"] == "success" and row["settled_status"] == "error"
         )
-        if not failed or row["business_attempt"] >= CRON_BATCH_MAX_ATTEMPTS:
+        if not failed or row["business_attempt"] >= max_attempts:
             return False
         await display_error_messages(tx, [row])
         return is_model_failure(row, row.get("_history"))

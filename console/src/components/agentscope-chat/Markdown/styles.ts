@@ -112,6 +112,11 @@ export default createGlobalStyle`
     word-break: break-word;
   }
 
+  .katex-display {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
   h1 {
     font-size: 1.2857142857142858em;
   }

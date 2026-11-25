@@ -7,9 +7,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
 from ..database.connection import get_db_connection
+from ..services.cron.managed.daily_retry_filters import DailyRetryFilters
 from ..services.cron.managed.daily_retry_service import DailyFailureRetry
 from ..services.cron.managed.diagnostics import format_management_error
 from ..services.cron.managed.identity import identity_value
@@ -50,10 +51,9 @@ router = APIRouter(
 )
 
 
-class DailyRetryRequest(BaseModel):
-    """调用方只能选择来源，不能传任务正文、角色或目标用户。"""
+class DailyRetryRequest(DailyRetryFilters):
+    """调用方可按来源和任务筛选补跑范围。"""
 
-    model_config = ConfigDict(extra="forbid")
     source_id: str = Field(min_length=1, max_length=128)
 
     @field_validator("source_id")
@@ -106,7 +106,11 @@ async def submit(
     """先持久受理再返回；不注册平台任务，不需要用户身份或认证 Header。"""
     _runtime_ready(request)
     try:
-        call = await service.calls.submit(body.source_id)
+        call = await service.calls.submit(
+            body.source_id,
+            task_scope=body.task_scope,
+            job_ids=body.job_ids,
+        )
     except Exception as error:
         raise _error(error) from error
     logger.info(

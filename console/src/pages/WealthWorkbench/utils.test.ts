@@ -14,9 +14,9 @@ import {
   scheduleLabel,
 } from "./utils";
 
-it("名单推送默认每日08:00，摘要保留已设置的时刻", () => {
-  expect(DEFAULT_SCHEDULE).toEqual({ type: "daily", hour: 8, minute: 0 });
-  expect(scheduleLabel(undefined)).toBe("每日 08:00");
+it("名单推送默认工作日08:00，摘要保留已设置的时刻", () => {
+  expect(DEFAULT_SCHEDULE).toEqual({ type: "weekdays", hour: 8, minute: 0 });
+  expect(scheduleLabel(undefined)).toBe("工作日 08:00");
   expect(scheduleLabel({ type: "weekly" })).toBe("每周一 08:00");
   expect(scheduleLabel({ type: "daily", hour: 9, minute: 30 })).toBe(
     "每日 09:30",

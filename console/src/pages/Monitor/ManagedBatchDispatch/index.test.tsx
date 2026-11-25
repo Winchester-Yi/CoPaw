@@ -7,7 +7,9 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { CronDispatchCapacityItem } from "@/api/modules/monitor";
 import ManagedBatchDispatchPage from "./index";
+import WorkerTrendDialog from "./WorkerTrendDialog";
 
 const api = vi.hoisted(() => ({
   batches: vi.fn(),
@@ -24,6 +26,7 @@ const context = vi.hoisted(() => ({
   manager: true,
   isSuperManager: false,
 }));
+const chartOptions = vi.hoisted(() => vi.fn());
 vi.mock("../../../api/modules/managedBatchBoard", () => ({
   managedBatchBoard: api,
 }));
@@ -32,7 +35,10 @@ vi.mock("../../../stores/iframeStore", () => ({
     selector(context),
 }));
 vi.mock("echarts-for-react", () => ({
-  default: () => <div>测试容量曲线</div>,
+  default: ({ option }: { option: unknown }) => {
+    chartOptions(option);
+    return <div>测试容量曲线</div>;
+  },
 }));
 beforeEach(() => {
   vi.clearAllMocks();
@@ -65,7 +71,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("点模型后在浮层发起模型池趋势查询", async () => {
+it("点模型后只查询到当前时刻，曲线和联动时间轴同步截断", async () => {
   api.workers.mockResolvedValue({
     source_id: "bank",
     policies: [],
@@ -80,19 +86,29 @@ it("点模型后在浮层发起模型池趋势查询", async () => {
       },
     ],
   });
-  api.workerTrends.mockResolvedValue({
-    bucket_seconds: 600,
-    points: [
-      {
-        at: "2026-11-20T03:00:00Z",
-        total: 2,
-        success: 1,
-        failed: 0,
-        requests: 3,
-        retries: 1,
-      },
-    ],
-  });
+  api.workerTrends.mockImplementation(
+    async (_source, { end_time }: { end_time: string }) => ({
+      bucket_seconds: 600,
+      points: [
+        {
+          at: end_time,
+          total: 2,
+          success: 1,
+          failed: 0,
+          requests: 3,
+          retries: 1,
+        },
+        {
+          at: new Date(Date.parse(end_time) + 3_600_000).toISOString(),
+          total: 10,
+          success: 1,
+          failed: 0,
+          requests: 11,
+          retries: 1,
+        },
+      ],
+    }),
+  );
   render(<ManagedBatchDispatchPage />);
   fireEvent.click(
     await screen.findByRole("button", {
@@ -100,8 +116,45 @@ it("点模型后在浮层发起模型池趋势查询", async () => {
     }),
   );
   const dialog = await screen.findByRole("dialog");
+  await waitFor(() => expect(api.workerTrends).toHaveBeenCalledOnce());
+  const cutoff = Date.parse(api.workerTrends.mock.lastCall?.[1].end_time);
+  expect(cutoff).toBeLessThanOrEqual(Date.now());
   const chart = await within(dialog).findByText("测试容量曲线");
   expect(chart).toBeInTheDocument();
+  const option = chartOptions.mock.lastCall?.[0] as {
+    xAxis: { max: number }[];
+    axisPointer: { link: { xAxisIndex: number[] }[] };
+    dataZoom: { xAxisIndex: number[] }[];
+    tooltip: {
+      formatter: (params: { axisIndex: number; axisValue: number }[]) => string;
+    };
+    series: { name: string; data: [number, number][] }[];
+  };
+  expect(option.xAxis.map((axis) => axis.max)).toEqual(Array(4).fill(cutoff));
+  expect(option.axisPointer.link).toEqual([
+    { xAxisIndex: [0, 1] },
+    { xAxisIndex: [2, 3] },
+  ]);
+  expect(option.dataZoom.map((zoom) => zoom.xAxisIndex)).toEqual([
+    [0, 1],
+    [0, 1],
+    [2, 3],
+    [2, 3],
+  ]);
+  const left = option.tooltip.formatter([{ axisIndex: 1, axisValue: cutoff }]);
+  expect(left).toContain("有效 Worker");
+  expect(left).toContain("待运行任务");
+  expect(left).not.toContain("累计执行数");
+  expect(left).not.toContain("发起请求总数");
+  const right = option.tooltip.formatter([{ axisIndex: 3, axisValue: cutoff }]);
+  expect(right).toContain("累计执行数 2");
+  expect(right).toContain("发起请求总数 3");
+  expect(right).not.toContain("有效 Worker");
+  expect(right).not.toContain("待运行任务");
+  for (const name of ["累计执行数", "发起请求总数"]) {
+    const data = option.series.find((series) => series.name === name)?.data;
+    expect(data?.slice(-1)[0]).toEqual([cutoff, name === "累计执行数" ? 2 : 3]);
+  }
   expect(api.workerTrends).toHaveBeenCalledWith(
     "bank",
     expect.objectContaining({ provider_id: "p", model_id: "m" }),
@@ -109,31 +162,43 @@ it("点模型后在浮层发起模型池趋势查询", async () => {
   );
 });
 
-it("顶栏子任务状态筛选传给批次列表和失败汇总", async () => {
+it("整个时间区间在未来时不请求趋势接口", async () => {
+  const now = Date.now();
+  render(
+    <WorkerTrendDialog
+      pool={{ provider_id: "p", model_id: "m" } as CronDispatchCapacityItem}
+      history={[]}
+      scope={{
+        source: "bank",
+        start: new Date(now + 3_600_000).toISOString(),
+        end: new Date(now + 7_200_000).toISOString(),
+        refresh: 0,
+      }}
+      onClose={() => {}}
+    />,
+  );
+  expect(await screen.findByText("当前时间范围内暂无趋势记录")).toBeInTheDocument();
+  expect(api.workerTrends).not.toHaveBeenCalled();
+});
+
+it("看板顶部不按子任务状态筛选", async () => {
   api.failureSummary.mockResolvedValue({
     total: 0,
     groups: [],
     queried_at: "2026-11-20T03:00:00Z",
   });
   render(<ManagedBatchDispatchPage />);
-  fireEvent.mouseDown(screen.getByRole("combobox", { name: "子任务状态" }));
-  fireEvent.click(await screen.findByText("等待子任务", { exact: true }));
-  await waitFor(() =>
-    expect(api.batches).toHaveBeenLastCalledWith(
-      "bank",
-      expect.objectContaining({ child_status: "waiting_subtasks", page: 1 }),
-      expect.any(AbortSignal),
-    ),
-  );
-  fireEvent.click(
-    await screen.findByRole("button", { name: /查看失败类型及详情/ }),
-  );
-  await waitFor(() =>
-    expect(api.failureSummary).toHaveBeenCalledWith(
-      "bank",
-      expect.objectContaining({ child_status: "waiting_subtasks" }),
-      expect.any(AbortSignal),
-    ),
+  const summary = await screen.findByRole("button", {
+    name: /查看失败类型及详情/,
+  });
+  expect(
+    screen.queryByRole("combobox", { name: /^子任务状态$/ }),
+  ).not.toBeInTheDocument();
+  expect(api.batches.mock.lastCall?.[1]).not.toHaveProperty("child_status");
+  fireEvent.click(summary);
+  await waitFor(() => expect(api.failureSummary).toHaveBeenCalledOnce());
+  expect(api.failureSummary.mock.lastCall?.[1]).not.toHaveProperty(
+    "child_status",
   );
 });
 it("非管理员不加载跨用户看板数据", () => {
@@ -143,6 +208,63 @@ it("非管理员不加载跨用户看板数据", () => {
   expect(api.batches).not.toHaveBeenCalled();
   expect(api.workers).not.toHaveBeenCalled();
   expect(api.workerOccupants).not.toHaveBeenCalled();
+});
+
+it("成员筛选传给批次清单和失败汇总，并回到第一页", async () => {
+  api.batches.mockResolvedValue({
+    items: [],
+    total: 8,
+    stats: {
+      total_batches: 8,
+      total_members: 0,
+      done_members: 0,
+      failed_members: 0,
+      running_batches: 0,
+    },
+  });
+  api.failureSummary.mockResolvedValue({
+    total: 0,
+    groups: [],
+    queried_at: "2026-11-24T01:00:00Z",
+  });
+  render(<ManagedBatchDispatchPage />);
+  fireEvent.click(await screen.findByTitle("2"));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ page: 2 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  const filter = screen.getByRole("combobox", { name: "可执行成员" });
+  fireEvent.mouseDown(filter);
+  fireEvent.click(await screen.findByText("有可执行成员", { exact: true }));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ has_members: true, page: 1 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.mouseDown(filter);
+  fireEvent.click(await screen.findByText("无可执行成员", { exact: true }));
+  await waitFor(() =>
+    expect(api.batches).toHaveBeenLastCalledWith(
+      "bank",
+      expect.objectContaining({ has_members: false, page: 1 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: /查看失败类型及详情/ }),
+  );
+  await waitFor(() =>
+    expect(api.failureSummary).toHaveBeenCalledWith(
+      "bank",
+      expect.objectContaining({ has_members: false }),
+      expect.any(AbortSignal),
+    ),
+  );
 });
 
 it("当前 Worker 占用独立查询并展示任务明细", async () => {

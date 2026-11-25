@@ -39,6 +39,7 @@ interface ChatSessionItemProps {
   showTimeline?: boolean;
   /** Whether to show channel tag (default: true) */
   showChannel?: boolean;
+  titleAction?: React.ReactNode;
   className?: string;
   /** Custom style for virtual scrolling positioning */
   style?: React.CSSProperties;
@@ -80,7 +81,12 @@ const ChatSessionItem: React.FC<ChatSessionItemProps> = (props) => {
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <div className={styles.name}>{props.name}</div>
+          <div className={styles.titleRow}>
+            <div className={styles.name} title={props.name}>
+              {props.name}
+            </div>
+            {props.titleAction}
+          </div>
         )}
         <div className={styles.metaRow}>
           <span className={styles.time}>{props.time}</span>
@@ -109,7 +115,7 @@ const ChatSessionItem: React.FC<ChatSessionItemProps> = (props) => {
         </div>
       </div>
       {/* Action buttons visible on hover */}
-      {!props.editing && (
+      {!props.editing && !props.titleAction && (
         <div className={styles.actions}>
           {props.showEdit !== false && (
             <IconButton

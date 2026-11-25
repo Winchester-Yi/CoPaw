@@ -94,7 +94,7 @@ async def _receipt(db, member, *, lock=False):
     )
 
 
-async def lock_retry(tx, row, prepared):
+async def lock_retry(tx, row, prepared, *, verify_membership=False):
     if prepared.receipt:
         await tx.fetch_one(
             f"SELECT job_id FROM swe_cron_jobs_v2 WHERE {JOB_WHERE} FOR UPDATE",
@@ -123,6 +123,12 @@ async def lock_retry(tx, row, prepared):
         member = await tx.fetch_one(
             f"SELECT * FROM {MEMBERS} WHERE batch_id=%s AND member_id=%s FOR UPDATE",
             (prepared.member["batch_id"], prepared.member["member_id"]),
+        )
+    elif verify_membership:
+        # 普通执行可能在预读取后被批次复用；未锁定该批回执时跳过本轮。
+        member = await tx.fetch_one(
+            f"SELECT * FROM {MEMBERS} WHERE current_execution_id=%s",
+            (row["execution_id"],),
         )
     return current, locked, member, receipt
 
@@ -157,7 +163,17 @@ def relation_reason(row, member, receipt):
     return None if valid else "cron_daily_retry_batch_not_current"
 
 
-async def eligible_reason(tx, call, row, current, member, receipt, prepared):
+async def eligible_reason(
+    tx,
+    call,
+    row,
+    current,
+    member,
+    receipt,
+    prepared,
+    *,
+    max_attempts,
+):
     if (
         row["source_id"] != call["source_id"]
         or row["kind"] not in {"ordinary", "batch"}
@@ -181,7 +197,7 @@ async def eligible_reason(tx, call, row, current, member, receipt, prepared):
     return (
         relation_reason(row, member, receipt)
         or await history_reason(tx, row)
-        or native_retry_reason(row, current, member)
+        or native_retry_reason(row, current, member, max_attempts)
     )
 
 
@@ -235,7 +251,17 @@ def retry_command(call, row, current, member):
     )
 
 
-async def enqueue_retry(tx, call, row, current, member, prepared, now):
+async def enqueue_retry(
+    tx,
+    call,
+    row,
+    current,
+    member,
+    prepared,
+    now,
+    *,
+    max_attempts,
+):
     key = tuple(row[name] for name in IDENTITY_FIELDS)
     caller = CallerIdentity(*key[:3], row["actor_id"] or row["tenant_id"])
     command = retry_command(call, row, current, member)
@@ -245,6 +271,7 @@ async def enqueue_retry(tx, call, row, current, member, prepared, now):
         command.dispatch_meta["dispatch_lane"] = await lane_for_batch(
             tx,
             member["batch_id"],
+            max_attempts,
         )
     run, reused = await ExecutionStore(
         tx,

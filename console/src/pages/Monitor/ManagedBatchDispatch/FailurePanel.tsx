@@ -220,7 +220,7 @@ export default function FailurePanel({
                 setPageSize(nextSize);
               },
             }}
-            scroll={{ x: 1120 }}
+            scroll={{ x: 1120, y: 240 }}
             columns={[
               {
                 title: "失败分类 / 公开错误码",

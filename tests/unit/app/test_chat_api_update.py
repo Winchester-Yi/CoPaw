@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -87,6 +89,71 @@ def test_update_chat_rejects_server_owned_scenario_snapshot() -> None:
 
     assert response.status_code == 400
     assert manager.updated_chat is None
+
+
+def test_update_chat_normalizes_and_marks_manual_title() -> None:
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_chat_manager] = lambda: manager
+    client = TestClient(app)
+    address = "/chats/chat-1"
+
+    assert client.put(address, json={"name": "  "}).status_code == 422
+    assert client.put(address, json={"name": "会" * 101}).status_code == 422
+    response = client.put(address, json={"name": "  手动标题  "})
+    assert response.status_code == 200
+    assert response.json()["name"] == "手动标题"
+    assert response.json()["meta"] == {
+        "existing": "value",
+        "session_title_edited": True,
+    }
+
+    # A full update can echo the marker but cannot clear it.
+    echoed_chat = response.json()
+    echoed_chat["meta"]["session_title_edited"] = False
+    echoed_chat["meta"]["plan_mode_enabled"] = True
+    response = client.put(address, json=echoed_chat)
+    assert response.status_code == 200
+    assert response.json()["meta"]["session_title_edited"] is True
+    assert response.json()["meta"]["plan_mode_enabled"] is True
+
+
+def test_update_chat_preserves_unchanged_legacy_title_and_ignores_echo() -> (
+    None
+):
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_chat_manager] = lambda: manager
+    client = TestClient(app)
+
+    for original in ("New Chat", "  " + "旧" * 101):
+        manager.chat.name = original
+        echoed_chat = manager.chat.model_dump(mode="json")
+        echoed_chat["meta"]["session_title_edited"] = True
+        echoed_chat["status"] = "running"
+        response = client.put("/chats/chat-1", json=echoed_chat)
+        assert response.status_code == 200
+        assert response.json()["name"] == original
+        assert response.json()["status"] == "running"
+        assert "session_title_edited" not in response.json()["meta"]
+
+
+def test_update_chat_rejects_stale_full_update_over_new_title() -> None:
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_chat_manager] = lambda: manager
+    client = TestClient(app)
+    address = "/chats/chat-1"
+    old_chat = manager.chat.model_dump(mode="json")
+
+    assert client.put(address, json={"name": "手动标题"}).status_code == 200
+    manager.chat.updated_at += timedelta(seconds=1)
+    old_chat["status"] = "running"
+    assert client.put(address, json=old_chat).status_code == 409
+    assert manager.chat.name == "手动标题"
 
 
 def test_update_chat_rejects_server_owned_scenario_snapshot_source() -> None:

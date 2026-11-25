@@ -13,7 +13,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from ...agents.memory.conversation_archive import ConversationArchiveStore
-from .models import ChatPage, ChatSpec
+from .models import MANUAL_CHAT_TITLE_META_KEY, ChatPage, ChatSpec
 from .repo import BaseChatRepository
 from ..channels.schema import DEFAULT_CHANNEL
 
@@ -499,6 +499,8 @@ class ChatManager:
                     "update_chat_name: chat not found chat_id=%s",
                     chat_id,
                 )
+                return False
+            if spec.meta.get(MANUAL_CHAT_TITLE_META_KEY):
                 return False
             expected_chat = spec.model_copy(deep=True)
             spec.name = name

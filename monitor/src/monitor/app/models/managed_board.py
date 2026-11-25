@@ -28,6 +28,7 @@ class BoardListQuery(BaseModel):
         ]
         | None
     ) = None
+    has_members: bool | None = None
     query: str | None = Field(default=None, max_length=200)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)

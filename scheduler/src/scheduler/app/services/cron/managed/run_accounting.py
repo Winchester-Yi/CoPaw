@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """共用运行占位定义，不将主执行完成误当作异步链路已结束。"""
 
+import json
+
 DIRECT_DISPATCH_KINDS = ("ordinary", "manual")
 
 
@@ -22,4 +24,16 @@ def standalone_direct_sql(alias):
         "UNION ALL SELECT 1 FROM swe_cron_managed_batch_members m "
         f"WHERE m.source_id={alias}.source_id "
         f"AND m.initial_execution_id={alias}.execution_id))"
+    )
+
+
+def is_text_run(row):
+    return json.loads(row.get("spec_json") or "{}").get("task_type") == "text"
+
+
+def direct_dispatch_sql(alias):
+    """纯文本使用冻结执行类型，独立执行沿用原有直接派发条件。"""
+    task_type = f"JSON_UNQUOTE(JSON_EXTRACT({alias}.spec_json,'$.task_type'))"
+    return (
+        f"({standalone_direct_sql(alias)} OR COALESCE({task_type},'')='text')"
     )

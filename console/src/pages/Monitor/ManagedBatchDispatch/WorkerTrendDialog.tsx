@@ -20,7 +20,11 @@ type TrendLine = {
   dash?: boolean;
 };
 
-const AXES = [0, 1, 2, 3];
+const AXIS_GROUPS = [
+  [0, 1],
+  [2, 3],
+];
+const AXES = AXIS_GROUPS.flat();
 
 function valueAt(data: Point[], time: number) {
   let value: number | null = null;
@@ -34,16 +38,13 @@ function valueAt(data: Point[], time: number) {
 function workerTrendOption(
   capacity: CronDispatchCapacityItem[],
   points: ManagedWorkerTrendPoint[],
-  start: string,
-  end: string,
+  from: number,
+  to: number,
   compact: boolean,
 ): EChartsOption {
-  const from = Date.parse(start);
-  const to = Date.parse(end);
   const tickFormat = to - from > 86_400_000 ? "MM-DD HH:mm" : "HH:mm";
   const samples = capacity
     .map((row) => ({ row, time: Date.parse(row.created_at) }))
-    .filter(({ time }) => Number.isFinite(time))
     .sort((a, b) => a.time - b.time || a.row.id - b.row.id);
   const sampled = (
     read: (row: CronDispatchCapacityItem) => number | null,
@@ -122,11 +123,15 @@ function workerTrendOption(
       ],
     },
   ];
+  const plotHeight = compact ? 74 : 142;
   const layout = panels.map((_, index) => {
-    const row = compact ? index : Math.floor(index / 2);
-    const rightColumn = !compact && index % 2 === 1;
+    const secondGroup = index >= 2;
+    const rightColumn = !compact && secondGroup;
+    const top = compact
+      ? 58 + index * 135 + (secondGroup ? 52 : 0)
+      : 58 + (index % 2) * 240;
     return {
-      top: 58 + row * (compact ? 135 : 240),
+      top,
       left: compact ? 52 : rightColumn ? "56%" : "6%",
       right: compact ? 18 : rightColumn ? "6%" : "56%",
       labelLeft: rightColumn ? "52%" : 16,
@@ -168,7 +173,7 @@ function workerTrendOption(
       top,
       left,
       right,
-      height: compact ? 74 : 142,
+      height: plotHeight,
     })),
     xAxis: AXES.map((i) => ({
       type: "time",
@@ -176,7 +181,7 @@ function workerTrendOption(
       min: from,
       max: to,
       axisLabel: {
-        show: compact ? i === 3 : i >= 2,
+        show: AXIS_GROUPS.some(([, bottomAxis]) => i === bottomAxis),
         hideOverlap: true,
         formatter: (value: number) => dayjs(value).format(tickFormat),
       },
@@ -189,48 +194,45 @@ function workerTrendOption(
       splitNumber: 3,
       axisLabel: { fontSize: 11 },
     })),
-    axisPointer: { link: [{ xAxisIndex: "all" }] },
+    axisPointer: {
+      link: AXIS_GROUPS.map((axes) => ({ xAxisIndex: axes })),
+    },
     tooltip: {
       trigger: "axis",
       renderMode: "richText",
       confine: true,
       formatter: (params) => {
-        const item = Array.isArray(params) ? params[0] : params;
-        const time = Number(
-          (item as { axisValue?: number } | undefined)?.axisValue,
+        const item = (Array.isArray(params) ? params[0] : params) as
+          | { axisIndex?: number; axisValue?: number }
+          | undefined;
+        const time = Number(item?.axisValue);
+        const group = AXIS_GROUPS.find((axes) =>
+          axes.includes(item?.axisIndex ?? -1),
         );
-        if (!Number.isFinite(time)) return "";
-        const sample = samples.find((entry) => entry.time === time)?.row;
+        if (!group || !Number.isFinite(time)) return "";
         return [
           dayjs(time).format("MM-DD HH:mm:ss"),
-          ...panels.flatMap((panel) =>
-            panel.lines.map(
-              (line) =>
-                `${line.name} ${valueAt(line.data, time)} ${panel.unit}`,
-            ),
-          ),
-          ...(sample
-            ? [
-                `调整前 Worker ${sample.previous_workers} 个`,
-                `反馈错误率 ${(sample.error_rate * 100).toFixed(2)}%`,
-                sample.decision_reason || "未记录调整原因",
-              ]
-            : []),
+          ...group.flatMap((index) => {
+            const { lines, unit } = panels[index];
+            return lines.map(
+              (line) => `${line.name} ${valueAt(line.data, time)} ${unit}`,
+            );
+          }),
         ].join("\n");
       },
     },
-    dataZoom: [
-      { type: "inside", xAxisIndex: AXES, filterMode: "none" },
+    dataZoom: AXIS_GROUPS.flatMap((axes) => [
+      { type: "inside" as const, xAxisIndex: axes, filterMode: "none" as const },
       {
-        type: "slider",
-        xAxisIndex: AXES,
-        filterMode: "none",
-        bottom: 10,
-        left: layout[0].left,
-        right: layout[1].right,
+        type: "slider" as const,
+        xAxisIndex: axes,
+        filterMode: "none" as const,
+        top: layout[axes[1]].top + plotHeight + 32,
+        left: layout[axes[0]].left,
+        right: layout[axes[0]].right,
         height: 18,
       },
-    ],
+    ]),
     series,
   };
 }
@@ -257,36 +259,46 @@ export default function WorkerTrendDialog({
   const { source, start, end, refresh } = scope;
   const { provider_id, model_id } = pool;
   const load = useCallback(
-    (signal: AbortSignal) => {
+    async (signal: AbortSignal) => {
       void refresh;
-      return managedBatchBoard.workerTrends(
+      const cutoff = Math.min(Date.parse(end), Date.now());
+      if (!(Date.parse(start) < cutoff)) return { cutoff, points: [] };
+      const { points } = await managedBatchBoard.workerTrends(
         source,
-        { start_time: start, end_time: end, provider_id, model_id },
+        {
+          start_time: start,
+          end_time: new Date(cutoff).toISOString(),
+          provider_id,
+          model_id,
+        },
         signal,
       );
+      return { cutoff, points };
     },
     [source, start, end, provider_id, model_id, refresh],
   );
   const trends = useBoardResource(load);
   const points = trends.value?.points;
-  const option = useMemo(
-    () =>
-      workerTrendOption(
-        history.filter(
-          (row) => row.provider_id === provider_id && row.model_id === model_id,
-        ),
-        points ?? [],
-        start,
-        end,
-        compact,
-      ),
-    [history, provider_id, model_id, points, start, end, compact],
-  );
-  const hasData =
-    points?.length ||
-    history.some(
-      (row) => row.provider_id === provider_id && row.model_id === model_id,
+  const cutoff = trends.value?.cutoff;
+  const option = useMemo(() => {
+    const from = Date.parse(start);
+    const to = cutoff ?? Math.min(Date.parse(end), Date.now());
+    if (!(from < to)) return null;
+    const withinRange = (value: string) => {
+      const time = Date.parse(value);
+      return time >= from && time <= to;
+    };
+    const capacity = history.filter(
+      (row) =>
+        row.provider_id === provider_id &&
+        row.model_id === model_id &&
+        withinRange(row.created_at),
     );
+    const trendPoints = (points ?? []).filter((point) => withinRange(point.at));
+    return capacity.length || trendPoints.length
+      ? workerTrendOption(capacity, trendPoints, from, to, compact)
+      : null;
+  }, [history, provider_id, model_id, points, start, end, cutoff, compact]);
   return (
     <Modal
       open
@@ -298,11 +310,11 @@ export default function WorkerTrendDialog({
       <p>容量和积压为共享池采样。累计结果和派发请求按新版批执行统计。</p>
       {trends.error && <Alert type="error" message="新版批执行趋势加载失败" />}
       <Spin spinning={trends.loading}>
-        {hasData ? (
+        {option ? (
           <ReactECharts
             option={option}
             notMerge
-            style={{ height: compact ? 594 : 500, width: "100%" }}
+            style={{ height: compact ? 646 : 500, width: "100%" }}
           />
         ) : (
           !trends.loading && <Empty description="当前时间范围内暂无趋势记录" />

@@ -27,7 +27,7 @@ def _join(alias):
 
 
 JOB_QUERY = (
-    "SELECT o.id AS job_id,o.name,o.tenant_id,o.source_id,"
+    "SELECT o.id AS job_id,o.name,o.tenant_id,o.source_id,o.cron_expr,"
     f"{AGENT} AS agent_id,{PARENT} AS parent_job_id,"
     "CASE WHEN j.status='completed' AND d.deleted_at IS NOT NULL THEN 'migrated_deleted' "
     "WHEN j.status='completed' THEN 'migrated' WHEN j.operation_id IS NOT NULL THEN 'in_progress' "
@@ -41,17 +41,8 @@ JOB_QUERY = (
 )
 
 
-async def jobs(
-    db,
-    source,
-    *,
-    cursor,
-    limit,
-    tenant=None,
-    query=None,
-    status=None,
-):
-    conditions, params = ["listed.job_id>%s"], [source, source, cursor]
+def _job_filters(tenant, query, status):
+    conditions, params = [], []
     if tenant:
         conditions.append("listed.tenant_id COLLATE utf8mb4_bin=%s")
         params.append(tenant)
@@ -68,16 +59,88 @@ async def jobs(
     if status:
         conditions.append("listed.migration_status=%s")
         params.append(status)
+    return conditions, params
+
+
+async def jobs(
+    db,
+    source,
+    *,
+    cursor,
+    limit,
+    tenant=None,
+    query=None,
+    status=None,
+):
+    conditions, params = _job_filters(tenant, query, status)
     rows = await db.fetch_all(
-        f"SELECT * FROM ({JOB_QUERY}) listed WHERE {' AND '.join(conditions)} "
+        f"SELECT * FROM ({JOB_QUERY}) listed WHERE "
+        f"{' AND '.join(['listed.job_id>%s', *conditions])} "
         "ORDER BY listed.job_id LIMIT %s",
-        (*params, limit + 1),
+        (source, source, cursor, *params, limit + 1),
     )
     return {
         "items": rows[:limit],
         "next_cursor": (
             rows[limit - 1]["job_id"] if len(rows) > limit else None
         ),
+    }
+
+
+async def job_groups(
+    db,
+    source,
+    *,
+    page,
+    limit,
+    tenant=None,
+    query=None,
+    status=None,
+):
+    conditions, params = _job_filters(tenant, query, status)
+    where = " AND ".join(["listed.parent_job_id IS NULL", *conditions])
+    # Match the preview's child scope: all undeleted legacy children in the
+    # source, including children owned by another tenant.
+    rows = await db.fetch_all(
+        f"""
+        WITH roots AS (
+            SELECT * FROM ({JOB_QUERY}) listed WHERE {where}
+        ), children AS (
+            SELECT {PARENT} COLLATE utf8mb4_bin AS parent_job_id,
+                   COUNT(*) AS child_count
+            FROM swe_cron_jobs o
+            WHERE o.source_id=%s AND o.source_id COLLATE utf8mb4_bin=%s
+              AND o.deleted_at IS NULL AND {PARENT} IS NOT NULL
+            GROUP BY parent_job_id
+        ), task_groups AS (
+            SELECT r.*, COALESCE(c.child_count, 0) AS child_count
+            FROM roots r LEFT JOIN children c
+              ON r.job_id COLLATE utf8mb4_bin=c.parent_job_id
+        ), paged AS (
+            SELECT * FROM task_groups ORDER BY job_id LIMIT %s OFFSET %s
+        )
+        SELECT p.*, totals.total, totals.task_total
+        FROM (
+            SELECT COUNT(*) AS total,
+                   COUNT(*) + COALESCE(SUM(child_count), 0) AS task_total
+            FROM task_groups
+        ) totals LEFT JOIN paged p ON 1=1
+        ORDER BY p.job_id
+        """,
+        (source, source, *params, source, source, limit, (page - 1) * limit),
+    )
+    return {
+        "items": [
+            {
+                key: value
+                for key, value in row.items()
+                if key not in {"total", "task_total"}
+            }
+            for row in rows
+            if row["job_id"] is not None
+        ],
+        "total": int(rows[0]["total"]),
+        "task_total": int(rows[0]["task_total"]),
     }
 
 

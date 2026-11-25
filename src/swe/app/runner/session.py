@@ -327,6 +327,8 @@ class SessionExecution:
         self._schema_version = 1
         self._state_dirty = False
         self._entered = False
+        self.closed_turn_statuses: dict[str, str] = {}
+        self.observed_turn_id: str | None = None
         self._terminal_baseline: dict[str, str] = {}
         self._active_executions_token: (
             Token[Mapping[str, "SessionExecution"]] | None
@@ -351,6 +353,8 @@ class SessionExecution:
     async def __aenter__(self) -> "SessionExecution":
         if self._entered or self._scope is not None:
             raise RuntimeError("session execution is already active")
+        self.closed_turn_statuses = {}
+        self.observed_turn_id = None
         self._scope = _session_write_scope(
             self._session_save_path,
             timeout_seconds=self._timeout_seconds,
@@ -392,6 +396,8 @@ class SessionExecution:
             raise
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
+        if self._entered:
+            self._remember_observed_turn(self._state)
         try:
             if self._scope is not None:
                 await self._scope.__aexit__(exc_type, exc, traceback)
@@ -445,6 +451,16 @@ class SessionExecution:
 
     async def commit_state(self, state: dict[str, Any]) -> dict[str, Any]:
         """Replace transaction state without reacquiring its held lock."""
+        try:
+            result = await self._commit_state(state)
+        except BaseException:
+            self.closed_turn_statuses = {}
+            self.observed_turn_id = None
+            raise
+        self._remember_observed_turn(state)
+        return result
+
+    async def _commit_state(self, state: dict[str, Any]) -> dict[str, Any]:
         self._require_entered()
         if not isinstance(state, dict):
             raise ValueError("state must be a dict")
@@ -544,6 +560,17 @@ class SessionExecution:
     def _require_entered(self) -> None:
         if not self._entered:
             raise RuntimeError("session execution is not active")
+
+    def _remember_observed_turn(self, state: dict[str, Any]) -> None:
+        turns = state.get("turn_states")
+        turn = (
+            turns.get(self.observed_turn_id)
+            if isinstance(turns, dict)
+            else None
+        )
+        status = turn.get("status") if isinstance(turn, dict) else None
+        if self.observed_turn_id and isinstance(status, str):
+            self.closed_turn_statuses[self.observed_turn_id] = status
 
     @staticmethod
     def _get_schema_version(state: dict[str, Any]) -> int:

@@ -115,6 +115,35 @@ async def test_auto_retry_stops_after_three_business_attempts(callback_setup):
 
 
 @pytest.mark.asyncio
+async def test_auto_retry_reloads_source_limit_without_restarting(
+    callback_setup,
+):
+    from scheduler.app.services.cron.managed.auto_retry import AutoBatchRetry
+
+    db, caller, _, _, now, _ = await failed_setup(callback_setup)
+    overrides = {caller.source_id: 1, caller.source_id.upper(): 4}
+
+    async def read_overrides():
+        return dict(overrides)
+
+    worker = AutoBatchRetry(
+        db,
+        clock=lambda: now,
+        retry_overrides=read_overrides,
+    )
+    assert await worker.tick() == 0
+    overrides[caller.source_id] = 2
+    assert await worker.tick() == 1
+    run = await db.fetch_one(
+        "SELECT * FROM swe_cron_execution_runs ORDER BY queue_order DESC LIMIT 1",
+    )
+    await complete_run(db, run)
+    assert await worker.tick() == 0
+    del overrides[caller.source_id]
+    assert await worker.tick() == 1
+
+
+@pytest.mark.asyncio
 async def test_incomplete_batch_relation_is_quiet_and_can_retry_after_repair(
     callback_setup,
     caplog,
@@ -363,12 +392,26 @@ async def test_background_runtime_enqueues_automatic_retry(callback_setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy_available", [True, False])
 async def test_last_attempt_subtask_timeout_settles_without_fourth_attempt(
     callback_setup,
+    policy_available,
 ):
+    from scheduler.app.services.cron.managed.batch_retry_policy import (
+        BatchRetryPolicyUnavailable,
+    )
+
+    async def unavailable():
+        raise BatchRetryPolicyUnavailable(
+            "configuration temporarily unavailable",
+        )
+
     db, _, _, original, now, worker = await failed_setup(callback_setup)
+    if not policy_available:
+        worker.retry_overrides = unavailable
     await db.execute(
-        "UPDATE swe_cron_managed_batch_members SET business_attempt=3",
+        "UPDATE swe_cron_managed_batch_members SET business_attempt=%s",
+        (3 if policy_available else 1,),
     )
     await db.execute(
         "UPDATE swe_cron_execution_runs SET status='success',error_code=NULL,result_json=NULL,started_at=%s",

@@ -487,6 +487,43 @@ async def notify_cron_approval_result(
         )
 
 
+async def _resolve_external_approval_chat(workspace, pending, decision):
+    manager = workspace.chat_manager
+    user_id = pending.user_id or "external-approval"
+    extra = getattr(pending, "extra", None) or {}
+    chat_id = extra.get("chat_id")
+    channel = getattr(pending, "channel", None) or CONSOLE_CHANNEL
+    if chat_id:
+        chat = await manager.get_chat(chat_id)
+        if (
+            chat is None
+            or chat.user_id != user_id
+            or chat.session_id != pending.session_id
+        ):
+            raise RuntimeError("Original approval Chat is unavailable")
+        return chat
+    if channel != CONSOLE_CHANNEL:
+        matches = await manager.list_chats_by_session(
+            pending.session_id,
+            user_id,
+            channel,
+        )
+        if len(matches) != 1:
+            raise RuntimeError("Original approval Chat is unavailable")
+        return matches[0]
+    return await manager.get_or_create_chat(
+        pending.session_id,
+        user_id,
+        CONSOLE_CHANNEL,
+        name=_command_for_decision(decision, pending.request_id),
+        meta=(
+            {"agent_id": workspace.agent_id}
+            if getattr(workspace, "agent_id", None)
+            else None
+        ),
+    )
+
+
 async def submit_external_approval_decision(
     *,
     workspace: Any,
@@ -526,17 +563,7 @@ async def submit_external_approval_decision(
     if console_channel is None:
         raise RuntimeError("console channel not found")
 
-    chat = await workspace.chat_manager.get_or_create_chat(
-        pending.session_id,
-        pending.user_id or "external-approval",
-        CONSOLE_CHANNEL,
-        name=_command_for_decision(decision, pending.request_id),
-        meta=(
-            {"agent_id": workspace.agent_id}
-            if getattr(workspace, "agent_id", None)
-            else None
-        ),
-    )
+    chat = await _resolve_external_approval_chat(workspace, pending, decision)
 
     await _wait_until_run_idle(workspace.task_tracker, chat.id)
 
@@ -561,6 +588,8 @@ async def submit_external_approval_decision(
         user_name=user_name,
         bbk_id=bbk_id,
     )
+    payload["channel_id"] = getattr(chat, "channel", CONSOLE_CHANNEL)
+    payload["meta"]["chat_id"] = chat.id
     await _append_external_approval_message(
         workspace=workspace,
         pending=pending,

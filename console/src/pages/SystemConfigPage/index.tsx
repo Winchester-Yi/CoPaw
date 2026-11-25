@@ -349,6 +349,22 @@ export default function SystemConfigPage() {
     );
   };
 
+  const handleCronBatchMaxAttemptsChange = (value: number | null) => {
+    if (formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) => {
+      const next = { ...previous };
+      if (value === null) {
+        delete next.cron_batch_max_attempts;
+      } else {
+        next.cron_batch_max_attempts = value;
+      }
+      return next;
+    });
+  };
+
   const handleCronUnreadAutoPauseThresholdChange = (value: number | null) => {
     if (formDisabled || typeof value !== "number") {
       return;
@@ -588,6 +604,35 @@ export default function SystemConfigPage() {
   };
 
   const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
+  const cronBatchMaxAttemptsLabel = t(
+    "sourceSystemConfigPage.cronBatchMaxAttempts",
+    {
+      defaultValue: "批调度最大尝试次数",
+    },
+  );
+  const cronBatchMaxAttemptsField = (
+    <div className={styles.numberField}>
+      <span className={styles.numberLabel}>{cronBatchMaxAttemptsLabel}</span>
+      <InputNumber
+        aria-label={cronBatchMaxAttemptsLabel}
+        min={1}
+        max={2147483647}
+        precision={0}
+        placeholder={t("sourceSystemConfigPage.inheritedSchedulerConfig", {
+          defaultValue: "继承配置",
+        })}
+        value={draftConfig.cron_batch_max_attempts ?? null}
+        disabled={formDisabled}
+        onChange={handleCronBatchMaxAttemptsChange}
+      />
+      <span className={styles.switchDescription}>
+        {t("sourceSystemConfigPage.cronBatchMaxAttemptsHelp", {
+          defaultValue:
+            "包含首次执行。设为 1 时关闭自动重试，留空继承 Scheduler 配置（缺省 3 次）。",
+        })}
+      </span>
+    </div>
+  );
   const cronBranchOverrides = (
     <CronUnreadPauseBranches
       config={cronUnreadAutoPauseConfig}
@@ -838,6 +883,9 @@ export default function SystemConfigPage() {
       </div>
     ) : selectedCapabilityId === "cron" ? (
       <div className={styles.drawerEditor}>
+        <section className={styles.toolOutputSection}>
+          {cronBatchMaxAttemptsField}
+        </section>
         <section className={styles.toolOutputSection}>
           <div className={styles.switchRow}>
             <span className={styles.switchTitle}>定时任务未读自动暂停</span>
@@ -1440,6 +1488,9 @@ export default function SystemConfigPage() {
               })}
             >
               <div className={styles.switchList}>
+                <section className={styles.scheduledTaskSection}>
+                  {cronBatchMaxAttemptsField}
+                </section>
                 <section className={styles.scheduledTaskSection}>
                   <div className={styles.switchRow}>
                     <div className={styles.switchCopy}>

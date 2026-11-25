@@ -62,7 +62,7 @@ describe("StepIndicator", () => {
 });
 
 describe("ScheduleEditor", () => {
-  it.each(["daily", "weekly"] as const)(
+  it.each(["daily", "weekdays", "weekly"] as const)(
     "%s 名单推送未设置时间时显示08:00",
     (type) => {
       const item: PlanItem = {
@@ -76,9 +76,17 @@ describe("ScheduleEditor", () => {
         schedule: { type },
       };
       render(<ScheduleEditor item={item} sceneName={item.sceneName} />);
-      expect(
-        screen.getByRole("button", { name: "默认时间场景名单推送时间" }),
-      ).toHaveTextContent("08:00");
+      const pushTime = screen.getByRole("button", {
+        name: "默认时间场景名单推送时间",
+      });
+      expect(pushTime).toHaveTextContent("08:00");
+      if (type === "weekdays") {
+        expect(pushTime.closest(`.${styles.scheduleField}`)).toHaveTextContent(
+          "周一至周五",
+        );
+      } else {
+        expect(screen.queryByText("周一至周五")).not.toBeInTheDocument();
+      }
     },
   );
 
@@ -141,7 +149,7 @@ describe("ScheduleEditor", () => {
       within(frequency)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).toEqual(["每小时", "每日", "每周", "自定义"]);
+    ).toEqual(["每小时", "工作日", "每周", "自定义"]);
     expect(
       within(frequency).getByRole("button", { name: "自定义" }),
     ).toHaveAttribute("aria-pressed", "true");

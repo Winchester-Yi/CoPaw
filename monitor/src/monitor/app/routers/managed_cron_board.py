@@ -77,6 +77,7 @@ async def batches(
             status=filters.status,
             query=filters.query,
             child_status=filters.child_status,
+            has_members=filters.has_members,
             page=filters.page,
             page_size=filters.page_size,
         )
@@ -157,6 +158,7 @@ async def failure_summary(
             status=filters.status,
             query=filters.query,
             child_status=filters.child_status,
+            has_members=filters.has_members,
         )
     except Exception as exc:
         raise board_error(exc) from exc

@@ -1,12 +1,85 @@
 # -*- coding: utf-8 -*-
 """Monitor 新看板的严格来源角色、缺表失败和只读接口验证。"""
 
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from tests.unit.scheduler.test_managed_cron_callbacks import callback_setup
+from tests.unit.scheduler.test_managed_cron_callbacks import (
+    body,
+    callback_setup,
+    create_source,
+)
 from tests.unit.scheduler.test_managed_batch_retry import failed_batch
+
+
+@pytest.mark.asyncio
+async def test_member_presence_filters_both_board_endpoints(callback_setup):
+    from monitor.app.routers import managed_cron_board as api
+    from monitor.app.services.cron.managed_board import ManagedBoardQuery
+    from scheduler.app.services.cron.managed.scheduling import (
+        ManagedSchedulingService,
+    )
+
+    db, caller, _ = callback_setup
+    _, failed_id = await failed_batch(callback_setup)
+    job = await create_source(callback_setup, "batch_enabled")
+    db.conn.execute("UPDATE swe_cron_jobs_v2 SET enabled=0")
+    db.conn.execute(
+        "UPDATE swe_cron_job_states SET pause_reason='auto_unread_threshold'",
+    )
+    empty = await ManagedSchedulingService(
+        db,
+        clock=lambda: datetime(2026, 10, 16, 1, tzinfo=timezone.utc),
+    ).accept(
+        caller,
+        body(db, job, kind="batch", trigger="empty"),
+        "batch",
+    )
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.board_service] = lambda: ManagedBoardQuery(db)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test/monitor/cron/managed-dispatch/",
+        headers={
+            "X-Source-Id": "bank",
+            "X-User-Id": "alice",
+            "X-User-Role": "manager",
+        },
+    ) as client:
+        for value, batch_id, members in (
+            ("true", failed_id, 1),
+            ("false", empty["batch_id"], 0),
+        ):
+            params = {"has_members": value, "page_size": 1}
+            result = (await client.get("batches", params=params)).json()
+            assert result["total"] == 1
+            assert [item["batch_id"] for item in result["items"]] == [batch_id]
+            assert result["stats"]["total_members"] == members
+            assert result["stats"]["failed_members"] == members
+            failures = (
+                await client.get("failure-summary", params=params)
+            ).json()
+            assert failures["total"] == members
+        combined = await client.get(
+            "batches",
+            params={"has_members": "false", "status": "failed"},
+        )
+        assert combined.json()["total"] == 0
+        db.conn.execute(
+            "UPDATE swe_cron_managed_trigger_receipts SET members_json='{}' "
+            "WHERE batch_id=?",
+            (empty["batch_id"],),
+        )
+        for endpoint in ("batches", "failure-summary"):
+            invalid = await client.get(
+                endpoint,
+                params={"has_members": "true"},
+            )
+            assert invalid.status_code == 503
 
 
 @pytest.mark.asyncio
@@ -18,7 +91,6 @@ async def test_worker_occupants_scopes_totals_and_current_attempt(
     from monitor.app.routers import managed_cron_board as api
     from monitor.app.services.cron.managed_board import ManagedBoardQuery
 
-    from datetime import datetime, timezone
     from scheduler.app.services.cron.managed.executions import (
         ExecutionRequest,
         ExecutionStore,
@@ -32,7 +104,7 @@ async def test_worker_occupants_scopes_totals_and_current_attempt(
     db.conn.executescript("""
         UPDATE swe_cron_execution_runs
         SET kind='ordinary', status='success', settled_status=NULL,
-            spec_json=JSON_SET(spec_json,'$.tenant_name','Alice'),
+            spec_json=JSON_SET(spec_json,'$.tenant_name','Alice','$.task_type','agent'),
             dispatch_meta_json=JSON_SET(
                 dispatch_meta_json,'$.daily_failure_retry.call_id','call-one'
             );
@@ -102,7 +174,13 @@ async def test_worker_occupants_scopes_totals_and_current_attempt(
         db.conn.execute("UPDATE swe_cron_execution_runs SET status='queued'")
         pending = await client.get(path, headers=headers)
         assert pending.json()["total"] == 1
-        assert pending.json()["items"][0]["tenant_id"] == "bob"
+        db.conn.execute(
+            "UPDATE swe_cron_execution_runs SET status='running', "
+            "spec_json=JSON_SET(spec_json,'$.task_type','text')",
+        )
+        text_only = await client.get(path, headers=headers)
+        assert text_only.json()["total"] == 1
+        assert text_only.json()["items"][0]["tenant_id"] == "bob"
 
 
 @pytest.mark.asyncio

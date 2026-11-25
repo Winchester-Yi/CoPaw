@@ -11,8 +11,20 @@ from tests.unit.scheduler.test_managed_cron_callbacks import (
     body,
 )
 from tests.unit.scheduler.test_managed_cron_distribution import payload
+from tests.unit.scheduler.test_managed_cron_executions import (
+    stub_execution_models,
+)
 
-SCOPE = {"source_id": "bank", "provider_id": "default", "model_id": "default"}
+SCOPE = {
+    "source_id": "bank",
+    "provider_id": "tenant-provider",
+    "model_id": "tenant-model",
+}
+
+
+@pytest.fixture(autouse=True)
+def agent_models(monkeypatch):
+    stub_execution_models(monkeypatch)
 
 
 async def batch(setup, name, second):
@@ -32,8 +44,8 @@ async def batch(setup, name, second):
             "dispatch_state": "batch_enabled",
             "spec": {
                 "name": name,
-                "task_type": "text",
-                "text": "body",
+                "task_type": "agent",
+                "request": {"input": "body"},
                 "schedule": {"cron": "0 9 * * *", "timezone": "Asia/Shanghai"},
             },
         },

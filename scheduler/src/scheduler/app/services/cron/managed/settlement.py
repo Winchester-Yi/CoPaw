@@ -8,7 +8,7 @@ from .executions import RUN_TABLE
 from .operations import utc_now
 from .storage import transaction, update
 from .dispatch_events import append_run_event
-from .run_accounting import standalone_direct_sql
+from .run_accounting import direct_dispatch_sql
 
 logger = logging.getLogger(__name__)
 TERMINAL = ("success", "error", "skipped", "cancelled")
@@ -16,7 +16,7 @@ PROTOCOL = (
     "JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))="
     "'scheduler_managed_v1'"
 )
-WORKER_RUN = f"{PROTOCOL} AND NOT {standalone_direct_sql('r')}"
+WORKER_RUN = f"{PROTOCOL} AND NOT {direct_dispatch_sql('r')}"
 SUBTASK_TERMINAL = "('SUC','FAIL','PART_SUC','TIMEOUT')"
 
 

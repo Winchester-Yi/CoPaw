@@ -65,8 +65,19 @@ async def channel_jobs(
     tenant: str | None = Query(None, max_length=128),
     query: str | None = Query(None, max_length=128),
     status: str | None = Query(None, max_length=32),
+    page: int | None = Query(None, ge=1, description="按父任务和独立任务分页"),
 ):
     try:
+        if page is not None:
+            return await channel_migration.job_groups(
+                db,
+                caller.source_id,
+                page=page,
+                limit=limit,
+                tenant=tenant,
+                query=query,
+                status=status,
+            )
         return await channel_migration.jobs(
             db,
             caller.source_id,

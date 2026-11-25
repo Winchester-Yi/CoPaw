@@ -58,6 +58,7 @@ _ROUTER_MODULES = (
     (".dream_logs", "router"),
     (".user_info", "router"),
     (".internal", "router"),
+    (".batch_status_report", "router"),
     (".internal", "public_router"),
     (".system_check", "router"),
     ("..source_system_config", "router"),

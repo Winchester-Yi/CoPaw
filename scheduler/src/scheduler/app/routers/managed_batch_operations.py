@@ -33,8 +33,12 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 
-def batch_service(db=Depends(management_database)):
-    return BatchRetryService(db)
+def batch_service(request: Request, db=Depends(management_database)):
+    worker = getattr(request.app.state, "managed_cron_worker", None)
+    return BatchRetryService(
+        db,
+        retry_overrides=getattr(worker, "retry_overrides", None),
+    )
 
 
 def batch_error(exc):
@@ -77,7 +81,7 @@ async def retry(
     caller: CallerIdentity = Depends(caller_identity),
     service=Depends(batch_service),
 ):
-    """共库事务受理、审计并返回；不调用平台或 SWE，不改变批入口模式。响应丢失重提原 Body。"""
+    """共库事务受理、审计并返回；响应丢失重提原 Body。"""
     try:
         result = await service.retry(caller, batch_id, body)
         worker = getattr(request.app.state, "managed_cron_worker", None)

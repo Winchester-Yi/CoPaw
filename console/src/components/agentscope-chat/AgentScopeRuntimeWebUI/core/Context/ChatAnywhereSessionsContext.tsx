@@ -20,6 +20,7 @@ import { shouldApplySessionLoadResult } from "@/pages/Chat/sessionApi/sessionRac
 
 export const SESSION_TITLE_PATCH_EVENT = "patchSessionTitle";
 export const SESSION_TITLE_GENERATED_META_KEY = "session_title_generated";
+export const MANUAL_CHAT_TITLE_META_KEY = "session_title_edited";
 
 interface SessionTitlePatchPayload {
   chat_id?: string;
@@ -138,6 +139,9 @@ export async function loadSessionMessages({
 
     return true;
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return false;
+    }
     const status =
       error && typeof error === "object"
         ? (error as { status?: unknown }).status
@@ -230,7 +234,10 @@ export function patchSessionTitleInList(
     if (!sessionMatchesTitlePatch(sessionWithIdentity, titlePatch)) {
       return session;
     }
-    if (sessionWithIdentity.meta?.session_kind === "task") {
+    if (
+      sessionWithIdentity.meta?.session_kind === "task" ||
+      sessionWithIdentity.meta?.[MANUAL_CHAT_TITLE_META_KEY]
+    ) {
       return session;
     }
 

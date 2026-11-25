@@ -2,9 +2,8 @@
  * 智能财富工作台 —— 日期与排程工具
  * 排程模型与控制台定时任务一致（@/utils/parseCron 的 CronParts）。
  */
-import type { CronParts } from "@/utils/parseCron";
 import type { WealthRole } from "./permissions";
-import type { Draft, Plan, PlanItem } from "./types";
+import type { Draft, Plan, PlanItem, PlanSchedule } from "./types";
 
 /** 规划展示状态只反映发布生命周期，不展示后端聚合的分发结果。 */
 export function planPublishLabel(plan: Plan): string {
@@ -120,9 +119,11 @@ const WEEKDAY_LABELS: Record<string, string> = {
 
 const WEEKDAY_BY_INDEX = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
-/** 名单推送默认排程：每日 08:00 */
-export const DEFAULT_SCHEDULE: CronParts = {
-  type: "daily",
+export const WORKDAYS = ["mon", "tue", "wed", "thu", "fri"];
+
+/** 名单推送默认排程：工作日 08:00 */
+export const DEFAULT_SCHEDULE: PlanSchedule = {
+  type: "weekdays",
   hour: 8,
   minute: 0,
 };
@@ -132,7 +133,7 @@ function pad2(value: number): string {
 }
 
 /** 排程的人类可读摘要：每日 08:00 / 每周一、四 08:30 / 每小时整点 / 自定义表达式 */
-export function scheduleLabel(parts: CronParts | undefined): string {
+export function scheduleLabel(parts: PlanSchedule | undefined): string {
   const schedule = parts ?? DEFAULT_SCHEDULE;
   const time = `${pad2(schedule.hour ?? 8)}:${pad2(schedule.minute ?? 0)}`;
   switch (schedule.type) {
@@ -140,6 +141,8 @@ export function scheduleLabel(parts: CronParts | undefined): string {
       return "每小时整点";
     case "daily":
       return `每日 ${time}`;
+    case "weekdays":
+      return `工作日 ${time}`;
     case "weekly": {
       const days = (schedule.daysOfWeek?.length ? schedule.daysOfWeek : ["mon"])
         .map((d) => WEEKDAY_LABELS[d] ?? d)
@@ -180,8 +183,9 @@ export function planItemScheduledOn(
   if (!item.start || !item.end) return false;
   if (day < item.start || day > item.end) return false;
   const schedule = item.schedule ?? DEFAULT_SCHEDULE;
-  if (schedule.type !== "weekly") return true;
+  if (schedule.type !== "weekly" && schedule.type !== "weekdays") return true;
   const dayName = WEEKDAY_BY_INDEX[calendarDate(day).getDay()];
+  if (schedule.type === "weekdays") return WORKDAYS.includes(dayName);
   const days = schedule.daysOfWeek?.length ? schedule.daysOfWeek : ["mon"];
   return days.includes(dayName);
 }
@@ -195,7 +199,7 @@ export function planScheduledOn(p: Plan, day: string): boolean {
 
 /** 今日任务树节点：一个排程到当天的场景条目 */
 export interface TaskTreeNode {
-  schedule: CronParts;
+  schedule: PlanSchedule;
   sceneId: string;
   custNum?: number;
   sceneName: string;

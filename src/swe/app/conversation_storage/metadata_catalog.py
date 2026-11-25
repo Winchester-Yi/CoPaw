@@ -387,23 +387,26 @@ class MetadataCatalog(BaseChatRepository):
                 revision=binding.revision + 1,
                 expert_id=expert_id,
             )
-            await self.db.execute(
-                "UPDATE swe_conversation_chats SET "
-                "expert_id=%s,expert_binding_revision=%s,"
-                "updated_at=UTC_TIMESTAMP(6) WHERE id=%s AND service_unit_key=%s "
-                "AND deleted_at IS NULL",
-                (
-                    (
-                        identity_bytes(expert_id, 256)
-                        if expert_id is not None
-                        else None
-                    ),
-                    updated.revision,
-                    row["id"],
-                    self.scope.sql_values[0],
-                ),
-            )
+            await self._write_expert_binding(row, updated)
             return updated
+
+    async def _write_expert_binding(self, row, updated):
+        await self.db.execute(
+            "UPDATE swe_conversation_chats SET "
+            "expert_id=%s,expert_binding_revision=%s,"
+            "updated_at=UTC_TIMESTAMP(6) WHERE id=%s AND service_unit_key=%s "
+            "AND deleted_at IS NULL",
+            (
+                (
+                    identity_bytes(updated.expert_id, 256)
+                    if updated.expert_id is not None
+                    else None
+                ),
+                updated.revision,
+                row["id"],
+                self.scope.sql_values[0],
+            ),
+        )
 
     async def compare_and_set_expert_binding(
         self,

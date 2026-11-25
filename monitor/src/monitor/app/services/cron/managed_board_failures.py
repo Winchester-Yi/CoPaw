@@ -41,9 +41,13 @@ ELSE COALESCE(NULLIF(settled_error_code,''),NULLIF(error_code,''),'未记录失�
 END,1,2048)"""
 
 
-def summary_query(where, filtered):
+def summary_query(where, filtered, has_members=None):
     # 与原列表复用同一份关系校验及状态聚合，清单仍只物化一次。
-    selected = "WHERE status=%s OR status='unavailable'" if filtered else ""
+    selected = sql.batch_list_filter(
+        filtered,
+        has_members,
+        include_unavailable=True,
+    )
     return (
         sql._aggregate_ctes(where)  # pylint: disable=protected-access
         + f", selected_batches AS (SELECT * FROM board_batches {selected}), "
@@ -84,6 +88,7 @@ async def failure_summary(
     query,
     *,
     child_status=None,
+    has_members=None,
 ):
     where, params = sql.batch_where(
         source,
@@ -93,7 +98,7 @@ async def failure_summary(
         child_status=child_status,
     )
     rows = await db.fetch_all(
-        summary_query(where, bool(status)),
+        summary_query(where, bool(status), has_members),
         (*params, status) if status else params,
     )
     if rows[0]["unavailable_batches"]:

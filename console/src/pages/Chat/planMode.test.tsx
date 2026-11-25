@@ -415,7 +415,11 @@ describe("Plan Mode frontend helpers", () => {
   it("persists Plan Mode changes through chat metadata updates", async () => {
     const session = {
       id: "chat-1",
-      meta: { plan_mode_enabled: true, title: "demo" },
+      meta: {
+        plan_mode_enabled: true,
+        title: "demo",
+        session_title_edited: true,
+      },
     };
     const ensureChatId = vi.fn(async () => "chat-1");
     const updateChat = vi.fn(async () => ({
@@ -439,10 +443,7 @@ describe("Plan Mode frontend helpers", () => {
       title: "demo",
     });
     expect(updateChat).toHaveBeenCalledWith("chat-1", {
-      meta: {
-        plan_mode_enabled: false,
-        title: "demo",
-      },
+      meta: { plan_mode_enabled: false },
     });
     expect(updateSession).toHaveBeenCalledWith({
       id: "chat-1",

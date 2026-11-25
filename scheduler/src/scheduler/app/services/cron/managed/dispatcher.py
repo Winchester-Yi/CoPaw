@@ -14,7 +14,11 @@ from .identity import CallerIdentity, encode_scope, identity_value
 from .operations import utc_now
 from .repository import IDENTITY_FIELDS, ManagedCronRepository
 from .storage import transaction, update
-from .run_accounting import DIRECT_DISPATCH_KINDS, occupied_run_sql
+from .run_accounting import (
+    DIRECT_DISPATCH_KINDS,
+    is_text_run,
+    occupied_run_sql,
+)
 from .swe_client import checked_base
 from .dispatch_events import append_run_event
 from .date_policy import reason as date_reason
@@ -202,7 +206,9 @@ class ExecutionDispatcher:
         direct = row["kind"] in DIRECT_DISPATCH_KINDS and not recovery
         receipt = await batch_for_execution(self.db, row) if direct else None
         permit = None
-        if not direct or receipt is not None:
+        batch_dispatch = not direct or receipt is not None
+        batch_text = not recovery and batch_dispatch and is_text_run(row)
+        if batch_dispatch and not batch_text:
             permit = await self._capacity_permit(
                 row,
                 recovery,
@@ -212,13 +218,7 @@ class ExecutionDispatcher:
                 return None
         if not direct and not recovery:
             receipt = await batch_for_execution(self.db, row)
-        if (
-            not recovery
-            and receipt is None
-            and json.loads(row.get("dispatch_meta_json") or "{}").get(
-                "batch_id",
-            )
-        ):
+        if self._missing_batch_receipt(row, receipt, recovery):
             return None
         return await self._claim_transaction(
             row,
@@ -226,6 +226,19 @@ class ExecutionDispatcher:
             recovery,
             permit,
             receipt,
+            check_job_limit=batch_text,
+        )
+
+    @staticmethod
+    def _missing_batch_receipt(row, receipt, recovery):
+        return (
+            not recovery
+            and receipt is None
+            and bool(
+                json.loads(row.get("dispatch_meta_json") or "{}").get(
+                    "batch_id",
+                ),
+            )
         )
 
     async def _capacity_permit(self, row, recovery, capacity_permit):
@@ -249,6 +262,8 @@ class ExecutionDispatcher:
         recovery,
         permit,
         receipt=None,
+        *,
+        check_job_limit=False,
     ):
         async with transaction(self.db) as tx:
             if permit is not None and not await self.capacity.lock(tx, permit):
@@ -278,42 +293,45 @@ class ExecutionDispatcher:
                 return None
             if not recovery and not self._due(current, definition):
                 return None
-            if permit is not None and not await self._can_reserve(
+            check_limits = permit is not None or check_job_limit
+            if check_limits and not await self._can_reserve(
                 tx,
                 permit,
                 current,
                 definition,
             ):
                 return None
-            values = {
-                "status": (
-                    current["status"]
-                    if current["status"] in {"accepted", "running"}
-                    else "dispatching"
-                ),
-                "dispatch_owner": str(uuid4()),
-                "dispatch_lease_until": self.clock() + timedelta(seconds=30),
-                "dispatch_attempt": current["dispatch_attempt"]
-                + (not recovery),
-                "version": current["version"] + 1,
-                "updated_at": self.clock(),
-            }
-            await update(
-                tx,
-                RUN_TABLE,
-                values,
-                "execution_id=%s AND version=%s",
-                (current["execution_id"], current["version"]),
+            return await self._record_claim(tx, current, recovery)
+
+    async def _record_claim(self, tx, current, recovery):
+        values = {
+            "status": (
+                current["status"]
+                if current["status"] in {"accepted", "running"}
+                else "dispatching"
+            ),
+            "dispatch_owner": str(uuid4()),
+            "dispatch_lease_until": self.clock() + timedelta(seconds=30),
+            "dispatch_attempt": current["dispatch_attempt"] + (not recovery),
+            "version": current["version"] + 1,
+            "updated_at": self.clock(),
+        }
+        await update(
+            tx,
+            RUN_TABLE,
+            values,
+            "execution_id=%s AND version=%s",
+            (current["execution_id"], current["version"]),
+        )
+        result = {**current, **values}
+        if not recovery:
+            kind = (
+                "dispatching"
+                if values["status"] == "dispatching"
+                else "transport_redelivery"
             )
-            result = {**current, **values}
-            if not recovery:
-                kind = (
-                    "dispatching"
-                    if values["status"] == "dispatching"
-                    else "transport_redelivery"
-                )
-                await append_run_event(tx, result, kind)
-            return result
+            await append_run_event(tx, result, kind)
+        return result
 
     def _claimable(self, current, retry, recovery=False):
         if current is None or current["status"] in TERMINAL_STATUSES:
@@ -356,7 +374,10 @@ class ExecutionDispatcher:
             definition,
         ):
             return True
-        if await self.capacity.available(tx, permit, current) <= 0:
+        if (
+            permit is not None
+            and await self.capacity.available(tx, permit, current) <= 0
+        ):
             return False
         # 尚未开始的同任务周期不提前占满模型池，让其他任务仍有机会运行。
         key = tuple(current[name] for name in IDENTITY_FIELDS)

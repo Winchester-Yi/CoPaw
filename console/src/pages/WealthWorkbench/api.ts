@@ -15,7 +15,7 @@ import { getWorkbenchContext, isOperationsMode } from "./operations";
 import { throwIfRequestAborted } from "./abortSignal";
 // import { Base64 } from "js-base64";
 import { SCENE_CATEGORIES } from "./mock/data";
-import { DEFAULT_SCHEDULE } from "./utils";
+import { DEFAULT_SCHEDULE, WORKDAYS } from "./utils";
 import { defaultMonitoring } from "./monitoring";
 import type {
   Account,
@@ -146,6 +146,7 @@ function mapSceneItem(scene: PlanSceneView): PlanItem {
   const monitorCron = scene.monitorTimeCron?.trim();
   const monitorSchedule = monitorCron ? parseCron(monitorCron) : undefined;
   const defaultMonitorSchedule = defaultMonitoring().schedule;
+  const schedule = parseCron(scene.cronExpr);
   return {
     id: scene.sceneId,
     sceneName: scene.sceneName,
@@ -159,7 +160,12 @@ function mapSceneItem(scene: PlanSceneView): PlanItem {
     cycle: scene.cycle ?? "自定义",
     start: scene.startDate ?? undefined,
     end: scene.endDate ?? undefined,
-    schedule: parseCron(scene.cronExpr),
+    schedule:
+      schedule.type === "weekly" &&
+      schedule.daysOfWeek?.length === WORKDAYS.length &&
+      WORKDAYS.every((day) => schedule.daysOfWeek?.includes(day))
+        ? { ...schedule, type: "weekdays" }
+        : schedule,
     ...(scene.schedule != null ||
     scene.monitorTimeCron != null ||
     scene.finishRate != null
@@ -867,6 +873,12 @@ function buildScenePayload(
   const monitoring = canMonitor
     ? item.monitoring ?? defaultMonitoring()
     : undefined;
+  const { type, ...schedule } = { ...DEFAULT_SCHEDULE, ...item.schedule };
+  const cronExpr = serializeCron(
+    type === "weekdays"
+      ? { ...schedule, type: "weekly", daysOfWeek: WORKDAYS }
+      : { ...schedule, type },
+  );
   return {
     sceneId: item.id,
     sceneName: item.sceneName,
@@ -878,7 +890,7 @@ function buildScenePayload(
     cycle: item.cycle,
     startDate: item.start,
     endDate: item.end,
-    cronExpr: serializeCron({ ...DEFAULT_SCHEDULE, ...item.schedule }),
+    cronExpr,
     ...(monitoring
       ? {
           schedule:

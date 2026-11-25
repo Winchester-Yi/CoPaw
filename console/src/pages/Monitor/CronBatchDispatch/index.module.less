@@ -1,3 +1,5 @@
+@import "../../../styles/scrollbar.less";
+
 .page {
   min-height: 100%;
   padding: 18px 20px 28px;
@@ -427,6 +429,21 @@
 .detailTabs :global(.ant-tabs-tab) {
   padding: 7px 0;
   font-size: 12px;
+}
+
+.managedDetailTabs :global(.swe-tabs-content) {
+  height: 100%;
+}
+
+.failureTab {
+  max-height: 100%;
+  overflow-y: auto;
+  .thin-scrollbar();
+
+  :global(.swe-table-body),
+  :global(.ant-table-body) {
+    .thin-scrollbar();
+  }
 }
 
 .intentTab {

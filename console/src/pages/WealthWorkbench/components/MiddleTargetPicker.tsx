@@ -673,7 +673,9 @@ function PersonnelCards({
                   }}
                   aria-pressed={selected.has(user.sapId)}
                   aria-label={`${user.name} ${user.sapId}`}
-                  title={`${user.name} · ${user.sapId}`}
+                  title={[user.name, user.sapId, user.orgName]
+                    .filter(Boolean)
+                    .join(" · ")}
                   onClick={() => onToggle(user)}
                 >
                   <span className={styles.check} aria-hidden="true">
@@ -684,7 +686,10 @@ function PersonnelCards({
                   </span>
                   <span className={styles.personInfo}>
                     <strong>{user.name}</strong>
-                    <small>{user.sapId}</small>
+                    <small>
+                      {user.sapId}
+                      {user.orgName ? ` · ${user.orgName}` : ""}
+                    </small>
                   </span>
                 </button>
               ))}

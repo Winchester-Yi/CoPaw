@@ -116,6 +116,9 @@ class FakeCoordinator:
     def __init__(self, tracker: FakeTaskTracker) -> None:
         self.tracker = tracker
 
+    async def current_identity(self, _chat_id):
+        return None
+
     async def status(self, _chat_id):
         return None
 

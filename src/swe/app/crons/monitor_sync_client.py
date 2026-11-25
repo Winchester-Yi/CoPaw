@@ -180,6 +180,23 @@ class MonitorSyncClient:
                 response.status_code,
             )
 
+    async def fetch_batch_status_report(
+        self,
+        source_id: str,
+        business_date: str,
+    ) -> dict:
+        client = await self._get_client()
+        response = await client.post(
+            "/monitor/internal/cron/batch-status-report-snapshot",
+            json={"source_id": source_id, "business_date": business_date},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("cron_report_snapshot_invalid")
+        return data
+
     def _sync_fire_and_forget(self, coro: Any) -> None:
         """Fire and forget - run coroutine in background.
 

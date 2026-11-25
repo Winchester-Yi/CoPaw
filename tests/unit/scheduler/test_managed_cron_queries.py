@@ -334,9 +334,20 @@ PATH = "/api/scheduler/cron/jobs"
 
 
 @pytest.mark.asyncio
-async def test_list_marks_previously_distributed_parent(client, database):
+@pytest.mark.parametrize("include_deleted", [False, True])
+async def test_list_separates_current_children_from_distribution_history(
+    client,
+    database,
+    include_deleted,
+):
     database.add("parent")
     database.add("standalone")
+    database.add(
+        "current-child",
+        tenant="bob",
+        parent=("alice", "bank", "default", "parent"),
+        enabled=False,
+    )
     database.add(
         "old-child",
         tenant="bob",
@@ -348,12 +359,28 @@ async def test_list_marks_previously_distributed_parent(client, database):
         tenant="bob",
         parent=("alice", "other", "default", "standalone"),
     )
-    response = await client.get(PATH, headers=HEADERS)
+    params = {"include_deleted": include_deleted}
+    response = await client.get(PATH, headers=HEADERS, params=params)
     assert response.status_code == 200
     assert {
-        row["id"]: row["has_distributed_children"]
+        row["id"]: (
+            row["has_distributed_children"],
+            row["has_undeleted_children"],
+        )
         for row in response.json()["items"]
-    } == {"parent": True, "standalone": False}
+    } == {"parent": (True, True), "standalone": (False, False)}
+
+    database.conn.execute(
+        "UPDATE swe_cron_jobs_v2 SET deleted_at='2026-11-23' "
+        "WHERE job_id='current-child'",
+    )
+    response = await client.get(PATH, headers=HEADERS, params=params)
+    assert response.status_code == 200
+    parent = next(
+        row for row in response.json()["items"] if row["id"] == "parent"
+    )
+    assert parent["has_distributed_children"] is True
+    assert parent["has_undeleted_children"] is False
 
 
 @pytest.mark.asyncio

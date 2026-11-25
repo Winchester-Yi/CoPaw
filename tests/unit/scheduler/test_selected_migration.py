@@ -226,6 +226,106 @@ async def test_channel_migration_lists_own_source_and_keeps_real_actor():
 
 
 @pytest.mark.asyncio
+async def test_channel_migration_pages_roots_and_counts_their_children():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from scheduler.app.routers import selected_cron_migration as api
+
+    db, _, _, _ = setup()
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.management_database] = lambda: db
+    root = '{"agent_id":"default"}'
+    child = '{"agent_id":"default","broadcast_source_job_id":"parent"}'
+    db.conn.executemany(
+        "INSERT INTO swe_cron_jobs "
+        "(id,tenant_id,source_id,name,meta,deleted_at) VALUES (?,?,?,?,?,?)",
+        [
+            ("parent", "alice", "bank", "父任务", root, None),
+            ("standalone", "bob", "bank", "独立任务", root, None),
+            ("child-a", "bob", "bank", "分发子任务", child, None),
+            ("child-b", "carol", "bank", "分发子任务", child, None),
+            (
+                "child-deleted",
+                "bob",
+                "bank",
+                "已删除子任务",
+                child,
+                "2026-11-20",
+            ),
+            ("child-other", "bob", "other", "其他渠道子任务", child, None),
+            ("other", "bob", "other", "其他渠道独立任务", root, None),
+        ],
+    )
+    db.conn.executemany(
+        "UPDATE swe_cron_jobs SET cron_expr=? WHERE id=?",
+        [("15 9 * * 1-5", "parent"), ("*/10 * * * *", "standalone")],
+    )
+    path = "/scheduler/cron/migrations/channel/jobs"
+    headers = {
+        "X-User-Id": "admin-user",
+        "X-Source-Id": "bank",
+        "X-User-Role": "manager",
+    }
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers=headers,
+        ) as client:
+            first = await client.get(path, params={"page": 1, "limit": 1})
+            assert first.status_code == 200
+            first = first.json()
+            assert (first["total"], first["task_total"]) == (2, 4)
+            assert [
+                (item["job_id"], item["child_count"], item["cron_expr"])
+                for item in first["items"]
+            ] == [("parent", 2, "15 9 * * 1-5")]
+            second = (
+                await client.get(path, params={"page": 2, "limit": 1})
+            ).json()
+            assert (second["total"], second["task_total"]) == (2, 4)
+            assert [
+                (item["job_id"], item["child_count"], item["cron_expr"])
+                for item in second["items"]
+            ] == [("standalone", 0, "*/10 * * * *")]
+            outside = (
+                await client.get(path, params={"page": 3, "limit": 1})
+            ).json()
+            assert outside == {
+                "items": [],
+                "total": 2,
+                "task_total": 4,
+            }
+            filtered = (
+                await client.get(
+                    path,
+                    params={
+                        "page": 1,
+                        "tenant": "alice",
+                        "query": "父任务",
+                        "status": "not_migrated",
+                    },
+                )
+            ).json()
+            assert (filtered["total"], filtered["task_total"]) == (1, 3)
+            assert filtered["items"][0]["child_count"] == 2
+            child_only = (
+                await client.get(
+                    path,
+                    params={"page": 1, "query": "分发子任务"},
+                )
+            ).json()
+            assert child_only == {
+                "items": [],
+                "total": 0,
+                "task_total": 0,
+            }
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fail_pause", [False, True])
 async def test_legacy_timers_pause_before_new_enable_and_retry(fail_pause):
     db, platform, caller, service = setup()

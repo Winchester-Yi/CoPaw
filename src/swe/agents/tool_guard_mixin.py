@@ -2488,8 +2488,9 @@ class ToolGuardMixin:
             extra["goal_id"] = goal_id
         chat_id = str(self._request_context.get("chat_id") or "").strip()
         msgid = str(self._request_context.get("msgid") or "").strip()
-        if chat_id and msgid:
+        if chat_id:
             extra["chat_id"] = chat_id
+        if chat_id and msgid:
             extra["msgid"] = msgid
         execution_identity = self._request_context.get("execution_identity")
         if isinstance(execution_identity, dict):

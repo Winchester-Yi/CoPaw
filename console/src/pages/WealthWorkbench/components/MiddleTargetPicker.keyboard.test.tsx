@@ -94,7 +94,7 @@ beforeEach(() => {
           userName: `人员${i}`,
           branchID: "110",
           subBranchID: "a",
-          subBranchName: "接口误报机构",
+          subBranchName: i === 1 ? "" : "测试营业部",
         })),
   }));
 });
@@ -186,15 +186,17 @@ it("原焦点卡片仍在渲染范围内时保留原键盘入口", async () => {
   expect(list.querySelectorAll('button[tabindex="0"]')).toHaveLength(1);
 });
 
-it("右侧卡片只展示姓名和用户 ID，搜索不使用接口机构名", async () => {
+it("右侧卡片展示接口返回的机构名称，人员搜索仍按姓名和用户 ID", async () => {
   await ready();
   expect(screen.getByRole("heading", { name: "测试支行人员" })).toBeVisible();
   const card = screen.getByRole("button", { name: "人员0 0000" });
-  expect(card).toHaveAttribute("title", "人员0 · 0000");
-  expect(card).toHaveTextContent("0000");
-  expect(card).not.toHaveTextContent("接口误报机构");
+  expect(card).toHaveAttribute("title", "人员0 · 0000 · 测试营业部");
+  expect(within(card).getByText("0000 · 测试营业部")).toBeVisible();
+  const cardWithoutOrg = screen.getByRole("button", { name: "人员1 0001" });
+  expect(cardWithoutOrg).toHaveAttribute("title", "人员1 · 0001");
+  expect(within(cardWithoutOrg).getByText("0001")).toBeVisible();
   const search = screen.getByLabelText("搜索分发目标");
-  fireEvent.change(search, { target: { value: "接口误报机构" } });
+  fireEvent.change(search, { target: { value: "测试营业部" } });
   expect(screen.getByText("未找到匹配人员")).toBeVisible();
   fireEvent.change(search, { target: { value: "0000" } });
   expect(screen.getByRole("button", { name: "人员0 0000" })).toBeVisible();

@@ -78,8 +78,9 @@ def _utc(value):
 
 
 class BatchRetryService:
-    def __init__(self, db):
+    def __init__(self, db, *, retry_overrides=None):
         self.db = db
+        self.retry_overrides = retry_overrides
 
     async def preview(self, caller, batch_id, types=(), *, offset=0):
         return await failure_preview(
@@ -91,12 +92,25 @@ class BatchRetryService:
         )
 
     async def retry(self, caller, batch_id, command: ManagedBatchRetryRequest):
+        from .batch_retry_policy import (
+            BatchRetryPolicyUnavailable,
+            max_batch_attempts,
+        )
+        from .retry_priority import lane_for_batch
+
         receipt = await read_batch(self.db, caller, batch_id)
         key = tuple(receipt[name] for name in IDENTITY_FIELDS)
         digest = request_hash(
             [caller.source_id, caller.actor_id, batch_id, command.request_id],
         )
         fingerprint = request_hash(command.model_dump())
+        try:
+            overrides = (
+                await self.retry_overrides() if self.retry_overrides else {}
+            )
+        except BatchRetryPolicyUnavailable:
+            # 在线配置仅影响重试优先级，人工受理仍可继续。
+            overrides = {}
         async with transaction(self.db) as tx:
             await tx.fetch_one(
                 f"SELECT job_id FROM swe_cron_jobs_v2 WHERE {JOB_WHERE} FOR UPDATE",
@@ -125,6 +139,11 @@ class BatchRetryService:
                     ),
                 )
             }
+            retry_lane = await lane_for_batch(
+                tx,
+                batch_id,
+                max_batch_attempts(overrides, caller.source_id),
+            )
             result = await self._apply(
                 tx,
                 caller,
@@ -132,6 +151,7 @@ class BatchRetryService:
                 command,
                 by_id,
                 digest,
+                retry_lane,
             )
             await self._audit(tx, receipt, caller, digest, fingerprint, result)
         logger.info(
@@ -173,10 +193,16 @@ class BatchRetryService:
                 (row["execution_id"],),
             )
 
-    async def _apply(self, tx, caller, batch_id, command, rows, digest):
-        from .retry_priority import lane_for_batch
-
-        retry_lane = await lane_for_batch(tx, batch_id)
+    async def _apply(
+        self,
+        tx,
+        caller,
+        batch_id,
+        command,
+        rows,
+        digest,
+        retry_lane,
+    ):
         results = []
         audit = {
             "batch_id": batch_id,

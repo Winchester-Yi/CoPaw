@@ -257,6 +257,26 @@ export default createGlobalStyle`
 }
 
 .chat-sidebar-history-list {
+  .chat-history-more {
+    flex: 0 0 24px;
+    opacity: 0;
+  }
+
+  :focus-within > .chat-history-more,
+  .chat-history-more[aria-expanded="true"] {
+    opacity: 1;
+  }
+
+  > div:hover .chat-history-more {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    .chat-history-more {
+      opacity: 1;
+    }
+  }
+
   flex: 1;
   min-height: 100px;
   // max-height: 400px;
@@ -281,6 +301,11 @@ export default createGlobalStyle`
 
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+
+.chat-history-rename-error {
+  margin-top: 8px;
+  color: var(--colorError, #ff4d4f);
 }
 
 /* Skeleton styles */

@@ -512,6 +512,12 @@ def test_expert_main_rejects_invalid_boolean_values():
         )
 
 
+@pytest.mark.parametrize("invalid", [0, -1, True, 2.5, "3"])
+def test_batch_retry_limit_must_be_a_positive_integer(invalid):
+    with pytest.raises(ValueError, match="cron_batch_max_attempts"):
+        SourceSystemConfig.model_validate({"cron_batch_max_attempts": invalid})
+
+
 class TestSourceSystemConfigStore:
     """验证 source 系统配置数据库存储。"""
 

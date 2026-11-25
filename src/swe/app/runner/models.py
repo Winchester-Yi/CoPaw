@@ -12,6 +12,8 @@ from agentscope_runtime.engine.schemas.agent_schemas import Message
 
 from ..channels.schema import DEFAULT_CHANNEL
 
+MANUAL_CHAT_TITLE_META_KEY = "session_title_edited"
+
 
 class ChatSpec(BaseModel):
     """Chat specification with UUID identifier.

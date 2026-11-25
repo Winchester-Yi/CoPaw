@@ -13,6 +13,7 @@ LIGHT_METADATA_TYPES = {
     "plan_mode_enabled": bool,
     "goal_mode_enabled": bool,
     "session_title_generated": bool,
+    "session_title_edited": bool,
     "session_kind": str,
     "task_job_id": str,
     "management_owner": str,

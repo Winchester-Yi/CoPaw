@@ -73,6 +73,14 @@
 - **财富工作台复用**：聊天页面和工作台通过 `console/src/styles/scrollbar.less` 的 `.thin-scrollbar()` 复用浅灰圆角滚动条。工作台在 `.root` 及其后代应用，覆盖页面、表格、筛选列表和原生 dialog 内部的实际滚动容器；横向与纵向 WebKit 滚动条均为 4px。iframe 内部文档与挂载到工作台子树之外的第三方弹层需各自处理。
 - **验证**：在实际溢出的消息容器上检查 `getComputedStyle(element, '::-webkit-scrollbar').display` 和宽度，覆盖样式延迟注入、长消息滚动与键盘翻页。当前 Chrome 的标准属性禁用实验只能验证 WebKit 回退分支，不能替代真实 360 / Chromium 108 验收。
 
+## 聊天回答中的 KaTeX 内容撑出消息列表
+
+- **现象**：回答段落的高亮区域宽度正常，但其中一行越出段落右边界，消息区底部出现横向滚动条。若该段落含有 `span.inline-katex`，检查其中的 `.katex-display > .katex` 是否为 `white-space: nowrap`。
+- **原因**：共享 Markdown 组件启用了 XMarkdown 的 `Latex()` 插件。插件可把成对的公式定界符之间的说明文字当成公式，且行内 token 也使用 `displayMode: true`。段落的 `overflow-wrap: anywhere` 无法使这一公式子节点换行。超出段落的内容进入 `.swe-bubble-list-scroll` 的滚动范围，该容器使用 `overflow: auto`。
+- **排查入口**：`console/src/components/agentscope-chat/Markdown/Markdown.tsx` 和 `Markdown/styles.ts` 控制解析与段落样式，`Bubble/style/list.ts` 定义列表滚动。对照历史消息原始 Markdown 与公式 DOM 确认具体定界符，同时比较问题段落及消息列表的 `scrollWidth` 与 `clientWidth`。
+- **处理**：给 Markdown 内部的 `.katex-display` 设置 `max-width: 100%` 和 `overflow-x: auto`。独立 `$$` 公式直接生成 `.katex-display`，行内公式的该节点位于 `.inline-katex` 内。两种结构共用宽度限制和内部滚动，Markdown 解析和公式定界符规则保持原样。
+- **验证**：在 Chrome 158 用真实消息列表、响应卡片和 Markdown 组件渲染模拟历史消息。独立多行公式的桌面列表从 850/5248 px（可见/滚动）恢复为 850/850 px，超宽独立公式和行内公式均可在内部滚到右端。短行内公式尺寸及普通文本、粗体、行内代码和链接输出一致。覆盖普通和模拟 `hideMenu=true` 布局。现场原始消息与 Chromium 108 未验证。
+
 ## 财富规划看板在旧内核浏览器点击刷新不发请求
 
 - 排查入口：`Board/index.tsx` → `useBoardRefresh.ts` → `requestTimeout.ts` 的 `withBoardRequestTimeout()` → `store.ts` 的 `refreshPlans()`。
@@ -969,6 +977,11 @@
 - 生产 `DatabaseConfig` 默认两者均为 600 秒，可分别用 `SWE_DB_READ_TIMEOUT`、`SWE_DB_WRITE_TIMEOUT` 调整。单次 database facade 操作超过期限会抛 `TimeoutError("Database operation timed out")`。
 - 写事务超时只说明当前等待被客户端终止，最终提交结果可能未知。保留原 `operation_key` 和 prepared publication，先对账再续跑，不能把超时直接重试成新写入。
 - 远端 MySQL 返回 `InterfaceError 2013` 或握手重置时属于连接中断，不等于 SQL timeout；先确认 `SELECT 1` 和连接池恢复，再评估是否在同一 manifest 重跑。
+
+## Agent 报 session execution is not active
+
+- 若堆栈指向 `stream_admission` 的 `terminal_turn_status`，检查会话提交后提前关闭、观测收尾再读取状态的顺序；会话内容可能已经保存，但定时任务会因收尾异常显示失败。
+- 当前实现关闭事务时保留 turn 状态供收尾使用。核对实际业务操作与通知结果后再决定是否重跑，避免重复执行。
 
 ## 会话迁移 fast verify 报消息批次或正文证据不匹配
 

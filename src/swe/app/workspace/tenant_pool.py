@@ -605,13 +605,6 @@ class TenantWorkspacePool:
         Raises:
             RuntimeError: If bootstrap fails.
         """
-        from ..conversation_storage.runtime import require_tenant_published
-
-        await require_tenant_published(
-            tenant_id,
-            source_id=source_id,
-            scope_id=scope_id,
-        )
         started_at = time.perf_counter()
 
         # Resolve bootstrap tenant ID
@@ -877,9 +870,6 @@ class TenantWorkspacePool:
         Raises:
             RuntimeError: If workspace creation or startup fails.
         """
-        from ..conversation_storage.runtime import require_tenant_published
-
-        await require_tenant_published(tenant_id)
         import warnings
 
         warnings.warn(

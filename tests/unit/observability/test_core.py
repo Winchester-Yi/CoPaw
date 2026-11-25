@@ -1759,3 +1759,115 @@ def test_events_example_matches_ingest_contract():
     for line in lines:
         if line.strip():
             _validate_payload(line)
+
+
+@pytest.mark.asyncio
+async def test_legacy_nas_evidence_reads_committed_session_and_archive(
+    tmp_path,
+):
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from agentscope.message import Msg
+
+    from swe.agents.memory.conversation_archive import ConversationArchiveStore
+    from swe.app.runner.models import ChatSpec
+    from swe.app.runner.session import SafeJSONSession
+    from swe.observability.nas_evidence import nas_reference
+    from swe.observability.query import _load_evidence_item
+
+    chat = ChatSpec(
+        id=str(uuid4()),
+        user_id="user",
+        session_id="session",
+        channel="console",
+    )
+    answer = Msg(
+        "assistant",
+        [
+            {"type": "thinking", "thinking": "private probe"},
+            {"type": "text", "text": "visible answer"},
+        ],
+        "assistant",
+        invocation_id="response",
+    )
+    tool = Msg(
+        "tool",
+        [
+            {
+                "type": "tool_result",
+                "id": "call-1",
+                "name": "echo",
+                "output": [{"type": "text", "text": "saved output"}],
+            },
+        ],
+        "system",
+    )
+    session = SafeJSONSession(str(tmp_path / "sessions"))
+    archive = ConversationArchiveStore(tmp_path / "dialog")
+    async with session.execution(chat.session_id, chat.user_id) as execution:
+        await execution.commit_state(
+            {"agent": {"memory": {"content": [[answer.to_dict(), []]]}}},
+        )
+    await archive.commit(chat.id, [tool])
+    await archive.commit(
+        chat.id,
+        [Msg("user", f"later {index}", "user") for index in range(501)],
+    )
+
+    workspace = SimpleNamespace(
+        agent_id="agent",
+        source_id="source",
+        tenant_id="tenant",
+        workspace_dir=tmp_path,
+        runner=SimpleNamespace(session=session),
+        chat_manager=SimpleNamespace(get_chat=AsyncMock(return_value=chat)),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(source_id="source"))
+    run = {
+        "service_unit_key": b"svc",
+        "tenant_key": b"tenant",
+        "agent_key": b"agent",
+        "source_key": b"source",
+        "chat_key": chat.id,
+        "session_key": chat.session_id,
+        "root_question_key": "question",
+    }
+
+    async def load(reference, run_row):
+        result, _, _ = await _load_evidence_item(
+            reference,
+            request=request,
+            run=run_row,
+            history=object(),
+            workspace=workspace,
+            max_bytes=32 * 1024,
+            authority={},
+        )
+        return result
+
+    for message, kind in ((tool, "tool_output"), (answer, "assistant_answer")):
+        reference = {
+            "chat_id": chat.id,
+            "message_id": message.id,
+            "reference_id": nas_reference(message.to_dict()),
+            "content_type": kind,
+            "saved_state": "available",
+        }
+        result = await load(reference, run)
+        assert result["status"] == "available"
+        payload = json.dumps(result["message"])
+        if kind == "assistant_answer":
+            assert (
+                "visible answer" in payload and "private probe" not in payload
+            )
+        else:
+            assert "saved output" in payload
+        for wrong_scope in (
+            {"source_key": b"other"},
+            {"tenant_key": b"other"},
+        ):
+            denied = await load(reference, {**run, **wrong_scope})
+            assert denied["status"] == "unavailable"
+        changed = await load({**reference, "reference_id": "nas:invalid"}, run)
+        assert changed["status"] == "unavailable"

@@ -8,15 +8,13 @@ vi.mock("../ChatSessionItem", () => ({
   default: (props: {
     name: string;
     onClick?: () => void;
-    onDelete?: () => void;
+    titleAction?: React.ReactNode;
   }) => (
     <div>
       <button type="button" onClick={props.onClick}>
         {props.name}
       </button>
-      <button type="button" onClick={props.onDelete}>
-        删除
-      </button>
+      {props.titleAction}
     </div>
   ),
 }));
@@ -40,6 +38,7 @@ describe("HistorySessionRow", () => {
         }}
         active={false}
         onSessionClick={onSessionClick}
+        onSessionRename={vi.fn()}
         onSessionDelete={vi.fn()}
       />,
     );
@@ -51,6 +50,7 @@ describe("HistorySessionRow", () => {
 
   it("passes the resolved chat id and session name when deleting", () => {
     const onSessionDelete = vi.fn();
+    const onSessionRename = vi.fn();
 
     render(
       <HistorySessionRow
@@ -63,11 +63,22 @@ describe("HistorySessionRow", () => {
         }}
         active={false}
         onSessionClick={vi.fn()}
+        onSessionRename={onSessionRename}
         onSessionDelete={onSessionDelete}
       />,
     );
 
-    fireEvent.click(screen.getByText("删除"));
+    const menu = screen.getByRole("button", { name: /更多操作/ });
+    fireEvent.click(menu);
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑标题" }));
+    expect(onSessionRename).toHaveBeenCalledWith(
+      "chat-real-2",
+      "待删除会话",
+      menu,
+    );
+
+    fireEvent.click(menu);
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
 
     expect(onSessionDelete).toHaveBeenCalledWith(
       "chat-real-2",

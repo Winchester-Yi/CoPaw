@@ -35,8 +35,10 @@ async def test_capacity_decision_consumes_feedback_across_overlapping_windows(
         ManagedCapacityFeedback,
     )
     from scheduler.app.services.cron.scheduling_service import WorkerScope
+    from tests.fakes.managed_board_schema import add_board_tables
 
     db = _SqliteDb()
+    add_board_tables(db.connection)
     monkeypatch.setattr(intent_module, "get_db_connection", lambda: db)
     db.connection.executescript("""
         CREATE TABLE swe_cron_dispatch_scope_leases (
@@ -56,7 +58,8 @@ async def test_capacity_decision_consumes_feedback_across_overlapping_windows(
         ALTER TABLE swe_cron_executions ADD COLUMN meta TEXT;
         CREATE TABLE swe_cron_execution_runs (
             execution_id TEXT PRIMARY KEY, source_id TEXT, provider_id TEXT, model_id TEXT,
-            status TEXT, not_before_at TEXT, settled_status TEXT, settled_at TEXT,
+            status TEXT, kind TEXT, spec_json TEXT,
+            not_before_at TEXT, settled_status TEXT, settled_at TEXT,
             subtask_success_count INTEGER, subtask_failure_count INTEGER,
             error_code TEXT, settled_error_code TEXT, result_json TEXT,
             history_execution_id INTEGER, job_id TEXT, tenant_id TEXT, agent_id TEXT,
@@ -90,6 +93,8 @@ async def test_capacity_decision_consumes_feedback_across_overlapping_windows(
         provider_id="default",
         model_id="default",
         status="success",
+        kind="batch",
+        spec_json='{"task_type": "agent"}',
         settled_status="success",
         settled_at=now.replace(tzinfo=None),
         subtask_success_count=3,

@@ -1,5 +1,8 @@
 # 定位路径
 
+## Console 轮次身份
+- 排查两个轮次复用同一 `msgid` 时，检查 `answer_turn/coordinator.py::start_or_attach`。Console 在进入协调器前生成新轮次 ID，协调器持有 Chat 锁时核对请求先前看到的轮次身份。仍是同一轮时允许挂接，另一轮抢先开始时返回忙碌，Chat 无活跃轮次时使用新 ID。响应头 `X-Swe-Msgid` 使用协调器返回的轮次身份。
+
 ## 会话迁移与历史读取性能
 - 会话元数据迁移、source 准入与回退：参见 [会话元数据迁移](conversation-metadata-migration.md)。
 
@@ -401,7 +404,7 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 角色分流入口：`components/TargetPicker.tsx`。支行行长沿用原有平铺卡片和 `distributeTargets.ts::fetchDistributeTargets`，POST `/zt/wealth/wmadm/getUserPostionByBrn`，参数取登录机构 `orgCode/orgLvl`。本次机构树改造仅适用于分行中台。
 - 中台勾选机构时同步切换人员视图，连续勾选展示最后一个机构，缓存命中直接展示；点击名称仅查看，不改变选择。取消全选或待选保留当前视图及搜索，待选取消后如仍需查看该机构则继续查询，但返回结果不重新选中。勾选切换机构会清空原人员搜索，并移除尚未发送且不再需要的旧纯查看请求，仍遵循同一人员查询队列。
 - 零人机构的明确选择通过 `DistributionSession.emptyInstitutions` 保存，与人员 ID 分开；统一用 `isInstitutionSelected` 判定勾选状态。成功空名单勾选后显示“全部 0 人”，纯查看不选中，取消待选后的空响应不恢复勾选；取消、移除、清空及表单重建清理相应状态。发布只发送实际人员，不增加虚假目标；新上级名单使该机构变为非空时，清理零人标记且不隐式选中新增人员。
-- 中台界面：`components/MiddleTargetPicker.tsx` 和同名 Less；左侧完整机构树不显示人数，右侧紧凑人员卡片只显示姓名和用户 ID，并按这两项搜索；查询机构名称由机构树提供，显示在右侧标题中。下方按机构汇总，父级覆盖子级时合并卡片。卡片最多每行五列，按容器宽度减少列数；人员区域使用 `@tanstack/react-virtual` 按行虚拟滚动，搜索和全选基于完整名单。方向键、Home/End 可在虚拟卡片之间移动焦点；边界位置不登记延迟聚焦，离开列表或搜索名单变化时清空待聚焦，防止搜索输入被卡片抢走焦点。
+- 中台界面：`components/MiddleTargetPicker.tsx` 和同名 Less；左侧完整机构树不显示人数，右侧人员卡片显示姓名、用户 ID 和人员接口返回的机构名称，机构名称缺失时省略。卡片悬浮提示显示完整信息，人员搜索按姓名和用户 ID 匹配。右侧列表标题的查询机构名称来自机构树。下方按机构汇总，父级覆盖子级时合并卡片。卡片最多每行五列，按容器宽度减少列数；人员区域使用 `@tanstack/react-virtual` 按行虚拟滚动，搜索和全选基于完整名单。方向键、Home/End 可在虚拟卡片之间移动焦点；边界位置不登记延迟聚焦，离开列表或搜索名单变化时清空待聚焦，防止搜索输入被卡片抢走焦点。
 - 机构栏宽度在 `MiddleTargetPicker.module.less::.orgPane` 调整：桌面 300px，760px 及以下 220px，540px 及以下纵向占满宽度。人员列数由 `useCardColumns` 根据右侧实际容器宽度计算，不必为左侧加宽另写固定列数；布局验收需同时检查普通工作台和 `hideMenu=true&hideLogo=true` 嵌入页面。
 - 人员卡片的 Tab 入口：原焦点卡片仍在渲染范围内时保留原入口；滚动卸载该卡片后，使用实际可见行的首张卡片作为唯一入口，不使用顶部缓冲行、不主动移动焦点。排查滚动后无法用键盘选择人员时，检查可见区域是否存在 `tabIndex=0` 的卡片，并验证 Tab、方向键、空格选择及返回顶部后的入口恢复。回归入口为 `MiddleTargetPicker.keyboard.test.tsx`，实际虚拟滚动还需浏览器验证。
 - 新接口适配：`distribution/api.ts`，统一 request POST `/zt/wealth/wmadm/bbkTree`（完整树）和 `/zt/wealth/wmadm/orgSaps`（人员），最终路径为 `{API base}/api/zt/wealth/wmadm/*`；复用统一鉴权、上下文请求头、401 刷新和 60 秒取消超时。前端不提供服务凭证，不再调用 Python `/api/user-info/*/by-branch` 代理。

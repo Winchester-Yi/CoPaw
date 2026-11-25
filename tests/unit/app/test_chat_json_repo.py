@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from swe.app.conversation_storage.errors import ConflictError
 from swe.app.runner.models import ChatSpec, ChatsFile
 from swe.app.runner.repo import json_repo
 from swe.app.runner.repo.json_repo import JsonChatRepository
@@ -30,6 +31,27 @@ def _saved_chats_payload(chats: list[ChatSpec]) -> str:
         indent=2,
         sort_keys=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_preserves_manual_title_across_workers(tmp_path):
+    writer = JsonChatRepository(tmp_path / "chats.json")
+    worker = JsonChatRepository(tmp_path / "chats.json")
+    original = ChatSpec(session_id="s1", user_id="u1")
+    await writer.upsert_chat(original)
+    edited = original.model_copy(
+        update={"name": "手动标题", "meta": {"session_title_edited": True}},
+    )
+    await writer.update_chat_if_unchanged(edited, original)
+
+    automatic = original.model_copy(update={"name": "自动标题"})
+    with pytest.raises(ConflictError):
+        await worker.update_chat_if_unchanged(automatic, original)
+    stale_cleanup = original.model_copy(update={"status": "running"})
+    updated = await worker.update_chat_if_exists(stale_cleanup)
+    assert updated.name == "手动标题"
+    assert updated.meta["session_title_edited"] is True
+    assert updated.status == "running"
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,25 @@ def _current_operation(row, operation_id):
         raise HTTPException(409, "cron_system_operation_not_current")
 
 
+@router.get("/batch-retry-overrides", include_in_schema=False)
+async def batch_retry_overrides(request: Request) -> dict[str, int]:
+    """内部调度巡检读取来源覆盖，不合成 Scheduler 的部署默认值。"""
+    from .migration_api import verify_internal_access
+    from ..source_system_config.store import SourceSystemConfigStoreUnavailable
+
+    verify_internal_access(request)
+    service = getattr(request.app.state, "source_system_config_service", None)
+    if service is None:
+        raise HTTPException(503, "cron_batch_retry_config_unavailable")
+    try:
+        return await service.store.list_cron_batch_retry_overrides()
+    except SourceSystemConfigStoreUnavailable as error:
+        raise HTTPException(
+            503,
+            "cron_batch_retry_config_unavailable",
+        ) from error
+
+
 @router.get("/config", summary="只读当前系统业务配置")
 async def current_config(
     request: Request,

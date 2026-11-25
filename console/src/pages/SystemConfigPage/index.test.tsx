@@ -365,6 +365,47 @@ describe("SystemConfigPage", () => {
     expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
   });
 
+  it("saves a source batch retry limit and restores inheritance when cleared", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent
+      .mockResolvedValueOnce({
+        source_id: "portal",
+        config: { cron_batch_max_attempts: 4 },
+        version: 1,
+        is_default: false,
+      })
+      .mockResolvedValueOnce({
+        source_id: "portal",
+        config: {},
+        version: 0,
+        is_default: true,
+      });
+
+    render(<SystemConfigPage />);
+    const input = await screen.findByRole("spinbutton", {
+      name: "批调度最大尝试次数",
+    });
+    expect(input).toHaveValue("");
+    fireEvent.change(input, { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenNthCalledWith(
+        1,
+        { config: { cron_batch_max_attempts: 4 } },
+      ),
+    );
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenNthCalledWith(
+        2,
+        { config: {} },
+      ),
+    );
+  });
+
   it("saves cron unread auto pause settings", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
       source_id: "portal",

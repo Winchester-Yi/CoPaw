@@ -1,6 +1,7 @@
 import type { SystemSyncSubmission } from "./systemCron";
 
 export interface SourceSystemConfig extends Record<string, unknown> {
+  cron_batch_max_attempts?: number | null;
   system_prompt_injections?: string[];
   approval_notifications?: {
     zhaohu_tool_guard_enabled?: boolean;

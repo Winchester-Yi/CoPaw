@@ -6,12 +6,15 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+from .....config.constant import SWE_INTERNAL_API_BASE_URL_ENV
 from ....database.connection import get_db_connection
 from ..capacity_claim import (
     enable_managed_capacity_accounting,
     set_managed_priority,
 )
 from ..scheduling_service import get_cron_scheduling_service
+from ..system.swe_client import SystemSweClient
+from .batch_retry_policy import BatchRetryPolicy
 from .capacity import ManagedCapacityGate
 from .dispatcher import ManagedSweExecutionClient
 from .platform import ManagedPlatformClient, platform_config
@@ -23,6 +26,13 @@ from .board_schema import assert_managed_board_schema_ready
 from .recheck_worker import prepare_recheck_storage
 
 logger = logging.getLogger(__name__)
+
+
+async def _fetch_batch_retry_overrides():
+    client = SystemSweClient(os.environ.get(SWE_INTERNAL_API_BASE_URL_ENV, ""))
+    return await client.get_batch_retry_overrides(
+        os.environ.get("SWE_INTERNAL_TOKEN"),
+    )
 
 
 async def create_managed_worker(db):
@@ -38,6 +48,7 @@ async def create_managed_worker(db):
     resources = ManagedSweClient(base)
     execution = ManagedSweExecutionClient(base)
     platform = ManagedPlatformClient(platform_config())
+    retry_policy = BatchRetryPolicy(_fetch_batch_retry_overrides)
     return ManagedRecoveryWorker(
         db,
         resources,
@@ -45,6 +56,7 @@ async def create_managed_worker(db):
         execution,
         capacity=ManagedCapacityGate(legacy),
         rechecks_enabled=rechecks_enabled,
+        retry_overrides=retry_policy.read_overrides,
     )
 
 

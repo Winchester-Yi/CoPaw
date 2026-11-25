@@ -200,7 +200,7 @@ class ManagedCronRepository:
 
     async def _mark_distributed_parents(self, rows):
         keys = [_key(row) for row in rows if _parent_key(row) is None]
-        parents = set()
+        matches = []
         if keys:
             fields = ", ".join(f"parent_{key}" for key in IDENTITY_FIELDS)
             columns = ", ".join(
@@ -210,7 +210,9 @@ class ManagedCronRepository:
             markers = ", ".join(["(%s,%s,%s,%s)"] * len(keys))
             try:
                 matches = await self.db.fetch_all(
-                    f"SELECT DISTINCT {columns} FROM swe_cron_jobs_v2 "
+                    f"SELECT DISTINCT {columns}, "
+                    "(deleted_at IS NULL) AS has_undeleted_children "
+                    "FROM swe_cron_jobs_v2 "
                     f"WHERE ({fields}) IN ({markers}) "
                     "AND management_owner='scheduler'",
                     tuple(value for key in keys for value in key),
@@ -219,9 +221,16 @@ class ManagedCronRepository:
                 raise ManagedCronUnavailable(
                     "cron_database_unavailable",
                 ) from exc
-            parents = {_parent_key(row) for row in matches}
+        parents = {_parent_key(row) for row in matches}
+        parents_with_children = {
+            _parent_key(row)
+            for row in matches
+            if row["has_undeleted_children"]
+        }
         for row in rows:
-            row["has_distributed_children"] = _key(row) in parents
+            key = _key(row)
+            row["has_distributed_children"] = key in parents
+            row["has_undeleted_children"] = key in parents_with_children
 
     async def page_rows(
         self,

@@ -64,13 +64,17 @@
 
 ## 3. 当前实现的操作入口
 
-DBA 初始化 `swe_conversation_sessions` 和 `swe_conversation_chats` 后，应用元数据模式的 DDL。工作区映射是 JSON 数组，每项含原工作区绝对路径 `root` 和顺序为 `[service_unit_id, tenant_id, source_id, agent_id]` 的 `scope`。CLI 通过 `SWE_DB_NAME` 和应用现有数据库配置连接目标库。线上进程配置 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql-metadata` 和部署的 `CMB_CAAS_SERVICEUNITID`。 [基础表 DDL](../../../scripts/sql/conversation_metadata_tables.sql) · [元数据模式 DDL](../../../scripts/sql/conversation_mysql_metadata.sql)
+DBA 初始化 `swe_conversation_sessions` 和 `swe_conversation_chats` 后，应用元数据模式的 DDL。迁移进程读取 `CMB_CAAS_SERVICEUNITID`，从 NAS 工作目录根扫描 `<scope-id>/workspaces/default`。CLI 通过 `SWE_DB_NAME` 和应用现有数据库配置连接目标库。线上进程配置 `SWE_CONVERSATION_STORAGE_AUTHORITY=mysql-metadata` 和部署的 `CMB_CAAS_SERVICEUNITID`。 [基础表 DDL](../../../scripts/sql/conversation_metadata_tables.sql) · [元数据模式 DDL](../../../scripts/sql/conversation_mysql_metadata.sql)
 
 ```bash
-swe conversation-storage prepare --mode mysql-metadata --workspaces /audit/workspaces.json --manifest /audit/metadata-manifest.json
+swe conversation-storage prepare --workspace-root /nas/swe --manifest /audit/metadata-manifest.json
 swe conversation-storage migrate --manifest /audit/metadata-manifest.json
 swe conversation-storage migrate --manifest /audit/metadata-manifest.json --apply --full-audit
 swe conversation-storage export-metadata --manifest /audit/metadata-manifest.json --destination /audit/metadata-rollback
 ```
 
-`prepare` 由显式映射确定迁移范围，读取原工作区的 `chats.json`。预览校验冻结输入，`--full-audit` 增加对关联 Session 和归档的只读解析。已发布来源在应用重跑时跳过。回退导出生成 `report.json` 和每个已发布工作区的 `chats.json`，报告记录其原工作区位置。现场人工停写后使用同一恢复点的导出文件和原 NAS 数据。
+`prepare` 记录固定路径下发现的工作区、归属和扫描异常，并对 `chats.json` 做基本格式校验。source 系统级 `default` 用户只扫描 `default_<source-id>/workspaces/default`，跳过属于该用户的编码目录。扫描清单不记录 `chats.json` 摘要。发现异常时退出 2，同时保留扫描结果。`migrate` 会跳过顶层 `scan_errors` 中的目录，并继续处理清单中已识别的工作区。工作区文件修复后，`migrate` 会从同一清单重新读取并校验。对需要补迁的目录，先确认归属与线上路径，再准备待补迁来源的清单。
+
+`migrate --apply` 读取执行时的 `chats.json` 并写入数据库。开始导入一个工作区时，在数据库中记录本次读取的摘要，供中断续跑时核对。`--full-audit` 增加对关联 Session 和归档的只读解析。已发布来源在应用重跑时跳过。原 `--workspaces` 显式清单入口仍可使用，并保留原有的摘要校验行为。
+
+回退导出生成 `report.json` 和每个已发布工作区的 `chats.json`，报告记录其原工作区位置。现场人工停写后使用同一恢复点的导出文件和原 NAS 数据。

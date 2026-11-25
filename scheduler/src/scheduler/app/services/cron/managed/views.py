@@ -213,6 +213,7 @@ def list_item(row: dict, actor_id: str, *, next_times=None) -> dict:
         **view.pop("spec"),
         **view,
         "has_distributed_children": bool(row.get("has_distributed_children")),
+        "has_undeleted_children": bool(row.get("has_undeleted_children")),
     }
 
 

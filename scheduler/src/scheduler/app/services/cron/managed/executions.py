@@ -118,7 +118,7 @@ async def _snapshot(
 ):
     spec = copy.deepcopy(json.loads(current["spec_json"]))
     meta = public_value(copy.deepcopy(command.dispatch_meta or {}))
-    # 纯文本不调用模型，沿用原有容量分组；Agent 使用解析后的真实模型。
+    # 纯文本保留默认分组标识用于执行记录；Agent 使用解析后的真实模型。
     slot = {"provider_id": "default", "model": "default"}
     if spec["task_type"] == "agent":
         slot = (

@@ -7,11 +7,15 @@
 1. 人工执行 `scripts/sql/cron_daily_failure_retry.sql`，仅新增一张调用表 `swe_cron_failure_retry_calls`，表名与列均带中文 comment。
 2. 核对 `SHOW INDEX FROM swe_cron_execution_runs`，按 `scripts/sql/cron_daily_failure_retry_indexes.sql` 补三个不存在的索引。索引 SQL 不可重复执行；请遵循行内数据库变更窗口。
 3. 先部署 SWE，再部署 Scheduler。混合版本期间先不要在外部平台启用本入口，避免旧 SWE 忽略补跑历史关联。
-4. 使用已有新版后台及 `SCHEDULER_SWE_API_BASE_URL` 配置，不增加新环境变量、内部密钥、调用凭证或用户 Header。
+4. 使用已有新版后台及 `SCHEDULER_SWE_API_BASE_URL` 配置。另为重试上限查询设置 `SCHEDULER_SWE_INTERNAL_API_BASE_URL`，填写 Scheduler 可直连的 SWE 内网根地址。
 
 应用启动不会执行上述建表或加索引语句。未建调用表时，新 POST 返回 503；新后台工作域退避诊断，不阻断已有任务派发。其他新版必需表与既有后台配置仍需就绪。
 
-补跑按 Scheduler 的 `SCHEDULER_CRON_BATCH_MAX_ATTEMPTS` 和批成员当前指针判断自动重试机会是否已用完。该配置包含首次执行，缺省为 3；设置为 1 时关闭自动重试。关系无法确认就跳过。
+已部署补跑接口的环境更新 Scheduler 后即可使用任务筛选参数。筛选条件复用现有调度事件表中的 `details_json`。筛选调用使用独立后台状态，旧 Scheduler 不会领取。对外返回的调用状态仍沿用下文口径。
+
+自动重试和补跑按批成员所属来源的「批调度最大尝试次数」判断原生重试机会是否已用完。来源管理员可在「系统特性配置 → 定时任务设置」保存覆盖值，后续判定会读到新值。留空时继承 `SCHEDULER_CRON_BATCH_MAX_ATTEMPTS`，缺省为 3。上限包含首次执行，设为 1 时关闭自动重试。已入队的执行继续推进。关系无法确认时跳过。
+
+Scheduler 用 `SCHEDULER_SWE_INTERNAL_API_BASE_URL` 访问 SWE 内部只读配置接口，结果在每个进程缓存 5 秒。上线时先部署 SWE 接口，再更新 Scheduler。若 SWE 配置了 `SWE_INTERNAL_TOKEN`，Scheduler 进程需要收到同一个内部凭据。完成上线后，在线保存无需重启。独立地址缺失或读取故障时，相关自动重试和当日失败补跑判定延后，已入队执行和超时结算继续处理。
 
 本接口按确认不加鉴权、角色、来源白名单、限流或业务补跑次数上限。任何能到达接口的调用方均能触发指定来源下全部用户的候选补跑；来源参数不是权限控制。
 
@@ -27,7 +31,21 @@ Headers 只需 `Content-Type: application/json`，不需要用户身份 Header�
 {"source_id":"RMASSIST"}
 ```
 
-Body 只接受 `source_id`，必填、最多 128 字符、不允许首尾空白或控制字符。不要加任务正文、用户身份或角色字段。每个被受理的请求都会生成自己的调用记录；重复触发不代表重复执行同一原失败。
+`source_id` 必填，最多 128 字符，不允许首尾空白或控制字符。每个被受理的请求都会生成自己的调用记录。
+
+可选筛选示例
+
+```json
+{
+  "source_id": "RMASSIST",
+  "task_scope": "batch",
+  "job_ids": ["批调度父任务ID", "指定子任务ID"]
+}
+```
+
+- `task_scope` 支持 `all`（全部，默认）、`batch`（新版批调度）和 `ordinary`（独立普通任务）。已被真实批次复用的普通执行随批次处理。
+- `job_ids` 可传最多 1000 个任务 ID，按大小写精确匹配。传普通任务或批子任务 ID 时只匹配该任务。传批调度父任务 ID 时匹配该父任务名下批次的所有符合条件的失败成员。省略或传 `null` 时按任务 ID 不限范围，传空数组时匹配零个任务。
+- 两个筛选条件同时传入时取交集，并在调用受理时冻结。所有结果仍按当日窗口、最新一轮和现有自动重试规则判断。
 
 成功返回 HTTP 202：
 

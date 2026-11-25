@@ -1938,6 +1938,124 @@ async def _read_pending_online(  # pylint: disable=too-many-statements
     }
 
 
+async def _nas_message_occurrence(workspace, request, run, reference):
+    from agentscope.message import Msg
+
+    from ..app.conversation_storage.runtime import resolved_scope
+    from ..app.runner import api
+    from ..app.runner.query_attempt import (
+        _get_memory_entry_message,
+        _get_persisted_memory_entries,
+    )
+    from .identity import same_tenant_scope
+    from .nas_evidence import nas_reference
+
+    unavailable = {"status": "unavailable", "message": None}
+    chat_id = reference["chat_id"]
+    if _population_identity(run.get("chat_key")) != chat_id:
+        return unavailable
+    scope = resolved_scope(
+        workspace,
+        service_unit_id=_population_identity(run.get("service_unit_key")),
+    )
+    if (
+        scope.agent_id != _population_identity(run.get("agent_key"))
+        or scope.source_id != _population_identity(run.get("source_key"))
+        or not same_tenant_scope(
+            scope.tenant_id,
+            _population_identity(run.get("tenant_key")),
+            scope.source_id,
+        )
+    ):
+        return unavailable
+    chat = await workspace.chat_manager.get_chat(chat_id)
+    if (
+        chat is None
+        or chat.id != chat_id
+        or chat.session_id != _population_identity(run.get("session_key"))
+    ):
+        return unavailable
+    _authorize_evidence_chat(request, workspace, chat)
+
+    if reference.get("occurrence_id") is not None:
+        return unavailable
+
+    def matches(message):
+        return (
+            isinstance(message, dict)
+            and message.get("id") == reference["message_id"]
+            and nas_reference(message) == reference["reference_id"]
+        )
+
+    state = await api._read_history_state(
+        workspace.runner.session,
+        chat.session_id,
+        chat.user_id,
+    )
+    messages = []
+    for entry in _get_persisted_memory_entries(state) or ():
+        message = _get_memory_entry_message(entry)
+        if matches(message):
+            messages.append(Msg.from_dict(message))
+            break
+    archive = api._archive_store(workspace)
+    if archive is not None and not messages:
+        messages = await archive.find_messages(
+            chat_id,
+            lambda message: matches(message.to_dict()),
+            limit=1,
+        )
+    if not messages or await workspace.chat_manager.get_chat(chat_id) != chat:
+        return unavailable
+    payload = _nas_evidence_payload(messages[0], chat.session_id, reference)
+    return (
+        {"status": "available", "message": payload} if payload else unavailable
+    )
+
+
+def _nas_evidence_payload(message, session_id, reference):
+    from agentscope.message import Msg
+
+    from ..app.runner import api
+
+    kind = reference.get("content_type")
+    content = message.content
+    if kind in {"assistant_answer", "tool_output"}:
+        if kind == "assistant_answer" and message.role != "assistant":
+            return None
+        block_type = "text" if kind == "assistant_answer" else "tool_result"
+        if isinstance(content, list):
+            content = [
+                block
+                for block in content
+                if isinstance(block, dict) and block.get("type") == block_type
+            ]
+        elif kind == "tool_output":
+            return None
+        if not content:
+            return None
+        message = Msg.from_dict(
+            {**message.to_dict(), "content": content, "metadata": {}},
+        )
+    elif kind != "user_question" or message.role != "user":
+        return None
+
+    fragments = api._redact_hidden_context_messages(
+        api._history_msg_to_messages([message], session_id=session_id),
+    )
+    expected_type = (
+        "plugin_call_output" if kind == "tool_output" else "message"
+    )
+    return next(
+        (
+            fragment.model_dump(mode="json")
+            for fragment in fragments
+            if fragment.type == expected_type
+        ),
+        None,
+    )
+
+
 async def _load_evidence_item(
     reference: dict[str, Any],
     *,
@@ -1964,11 +2082,20 @@ async def _load_evidence_item(
     }
     status = _evidence_status(reference.get("saved_state"))
     item["status"] = status
+    reference_id = reference.get("reference_id")
+    is_nas_reference = isinstance(
+        reference_id,
+        str,
+    ) and reference_id.startswith(
+        "nas:",
+    )
     pending_reference = (
-        status in {"pending", "available", "compacted"}
+        not is_nas_reference
+        and reference.get("occurrence_id") is None
+        and status in {"pending", "available", "compacted"}
         and reference.get("content_type")
         in {"tool_output", "assistant_answer"}
-        and isinstance(reference.get("reference_id"), str)
+        and isinstance(reference_id, str)
     )
     if status not in {"available", "compacted"} and not pending_reference:
         return item, history, workspace
@@ -2004,7 +2131,14 @@ async def _load_evidence_item(
         except Exception:
             history = None
     try:
-        if pending_reference and workspace is not None:
+        if workspace is not None and is_nas_reference:
+            result = await _nas_message_occurrence(
+                workspace,
+                request,
+                run,
+                reference,
+            )
+        elif pending_reference and workspace is not None:
             result = await _read_pending_online(
                 workspace,
                 request,
@@ -2052,6 +2186,11 @@ async def _load_evidence_item(
         item["truncated"] = True
     payload = result.get("message")
     if result_status in {"available", "compacted"}:
+        if not isinstance(payload, (dict, list)) or (
+            isinstance(payload, dict) and payload.get("type") == "reasoning"
+        ):
+            item["status"] = "unavailable"
+            return item, history, workspace
         _set_evidence_content(
             item,
             payload,

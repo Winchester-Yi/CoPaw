@@ -44,6 +44,7 @@ _MANAGED = f"""
     LEFT JOIN swe_cron_jobs_v2 d ON {sql.identity_join('r', 'd')}
     WHERE r.source_id=%s AND r.source_id COLLATE utf8mb4_bin=%s
       AND JSON_UNQUOTE(JSON_EXTRACT(r.dispatch_meta_json,'$.protocol'))='scheduler_managed_v1'
+      AND NOT {sql.TEXT_RUN}
       AND (r.kind NOT IN ('ordinary','manual') OR EXISTS (
           SELECT 1 FROM {sql.MEMBERS} m WHERE m.source_id=r.source_id
             AND m.current_execution_id=r.execution_id

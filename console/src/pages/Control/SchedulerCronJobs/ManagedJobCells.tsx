@@ -14,6 +14,8 @@ export function TaskIdentity({
   onCopy: (success: boolean) => void;
 }) {
   const parent = getBroadcastParentInfo(job);
+  const hasChildren =
+    job.has_undeleted_children ?? job.has_distributed_children;
   const owner =
     parent.sourceTenantName && parent.sourceTenantId
       ? `${parent.sourceTenantName}（${parent.sourceTenantId}）`
@@ -54,7 +56,7 @@ export function TaskIdentity({
             分发子任务
           </Tag>
         </Tooltip>
-      ) : job.has_distributed_children ? (
+      ) : hasChildren ? (
         <Tag>父任务</Tag>
       ) : null}
     </div>

@@ -36,6 +36,7 @@ from .services.cron.managed.runtime import (
     prepare_managed_runtime,
 )
 from .services.cron.system.runtime import system_lifespan
+from .services.cron.batch_status_report.runtime import report_lifespan
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -127,7 +128,8 @@ async def application_lifespan(fastapi_app: FastAPI):
     async with lifespan(fastapi_app):
         async with managed_lifespan(fastapi_app):
             async with system_lifespan(fastapi_app):
-                yield
+                async with report_lifespan(fastapi_app):
+                    yield
 
 
 app = FastAPI(

@@ -30,11 +30,12 @@ export interface MigrationProgress {
 export interface ChannelMigrationJob {
   job_id: string;
   name: string;
+  cron_expr: string;
   tenant_id: string;
   source_id: string;
   agent_id: string | null;
-  parent_job_id: string | null;
   migration_status: string;
+  child_count: number;
 }
 export interface ChannelMigrationOperation extends MigrationProgress {
   tenant_id: string;
@@ -53,9 +54,19 @@ function call<T>(
   });
 }
 export const cronMigrationApi = {
-  channelJobs: (context: ManagedCronContext, params: URLSearchParams, signal?: AbortSignal) =>
-    call<{ items: ChannelMigrationJob[]; next_cursor: string | null }>(
-      context, `/channel/jobs?${params}`, { signal },
+  channelJobs: (
+    context: ManagedCronContext,
+    params: URLSearchParams,
+    signal?: AbortSignal,
+  ) =>
+    call<{
+      items: ChannelMigrationJob[];
+      total: number;
+      task_total: number;
+    }>(
+      context,
+      `/channel/jobs?${params}`,
+      { signal },
     ),
   channelRecent: (context: ManagedCronContext, signal?: AbortSignal) =>
     call<{ items: ChannelMigrationOperation[] }>(context, "/channel/operations", { signal }),

@@ -1,5 +1,15 @@
-import { useCallback, useRef, useState } from "react";
-import { Alert, Button, Card, Input, Select, Space, Table, Tag } from "antd";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Input,
+  Pagination,
+  Select,
+  Space,
+  Table,
+  Tag,
+} from "antd";
 import { v4 as uuid } from "uuid";
 import { cronAccessKey, currentCronContext } from "@/api/cronTaskContext";
 import { cronMigrationApi, type ChannelMigrationJob, type ChannelMigrationOperation } from "@/api/modules/cronMigration";
@@ -19,29 +29,56 @@ const states: Record<string, string> = {
 function MigrationPage() {
   const [selected, setSelected] = useState<string[]>([]);
   const [filters, setFilters] = useState({ tenant: "", query: "", status: "" });
-  const [cursors, setCursors] = useState([""]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [lastTotals, setLastTotals] = useState<{
+    total: number;
+    task_total: number;
+  }>();
   const [refresh, setRefresh] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const requestId = useRef<{ key: string; id: string }>();
-  const cursor = cursors[cursors.length - 1];
   const context = currentCronContext();
   const scope = cronAccessKey(context);
-  const load = useCallback((signal: AbortSignal) => {
+  const load = useCallback(async (signal: AbortSignal) => {
     void refresh;
-    const params = new URLSearchParams({ cursor });
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(pageSize),
+    });
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
-    return cronMigrationApi.channelJobs(currentCronContext(), params, signal);
-  }, [refresh, cursor, filters]);
+    const result = await cronMigrationApi.channelJobs(
+      currentCronContext(),
+      params,
+      signal,
+    );
+    if (!Number.isInteger(result.total) || !Number.isInteger(result.task_total)) {
+      throw new Error("invalid_cron_migration_page");
+    }
+    return result;
+  }, [refresh, page, pageSize, filters]);
   const loadProgress = useCallback((signal: AbortSignal) => {
     void refresh;
     return cronMigrationApi.channelRecent(currentCronContext(), signal);
   }, [refresh]);
   const jobs = useBoardResource(load);
   const operations = useBoardResource(loadProgress);
+  const totals = jobs.value ?? (jobs.loading ? lastTotals : undefined);
+  useEffect(() => {
+    if (!jobs.value) return;
+    const { total, task_total } = jobs.value;
+    setLastTotals({ total, task_total });
+    const lastPage = Math.max(1, Math.ceil(total / pageSize));
+    if (page > lastPage) {
+      setPage(lastPage);
+      setSelected([]);
+    }
+  }, [jobs.value, page, pageSize]);
   const changeFilter = (key: keyof typeof filters, value: string) => {
     setFilters((previous) => ({ ...previous, [key]: value }));
-    setCursors([""]);
+    setPage(1);
+    setLastTotals(undefined);
     setSelected([]);
   };
   const act = async (action: () => Promise<unknown>) => {
@@ -73,7 +110,7 @@ function MigrationPage() {
     <Card title={`定时任务迁移 · ${context.source_id}`} extra={
       <Button onClick={() => setRefresh((value) => value + 1)}>刷新列表及进度</Button>
     }>
-      <Alert type="info" showIcon message="只勾选父任务或独立任务；分发子任务随父任务整组迁移。预览不修改任务。" />
+      <Alert type="info" showIcon message="勾选父任务可将分发子任务整组迁移。预览不修改任务。" />
       {error && <Alert type="error" message={error} />}
       {jobs.error && <Alert type="error" message="旧任务清单加载失败，请刷新重试" />}
       <Space wrap style={{ marginBlock: 16 }}>
@@ -86,30 +123,56 @@ function MigrationPage() {
           预览迁移（{selected.length}）
         </Button>
       </Space>
+      <div role="status" style={{ marginBottom: 8 }}>
+        {totals && `共 ${totals.task_total} 个任务`}
+      </div>
       <Table<ChannelMigrationJob> rowKey="job_id" dataSource={jobs.value?.items ?? []} loading={jobs.loading}
+        scroll={{ x: 1000 }}
+        locale={{ emptyText: "暂无匹配的父任务或独立任务" }}
         pagination={false} rowSelection={{
           selectedRowKeys: selected, onChange: (keys) => setSelected(keys.map(String)),
-          getCheckboxProps: (row) => ({ disabled: Boolean(row.parent_job_id) || row.migration_status !== "not_migrated" }),
+          getCheckboxProps: (row) => ({ disabled: row.migration_status !== "not_migrated" }),
         }}
         columns={[
-          { title: "任务名称", dataIndex: "name" },
-          { title: "任务 ID", dataIndex: "job_id" },
+          { title: "任务名称", dataIndex: "name", ellipsis: true },
+          { title: "任务 ID", dataIndex: "job_id", ellipsis: true },
+          {
+            title: "Cron 表达式",
+            dataIndex: "cron_expr",
+            width: 200,
+            render: (_, row) =>
+              row.cron_expr ? (
+                <code
+                  style={{ overflowWrap: "anywhere", whiteSpace: "pre-wrap" }}
+                >
+                  {row.cron_expr}
+                </code>
+              ) : (
+                "—"
+              ),
+          },
           { title: "租户", dataIndex: "tenant_id" },
           { title: "Agent", render: (_, row) => row.agent_id || "—" },
-          { title: "父任务 ID", render: (_, row) => row.parent_job_id || "—" },
+          { title: "子任务数", dataIndex: "child_count", align: "right" },
           { title: "状态", render: (_, row) => <Tag>{states[row.migration_status]}</Tag> },
         ]} />
-      <Space style={{ marginTop: 12 }}>
-        <Button disabled={cursors.length < 2 || jobs.loading} onClick={() => {
-          setCursors((value) => value.slice(0, -1));
-          setSelected([]);
-        }}>上一页</Button>
-        <Button disabled={!jobs.value?.next_cursor || jobs.loading} onClick={() => {
-          const next = jobs.value?.next_cursor;
-          if (next) setCursors((value) => [...value, next]);
-          setSelected([]);
-        }}>下一页</Button>
-      </Space>
+      {totals && (
+        <nav aria-label="迁移清单分页" style={{ marginTop: 12 }}>
+          <Pagination
+            current={page}
+            pageSize={pageSize}
+            total={totals.total}
+            disabled={jobs.loading}
+            showSizeChanger
+            pageSizeOptions={[10, 20, 50, 100]}
+            onChange={(nextPage, nextSize) => {
+              setPage(nextSize === pageSize ? nextPage : 1);
+              setPageSize(nextSize);
+              setSelected([]);
+            }}
+          />
+        </nav>
+      )}
     </Card>
     <Card title="近期迁移进度">
       {operations.error && <Alert type="error" message="迁移进度加载失败，请刷新重试" />}

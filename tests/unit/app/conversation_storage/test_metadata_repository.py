@@ -2,15 +2,71 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import json
 
 import pytest
 
+from swe.app.conversation_storage import runtime
 from swe.app.conversation_storage.errors import ConflictError
 from swe.app.conversation_storage.identity import WorkspaceScope
 from swe.app.conversation_storage.metadata_repository import (
     MySQLMetadataRepository,
     session_filename,
 )
+from swe.app.conversation_storage.migration import metadata
+from swe.config.context import encode_scope_id
+
+
+@pytest.mark.asyncio
+async def test_new_tenant_can_open_empty_catalog_and_is_in_cutover_export(
+    tmp_path,
+    monkeypatch,
+):
+    scope = WorkspaceScope("new", "source", "default", service_unit_id="svc")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    binding = {**scope.fields, "workspace_root": str(root).encode()}
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    db = SimpleNamespace(
+        is_connected=True,
+        fetch_one=AsyncMock(
+            side_effect=[None, binding, binding, None, {"1": 1}],
+        ),
+        fetch_all=AsyncMock(side_effect=[[], [], [], [binding], []]),
+        execute=AsyncMock(),
+        transaction=transaction,
+    )
+    monkeypatch.setattr(runtime, "_metadata_database", None)
+    monkeypatch.setenv(runtime.AUTHORITY_ENV, runtime.METADATA_AUTHORITY)
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", scope.service_unit_id)
+    await runtime.configure_runtime(db)
+    workspace = SimpleNamespace(
+        workspace_dir=root,
+        tenant_id=encode_scope_id(scope.tenant_id, scope.source_id),
+        agent_id=scope.agent_id,
+    )
+    repo = await runtime.workspace_metadata_repository(workspace)
+    await repo._assert_writes_allowed()
+    destination = tmp_path / "export"
+    [exported] = await metadata.export(db, None, None, destination)
+
+    assert exported["scope"] == scope.values
+    assert json.loads((destination / exported["registry"]).read_text()) == {
+        "version": 1,
+        "chats": [],
+    }
+    assert all(
+        metadata.SOURCES not in call.args[0]
+        for call in db.fetch_one.await_args_list[:3]
+    )
+    rejected = tmp_path / "partial-export"
+    with pytest.raises(ConflictError, match="finish migration"):
+        await metadata.export(db, None, None, rejected)
+    assert not rejected.exists()
 
 
 @pytest.mark.asyncio
@@ -27,7 +83,7 @@ async def test_session_candidate_lookup_treats_oversized_id_as_missing():
 
 
 @pytest.mark.asyncio
-async def test_existing_session_path_uses_only_a_published_lookup():
+async def test_existing_session_path_uses_one_lookup_without_migration_state():
     filename = session_filename("session", "user").encode()
     db = SimpleNamespace(
         fetch_one=AsyncMock(return_value={"nas_filename": filename}),
@@ -40,7 +96,7 @@ async def test_existing_session_path_uses_only_a_published_lookup():
     await repo.ensure_session_path("session", "user", "console")
     db.fetch_one.assert_awaited_once()
     statement, _ = db.fetch_one.await_args.args
-    assert "published=1" in statement
+    assert "swe_conversation_metadata_sources" not in statement
     assert "FOR UPDATE" not in statement
     repo.claim_session.assert_not_awaited()
 

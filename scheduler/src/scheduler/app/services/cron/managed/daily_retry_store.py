@@ -4,6 +4,12 @@
 from datetime import timedelta, timezone
 from uuid import uuid4
 
+from .daily_retry_audit import record_filters
+from .daily_retry_filters import (
+    FILTERED_QUEUED,
+    FILTERED_RUNNING,
+    DailyRetryFilters,
+)
 from .daily_retry_policy import day_window, utc_time
 from .identity import identity_value
 from .operations import utc_now
@@ -11,6 +17,9 @@ from .storage import insert, transaction, update
 
 CALLS = "swe_cron_failure_retry_calls"
 LEASE_SECONDS = 180
+# 筛选调用使用独立状态，避免旧实例忽略筛选参数后领取调用。
+PENDING_SQL = f"('queued','running','{FILTERED_QUEUED}','{FILTERED_RUNNING}')"
+RUNNING_SQL = f"('running','{FILTERED_RUNNING}')"
 FIELDS = (
     "call_id source_id business_date window_start cutoff_at max_queue_order "
     "queue_cursor status scanned_count queued_count skipped_count failed_count "
@@ -31,6 +40,7 @@ def call_summary(row):
         "error_code",
     )
     result = {name: row.get(name) for name in names}
+    result["status"] = result["status"].removeprefix("filtered_")
     result["business_date"] = str(row["business_date"])
     for name in (
         "window_start",
@@ -61,10 +71,12 @@ class DailyRetryCalls:
         except Exception as exc:
             raise RuntimeError("cron_daily_retry_storage_unavailable") from exc
 
-    async def submit(self, source):
+    async def submit(self, source, *, task_scope="all", job_ids=None):
         if not isinstance(source, str):
             raise ValueError("invalid_cron_source")
         identity_value(source)
+        filters = DailyRetryFilters(task_scope=task_scope, job_ids=job_ids)
+        filtered = filters.task_scope != "all" or filters.job_ids is not None
         await self.ready()
         date, start, end = day_window(self.clock())
         async with transaction(self.db) as tx:
@@ -79,7 +91,7 @@ class DailyRetryCalls:
                 "cutoff_at": end,
                 "max_queue_order": int(maximum["maximum"] or 0),
                 "queue_cursor": 0,
-                "status": "queued",
+                "status": FILTERED_QUEUED if filtered else "queued",
                 "scanned_count": 0,
                 "queued_count": 0,
                 "skipped_count": 0,
@@ -94,6 +106,8 @@ class DailyRetryCalls:
                 "updated_at": end,
             }
             await insert(tx, CALLS, row)
+            if filtered:
+                await record_filters(tx, row, filters)
         return call_summary(row)
 
     async def get(self, source, call_id):
@@ -110,7 +124,7 @@ class DailyRetryCalls:
 
     async def pending(self, limit=8):
         return await self.db.fetch_all(
-            f"SELECT call_id FROM {CALLS} WHERE status IN ('queued','running') "
+            f"SELECT call_id FROM {CALLS} WHERE status IN {PENDING_SQL} "
             "AND (lease_until IS NULL OR lease_until<=%s) "
             "ORDER BY created_at,call_id LIMIT %s",
             (self.clock(), limit),
@@ -119,9 +133,10 @@ class DailyRetryCalls:
     async def claim(self, call_id, owner):
         now = self.clock()
         changed = await self.db.execute(
-            f"UPDATE {CALLS} SET status='running',lease_owner=%s,lease_until=%s, "
+            f"UPDATE {CALLS} SET status=CASE WHEN status IN ('{FILTERED_QUEUED}','{FILTERED_RUNNING}') "
+            f"THEN '{FILTERED_RUNNING}' ELSE 'running' END,lease_owner=%s,lease_until=%s, "
             "started_at=COALESCE(started_at,%s),updated_at=%s,version=version+1 "
-            "WHERE call_id=%s AND status IN ('queued','running') "
+            f"WHERE call_id=%s AND status IN {PENDING_SQL} "
             "AND (lease_until IS NULL OR lease_until<=%s)",
             (
                 owner,
@@ -145,7 +160,7 @@ class DailyRetryCalls:
     def check_owner(self, row, owner):
         if (
             row is None
-            or row["status"] != "running"
+            or row["status"] not in {"running", FILTERED_RUNNING}
             or row["lease_owner"] != owner
             or row["lease_until"] is None
             or utc_time(row["lease_until"]) <= self.clock()
@@ -181,7 +196,11 @@ class DailyRetryCalls:
     async def release(self, call_id, owner, *, complete=False):
         async with transaction(self.db) as tx:
             row = await self.locked(tx, call_id, owner)
-            status = "queued"
+            status = (
+                FILTERED_QUEUED
+                if row["status"] == FILTERED_RUNNING
+                else "queued"
+            )
             if complete:
                 status = (
                     "completed_with_errors"
@@ -212,8 +231,9 @@ class DailyRetryCalls:
         """扫描级故障保留游标，短暂退避；旧租约不能覆盖接手者。"""
         now = self.clock()
         await self.db.execute(
-            f"UPDATE {CALLS} SET status='queued',lease_owner='',lease_until=%s,"
+            f"UPDATE {CALLS} SET status=CASE WHEN status='{FILTERED_RUNNING}' "
+            f"THEN '{FILTERED_QUEUED}' ELSE 'queued' END,lease_owner='',lease_until=%s,"
             "error_code='cron_daily_retry_scan_failed',updated_at=%s,version=version+1 "
-            "WHERE call_id=%s AND status='running' AND lease_owner=%s AND lease_until>%s",
+            f"WHERE call_id=%s AND status IN {RUNNING_SQL} AND lease_owner=%s AND lease_until>%s",
             (now + timedelta(seconds=60), now, call_id, owner, now),
         )

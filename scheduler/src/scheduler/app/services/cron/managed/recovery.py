@@ -37,11 +37,13 @@ class ManagedRecoveryWorker:
         limit=32,
         capacity=None,
         rechecks_enabled=False,
+        retry_overrides=None,
     ):
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError("invalid_managed_recovery_limit")
         self.db = db
         self.limit = limit
+        self.retry_overrides = retry_overrides
         self.dispatcher = ExecutionDispatcher(
             db,
             execution_client,
@@ -58,8 +60,13 @@ class ManagedRecoveryWorker:
             db,
             page_size=min(limit, 100),
             dispatch_ordinary=self.dispatcher.dispatch_registered,
+            retry_overrides=retry_overrides,
         )
-        self.auto_retry = AutoBatchRetry(db, limit=limit)
+        self.auto_retry = AutoBatchRetry(
+            db,
+            limit=limit,
+            retry_overrides=retry_overrides,
+        )
         self.pause_groups = PauseGroupService(db, platform)
         self.rechecks = (
             RecheckWorker(db, execution_client, limit)

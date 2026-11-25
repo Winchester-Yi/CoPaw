@@ -3,6 +3,7 @@ import * as api from "./api";
 import { request } from "../../api/request";
 import { useIframeStore } from "../../stores/iframeStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { planItemScheduledOn, scheduleLabel } from "./utils";
 import type { Account, Draft } from "./types";
 
 vi.mock("../../api/request", async (importOriginal) => {
@@ -106,6 +107,34 @@ afterEach(() => {
 });
 
 describe("Java 规划网关契约", () => {
+  it("工作日发布后按周一至周五回显与展示日历", async () => {
+    const cronExpr = "0 8 * * mon-fri";
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok({ id: "plan-a" }))
+      .mockResolvedValueOnce(
+        ok({ items: [{ ...view, scenes: [{ ...view.scenes[0], cronExpr }] }] }),
+      );
+    const {
+      plans: [plan],
+    } = await api.publishPlan(
+      account,
+      {
+        ...draft,
+        items: [{ ...draft.items[0], schedule: { type: "weekdays" } }],
+      },
+      null,
+      [],
+    );
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    expect(body.scenes[0].cronExpr).toBe(cronExpr);
+    const [item] = plan.items;
+    expect(scheduleLabel(item.schedule)).toBe("工作日 08:00");
+    expect(planItemScheduledOn(plan, item, "2026-10-23")).toBe(true);
+    expect(planItemScheduledOn(plan, item, "2026-10-24")).toBe(false);
+    expect(planItemScheduledOn(plan, item, "2026-10-25")).toBe(false);
+    expect(planItemScheduledOn(plan, item, "2026-10-26")).toBe(true);
+  });
+
   it.each(["daily", "weekly"] as const)(
     "%s 名单推送未设置时间时提交08:00，督办仍为17:00",
     async (type) => {

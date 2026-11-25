@@ -16,8 +16,8 @@ async def completed(execution_setup, async_status=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["ordinary", "manual"])
-async def test_standalone_result_does_not_enter_worker_feedback(
+@pytest.mark.parametrize("kind", ["ordinary", "manual", "batch"])
+async def test_direct_result_does_not_enter_worker_feedback(
     execution_setup,
     kind,
 ):
@@ -31,6 +31,10 @@ async def test_standalone_result_does_not_enter_worker_feedback(
 
     db, _, _ = execution_setup
     await settle_fixture(execution_setup, "success", kind=kind)
+    if kind == "batch":
+        db.conn.execute(
+            "UPDATE swe_cron_execution_runs SET spec_json=JSON_SET(spec_json,'$.task_type','text')",
+        )
     feedback = ManagedCapacityFeedback(db)
     now = utc_now()
     assert await feedback.scopes(now_utc=now) == []

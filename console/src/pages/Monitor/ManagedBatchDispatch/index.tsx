@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -24,7 +24,7 @@ import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { getUserId } from "../../../utils/identity";
 import { loadWorkerHistory } from "../CronBatchDispatch/workerHistory";
 import styles from "../CronBatchDispatch/index.module.less";
-import { labels, statusTag, timeText } from "./format";
+import { statusTag, timeText } from "./format";
 import { useBoardResource } from "./useBoardResource";
 import BatchDetail from "./BatchDetail";
 import SharedWorkers from "./SharedWorkers";
@@ -45,7 +45,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
   const [shortcut, setShortcut] = useState("today");
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => buildRange("today"));
   const [status, setStatus] = useState("");
-  const [childStatus, setChildStatus] = useState("");
+  const [memberPresence, setMemberPresence] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState("");
@@ -60,24 +60,30 @@ function Board({ source, actor }: { source: string; actor: string }) {
   }, []);
   const start = range[0].toISOString();
   const end = range[1].toISOString();
+  const batchFilters = useMemo(
+    () => ({
+      start_time: start,
+      end_time: end,
+      status,
+      has_members: memberPresence ? memberPresence === "true" : undefined,
+      query,
+    }),
+    [start, end, status, memberPresence, query],
+  );
   const loadBatches = useCallback(
     (signal: AbortSignal) => {
       void refresh;
       return managedBatchBoard.batches(
         source,
         {
-          start_time: start,
-          end_time: end,
-          status,
-          child_status: childStatus,
-          query,
+          ...batchFilters,
           page,
           page_size: 4,
         },
         signal,
       );
     },
-    [source, start, end, status, childStatus, query, page, refresh],
+    [source, batchFilters, page, refresh],
   );
   const batches = useBoardResource(loadBatches);
   const loadWorkers = useCallback(
@@ -181,34 +187,16 @@ function Board({ source, actor }: { source: string; actor: string }) {
           }}
         />
         <Select
-          aria-label="子任务状态"
-          value={childStatus}
+          aria-label="可执行成员"
+          value={memberPresence}
           className={styles.statusSelect}
           options={[
-            { value: "", label: "全部子任务状态" },
-            ...[
-              "queued",
-              "dispatching",
-              "accepted",
-              "running",
-              "waiting_subtasks",
-              "success",
-              "error",
-              "dispatch_failed",
-              "skipped",
-              "cancelled",
-            ].map((value) => ({
-              value,
-              label:
-                value === "success"
-                  ? "整轮成功"
-                  : value === "waiting_subtasks"
-                  ? "等待子任务"
-                  : labels[value],
-            })),
+            { value: "", label: "全部成员" },
+            { value: "true", label: "有可执行成员" },
+            { value: "false", label: "无可执行成员" },
           ]}
           onChange={(value) => {
-            setChildStatus(value);
+            setMemberPresence(value);
             setPage(1);
           }}
         />
@@ -220,13 +208,7 @@ function Board({ source, actor }: { source: string; actor: string }) {
             {title === "失败任务" ? (
               <FailureSummary
                 source={source}
-                filters={{
-                  start_time: start,
-                  end_time: end,
-                  status,
-                  child_status: childStatus,
-                  query,
-                }}
+                filters={batchFilters}
                 refresh={refresh}
                 value={stats?.failed_members}
               />

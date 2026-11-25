@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from swe.cli.conversation_storage_cmd import conversation_storage_group
 from swe.app.conversation_storage import runtime
+from swe.config.context import encode_scope_id
 
 
 def test_prepare_defaults_to_metadata_and_preview_is_read_only(
@@ -49,6 +50,61 @@ def test_prepare_defaults_to_metadata_and_preview_is_read_only(
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["status"] == "preview"
+
+
+def test_prepare_scans_default_workspaces_and_migrate_reads_current_registry(
+    tmp_path,
+    monkeypatch,
+):
+    from swe.database import config
+
+    monkeypatch.setenv("CMB_CAAS_SERVICEUNITID", "svc")
+    monkeypatch.setattr(
+        config,
+        "get_database_config",
+        lambda: SimpleNamespace(database="test"),
+    )
+    nas = tmp_path / "nas"
+    root = nas / encode_scope_id("tenant", "source") / "workspaces" / "default"
+    root.mkdir(parents=True)
+    registry = root / "chats.json"
+    registry.write_text("broken JSON")
+    other = root.parent / "other-agent"
+    other.mkdir()
+    (other / "chats.json").write_text("also broken")
+    (nas / "current-backup").symlink_to(other, target_is_directory=True)
+    manifest = tmp_path / "scan.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        conversation_storage_group,
+        ["prepare", "--workspace-root", str(nas), "--manifest", str(manifest)],
+    )
+    assert result.exit_code == 2, result.output
+    scan = json.loads(manifest.read_text())
+    assert scan["scan_errors"] == []
+    (item,) = scan["workspaces"]
+    assert item["scope"] == ["svc", "tenant", "source", "default"]
+    assert item["root"] == str(root)
+    assert "scan_error" in item
+    assert "registry_sha256" not in item
+
+    registry.write_text('{"version": 1, "chats": []}')
+    result = runner.invoke(
+        conversation_storage_group,
+        ["migrate", "--manifest", str(manifest)],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["validated"] == [
+        ["svc", "tenant", "source"],
+    ]
+
+    registry.write_text('{"version": 1, "chats": [{}]}')
+    result = runner.invoke(
+        conversation_storage_group,
+        ["migrate", "--manifest", str(manifest)],
+    )
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.output)["failed"][0]["phase"] == "preflight"
 
 
 def test_rejects_bundle_mode_and_manifest(tmp_path, monkeypatch):
@@ -123,14 +179,12 @@ def test_partial_migration_exits_with_code_two(tmp_path, monkeypatch):
 
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}")
-    monkeypatch.setattr(
-        workflow,
-        "_execute_metadata",
-        AsyncMock(return_value={"status": "partial_success"}),
-    )
+    execute = AsyncMock(return_value={"status": "partial_success"})
+    monkeypatch.setattr(workflow, "_execute_metadata", execute)
     result = CliRunner().invoke(
         conversation_storage_group,
-        ["migrate", "--manifest", str(manifest)],
+        ["migrate", "--manifest", str(manifest), "--workers", "2"],
     )
     assert result.exit_code == 2
     assert json.loads(result.output)["status"] == "partial_success"
+    assert execute.await_args.kwargs["workers"] == 2

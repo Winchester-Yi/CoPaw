@@ -79,6 +79,7 @@ from . import (
     turn_lifecycle,
 )
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
+from .models import MANUAL_CHAT_TITLE_META_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
 from .expert_main_runtime import ExpertMainRegistry, restricted_expert_config
@@ -2604,7 +2605,9 @@ def _should_generate_session_title(
     if meta.get("session_kind") == _TASK_SESSION_KIND:
         return False
 
-    if meta.get(_SESSION_TITLE_GENERATED_META_KEY):
+    if meta.get(_SESSION_TITLE_GENERATED_META_KEY) or meta.get(
+        MANUAL_CHAT_TITLE_META_KEY,
+    ):
         return False
 
     current_name = (getattr(chat, "name", "") or "").strip()

@@ -77,7 +77,10 @@ async def test_batch_prefire_makes_all_members_ready_without_individual_scatter(
         lambda: now.replace(tzinfo=None),
     )
     db.conn.create_function("JSON_UNQUOTE", 1, lambda value: value)
-    ready = await work_query.ManagedWorkQuery(db, 10).rows(running=False)
+    ready = await work_query.ManagedWorkQuery(db, 10).rows(
+        running=False,
+        direct=True,
+    )
     assert len(ready) == accepted["enqueued_intents"] == 3
 
 

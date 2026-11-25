@@ -79,7 +79,7 @@ async def test_priority_survives_clock_change_and_later_configuration_update(
         "UPDATE swe_cron_execution_runs SET updated_at='2099-01-01 00:00:00' WHERE tenant_id='carol'",
     )
     await priority(callback_setup, root["job_id"], "priority-bob", ["bob"])
-    first = (await ManagedWorkQuery(db, 1).rows(running=False))[0]
+    first = (await ManagedWorkQuery(db, 1).rows(running=False, direct=True))[0]
     tenant = db.conn.execute(
         "SELECT tenant_id FROM swe_cron_execution_runs WHERE execution_id=?",
         (first["execution_id"],),
@@ -110,7 +110,7 @@ async def test_existing_heat_rule_breaks_unconfigured_priority_ties(
         clock=lambda: datetime(2026, 10, 16, 1, tzinfo=timezone.utc),
     ).accept(caller, callback, "batch")
     db.conn.create_function("JSON_UNQUOTE", 1, lambda value: value)
-    first = (await ManagedWorkQuery(db, 1).rows(running=False))[0]
+    first = (await ManagedWorkQuery(db, 1).rows(running=False, direct=True))[0]
     tenant = db.conn.execute(
         "SELECT tenant_id FROM swe_cron_execution_runs WHERE execution_id=?",
         (first["execution_id"],),

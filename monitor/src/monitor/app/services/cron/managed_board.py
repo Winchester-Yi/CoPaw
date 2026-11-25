@@ -152,6 +152,7 @@ class ManagedBoardQuery:
         status=None,
         query=None,
         child_status=None,
+        has_members=None,
     ):
         from .managed_board_failures import failure_summary
 
@@ -164,6 +165,7 @@ class ManagedBoardQuery:
             status,
             query,
             child_status=child_status,
+            has_members=has_members,
         )
 
     async def batches(
@@ -177,6 +179,7 @@ class ManagedBoardQuery:
         page=1,
         page_size=20,
         child_status=None,
+        has_members=None,
     ):
         await self._ready()
         where, params = sql.batch_where(
@@ -188,7 +191,7 @@ class ManagedBoardQuery:
         )
         bound = (*params, status, status) if status else params
         rows = await self.db.fetch_all(
-            sql.list_query(where, bool(status)),
+            sql.list_query(where, bool(status), has_members),
             (*bound, page_size, (page - 1) * page_size),
         )
         # 全局统计左联分页；即使当前页为空，仍返回一行统计。

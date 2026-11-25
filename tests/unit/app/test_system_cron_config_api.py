@@ -25,6 +25,41 @@ HEADERS = {
 }
 
 
+@pytest.mark.asyncio
+async def test_batch_retry_config_returns_only_explicit_limits(monkeypatch):
+    from scheduler.app.services.cron.system.swe_client import SystemSweClient
+    from swe.app.routers import internal
+    from swe.app.source_system_config.store import SourceSystemConfigStore
+
+    monkeypatch.setattr(internal, "_INTERNAL_TOKEN", "policy-test-token")
+    db = SimpleNamespace(
+        is_connected=True,
+        fetch_all=AsyncMock(
+            return_value=[{"source_id": "bank", "max_attempts": "3"}],
+        ),
+    )
+    app = FastAPI()
+    app.include_router(system_api.router, prefix="/api")
+    app.state.source_system_config_service = SimpleNamespace(
+        store=SourceSystemConfigStore(db),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app),
+        base_url="http://test",
+    ) as client:
+        unauthorized = await client.get(
+            "/api/internal/cron/system/batch-retry-overrides",
+        )
+        assert unauthorized.status_code == 401
+        db.fetch_all.assert_not_awaited()
+        swe = SystemSweClient("http://test", http=client)
+        assert await swe.get_batch_retry_overrides("policy-test-token") == {
+            "bank": 3,
+        }
+        db.fetch_all.return_value = []
+        assert await swe.get_batch_retry_overrides("policy-test-token") == {}
+
+
 @pytest.fixture
 async def system_config_api(system_setup, config_scope):
     db, store, _ = system_setup

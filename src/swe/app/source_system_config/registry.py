@@ -135,6 +135,14 @@ CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING = SourceSystemConfigSetting(
     value_type="int",
     ge=1,
 )
+CRON_BATCH_MAX_ATTEMPTS_SETTING = SourceSystemConfigSetting(
+    key="cron_batch_max_attempts",
+    path=("cron_batch_max_attempts",),
+    default_value=None,
+    value_type="optional_int",
+    ge=1,
+    le=2147483647,
+)
 CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING = SourceSystemConfigSetting(
     key="cron_task_session_cleanup.enabled",
     path=("cron_task_session_cleanup", "enabled"),
@@ -328,6 +336,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
+    CRON_BATCH_MAX_ATTEMPTS_SETTING,
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_TASK_SESSION_CLEANUP_CRON_SETTING,
@@ -387,6 +396,9 @@ def build_default_source_system_config_payload() -> dict[str, Any]:
     """根据注册表生成默认 source 系统配置。"""
     payload: dict[str, Any] = {}
     for setting in CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS:
+        if setting is CRON_BATCH_MAX_ATTEMPTS_SETTING:
+            # 缺少来源覆盖时，由 Scheduler 使用自身部署配置。
+            continue
         payload = _deep_merge_dicts(
             payload,
             _build_nested_payload(setting.path, setting.default_value),

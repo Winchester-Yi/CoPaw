@@ -3,8 +3,11 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from functools import partial
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 
@@ -252,6 +255,68 @@ async def test_accounting_is_ready_before_old_loop_can_claim(monkeypatch):
             )
         assert app.state.managed_cron_task.done()
         assert app.state.scheduler_task.done()
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("internal_base", [None, "http://swe-internal/api/"])
+async def test_retry_policy_uses_dedicated_swe_address(
+    monkeypatch,
+    internal_base,
+):
+    from scheduler.app.services.cron import capacity_claim
+    from scheduler.app.services.cron.managed import runtime
+    from scheduler.app.services.cron.managed.batch_retry_policy import (
+        BatchRetryPolicyUnavailable,
+    )
+
+    monkeypatch.setattr(capacity_claim, "MANAGED_CAPACITY_ACCOUNTING", False)
+    legacy = Mock()
+    monkeypatch.setattr(runtime, "get_cron_scheduling_service", lambda: legacy)
+    monkeypatch.setenv("SCHEDULER_SWE_API_BASE_URL", "http://swe-gateway")
+    monkeypatch.delenv("SCHEDULER_SWE_INTERNAL_API_BASE_URL", raising=False)
+    if internal_base:
+        monkeypatch.setenv(
+            "SCHEDULER_SWE_INTERNAL_API_BASE_URL",
+            internal_base,
+        )
+    monkeypatch.setenv("SWE_CRON_SCHEDULER_BASE_URL", "http://platform")
+    monkeypatch.setenv("SWE_SERVER_DOMAIN", "http://callback")
+    monkeypatch.setenv("SWE_INTERNAL_TOKEN", "retry-test-token")
+    requests = []
+
+    def swe(request):
+        requests.append(request)
+        assert request.method == "GET"
+        assert str(request.url) == (
+            "http://swe-internal/api/internal/cron/system/batch-retry-overrides"
+        )
+        assert request.headers["X-Internal-Token"] == "Bearer retry-test-token"
+        return httpx.Response(200, json={"bank": 2, "retail": 4})
+
+    db = complete_test_schema()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(swe),
+        ) as http:
+            monkeypatch.setattr(
+                runtime,
+                "SystemSweClient",
+                partial(runtime.SystemSweClient, http=http),
+            )
+            worker = await runtime.create_managed_worker(db)
+            assert worker.dispatcher.client.base_url == "http://swe-gateway"
+            if internal_base:
+                assert await worker.retry_overrides() == {
+                    "bank": 2,
+                    "retail": 4,
+                }
+                assert len(requests) == 1
+            else:
+                with pytest.raises(BatchRetryPolicyUnavailable):
+                    await worker.retry_overrides()
+                assert requests == []
     finally:
         db.conn.close()
 

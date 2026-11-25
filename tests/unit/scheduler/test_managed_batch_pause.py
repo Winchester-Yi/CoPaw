@@ -107,6 +107,11 @@ async def test_paused_queue_uses_no_worker_and_inflight_releases_after_settlemen
         retry_body(await service.preview(caller, batch)),
     )
     execution = result["results"][0]["execution_id"]
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET spec_json=JSON_SET(spec_json,'$.task_type','agent') "
+        "WHERE execution_id=%s",
+        (execution,),
+    )
     run = await db.fetch_one(
         "SELECT * FROM swe_cron_execution_runs WHERE execution_id=%s",
         (execution,),

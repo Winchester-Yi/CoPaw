@@ -51,6 +51,7 @@ from .expert_binding import (
     is_ordinary_chat,
 )
 from .models import (
+    MANUAL_CHAT_TITLE_META_KEY,
     ChatArchiveMetadata,
     ChatArchivePage,
     ChatCompactionBoundary,
@@ -75,6 +76,7 @@ TASK_RUN_SECTION_FINAL = "final"
 _SERVER_OWNED_CHAT_META_KEYS = frozenset(
     {
         GOAL_DRAFT_DELEGATION_META_KEY,
+        MANUAL_CHAT_TITLE_META_KEY,
         "expert_main_binding",
         "multi_agent_mode_enabled",
         "scenario_preset_snapshot",
@@ -114,29 +116,65 @@ class MultiAgentModeUpdate(BaseModel):
     expected_revision: int = Field(ge=0, strict=True)
 
 
+def _chat_title_update(
+    existing: ChatSpec,
+    patch: ChatUpdateRequest,
+) -> str | None:
+    if patch.name is None or patch.name == existing.name:
+        return None
+
+    name = patch.name.strip()
+    if not 1 <= len(name) <= 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Chat name must contain 1 to 100 characters",
+        )
+    if name == existing.name:
+        return None
+
+    if patch.updated_at is not None:
+        submitted_at = patch.updated_at
+        current_at = existing.updated_at
+        if submitted_at.tzinfo is None:
+            submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+        if current_at.tzinfo is None:
+            current_at = current_at.replace(tzinfo=timezone.utc)
+        if submitted_at < current_at:
+            raise HTTPException(
+                status_code=409,
+                detail="Chat changed since patch was read",
+            )
+    return name
+
+
 def _merge_chat_update(
     existing: ChatSpec,
     patch: ChatUpdateRequest,
 ) -> ChatSpec:
     """将部分更新合并到已有会话，保留调用方没有提交的字段。"""
-    updates = patch.model_dump(exclude_unset=True)
     merged = existing.model_dump()
 
-    for field_name in (
-        "name",
-        "session_id",
-        "user_id",
-        "channel",
-        "created_at",
-        "updated_at",
-        "status",
-    ):
-        if field_name in updates and updates[field_name] is not None:
-            merged[field_name] = updates[field_name]
+    merged.update(
+        patch.model_dump(
+            include={
+                "session_id",
+                "user_id",
+                "channel",
+                "created_at",
+                "updated_at",
+                "status",
+            },
+            exclude_unset=True,
+            exclude_none=True,
+        ),
+    )
 
-    if "meta" in updates:
+    meta_update = patch.model_dump(include={"meta"}, exclude_unset=True)
+    if "meta" in meta_update:
         # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
-        incoming_meta = updates["meta"] or {}
+        incoming_meta = dict(meta_update["meta"] or {})
+        # Older clients send back the metadata from the preceding GET.
+        incoming_meta.pop(MANUAL_CHAT_TITLE_META_KEY, None)
         _reject_server_owned_chat_meta(incoming_meta)
         merged["meta"] = {
             **(existing.meta or {}),
@@ -148,6 +186,10 @@ def _merge_chat_update(
                 None,
             )
 
+    name = _chat_title_update(existing, patch)
+    if name is not None:
+        merged["name"] = name
+        merged["meta"][MANUAL_CHAT_TITLE_META_KEY] = True
     return ChatSpec.model_validate(merged)
 
 

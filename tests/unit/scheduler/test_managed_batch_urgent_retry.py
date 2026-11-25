@@ -46,12 +46,22 @@ async def test_closed_batch_retry_is_urgent_and_preserves_original_batch(
 
 
 @pytest.mark.asyncio
-async def test_retry_while_native_retry_is_pending_remains_normal(
+@pytest.mark.parametrize(
+    "override,expected_lane",
+    [(3, "normal"), (1, "urgent")],
+)
+async def test_manual_retry_lane_follows_the_source_attempt_limit(
     callback_setup,
+    override,
+    expected_lane,
 ):
     db = callback_setup[0]
     caller, batch_id = await failed_batch(callback_setup)
-    service = BatchRetryService(db)
+
+    async def read_overrides():
+        return {caller.source_id: override}
+
+    service = BatchRetryService(db, retry_overrides=read_overrides)
     result = await service.retry(
         caller,
         batch_id,
@@ -61,7 +71,7 @@ async def test_retry_while_native_retry_is_pending_remains_normal(
         "SELECT * FROM swe_cron_execution_runs WHERE execution_id=%s",
         (result["results"][0]["execution_id"],),
     )
-    assert run["dispatch_lane"] == "normal"
+    assert run["dispatch_lane"] == expected_lane
 
 
 @pytest.mark.asyncio

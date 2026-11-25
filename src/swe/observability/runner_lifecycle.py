@@ -454,6 +454,9 @@ def finish_query_run(
 def terminal_turn_status(execution: Any, turn_id: str | None) -> str | None:
     if not turn_id:
         return None
+    if getattr(execution, "is_active", True) is False:
+        statuses = getattr(execution, "closed_turn_statuses", {})
+        return statuses.get(turn_id)
     state = getattr(execution, "state", None)
     turn_states = state.get("turn_states") if isinstance(state, dict) else None
     turn = turn_states.get(turn_id) if isinstance(turn_states, dict) else None

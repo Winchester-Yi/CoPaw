@@ -140,7 +140,13 @@ class DailyRetryScenario:
             await ExecutionSettlement(self.db, clock=self.clock).tick()
         return await writer.get(row["execution_id"], key)
 
-    async def batch(self, *, attempts=1, children=False):
+    async def batch(
+        self,
+        *,
+        attempts=1,
+        children=False,
+        fail_all_children=False,
+    ):
         """通过真实批回调冻结关系，并用原重试服务推进业务尝试。"""
         from dataclasses import replace
         from scheduler.app.services.cron.managed.batch_retry import (
@@ -209,6 +215,7 @@ class DailyRetryScenario:
                 status=(
                     "error"
                     if member["member_id"] == target["member_id"]
+                    or (fail_all_children and member["member_role"] == "child")
                     else "success"
                 ),
             )

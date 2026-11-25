@@ -8,6 +8,10 @@ import type { CronParts } from "@/utils/parseCron";
 import type { SceneMonitoring } from "./monitoring";
 import type { WealthRole } from "./permissions";
 
+export type PlanSchedule = Omit<CronParts, "type"> & {
+  type: CronParts["type"] | "weekdays";
+};
+
 /** 工作台角色对应的登录账户（mock 期的角色预览身份） */
 export interface Account {
   /** 与 WealthRole 一一对应：rm 客户经理 / president 支行行长 / middle 分行中台 */
@@ -60,8 +64,8 @@ export interface PlanItem {
   cycle: string;
   start?: string;
   end?: string;
-  /** 执行频率：与控制台定时任务同一模型（hourly/daily/weekly/custom） */
-  schedule: CronParts;
+  /** 执行频率：沿用定时任务排程模型，增加工作日快捷选项 */
+  schedule: PlanSchedule;
   /** 行长督办策略，随规划接口保存和回显。 */
   monitoring?: SceneMonitoring;
 }

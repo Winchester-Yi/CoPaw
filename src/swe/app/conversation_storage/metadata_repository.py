@@ -15,6 +15,7 @@ from ..runner.expert_binding import (
     read_expert_binding,
 )
 from ..runner.chat_summary import display_metadata
+from ..runner.models import MANUAL_CHAT_TITLE_META_KEY
 from ..runner.session import session_filename
 from .chat_mutations import (
     ChatMetadataInstall,
@@ -150,11 +151,13 @@ class MySQLMetadataRepository(MetadataCatalog):
         )
         if row is None:
             raise IntegrityError("Chat workspace is not registered")
+        if not self.importing:
+            return
         source = await self.db.fetch_one(
             f"SELECT published FROM {SOURCES} WHERE " + SOURCE_PREDICATE,
             self.scope.sql_values[:3],
         )
-        if source is None or bool(source["published"]) == self.importing:
+        if source is None or source["published"]:
             raise ConflictError("Chat workspace publication state changed")
 
     def _spec(self, row, content=None):
@@ -279,21 +282,18 @@ class MySQLMetadataRepository(MetadataCatalog):
     async def ensure_session_path(self, session_id, user_id, channel):
         identity = SessionIdentity(self.scope, user_id, channel, session_id)
         name = session_filename_key(identity)
-        # Published sources stay published and Session filename mappings are
-        # immutable. Only a missing mapping needs the write transaction.
+        # Session filename mappings are immutable. Only a missing mapping
+        # needs the write transaction.
         row = await self.db.fetch_one(
             "SELECT nas_filename FROM swe_conversation_sessions "
             "WHERE "
             + SESSION_PREDICATE
             + f" AND EXISTS (SELECT 1 FROM {WORKSPACES} WHERE "
             + SCOPE_PREDICATE
-            + f") AND EXISTS (SELECT 1 FROM {SOURCES} WHERE "
-            + SOURCE_PREDICATE
-            + " AND published=1)",
+            + ")",
             (
                 *identity.sql_values,
                 *self.scope.sql_values,
-                *self.scope.sql_values[:3],
             ),
         )
         if row is None:
@@ -377,11 +377,45 @@ class MySQLMetadataRepository(MetadataCatalog):
             row = await self._raw_chat(spec.id)
             if row is None or row["deleted_at"] is not None:
                 return None
-            if expected_chat is not None and expected_chat != self._spec(row):
+            existing = self._spec(row)
+            if expected_chat is not None and expected_chat != existing:
                 raise ConflictError("Chat changed since patch was read")
+            if expected_chat is None and existing.meta.get(
+                MANUAL_CHAT_TITLE_META_KEY,
+            ):
+                spec = spec.model_copy(
+                    update={
+                        "name": existing.name,
+                        "meta": {
+                            **spec.meta,
+                            MANUAL_CHAT_TITLE_META_KEY: True,
+                        },
+                    },
+                )
             session = await self._session_for(spec)
             await self._install(spec, session, row)
             return await self.get_chat(spec.id)
+
+    async def _write_expert_binding(self, row, updated):
+        if updated.expert_id is None:
+            await super()._write_expert_binding(row, updated)
+            return
+        extended = load_metadata_json(row["extended_metadata_text"] or "{}")
+        extended["multi_agent_mode_enabled"] = False
+        _, extended_text = metadata_fields(extended)
+        await self.db.execute(
+            "UPDATE swe_conversation_chats SET expert_id=%s,"
+            "expert_binding_revision=%s,extended_metadata_text=%s,"
+            "metadata_revision=metadata_revision+1,updated_at=UTC_TIMESTAMP(6) "
+            "WHERE id=%s AND service_unit_key=%s AND deleted_at IS NULL",
+            (
+                identity_bytes(updated.expert_id, 256),
+                updated.revision,
+                extended_text,
+                row["id"],
+                self.scope.sql_values[0],
+            ),
+        )
 
     async def set_multi_agent_mode(self, chat_id, enabled, expected_revision):
         async with self.db.transaction():

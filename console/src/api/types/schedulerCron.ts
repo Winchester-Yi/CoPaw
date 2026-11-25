@@ -64,6 +64,7 @@ export type ManagedCronSpec = Omit<CronJobSpecInput, "id" | "schedule"> & {
 
 export interface ManagedJob extends CronJobSpecOutput {
   has_distributed_children?: boolean;
+  has_undeleted_children?: boolean;
   run_date_range?: ManagedRunDateRange | null;
   recheck?: ManagedRecheckRule | null;
   schedule: ManagedCronSchedule;

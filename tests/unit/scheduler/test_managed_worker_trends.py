@@ -19,6 +19,7 @@ async def test_worker_trends_counts_started_settled_and_retried(
     await failed_batch(callback_setup)
     db.conn.executescript("""
         UPDATE swe_cron_execution_runs SET provider_id='provider',model_id='model',
+          spec_json=JSON_SET(spec_json,'$.task_type','agent'),
           created_at='2026-10-16 01:01:00',started_at='2026-10-16 01:02:00',
           settled_at='2026-10-16 01:14:00',settled_status='error';
         UPDATE swe_cron_managed_dispatch_events
@@ -47,4 +48,19 @@ async def test_worker_trends_counts_started_settled_and_retried(
     other = await worker_trends(db, "other", "provider", "model", start, end)
     assert all(
         point["requests"] == point["total"] == 0 for point in other["points"]
+    )
+    db.conn.execute(
+        "UPDATE swe_cron_execution_runs SET spec_json=JSON_SET(spec_json,'$.task_type','text')",
+    )
+    text_only = await worker_trends(
+        db,
+        "bank",
+        "provider",
+        "model",
+        start,
+        end,
+    )
+    assert all(
+        point["requests"] == point["total"] == 0
+        for point in text_only["points"]
     )
