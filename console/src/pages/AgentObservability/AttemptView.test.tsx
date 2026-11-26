@@ -401,7 +401,7 @@ it("keeps the timeline header in the same scroll container as its rows", async (
   const row = await screen.findByRole("treeitem", { name: /row/ });
   const tree = screen.getByRole("tree", { name: "执行树" });
   expect(tree).toContainElement(
-    screen.getByText("时间轴（相对 Attempt 起点）"),
+    screen.getByLabelText("时间轴（相对 Attempt 起点）"),
   );
   expect(tree).toContainElement(row);
 });
