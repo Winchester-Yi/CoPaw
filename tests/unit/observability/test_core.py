@@ -1701,6 +1701,34 @@ def test_health_reports_accumulated_drops_after_writer_unblocks(monkeypatch):
     assert "scope" not in first
 
 
+def test_close_counts_health_frame_reserved_during_shutdown(monkeypatch):
+    stream = BlockingStream()
+    emitter = JsonlEmitter(stream=stream)
+    join = emitter._thread.join
+
+    def join_while_health_is_in_flight(_timeout):
+        # Let the writer reserve the final frame after close sets _closed.
+        emitter._condition.release()
+        try:
+            assert stream.entered.wait(1)
+        finally:
+            emitter._condition.acquire()
+
+    try:
+        with emitter._condition:
+            assert not emitter.emit({"event_name": "observer.health"})
+            monkeypatch.setattr(
+                emitter._thread,
+                "join",
+                join_while_health_is_in_flight,
+            )
+            assert emitter.close(timeout=0.01) == 1
+    finally:
+        monkeypatch.setattr(emitter._thread, "join", join)
+        stream.release.set()
+        assert emitter.close() == 0
+
+
 def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
     """白名单只放开 delay_ms，其他未知嵌套键仍应被投影剔除。"""
     stream = io.StringIO()

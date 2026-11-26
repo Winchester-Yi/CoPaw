@@ -188,6 +188,18 @@ def _project(value: Any, depth: int = 0, key: str | None = None) -> Any:
     return None
 
 
+def _encode_event(event: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            event,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
 class JsonlEmitter:
     """Single-writer emitter with event and byte limits including in-flight data."""
 
@@ -250,21 +262,18 @@ class JsonlEmitter:
                     )
                 ):
                     raise ValueError("run event scope is incomplete")
-            payload = (
-                json.dumps(
-                    projected,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ).encode("utf-8")
-                + b"\n"
+            payload = _encode_event(projected)
+            limit = min(
+                self.config.max_event_bytes,
+                self.config.max_queue_bytes,
             )
+            if len(payload) > limit and projected.pop("resource", None):
+                payload = _encode_event(projected)
             if len(payload) > self.config.max_event_bytes:
                 projected["metadata_truncated"] = True
                 for key in (
                     "links",
                     "events",
-                    "resource",
                     "asset",
                     "model",
                     "tool",
@@ -276,15 +285,7 @@ class JsonlEmitter:
                     if key in _REQUIRED_FIELDS:
                         continue
                     projected.pop(key, None)
-                    payload = (
-                        json.dumps(
-                            projected,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            allow_nan=False,
-                        ).encode("utf-8")
-                        + b"\n"
-                    )
+                    payload = _encode_event(projected)
                     if len(payload) <= self.config.max_event_bytes:
                         break
             if len(payload) > self.config.max_event_bytes:
@@ -446,11 +447,9 @@ class JsonlEmitter:
         with self._condition:
             self._closed = True
             self._condition.notify_all()
-            while self._outstanding_events and time.monotonic() < deadline:
-                self._condition.wait(deadline - time.monotonic())
-            remaining = self._outstanding_events
         self._thread.join(max(0.0, deadline - time.monotonic()))
-        return remaining
+        with self._condition:
+            return self._outstanding_events
 
 
 _DEFAULT_EMITTER: JsonlEmitter | None = None

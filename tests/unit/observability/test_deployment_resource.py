@@ -5,6 +5,7 @@ import json
 import pytest
 
 from swe.__version__ import __version__
+from swe.observability.config import EmitterConfig
 from swe.observability.emitter import JsonlEmitter
 from swe.observability.models import MetadataEvent, ObservabilityContext, Scope
 from swe.observability.outbox import sign_event, verify_event
@@ -83,6 +84,30 @@ def test_worker_forwarding_preserves_only_bounded_resource_labels(monkeypatch):
     }
     assert "resource" not in historical
     assert _semantic_json(current) == _semantic_json(historical)
+
+
+@pytest.mark.parametrize("budget", ["max_event_bytes", "max_queue_bytes"])
+def test_resource_yields_to_event_byte_budget(budget):
+    event = _run_event().to_dict()
+    event["links"] = [
+        {"relation_type": "cause", "obs_span_id": event["event_id"]},
+    ]
+    historical = {
+        key: value for key, value in event.items() if key != "resource"
+    }
+    historical_size = (
+        len(json.dumps(historical, separators=(",", ":")).encode()) + 1
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(
+        EmitterConfig(**{budget: historical_size}),
+        stream=stream,
+    )
+    try:
+        assert emitter.emit(event)
+    finally:
+        assert emitter.close() == 0
+    assert json.loads(stream.getvalue()) == historical
 
 
 def test_outbox_preserves_signed_resource_and_legacy_absence(monkeypatch):
