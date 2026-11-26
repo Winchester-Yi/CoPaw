@@ -1347,19 +1347,8 @@ class ProviderManager:
 
     def _provider_from_data(self, data: Dict) -> Provider:
         """Deserialize provider data to a concrete provider type."""
-        from swe.providers.anthropic_provider import AnthropicProvider
-        from swe.providers.ollama_provider import OllamaProvider
         from swe.providers.openai_provider import OpenAIProvider
 
-        provider_id = str(data.get("id", ""))
-        chat_model = str(data.get("chat_model", ""))
-
-        if provider_id == "anthropic" or chat_model == "AnthropicChatModel":
-            return AnthropicProvider.model_validate(data)
-        # if provider_id == "gemini" or chat_model == "GeminiChatModel":
-        #     return GeminiProvider.model_validate(data)
-        if provider_id == "ollama":
-            return OllamaProvider.model_validate(data)
         return OpenAIProvider.model_validate(data)
 
     def save_active_model(self, active_model: ModelSlotConfig):

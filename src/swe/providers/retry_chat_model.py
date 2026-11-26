@@ -66,7 +66,6 @@ RETRYABLE_STATUS_CODES = {429, 432, 433, 500, 502, 503, 504, 529}
 EMPTY_MODEL_OUTPUT_MAX_RETRIES = 1
 
 _openai_retryable: tuple[type[Exception], ...] | None = None
-_anthropic_retryable: tuple[type[Exception], ...] | None = None
 
 
 class EmptyModelOutputError(RuntimeError):
@@ -163,22 +162,6 @@ def _get_openai_retryable() -> tuple[type[Exception], ...]:
     return _openai_retryable
 
 
-def _get_anthropic_retryable() -> tuple[type[Exception], ...]:
-    global _anthropic_retryable
-    if _anthropic_retryable is None:
-        try:
-            import anthropic
-
-            _anthropic_retryable = (
-                anthropic.RateLimitError,
-                anthropic.APITimeoutError,
-                anthropic.APIConnectionError,
-            )
-        except ImportError:
-            _anthropic_retryable = ()
-    return _anthropic_retryable
-
-
 def _is_retryable(exc: Exception) -> bool:
     """Return *True* if *exc* should trigger a retry."""
     # CancelledError 永远不重试（用户主动取消）
@@ -188,7 +171,7 @@ def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, TimeoutError):
         return True
 
-    retryable = _get_openai_retryable() + _get_anthropic_retryable()
+    retryable = _get_openai_retryable()
     if retryable and isinstance(exc, retryable):
         return True
 
@@ -207,8 +190,7 @@ def _is_rate_limit(exc: Exception) -> bool:
 def _extract_retry_after(exc: Exception) -> float | None:
     """Parse the Retry-After header value (in seconds) from an exception.
 
-    Handles both OpenAI and Anthropic SDK exception shapes, which expose
-    headers either directly on the exception or on an attached response object.
+    SDK exceptions can expose headers directly or on an attached response.
     """
     headers = getattr(exc, "headers", None) or getattr(
         getattr(exc, "response", None),

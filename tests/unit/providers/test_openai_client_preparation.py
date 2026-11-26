@@ -92,7 +92,7 @@ async def test_failed_preparation_does_not_poison_later_client(monkeypatch):
         environment.setenv("SSL_CERT_FILE", "/nonexistent/swe-test-ca.pem")
         with pytest.raises(OSError):
             await provider._client_async()
-    assert prepared_http_client_kwargs("openai") == {}
+    assert prepared_http_client_kwargs() == {}
     client = await provider._client_async()
     try:
         assert not client.is_closed()
@@ -127,7 +127,7 @@ async def test_admin_operations_use_prepared_client(monkeypatch, operation):
         )
 
     def install(timeout=5):
-        kwargs = prepared_http_client_kwargs("openai")
+        kwargs = prepared_http_client_kwargs()
         prepared.append(bool(kwargs))
         if kwargs:
             clients.append(kwargs["http_client"])
@@ -154,7 +154,7 @@ async def test_admin_operations_use_prepared_client(monkeypatch, operation):
                 start_time=time.monotonic(),
             )
         assert prepared == [True]
-        assert prepared_http_client_kwargs("openai") == {}
+        assert prepared_http_client_kwargs() == {}
     finally:
         for client in clients:
             await client.aclose()

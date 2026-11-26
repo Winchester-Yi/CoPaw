@@ -63,8 +63,6 @@ _PROVIDER_API_SLOW_LOG_MS = 500
 ChatModelName = Literal[
     "OpenAIChatModel",
     "KimiChatModel",
-    "AnthropicChatModel",
-    "GeminiChatModel",
 ]
 
 # effective: agent-specific if set, otherwise global
