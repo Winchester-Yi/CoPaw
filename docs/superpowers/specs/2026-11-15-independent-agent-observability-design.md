@@ -22,6 +22,7 @@
 | 身份 | 沿用现有身份/manager/admin 判定；manager 当前 Source，admin 显式跨 Source；同范围可读正文 |
 | 开关 | 单一全局开关，默认关闭；新 Run 准入快照，后续 Attempt/SubAgent 继承 |
 | P0 执行 | 主对话、专家主执行、后台 SubAgent 基础关联与终态；Cron/独立 Workflow 放 P1 |
+| 模型适配器 | 模型请求埋点覆盖 OpenAI 兼容协议，包含基于该协议的 Kimi 分支。移除产品内置的 Ollama、Anthropic 和 Gemini 专用适配器 |
 | 质量 | 优先业务响应、允许有标记降级，不承诺 Span 零丢失 |
 | 刷新 | 手动刷新/有界轮询，无新实时推送通道 |
 
@@ -143,6 +144,8 @@ Run elapsed含审批等待，active time为Attempt活动区间并集；操作dur
 
 ## 9. 新 API 与页面
 
+Console 首版已确认 manager 和 admin 都在当前 Source 内完成从列表到证据的排查。交互及当前已实现的 API 映射见 [Swe Agent 可观测页面交互设计](2026-11-23-agent-observability-console-interaction.md)。
+
 前缀/agent-observability；所有数据API先应用现有身份判定和服务端manager当前Source/admin显式Source过滤，普通用户403，越界详情/正文与不存在统一404。admin跨Source须明确all_sources或列表，默认不自动全库。service_unit由后台允许范围约束，不让客户端任意指NAS根。
 
 - GET /capabilities：全局配置快照、只读可用性，不返回连接秘密。
@@ -165,6 +168,8 @@ Console使用独立“Agent可观测”入口：上方筛选/数据质量，执�
 
 页面路径采用 `/agent-observability/runs`、`/agent-observability/runs/{run_id}?attempt={attempt_id}&span={span_id}`，不依赖旧 Monitor 页。项目筛选映射服务端授权 Source，不新增 project 身份。默认 Run 总览，展开所选 Attempt 的真实 Span；Run/Attempt 导航条是 UI 结构，不伪造持久化 Span。父子需同 Run，跨 Attempt 的恢复关系使用 Link；未确认父关系不能按时间、名称或 step 猜。
 
+2026-11-23 已确认从列表打开详情默认展示 Run 最终状态和最近一次已观测的 Attempt。进行中的 Run 展示当前状态，带 Attempt 或 Span 的深链接优先恢复指定位置。
+
 ### 10.2 五表增量与投影字段
 
 保留五表，新列/索引均已进入 [DDL 草案](../../../.scratch/agent-observability/schema-draft.sql)，尚未执行：
@@ -182,6 +187,8 @@ Run的span_count/error_span_count统计已规范投影的唯一Span及has_error=
 请求模型与响应模型是不同字段；二者不同不构成冲突。model_key从请求模型回退值提升为已知响应模型时允许更新，并保留model_key_source=request_fallback|response；只有同一实际请求的同一身份字段出现互斥已知值才标conflict。一个逻辑模型容器跨请求尝试时不把多个实际模型硬合成一个身份，实际模型按请求Span展示。
 
 ### 10.3 埋点字段与事实边界
+
+聊天请求获取工作区时立即继续执行。正文证据恢复服务的初始化和工作区登记由后台完成，登记失败由后台重试。恢复服务就绪且当前工作区登记成功后，新产生的正文证据按现有规则关联。登记前已经持久化且可验证的证据信封仍可恢复，未留存关联的证据记录为 `not_saved`。模型元数据采集独立于正文证据登记。
 
 结束事件仍须自包含开始时间、操作身份、父关系、技术/业务结果及本操作有界摘要，开始丢失也能显示partial。同Span重复包装只生成一个事实槽；保持旧埋点及业务调用次序不变。以下是字段设计，不代表项目现在已经产出这些字段：
 
@@ -234,11 +241,17 @@ Span默认200/最多1000，事件默认100/最多500；单次响应JSON建议最
 
 持久化UTC DATETIME(6)，API给UTC带微秒字符串及相对所选视窗的offset_us；不向JavaScript传纳秒epoch Number。单调duration_us与墙钟起止不一致时分别保留并标clock_skew，end早于start等异常不改写成正常耗时。统一窗口取已知起止边界并包含后台晚结束；进行中延长至服务端observed_at，未知/缺结束用unknown/partial样式，不能仅因无end永远宣称仍在业务执行。浏览器可外推显示估计elapsed但不作为业务裁决。
 
-首有效chunk/首可见文本沿用第8节的真实定义；Provider未证明为首token时UI不将time_to_first_chunk标成精确TTFT。请求模型与实际模型分别展示。Input/Output Usage及合计仅在相应覆盖已知时给值，未知为—；不把父/子模型容器重复相加。成本仍是P1：没有执行时价格版本、币种与实际用量口径，本期隐藏成本列或显示unavailable，不按现价估算。
+首有效chunk/首可见文本沿用第8节的真实定义；Provider未证明为首token时UI不将time_to_first_chunk标成精确TTFT。请求模型与实际模型分别展示。成本仍是P1：没有执行时价格版本、币种与实际用量口径，本期隐藏成本列或显示unavailable，不按现价估算。
+
+Run 摘要按唯一模型请求尝试分别累加已获取的输入和输出 Token。两次请求中仅一次返回 20 个输入 Token 时，摘要显示 20。部分覆盖时标明数值为已观测用量。某项完全缺失时，API 返回 `null`。请求详情逐字段展示已知值，真实零值显示 `0`，缺失显示「未获取」。单次请求的 Token 合计在输入与输出均已获取时显示。
+
+请求级 Usage 上线前的历史 Run 如缺少请求级用量证据，相应的 Token 字段在 API 中返回 `null`，Console 留空。按已有请求级证据展示已知值，输入和输出分别判断。历史逻辑调用上的用量摘要不用于补算请求级用量，缺失值不计作零。
 
 视图的Tool命令预览、完整Prompt、原始异常堆栈、下载原文件、全部OTel attributes不是本期承诺。Loop/Context/Checkpoint支持安全类型化呈现，但只对项目真实边界埋点。Transcript、关键路径、原生OTel接入/导出、价格成本、反馈评测和新全文搜索不由本次视图对照自动进入P0。Chromium108与hideMenu兼容要求保持不变。
 
 ## 11. 实施顺序与验收
+
+模型请求埋点修复先完成 OpenAI 兼容适配器的请求事实采集、请求侧业务隔离和 MySQL 投影。首批 Console 交付 Run 摘要与单次模型请求详情，用同一条执行链路验收从模型调用到页面展示。跨 Run 性能总览中的模型请求次数、用量覆盖和首输出延迟分布安排在后续批次。
 
 1. 独立协议/全局配置/上下文/输出：关闭零正文工作量、队满不阻塞、取消不变、JSON白名单/UTF-8限额；旧可观测无导入依赖。
 2. MySQL DDL/readiness/inbox投影：样例导入、重复/不同ID同槽/冲突、乱序、并发、晚提交小ID、事务回滚；先实际数据库验DDL/索引。

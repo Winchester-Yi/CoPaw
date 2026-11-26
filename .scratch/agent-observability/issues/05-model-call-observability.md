@@ -14,17 +14,41 @@ Priority: P0
 
 依据已确认的独立可观测设计、Trace视图对照、领域词汇及ADR 0047/0048。与旧SDK、旧埋点、旧追踪ID和旧可观测存储查询没有运行依赖；只输出元数据，正文仅经现有业务授权从NAS读取。采集由用户处理，本票不增加ES、TTL/清理或新身份体系；授权仍沿用项目已有身份判定。
 
+模型请求埋点验收范围为 OpenAI 兼容协议，覆盖通用适配器及基于同一适配器的 Kimi 分支。Ollama、Anthropic 和 Gemini 专用适配器从产品移除，涉及注册、配置解析、模型工厂及调用方。生产环境未使用这三个适配器。本次仅移除适配器及其产品入口，无存量配置迁移。
+
 - [ ] 观察点位于实际模型调用边界，分别定义逻辑调用与本项目可见请求尝试；保留后续重试扩展身份，不能把一次reasoning包装等同一次物理请求。
 - [ ] 从真实流式与非流式请求到独立日志、Span投影、API、LLM Inspector和Run摘要完成闭环；审批/计划等无请求短路不计llm_calls。
 - [ ] 记录受控provider、请求模型、响应模型、streaming和finish reason；响应模型补齐可替换请求回退索引值并保留来源，二者不同不标身份冲突。
 - [ ] 首有效chunk排除空启动与usage-only帧，首可见文本另计；无输出为null，非流式不伪造TTFT，未证明为首token时页面不称精确TTFT。
 - [ ] Usage取真实最终/最新累计快照，不逐帧相加，不重复统计父逻辑容器和请求操作，不默认把推理Token额外加进输出；未知input/output分别保持null并展示覆盖。
+- [ ] 两次模型请求中仅一次返回 20 个输入 Token 时，Run 摘要显示已观测的 20。单次请求详情对已知值直接显示，对缺失项显示「未获取」，输入和输出分别判断。全部缺失时对应 Run 指标返回 `null`。
+- [ ] 验证上线前的历史 Run 在缺少请求级用量证据时，API 返回 `null`，Console 对相应 Token 字段留空。存在可信请求级证据时展示已知值，输入和输出分别判断。
 - [x] 只记录真实存在的Reasoning Step ordinal，不创建假Step/Loop区间；Span与后续详情使用相同的 `step_index`。
 - [x] 独立定义并验证实际Agent Loop汇总口径；retry上限、物理请求次数和缺失Step不能冒充完整Loop数。
 - [ ] 测试流式取消、异常、无输出、Usage缺失、实际模型变化与并发上下文；日志/Raw不包含prompt、messages或响应文本，成本保持P1。
 - [ ] 验证LLM类型详情在Chromium108、当前浏览器及适用嵌入场景正常展示。
 
+首批 Console 验收覆盖 Run 摘要与单次模型请求详情。用包含重试、取消和缺失用量的 OpenAI 兼容模型执行链路，核对 JSONL、MySQL 投影、授权 API 与页面展示。跨 Run 模型性能指标在后续批次验收。
+
+首批实施范围、事项依赖及完成标准见[模型请求可观测首批 Spec](../../model-request-observability/spec.md)。
+
 验收环境不可用时必须明确记录未验证项，不以构建成功或新浏览器模拟替代真实Chromium108验收。
+
+## 生产 OpenAI 兼容流式响应样例
+
+以下三帧来自用户提供的实际模型响应末尾，作为适配器开发和回归测试的输入。
+
+```text
+data: {"id":"chatcmpl-338dcace-b8de-4335-9a0e-18b2a5851675","object":"chat.completion.chunk","created":1795597418,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"。"},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}]}
+
+data: {"id": "chatcmpl-338dcace-b8de-4335-9a0e-18b2a5851675", "object": "chat.completion.chunk", "created": 1795597418, "model": "deepseek-v4-flash", "choices": [], "usage": {"prompt_tokens": 333, "total_tokens": 344, "completion_tokens": 11, "prompt_tokens_details": {"cached_tokens": 0}}, "system_fingerprint": "vllm-0.25.1-dp16-ep-9c255410"}
+
+data: [DONE]
+```
+
+- 同一请求的文本帧携带 `finish_reason=stop`，后续 `choices: []` 帧携带最终 Usage。流按现有语义继续消费至 `[DONE]`，请求结算同时保留实际模型 `deepseek-v4-flash`、结束原因 `stop`、输入 Token 333、输出 Token 11、合计 344。
+- 在回归样例前加一帧有效文本时，首有效 chunk 和首可见文本应取该较早的帧。`choices: []` 用量帧和 `[DONE]` 均排除在首输出计时之外。
+- 增加在收到用量帧前取消的变体。若此前未收到 Usage，请求详情显示「未获取」。响应正文只用于测试适配器的业务输出，观测 JSONL 仅验证受控元数据。
 
 ## Comments
 
