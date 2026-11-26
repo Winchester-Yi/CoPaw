@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Async generator wrapper with cleanup before the first iteration."""
 
 from collections.abc import AsyncGenerator, Awaitable, Callable

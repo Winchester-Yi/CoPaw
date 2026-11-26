@@ -151,7 +151,10 @@ class TracingModelWrapper:
                 if span_id:
                     return CloseAwareStream(
                         self._wrap_stream(
-                            result, trace_ctx, trace_mgr, span_id
+                            result,
+                            trace_ctx,
+                            trace_mgr,
+                            span_id,
                         ),
                         result.aclose,
                     )

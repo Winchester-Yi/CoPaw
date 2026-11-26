@@ -618,7 +618,8 @@ class _ModelRequest:
         if not visible_text and not _has_model_output(value):
             return
         elapsed = max(
-            0, (time.monotonic_ns() - self.span._started_clock) // 1000
+            0,
+            (time.monotonic_ns() - self.span._started_clock) // 1000,
         )
         self.metrics.setdefault("first_chunk_us", elapsed)
         if visible_text:
@@ -793,7 +794,7 @@ def observe_openai_response(value: Any) -> None:
         )
         choices = getattr(value, "choices", None)
         request.output_frame = bool(choices)
-        if request.output_frame:
+        if choices:
             choice = choices[0]
             delta = getattr(choice, "delta", None)
             if delta is not None:
@@ -802,7 +803,7 @@ def observe_openai_response(value: Any) -> None:
                     or getattr(delta, "reasoning_content", None)
                     or getattr(delta, "reasoning", None)
                     or getattr(delta, "tool_calls", None)
-                    or getattr(delta, "audio", None)
+                    or getattr(delta, "audio", None),
                 )
             finish_reason = getattr(choice, "finish_reason", None)
             if isinstance(finish_reason, str) and finish_reason in {
@@ -1065,7 +1066,9 @@ def _token_counts(
 
 def _usage_metrics(value: Any) -> dict[str, int]:
     return _token_counts(
-        _get_field(value, "usage"), "input_tokens", "output_tokens"
+        _get_field(value, "usage"),
+        "input_tokens",
+        "output_tokens",
     )
 
 

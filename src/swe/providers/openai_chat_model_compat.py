@@ -41,7 +41,8 @@ class _ObservableOpenAICompletions:
     async def create(self, **kwargs: Any) -> Any:
         streaming = bool(kwargs.get("stream"))
         record_openai_request(
-            streaming=streaming, request_model=kwargs["model"]
+            streaming=streaming,
+            request_model=kwargs["model"],
         )
         response = await self._completions.create(**kwargs)
         close = getattr(response, "close", None)
@@ -50,7 +51,9 @@ class _ObservableOpenAICompletions:
 
             async def close_response() -> None:
                 if not getattr(
-                    getattr(response, "response", None), "is_closed", False
+                    getattr(response, "response", None),
+                    "is_closed",
+                    False,
                 ):
                     await close()
 
@@ -78,7 +81,8 @@ class _ObservableStructuredStream:
     async def __aenter__(self) -> Any:
         self._manager = self._completions.stream(**self._kwargs)
         record_openai_request(
-            streaming=True, request_model=self._kwargs["model"]
+            streaming=True,
+            request_model=self._kwargs["model"],
         )
         return await self._manager.__aenter__()
 

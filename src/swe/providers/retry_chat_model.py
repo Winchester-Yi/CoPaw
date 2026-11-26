@@ -499,9 +499,9 @@ class RetryChatModel(ChatModelBase):
                     # retries on stream failure.
                     owns_semaphore = False
 
-                    async def close_unstarted() -> None:
+                    async def close_unstarted(source=result) -> None:
                         try:
-                            await result.aclose()
+                            await source.aclose()
                         finally:
                             limiter.release()
 
@@ -606,7 +606,9 @@ class RetryChatModel(ChatModelBase):
         await asyncio.sleep(delay)
 
     async def _notify_request_attempt(
-        self, attempt: int, kwargs: dict
+        self,
+        attempt: int,
+        kwargs: dict,
     ) -> None:
         if self._on_request_attempt is None:
             return
@@ -732,7 +734,7 @@ class RetryChatModel(ChatModelBase):
                     self._consume_stream_with_usage(
                         stream,
                         limiter,
-                    )
+                    ),
                 ) as chunks:
                     async for chunk, chunk_usable in chunks:
                         has_usable_output = has_usable_output or chunk_usable
@@ -772,7 +774,8 @@ class RetryChatModel(ChatModelBase):
                     acquired = True
 
                     await self._notify_request_attempt(
-                        call_attempt, call_kwargs
+                        call_attempt,
+                        call_kwargs,
                     )
                     result = await asyncio.wait_for(
                         self._inner(*call_args, **call_kwargs),
@@ -786,7 +789,7 @@ class RetryChatModel(ChatModelBase):
                             self._consume_stream_with_usage(
                                 result,
                                 limiter,
-                            )
+                            ),
                         ) as chunks:
                             async for chunk, chunk_usable in chunks:
                                 has_usable_output = (

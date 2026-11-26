@@ -154,7 +154,8 @@ class KimiChatModel(OpenAIChatModelCompat):
 
                 yield self._normalize_kimi_response(parsed)
 
-    def _parse_openai_stream_response(
+    # Return the close-aware stream before its first iteration.
+    def _parse_openai_stream_response(  # pylint: disable=invalid-overridden-method
         self,
         start_datetime: datetime,
         response: Any,
