@@ -23,6 +23,8 @@ from swe.observability.instrumentation import (
     _system_prompt_digest,
     record_model_request_attempt,
 )
+from swe.observability.models import MetadataEvent
+from swe.observability.projector import _validate_payload
 from swe.providers.retry_chat_model import (
     RateLimitConfig,
     RetryChatModel,
@@ -1634,6 +1636,69 @@ def test_queue_budget_counts_in_flight_event_and_shutdown_is_bounded():
     remaining = emitter.close(timeout=0.01)
     assert remaining == 1
     stream.release.set()
+    emitter.close()
+
+
+def test_health_reports_accumulated_drops_after_writer_unblocks(monkeypatch):
+    monkeypatch.setattr(
+        "swe.observability.emitter._HEALTH_INTERVAL_SECONDS",
+        600,
+    )
+    health_written = threading.Event()
+
+    class HealthStream(BlockingStream):
+        def write(self, value):
+            written = super().write(value)
+            if json.loads(value)["event_name"] == "observer.health":
+                health_written.set()
+            return written
+
+    stream = HealthStream()
+    emitter = JsonlEmitter(EmitterConfig(max_queue_events=2), stream=stream)
+    try:
+        context = ObservabilityContext.new_run(
+            scope=Scope("unit", "src", "tenant", "agent"),
+            capture_enabled=True,
+        )
+        event = MetadataEvent(
+            "run.accepted",
+            context,
+            "run",
+            context.obs_run_id,
+            "accepted",
+            0,
+            {"started_at": context.run_started_at},
+        )
+        assert emitter.emit(event)
+        assert stream.entered.wait(1)
+        assert emitter.emit(event)
+        assert not emitter.emit({"event_name": "observer.health"})
+        assert not emitter.emit(event)
+        assert emitter.dropped_count == 2
+        stream.release.set()
+        assert health_written.wait(1)
+        assert not emitter.emit_raw(b"invalid")
+        assert emitter.dropped_count == 3
+    finally:
+        stream.release.set()
+        assert emitter.close() == 0
+
+    accepted, first, queued, final = map(
+        _validate_payload,
+        stream.getvalue().splitlines(),
+    )
+    assert accepted["event_name"] == "run.accepted"
+    assert queued == accepted
+    assert [first["local_seq"], final["local_seq"]] == [0, 1]
+    assert first["entity_id"] == final["entity_id"]
+    assert (
+        first["producer_id"] == final["producer_id"] == accepted["producer_id"]
+    )
+    assert first["event_name"] == final["event_name"] == "observer.health"
+    assert first["metrics"] == {"dropped_events": 2}
+    assert final["metrics"] == {"dropped_events": 3}
+    assert "obs_run_id" not in first
+    assert "scope" not in first
 
 
 def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
@@ -1692,7 +1757,9 @@ def test_emit_raw_forwards_child_lines_and_rejects_bad_payloads():
     assert emitter.emit_raw(b'{"ok":1}' + b"x" * (24 * 1024)) is False
     emitter.close()
 
-    assert json.loads(stream.getvalue()) == expected
+    forwarded, *health = map(json.loads, stream.getvalue().splitlines())
+    assert forwarded == expected
+    assert health[-1]["metrics"] == {"dropped_events": 4}
     assert emitter.dropped_count == 4
 
 

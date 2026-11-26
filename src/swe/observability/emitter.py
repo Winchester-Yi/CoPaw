@@ -13,11 +13,12 @@ from typing import Any, TextIO
 from uuid import uuid4
 
 from .config import EmitterConfig
-from .models import MetadataEvent
+from .models import MetadataEvent, new_id
 
+_HEALTH_INTERVAL_SECONDS = 30.0
 _ALLOWED_KEYS = frozenset(
     "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at attempt_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics delay_ms quality model tool asset asset_type asset_id asset_version asset_digest asset_source approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind event_type relation_type duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key tool_call_id tool_execution_id executor_kind timeout_budget_ms retry_index exit_code request_attempt_index skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
-) | {"no_request_attempts"}
+) | {"dropped_events", "no_request_attempts"}
 _FORBIDDEN_KEYS = frozenset(
     "prompt messages input output content body text query parameters arguments result exception traceback api_key password secret".split(),
 )
@@ -182,6 +183,8 @@ class JsonlEmitter:
         self._outstanding_bytes = 0
         self._outstanding_events = 0
         self._dropped = 0
+        self._observer_id = new_id()
+        self._health_seq = 0
         self._closed = False
         self._thread = threading.Thread(
             target=self._write_loop,
@@ -276,6 +279,7 @@ class JsonlEmitter:
                 > self.config.max_queue_bytes
             ):
                 self._dropped += 1
+                self._condition.notify()
                 return False
             self._queue.append(payload)
             self._outstanding_events += 1
@@ -307,26 +311,104 @@ class JsonlEmitter:
     def _drop(self) -> None:
         with self._condition:
             self._dropped += 1
+            self._condition.notify()
+
+    def _health_payload(self, dropped: int) -> bytes:
+        try:
+            event = MetadataEvent(
+                event_name="observer.health",
+                obs_context=None,
+                entity_kind="observer",
+                entity_id=self._observer_id,
+                phase_key="health",
+                local_seq=self._health_seq,
+                attributes={"metrics": {"dropped_events": dropped}},
+            )
+            payload = (
+                json.dumps(
+                    _project(event.to_dict()),
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+        except Exception:
+            return b""
+        if len(payload) > min(
+            self.config.max_event_bytes,
+            self.config.max_queue_bytes,
+        ):
+            return b""
+        self._health_seq += 1
+        return payload
 
     def _write_loop(self) -> None:
+        payload = b""
+        health_count = None
+        final_health = False
+        written = False
+        reported = 0
+        next_health_at = 0.0
         while True:
             with self._condition:
-                while not self._queue and not self._closed:
-                    self._condition.wait()
-                if not self._queue and self._closed:
+                if payload:
+                    self._outstanding_events -= 1
+                    self._outstanding_bytes -= len(payload)
+                    self._condition.notify_all()
+                    if health_count is not None:
+                        if written:
+                            reported = health_count
+                        next_health_at = (
+                            time.monotonic() + _HEALTH_INTERVAL_SECONDS
+                        )
+                    elif not written:
+                        self._dropped += 1
+                if final_health:
                     return
-                payload = self._queue.popleft()
+                payload, health_count = self._next_write(
+                    reported,
+                    next_health_at,
+                )
+                if not payload:
+                    return
+                final_health = self._closed and health_count is not None
+            written = False
             try:
                 self._stream.write(payload.decode("utf-8"))
                 self._stream.flush()
             except Exception:
-                with self._condition:
-                    self._dropped += 1
-            finally:
-                with self._condition:
-                    self._outstanding_events -= 1
-                    self._outstanding_bytes -= len(payload)
-                    self._condition.notify_all()
+                pass
+            else:
+                written = True
+
+    def _next_write(
+        self,
+        reported: int,
+        next_health_at: float,
+    ) -> tuple[bytes, int | None]:
+        """Select the next record with the condition lock held."""
+        while True:
+            delay = None
+            if self._dropped > reported:
+                delay = next_health_at - time.monotonic()
+                final = self._closed and not self._queue
+                due = not self._closed and delay <= 0
+                if (final or due) and (
+                    self._outstanding_events < self.config.max_queue_events
+                ):
+                    health = self._health_payload(self._dropped)
+                    if health and (
+                        self._outstanding_bytes + len(health)
+                        <= self.config.max_queue_bytes
+                    ):
+                        self._outstanding_events += 1
+                        self._outstanding_bytes += len(health)
+                        return health, self._dropped
+                    delay = _HEALTH_INTERVAL_SECONDS
+            if self._queue:
+                return self._queue.popleft(), None
+            if self._closed:
+                return b"", None
+            self._condition.wait(delay)
 
     def close(self, timeout: float | None = None) -> int:
         wait_for = (
