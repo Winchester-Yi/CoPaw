@@ -655,9 +655,7 @@ class ObservabilityStore:
             )
             params.extend([span_id, span_id])
         if links_only:
-            query += (
-                " AND JSON_LENGTH(JSON_EXTRACT(metadata_text,'$.links')) > 0"
-            )
+            query = _deduplicate_event_links(query)
         if before:
             query += " AND (occurred_at < %s OR (occurred_at = %s AND event_id < %s))"
             params.extend([before[0], before[0], before[1]])
@@ -1166,6 +1164,38 @@ _SUBAGENT_API_FIELDS = (
     "execution_agent_key",
     "result_status",
 )
+
+
+def _deduplicate_event_links(scoped_events: str) -> str:
+    # Choose one event per source/type/target before applying the page cursor.
+    # Keep the original event envelope and only replace its links array.
+    return (
+        "WITH scoped_events AS ("
+        + scoped_events
+        + " AND JSON_LENGTH(JSON_EXTRACT(metadata_text,'$.links')) > 0), "
+        "ranked_links AS ("
+        "SELECT event_id, links.link_index, "
+        "ROW_NUMBER() OVER ("
+        "PARTITION BY entity_kind,entity_id,links.relation_type,"
+        "links.target_span_id,links.target_attempt_id "
+        "ORDER BY occurred_at DESC,event_id DESC,links.link_index ASC"
+        ") AS edge_rank "
+        "FROM scoped_events JOIN JSON_TABLE(CAST(metadata_text AS JSON), '$.links[*]' COLUMNS ("
+        "link_index FOR ORDINALITY,"
+        "relation_type VARCHAR(32) PATH '$.relation_type',"
+        "target_span_id CHAR(36) PATH '$.obs_span_id',"
+        "target_attempt_id CHAR(36) PATH '$.obs_attempt_id'"
+        ")) AS links), "
+        "unique_event_links AS ("
+        "SELECT ranked_links.event_id, JSON_ARRAYAGG(JSON_EXTRACT(metadata_text,"
+        "CONCAT('$.links[',link_index-1,']'))) AS links "
+        "FROM ranked_links JOIN scoped_events USING (event_id) "
+        "WHERE edge_rank=1 GROUP BY ranked_links.event_id) "
+        "SELECT /*+ MAX_EXECUTION_TIME(5000) */ event_id,event_name,entity_kind,entity_id,"
+        "attempt_id,phase_key,local_seq,occurred_at,"
+        "JSON_SET(metadata_text,'$.links',unique_event_links.links) AS metadata_text "
+        "FROM scoped_events JOIN unique_event_links USING (event_id) WHERE 1=1"
+    )
 
 
 def _span_search_where(

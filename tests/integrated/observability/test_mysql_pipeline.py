@@ -1838,19 +1838,21 @@ def _emit_retry_events():
                         streaming=True,
                     )
                 if span_index == 2:
+                    retry_link = {
+                        "relation_type": "retry_of",
+                        "obs_span_id": span_ids[0],
+                    }
                     span.event(
                         "link.added",
                         links=[
-                            {
-                                "relation_type": "retry_of",
-                                "obs_span_id": span_ids[0],
-                            },
+                            retry_link,
                             {
                                 "relation_type": "cause",
                                 "obs_span_id": str(uuid4()),
                             },
                         ],
                     )
+                    span.event("link.added", links=[retry_link, retry_link])
     assert emitter.close(timeout=1) == 0
     return context.obs_run_id, [
         json.loads(line) for line in sink.getvalue().splitlines()
@@ -1988,7 +1990,12 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
                 "integration-cursor-secret-at-least-32",
             )
             pages = await _read_event_pages(client, run_id)
-            links = await _read_event_pages(client, run_id, view="links")
+            links = await _read_event_pages(
+                client,
+                run_id,
+                view="links",
+                limit=1,
+            )
             all_events = await _read_event_pages(client, run_id, limit=500)
             span_pages = await _read_span_pages(client, run_id)
             hidden = await client.get(
@@ -2019,8 +2026,11 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
             )
             == 36
         )
-        assert len(links) == 1
-        assert links[0]["metadata"].get("event_type") == "link.added"
+        assert len(links) == 2
+        assert all(
+            item["metadata"].get("event_type") == "link.added"
+            for item in links
+        )
         assert len(all_events) == len(records)
         span_ids = {
             record["entity_id"]
@@ -2037,20 +2047,9 @@ async def test_mysql_event_api_pages_more_than_one_event_array(monkeypatch):
             for item in pages
             if item["event_name"] == "span.event"
         )
-        link_event = next(
-            item
-            for item in pages
-            if item["metadata"].get("event_type") == "link.added"
-        )
-        assert link_event["metadata"]["links"] == [
-            {
-                "relation_type": "retry_of",
-                "obs_span_id": first_span_id,
-            },
-            {
-                "relation_type": "cause",
-                "target_unavailable": True,
-            },
+        assert [item["metadata"]["links"] for item in links] == [
+            [{"relation_type": "retry_of", "obs_span_id": first_span_id}],
+            [{"relation_type": "cause", "target_unavailable": True}],
         ]
         assert len(span_pages) == 3
         assert len({span["span_id"] for span in span_pages}) == 3
@@ -2870,14 +2869,14 @@ def _assert_retry_recovery_detail(detail, link_pages):
     assert request_attempts[0]["status"] == "failed"
     assert request_attempts[0]["error_type"] == "TransientProviderError"
     assert request_attempts[1]["status"] == "succeeded"
-    retry_link = next(
+    [retry_link] = [
         item
         for item in link_pages
         if any(
             link.get("relation_type") == "retry_of"
             for link in item["metadata"].get("links", [])
         )
-    )
+    ]
     assert retry_link["entity_id"] == request_attempts[1]["span_id"]
     assert retry_link["metadata"]["links"] == [
         {
@@ -2886,12 +2885,12 @@ def _assert_retry_recovery_detail(detail, link_pages):
         },
     ]
     first, second = (span["span_id"] for span in request_attempts)
-    assert {
+    assert sorted(
         (link["relation_type"], link["obs_span_id"])
         for item in link_pages
         if item["entity_id"] == first
         for link in item["metadata"].get("links", [])
-    } == {("retry_next", second), ("recovered_by", second)}
+    ) == [("recovered_by", second), ("retry_next", second)]
 
 
 @pytest.mark.asyncio
@@ -2962,6 +2961,7 @@ async def test_mysql_performance_counts_logical_calls_separately_from_attempts(
                 client,
                 run_id,
                 view="links",
+                limit=1,
             )
         assert response.status_code == 200, response.text
         assert assets_response.status_code == 200, assets_response.text
