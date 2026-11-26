@@ -1877,6 +1877,8 @@ it("marks backend error conditions and identifies unlisted span types", async ()
     { name: "technical", technical_status: "ERROR" },
     { name: "rejected", status: "rejected" },
     { name: "other", span_type: "Guard" },
+    { name: "timeout", status: "timed_out" },
+    { name: "timeout with error", status: "timed_out", has_error: 1 },
   ].map((item, index) => ({
     span_id: `s${index}`,
     attempt_id: "a1",
@@ -1900,7 +1902,12 @@ it("marks backend error conditions and identifies unlisted span types", async ()
     ),
   );
   mount("/agent-observability/runs/abc");
-  for (const name of ["flagged", "technical", "rejected"]) {
+  for (const name of [
+    "flagged",
+    "technical",
+    "rejected",
+    "timeout with error",
+  ]) {
     const row = await screen.findByRole("treeitem", { name: new RegExp(name) });
     expect(within(row).getByText("异常")).toBeInTheDocument();
     expect(
@@ -1908,6 +1915,8 @@ it("marks backend error conditions and identifies unlisted span types", async ()
         .backgroundColor,
     ).toBe("rgb(224, 77, 107)");
   }
+  const timeout = screen.getByText("timeout").closest<HTMLElement>('[role="treeitem"]')!;
+  expect(within(timeout).queryByText("异常")).not.toBeInTheDocument();
   const other = screen.getByRole("treeitem", { name: /other/ });
   expect(
     (other.querySelector('[style*="background-color"]') as HTMLElement).style

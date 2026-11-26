@@ -87,9 +87,7 @@ const isErrorSpan = (span: Span) =>
   span.has_error === true ||
   span.has_error === 1 ||
   String(span.technical_status || "").toUpperCase() === "ERROR" ||
-  ["error", "failed", "rejected", "timed_out"].includes(
-    (span.status || "").toLowerCase(),
-  );
+  ["failed", "rejected"].includes((span.status || "").toLowerCase());
 
 const requestFields: [string, string][] = [
   ["request_attempt_index", "请求序号"],
