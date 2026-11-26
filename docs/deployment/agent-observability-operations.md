@@ -20,9 +20,9 @@ outbox 保存的是随实际消息一起提交的签名事件信封和引用，�
 
 ## 故障与降级
 
-- 初始化缺少观测库、恢复表/ACK 索引、service unit 或有效密钥时，恢复门禁关闭，后台每 5 秒重试初始化；scope 登记失败也不会开放该 scope 的门禁。请求侧有界等待登记，失败或超时后业务继续。工具结果及答案无法安全留存关联时会发 `not_saved` 元数据，页面显示“未留存”；此降级事件也依赖 JSONL emitter 和下游采集，若它们不可用，状态本身可能缺失。
+- 观测库初始化、scope 登记和重试在后台运行。聊天请求直接继续，启用采集时模型元数据仍会写 stdout。初始化缺少观测库、恢复表、ACK 索引、service unit 或有效密钥时，后台每 5 秒重试。scope 成功登记后，新保存的工具结果和答案可以建立证据关联。无法安全留存关联时发出 `not_saved` 元数据，事件仍依赖 emitter 和下游采集。
 - 恢复读取配置和解析工作区路径在独立线程执行，每个 scope 等待最多 5 秒，超时后调度其他 scope；同一路径和 Agent 的在途读取不会重复提交，整个进程最多同时执行两次读取，不排队。底层 NAS 系统调用无法被线程超时或取消中断；若两个读取均持续卡住，配置恢复会暂时全部跳过并重试，且 Python 进程退出时可能等待这些线程。应恢复 NAS 连接；若无法恢复，按容器运维流程强制结束实例。
-- 检查容器 stdout/stderr 中的 `Evidence recovery unavailable`、`Evidence recovery registration failed`、`Evidence capture is unavailable for this request`、`Evidence scope recovery failed`、`Evidence outbox recovery cycle failed`、`Evidence outbox replay was not accepted`、`Evidence outbox backlog` 和 `Evidence outbox record failed verification`。日志只给有限诊断，不输出正文或密钥；结合观测库连通性、表索引、collector、workspace 根/authority 和密钥配置定位。
+- 检查容器 stdout/stderr 中的 `Evidence recovery unavailable`、`Evidence recovery registration failed`、`Evidence scope recovery failed`、`Evidence outbox recovery cycle failed`、`Evidence outbox replay was not accepted`、`Evidence outbox backlog` 和 `Evidence outbox record failed verification`。结合观测库连通性、表索引、collector、workspace 根、authority 和密钥配置定位。
 - 恢复扫描的内部归档游标可跨实例接管；旧版或失效游标会从归档开头重新扫描，重复投递仍以事件 ID 和 inbox ACK 去重。`Evidence outbox checkpoint reset`、`Evidence outbox Chat cursor reset` 和 `Evidence outbox archive cursor reset` 表示扫描位置已重置。`Evidence outbox chat scan failed` 表示该 Chat 的损坏或读取错误，本轮会继续扫描其他 Chat，并在下一完整轮次重试；持续出现时须修复对应存储，不能将跳过视为 ACK。离线迁移核验仍会对损坏数据直接失败。
 - `Evidence recovery skipped invalid Chat directory entry` 或 `Evidence recovery skipped ambiguous Chat directory entry` 表示目录记录损坏或 ID 不唯一。后台恢复会跳过这些记录并继续处理可验证的 Chat，之后每轮重新检查；须修复原始目录才能恢复被跳过的记录。整个目录无法解析，或数据库行的分页身份本身损坏时，恢复暂停该 scope 并重试；离线迁移仍要求完整目录有效且无重复。
 - `pending` 可表示事件已观测但消息尚未证明提交；`not_saved` 表示未留存关联；`unresolved` 表示身份不唯一或不匹配；`unavailable` 表示当前无法读取；`compacted` 表示正文在归档。删除、损坏、大小/扫描上限、权限或历史记录缺少可证明关联，都可能使正文不可用。不能将缺失事件或正文当作业务执行失败的证明。

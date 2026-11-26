@@ -126,7 +126,6 @@ class MultiAgentManager:
         self._workflow_config_store = workflow_config_store
         self._continuous_governance_service = continuous_governance_service
         self._outbox_register = None
-        self._outbox_initialization = None
         self._outbox_tasks = {}
         self._outbox_registered = {}
         logger.debug("MultiAgentManager initialized")
@@ -140,9 +139,6 @@ class MultiAgentManager:
         if register is not None:
             for key, workspace in self.agents.items():
                 self._schedule_outbox_registration(key, workspace)
-
-    def set_outbox_initialization(self, task) -> None:
-        self._outbox_initialization = task
 
     def _schedule_outbox_registration(self, key, workspace):
         if self._outbox_register is None:
@@ -188,51 +184,6 @@ class MultiAgentManager:
                 self._outbox_tasks.pop(key, None)
 
         task.add_done_callback(done)
-
-    async def _wait_outbox_registration(self, key, workspace):
-        deadline = asyncio.get_running_loop().time() + 1.0
-        initialization = self._outbox_initialization
-        if self._outbox_register is None and initialization is not None:
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(initialization),
-                    timeout=1.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Evidence capture is unavailable for this request",
-                )
-                return
-            except asyncio.CancelledError:
-                if (
-                    not initialization.cancelled()
-                    or asyncio.current_task().cancelling()
-                ):
-                    raise
-                return
-            except Exception:
-                logger.warning(
-                    "Evidence recovery initialization failed for this request",
-                )
-                return
-        self._schedule_outbox_registration(key, workspace)
-        task = self._outbox_tasks.get(key)
-        if task is not None:
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(task),
-                    timeout=max(
-                        0,
-                        deadline - asyncio.get_running_loop().time(),
-                    ),
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Evidence capture is unavailable for this request",
-                )
-            except asyncio.CancelledError:
-                if not task.cancelled() or asyncio.current_task().cancelling():
-                    raise
 
     def set_source_system_config_service(
         self,
@@ -317,13 +268,11 @@ class MultiAgentManager:
                 self._agent_start_eviction_protected_keys.add(cache_key)
 
         if instance is not None:
-            await self._wait_outbox_registration(cache_key, instance)
             return instance
 
         assert start_task is not None
         try:
             instance = await asyncio.shield(start_task)
-            await self._wait_outbox_registration(cache_key, instance)
             await self._evict_workspace_cache(protected_keys={cache_key})
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             logger.debug(
@@ -1120,7 +1069,6 @@ class MultiAgentManager:
 
         outbox_tasks = list(self._outbox_tasks.values())
         self.set_outbox_register(None)
-        self.set_outbox_initialization(None)
         if outbox_tasks:
             await asyncio.gather(*outbox_tasks, return_exceptions=True)
         await self.stop_workspace_cleanup_loop()

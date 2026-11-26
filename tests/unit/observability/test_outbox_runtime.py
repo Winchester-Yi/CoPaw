@@ -689,7 +689,7 @@ async def test_start_supervisor_retries_schema_failure_then_succeeds(
 
 
 @pytest.mark.asyncio
-async def test_first_workspace_request_waits_for_registration_commit():
+async def test_first_workspace_request_finishes_before_registration_commit():
     import asyncio
     from swe.app.multi_agent_manager import MultiAgentManager
 
@@ -707,18 +707,19 @@ async def test_first_workspace_request_waits_for_registration_commit():
         await commit.wait()
 
     manager.set_outbox_register(register)
-    request = asyncio.create_task(manager.get_agent("agent"))
     await entered.wait()
-    await asyncio.sleep(0)
-    assert not request.done()
+    assert (
+        await asyncio.wait_for(manager.get_agent("agent"), 0.25) is workspace
+    )
+    registration = manager._outbox_tasks["agent"]
     commit.set()
-    assert await request is workspace
+    await registration
     assert manager._outbox_registered["agent"]() is workspace
     manager.set_outbox_register(None)
 
 
 @pytest.mark.asyncio
-async def test_workspace_request_degrades_on_registration_timeout_then_recovers():
+async def test_workspace_registration_retries_in_background(monkeypatch):
     import asyncio
     from swe.app.multi_agent_manager import MultiAgentManager
 
@@ -729,33 +730,61 @@ async def test_workspace_request_degrades_on_registration_timeout_then_recovers(
     manager = MultiAgentManager()
     manager.agents["agent"] = workspace
     commit = asyncio.Event()
+    retry = asyncio.Event()
+    calls = 0
 
     async def register(_workspace):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("registration unavailable")
         await commit.wait()
 
+    async def retry_delay(seconds):
+        assert seconds == 5
+        retry.set()
+
+    monkeypatch.setattr(asyncio, "sleep", retry_delay)
     manager.set_outbox_register(register)
+    registration = manager._outbox_tasks["agent"]
+    await retry.wait()
     assert await manager.get_agent("agent") is workspace
     assert "agent" not in manager._outbox_registered
     commit.set()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await registration
+    assert calls == 2
     assert manager._outbox_registered["agent"]() is workspace
     assert await manager.get_agent("agent") is workspace
     manager.set_outbox_register(None)
 
 
 @pytest.mark.asyncio
-async def test_request_waits_for_production_supervisor_and_scope_commit(
+async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
     monkeypatch,
     tmp_path,
 ):
     import asyncio
     from contextlib import asynccontextmanager
+    from io import StringIO
+    from uuid import uuid4
+    from agentscope.message import Msg
     from swe.app import _app
     from swe.app.multi_agent_manager import MultiAgentManager
     from swe.observability import outbox_recovery
+    from swe.observability.config import EmitterConfig
+    from swe.observability.context import bind_context
+    from swe.observability.emitter import JsonlEmitter
+    from swe.observability.instrumentation import (
+        Observability,
+        ObservabilityModelWrapper,
+        mark_pending_message_evidence,
+    )
+    from swe.observability.models import Scope
+    from swe.observability.outbox import verify_event
 
     monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "test-key")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
 
     scope = WorkspaceScope("t", "s", "a", service_unit_id="unit")
     scope_dict = dict(
@@ -815,7 +844,6 @@ async def test_request_waits_for_production_supervisor_and_scope_commit(
     class Workspace:
         workspace_dir = tmp_path
 
-    monkeypatch.setattr("swe.observability.outbox._keys", lambda: None)
     monkeypatch.setattr(
         "swe.app.conversation_storage.runtime.resolved_scope",
         lambda *_args, **_kwargs: scope,
@@ -837,23 +865,80 @@ async def test_request_waits_for_production_supervisor_and_scope_commit(
     manager = MultiAgentManager()
     workspace = Workspace()
     manager.agents["agent"] = workspace
+    sink = StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=sink)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = (
+        Observability()
+        .prepare_run(
+            scope=Scope("unit", "s", "t", "a"),
+            business_ref={"chat_id": "chat"},
+            enabled=True,
+        )
+        .with_updates(workspace_binding=(str(tmp_path), "legacy"))
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, _messages):
+            return SimpleNamespace(
+                id=str(uuid4()),
+                content=[{"type": "text", "text": "internal body"}],
+            )
+
+    async def model_answer():
+        with bind_context(context):
+            response = await ObservabilityModelWrapper(
+                Model(),
+                provider_key="provider",
+                model_key="model",
+            )([])
+            message = Msg("assistant", response.content, "assistant")
+            message.invocation_id = response.id
+            mark_pending_message_evidence(message)
+        return message
+
     supervisor = asyncio.create_task(
         _app._supervise_evidence_recovery(app, manager, None),
     )
-    manager.set_outbox_initialization(supervisor)
-    request = asyncio.create_task(manager.get_agent("agent"))
-    await asyncio.sleep(0)
-    assert not request.done()
+    assert (
+        await asyncio.wait_for(manager.get_agent("agent"), 0.25) is workspace
+    )
     assert not scope_registered(scope_dict, (str(tmp_path), "legacy"))
     schema_read.set()
     await entered.wait()
-    assert not request.done()
+    assert (
+        await asyncio.wait_for(manager.get_agent("agent"), 0.25) is workspace
+    )
     assert not scope_registered(scope_dict, (str(tmp_path), "legacy"))
+    first = await asyncio.wait_for(model_answer(), 0.25)
+    assert "agent_observability_outbox" not in (first.metadata or {})
+    registration = manager._outbox_tasks["agent"]
     commit.set()
-    assert await request is workspace
+    await registration
     assert scope_registered(scope_dict, (str(tmp_path), "legacy"))
+    second = await model_answer()
+    envelope = second.metadata["agent_observability_outbox"]
+    assert verify_event(envelope)["message_id"] == second.id
     await outbox_runtime.stop_recovery(app, manager)
     await supervisor
+    assert emitter.close() == 0
+    events = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert [
+        event["status"]
+        for event in events
+        if event.get("span_type") == "LLM"
+        and event["event_name"] == "span.ended"
+    ] == ["succeeded", "succeeded"]
+    assert [
+        event["saved_state"]
+        for event in events
+        if event.get("content_type") == "assistant_answer"
+    ] == ["not_saved", "pending"]
 
 
 @pytest.mark.asyncio
@@ -878,12 +963,12 @@ async def test_request_degrades_when_supervisor_is_not_ready_then_recovers():
         manager.set_outbox_register(register)
 
     supervisor = asyncio.create_task(initialize())
-    manager.set_outbox_initialization(supervisor)
     assert await manager.get_agent("agent") is workspace
     assert "agent" not in manager._outbox_registered
     assert not supervisor.cancelled()
     ready.set()
     await supervisor
+    await manager._outbox_tasks["agent"]
     assert await manager.get_agent("agent") is workspace
     assert manager._outbox_registered["agent"]() is workspace
     manager.set_outbox_register(None)

@@ -1379,7 +1379,9 @@ def test_worker_end_fallback_only_when_worker_did_not_end(
     tmp_path,
     monkeypatch,
 ):
-    """只有确认 worker 未发结束事件时才补发 launcher 终态。"""
+    """补发使用持久化业务终态，保留原执行 Agent 与业务 ID。"""
+    from types import SimpleNamespace
+
     calls: list[tuple[str, dict]] = []
 
     class _FakeObservability:
@@ -1396,17 +1398,46 @@ def test_worker_end_fallback_only_when_worker_did_not_end(
     )
     handle = _active_run(
         tmp_path,
-        _PipeProcess(returncode=1),
-        carrier={"obs_span_id": "span-1"},
+        _PipeProcess(returncode=0),
+        carrier={
+            "obs_span_id": "span-1",
+            "attributes": {"subagent": {"execution_agent_key": "researcher"}},
+        },
     )
 
+    record = SimpleNamespace(
+        run_id="run-1",
+        status="running",
+        errors=[],
+        result=None,
+    )
     supervisor = BackgroundSubAgentSupervisor()
-    supervisor._emit_worker_end_fallback(handle, "run-1", status="failed")
-    assert calls == [("failed", {"subagent": {"mode": "background"}})]
+    supervisor._emit_worker_end_fallback(handle, record)
+    assert calls == []
+    record.status = "failed"
+    record.errors = [SimpleNamespace(code="worker_exited_without_result")]
+    supervisor._emit_worker_end_fallback(handle, record)
+    assert calls == []
+    record.errors = []
+    record.result = SimpleNamespace(status="failed")
+    supervisor._emit_worker_end_fallback(handle, record)
+    assert calls == [
+        (
+            "failed",
+            {
+                "subagent": {
+                    "execution_agent_key": "researcher",
+                    "business_subagent_key": "run-1",
+                    "mode": "background",
+                    "result_status": "failed",
+                },
+            },
+        ),
+    ]
 
     calls.clear()
     handle.saw_subagent_end = True
-    supervisor._emit_worker_end_fallback(handle, "run-1", status="failed")
+    supervisor._emit_worker_end_fallback(handle, record)
     assert calls == []
 
 
@@ -1435,7 +1466,12 @@ async def test_shutdown_cancels_all_active_runs(monkeypatch, tmp_path):
     )
 
     async def fake_cancel(_self, run_id):
-        return SimpleNamespace(run_id=run_id, status="cancelled")
+        return SimpleNamespace(
+            run_id=run_id,
+            status="cancelled",
+            result=None,
+            errors=[],
+        )
 
     monkeypatch.setattr(
         "swe.app.subagents.supervisor.PerRunSubAgentRunStore.cancel",

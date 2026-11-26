@@ -30,10 +30,13 @@ def _trusted_workspace_binding(owner):
     workspace_dir = getattr(owner, "workspace_dir", None)
     if workspace_dir is None:
         return None
-    return (
-        str(Path(workspace_dir).expanduser().resolve(strict=True)),
-        storage_authority(),
-    )
+    try:
+        return (
+            str(Path(workspace_dir).expanduser().resolve(strict=True)),
+            storage_authority(),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 _APPROVAL_RESOLUTION_OBSERVER: ContextVar[

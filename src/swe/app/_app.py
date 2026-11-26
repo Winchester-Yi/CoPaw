@@ -353,14 +353,13 @@ async def _initialize_agent_observability_storage(app: FastAPI) -> None:
         await connection.connect()
         store = ObservabilityStore(connection)
         readiness = await store.readiness()
-        app.state.agent_observability_connection = connection
         if readiness["ready"]:
-            app.state.agent_observability_store = store
             from ..observability.projector import InboxProjector
 
             projector = InboxProjector(store)
-            app.state.agent_observability_projector = projector
             await projector.start()
+            app.state.agent_observability_store = store
+            app.state.agent_observability_projector = projector
         else:
             logger.warning(
                 "Agent observability database schema is not ready: tables=%s columns=%s indexes=%s",
@@ -368,6 +367,11 @@ async def _initialize_agent_observability_storage(app: FastAPI) -> None:
                 readiness["missing_columns"],
                 readiness["invalid_indexes"],
             )
+        app.state.agent_observability_connection = connection
+    except asyncio.CancelledError:
+        if connection is not None:
+            await connection.close()
+        raise
     except Exception as exc:
         logger.warning(
             "Agent observability database unavailable: %s",
@@ -1153,7 +1157,6 @@ async def lifespan(
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
     app.state.db_connection = db_connection
-    await _initialize_agent_observability_storage(app)
     from .crons.auth_mirror import configure_cron_auth_mirror
 
     configure_cron_auth_mirror(db_connection)
@@ -1169,12 +1172,6 @@ async def lifespan(
                 db_connection,
             ),
         )
-        from ..observability.config import capture_enabled
-
-        if capture_enabled():
-            multi_agent_manager.set_outbox_initialization(
-                app.state.agent_observability_recovery_start,
-            )
         await _initialize_tracing_manager(db_connection)
         logger.info("Instance module initialized")
 

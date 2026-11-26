@@ -12,6 +12,7 @@ from swe.observability.instrumentation import Observability
 from swe.observability.projector import _validate_payload
 from swe.observability.models import ObservabilityContext, Scope
 from swe.app.runner.session_lifecycle import admit_user_turn_with_creation
+from swe.app.answer_turn.models import TurnIdentity
 
 
 class RecordingEmitter:
@@ -583,8 +584,13 @@ def test_default_tenant_is_emittable_without_tenant_context(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_terminal_turn_reexecution_is_new_but_active_reconnect_is_not():
+@pytest.mark.parametrize("capture_enabled", [False, True])
+async def test_terminal_turn_reexecution_is_new_but_active_reconnect_is_not(
+    capture_enabled,
+):
     message = _message()
+    original = TurnIdentity.create(chat_id="chat-a", msgid=message.id)
+    retry = TurnIdentity.create(chat_id="chat-a", msgid=message.id)
 
     class Execution:
         state = {
@@ -592,6 +598,7 @@ async def test_terminal_turn_reexecution_is_new_but_active_reconnect_is_not():
                 message.id: {
                     "status": "completed",
                     "message": message.to_dict(),
+                    "execution_id": original.turn_id,
                 },
             },
         }
@@ -608,26 +615,41 @@ async def test_terminal_turn_reexecution_is_new_but_active_reconnect_is_not():
         commits = 0
 
     execution = Execution()
-    request = SimpleNamespace(channel_meta={})
-    run_context = ObservabilityContext.new_run(
-        capture_enabled=True,
-        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
-        business_ref={"root_question_msgid": message.id},
+    run_context = (
+        ObservabilityContext.new_run(
+            capture_enabled=True,
+            scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+            business_ref={"root_question_msgid": message.id},
+        )
+        if capture_enabled
+        else None
     )
+    for channel_meta in ({}, {"answer_turn_identity": original}):
+        duplicate = await admit_user_turn_with_creation(
+            execution,
+            msgs=[message],
+            request=SimpleNamespace(channel_meta=channel_meta),
+            observability_context=run_context,
+        )
+        assert duplicate == (message.id, False, None)
+    assert execution.state["turn_states"][message.id]["status"] == "completed"
+    assert execution.commits == 0
+    request = SimpleNamespace(channel_meta={"answer_turn_identity": retry})
     first_admission = await admit_user_turn_with_creation(
         execution,
         msgs=[message],
         request=request,
         observability_context=run_context,
     )
-    assert first_admission[:2] == (message.id, True)
+    assert first_admission == (message.id, True, run_context)
     assert execution.state["turn_states"][message.id]["status"] == "admitted"
     second_admission = await admit_user_turn_with_creation(
         execution,
         msgs=[message],
         request=request,
+        observability_context=run_context,
     )
-    assert second_admission[:2] == (message.id, False)
+    assert second_admission == (message.id, False, None)
     assert execution.commits == 1
 
 
