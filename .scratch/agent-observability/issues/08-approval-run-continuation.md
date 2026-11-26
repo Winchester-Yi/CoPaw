@@ -109,4 +109,4 @@ Chromium 108.0.5359.29 实机页面检查被 dev server 的认证、有效配置
 
 后续补充真实 `TaskTracker` 与 `AnswerTurnCoordinator` 的取消生命周期合同：外部提交审计在新 producer 启动前取消时，空流原会让 Coordinator 遗留 `RUNNING`；Stop 若先将 gate 中的 Turn 转为 `STOPPING`，也会令 producer 退出而不结算。现为 gate turn 显式记录 producer-started 状态，成功审计后才标记业务 producer 开始；取消或 Stop 已先发生时，在同一 per-chat 锁下原子认领并持久化 `CANCELLED`，关闭 ReplayStream 并清理 Coordinator/TaskTracker。测试覆盖取消传播、持久终态、stop-before-gate-release、不进入 ConsoleChannel，以及并发 mark/cancel 的线性化；独立复核确认无遗留竞态。外部审批、Coordinator/TaskTracker 与 Stop 定向回归 52 passed，目标 pre-commit 全绿，`git diff --check` 通过。真实 MySQL取消审计时序和浏览器验收仍未执行，Ticket 保持 in-progress。
 
-2026-11-26：新增本地外部审批 HTTP 到真实 ToolGuard 和工具恢复链路，目标外部通道和现场数据库待验收。 [本轮交付](../followup-completion-report.md)
+2026-11-26：新增本地外部审批 HTTP 到真实 ToolGuard 和工具恢复链路。目标 MySQL 8.0.46 的独立测试库已通过审批投影和审计回归，目标部署中的正式外部通道与工具恢复闭环待验收。 [测试报告](../followup-test-report.md)

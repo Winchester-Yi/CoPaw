@@ -43,4 +43,4 @@ Priority: P0
 
 2026-11-18 后续：补齐非流式空模型输出触发的生产重试事实。`RetryChatModel` 在空输出重试前通过 `on_retry` 发出 `EmptyModelOutputError` 类型，JSONL 合同确认首 request-attempt 失败、第二次成功并以 `retry_of` 关联，空输出重试与瞬时 Provider 错误可区分；原重试次数和立即重试行为不变。模型调用、观测 core 与 Provider 定向套件 62 passed，目标 pre-commit 全绿。当前生产没有 Tool 自动重试状态机，未添加 Tool retry/recovery 事实；Ticket 保持 open。
 
-2026-11-26：已核对现有实际边界，补齐模型请求和 Agent Attempt 的重试与恢复关系，工具不存在独立自动重试执行边界。隔离 MySQL 和授权 API 已验证，现场浏览器待验收。 [本轮交付](../followup-completion-report.md)
+2026-11-26：已核对现有实际边界，补齐模型请求和 Agent Attempt 的重试与恢复关系，工具不存在独立自动重试执行边界。已在目标 MySQL 8.0.46 的独立测试库验证重试、恢复和授权 API，现场浏览器待验收。 [测试报告](../followup-test-report.md)
