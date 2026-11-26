@@ -1,6 +1,6 @@
 # 14: 展示口径明确的观测性能总览
 
-Status: open
+Status: implemented-pending-site-verification
 Type: task
 Blocked by: 07
 Triage: ready-for-agent
@@ -10,7 +10,7 @@ Priority: P0
 
 **Blocked by:** 07：追踪重试、恢复及分页Events/Links
 
-**Status:** ready-for-agent
+**Status:** implemented-pending-site-verification
 
 依据已确认的独立可观测设计、Trace视图对照、领域词汇及ADR 0047/0048。与旧SDK、旧埋点、旧追踪ID和旧可观测存储查询没有运行依赖；只输出元数据，正文仅经现有业务授权从NAS读取。采集由用户处理，本票不增加ES、TTL/清理或新身份体系；授权仍沿用项目已有身份判定。
 
@@ -54,3 +54,5 @@ Priority: P0
 独立只读复核确认随机 schema 所有权检查、创建异常/确认丢失后的 `DROP DATABASE IF EXISTS` 清理、DDL 作用范围及 EXPLAIN/候选查询过滤一致；全局 Performance Schema 指标未被归因为单查询资源。清理 finding 已关闭，无新增可操作发现。
 
 2026-11-26：模型性能总览已展示已结束逻辑模型调用、请求尝试、输入与输出用量覆盖、首有效 chunk 与首可见文本的 P50/P95/P99 及已知样本数。隔离 MySQL 测试验证两次请求仅一次有用量时覆盖率为 50%。Chrome 158.0.8127.88 与 Chromium 108.0.5359.29 在受控 API、1280/1440 宽度及 `hideMenu=true` 下验证通过。
+
+2026-11-26：已交付请求次数、请求级用量覆盖和首输出分布，现有 Console 回归和本地 Chromium 108 已验证，现场 360 待验收。 [本轮交付](../followup-completion-report.md)

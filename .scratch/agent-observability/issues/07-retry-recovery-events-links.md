@@ -1,6 +1,6 @@
 # 07: 追踪重试、恢复及分页Events/Links
 
-Status: open
+Status: implemented-pending-site-verification
 Type: task
 Blocked by: 05, 06
 Triage: ready-for-agent
@@ -10,7 +10,7 @@ Priority: P0
 
 **Blocked by:** 05：查看真实模型调用、用量与首输出延迟；06：查看真实工具执行、拒绝与技术错误
 
-**Status:** ready-for-agent
+**Status:** implemented-pending-site-verification
 
 依据已确认的独立可观测设计、Trace视图对照、领域词汇及ADR 0047/0048。与旧SDK、旧埋点、旧追踪ID和旧可观测存储查询没有运行依赖；只输出元数据，正文仅经现有业务授权从NAS读取。采集由用户处理，本票不增加ES、TTL/清理或新身份体系；授权仍沿用项目已有身份判定。
 
@@ -42,3 +42,5 @@ Priority: P0
 2026-11-18 后续：真实 `RetryChatModel` 合同增补 `on_retry` 生产同款 callback，而非仅合成请求 attempt；一次 429 后成功的隔离 MySQL→Projector→Performance/Run Detail/Links API 测试现在断言首次 request-attempt 仍为 `failed/TransientProviderError`，第二次为 `succeeded` 并含可用 `retry_of` Link，Run 最终为 `succeeded`，逻辑调用=1、物理 attempt=2、Usage 只计一次。合同在新随机 `_test` schema 通过，schema 删除并核验不存在；目标 pre-commit 全绿。Tool 自动重试状态机仍不存在，页面/Chromium108验收仍未完成。
 
 2026-11-18 后续：补齐非流式空模型输出触发的生产重试事实。`RetryChatModel` 在空输出重试前通过 `on_retry` 发出 `EmptyModelOutputError` 类型，JSONL 合同确认首 request-attempt 失败、第二次成功并以 `retry_of` 关联，空输出重试与瞬时 Provider 错误可区分；原重试次数和立即重试行为不变。模型调用、观测 core 与 Provider 定向套件 62 passed，目标 pre-commit 全绿。当前生产没有 Tool 自动重试状态机，未添加 Tool retry/recovery 事实；Ticket 保持 open。
+
+2026-11-26：已核对现有实际边界，补齐模型请求和 Agent Attempt 的重试与恢复关系，工具不存在独立自动重试执行边界。隔离 MySQL 和授权 API 已验证，现场浏览器待验收。 [本轮交付](../followup-completion-report.md)

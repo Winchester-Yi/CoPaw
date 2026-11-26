@@ -1,6 +1,6 @@
 # 08: 贯通审批等待与同Run恢复执行
 
-Status: in-progress
+Status: implemented-pending-site-verification
 Type: task
 Blocked by: 06
 Triage: ready-for-agent
@@ -10,7 +10,7 @@ Priority: P0
 
 **Blocked by:** 06：查看真实工具执行、拒绝与技术错误
 
-**Status:** in-progress
+**Status:** implemented-pending-site-verification
 
 依据已确认的独立可观测设计、Trace视图对照、领域词汇及ADR 0047/0048。与旧SDK、旧埋点、旧追踪ID和旧可观测存储查询没有运行依赖；只输出元数据，正文仅经现有业务授权从NAS读取。采集由用户处理，本票不增加ES、TTL/清理或新身份体系；授权仍沿用项目已有身份判定。
 
@@ -108,3 +108,5 @@ Chromium 108.0.5359.29 实机页面检查被 dev server 的认证、有效配置
 同日继续：新增真实 SQL/MySQL 取消结算合同。等待审批 Run 先结束 Attempt 为 `waiting_approval`，取消通过 deferred settlement 清除 Attempt 所有权后结束根 Run 为 `cancelled`；投影/API 保留 waiting Attempt，不重复写 cancelled Attempt 终态，也不伪造 `approval.resolved`。隔离 MySQL 1 passed（9.97s），控制 schema 与 fixture 子 schema 清理并确认不存在；目标文件 pre-commit 通过。该合同覆盖观测结算顺序，不替代真实 Stop/Coordinator 进程级取消、外部通道和审计中断恢复验收，Ticket 保持 in-progress。
 
 后续补充真实 `TaskTracker` 与 `AnswerTurnCoordinator` 的取消生命周期合同：外部提交审计在新 producer 启动前取消时，空流原会让 Coordinator 遗留 `RUNNING`；Stop 若先将 gate 中的 Turn 转为 `STOPPING`，也会令 producer 退出而不结算。现为 gate turn 显式记录 producer-started 状态，成功审计后才标记业务 producer 开始；取消或 Stop 已先发生时，在同一 per-chat 锁下原子认领并持久化 `CANCELLED`，关闭 ReplayStream 并清理 Coordinator/TaskTracker。测试覆盖取消传播、持久终态、stop-before-gate-release、不进入 ConsoleChannel，以及并发 mark/cancel 的线性化；独立复核确认无遗留竞态。外部审批、Coordinator/TaskTracker 与 Stop 定向回归 52 passed，目标 pre-commit 全绿，`git diff --check` 通过。真实 MySQL取消审计时序和浏览器验收仍未执行，Ticket 保持 in-progress。
+
+2026-11-26：新增本地外部审批 HTTP 到真实 ToolGuard 和工具恢复链路，目标外部通道和现场数据库待验收。 [本轮交付](../followup-completion-report.md)

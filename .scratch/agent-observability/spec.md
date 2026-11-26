@@ -1,9 +1,9 @@
 # 独立 Agent 可观测：元数据日志与 NAS 正文设计
 
-Status: open
+Status: implemented-pending-site-verification
 Type: grilling
 日期：2026-11-15
-阶段：Q1–Q25已确认，方案已收敛，等待共同理解最终确认。
+阶段：本轮剩余埋点已提交，现场验收待完成。见[功能完成报告](followup-completion-report.md)与[测试报告](followup-test-report.md)。
 
 **最终评审入口**：[独立 Agent 可观测实施设计](../../docs/superpowers/specs/2026-11-15-independent-agent-observability-design.md)。本文件保留代码核查证据；实现以最终评审通过的设计为准。
 输入：[能力蓝图](../../Agent_可观测增强设计_Span与五大能力.md)；[决策树](map.md)；[ADR 0047](../../docs/adr/0047-independent-agent-observability-uses-metadata-logs.md)。

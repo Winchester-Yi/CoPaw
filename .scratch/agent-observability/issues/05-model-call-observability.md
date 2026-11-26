@@ -1,6 +1,6 @@
 # 05: 查看真实模型调用、用量与首输出延迟
 
-Status: open
+Status: resolved
 Type: task
 Blocked by: 04
 Triage: ready-for-agent
@@ -10,7 +10,7 @@ Priority: P0
 
 **Blocked by:** 04：展示Attempt与Agent执行树、同行瀑布
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 依据已确认的独立可观测设计、Trace视图对照、领域词汇及ADR 0047/0048。与旧SDK、旧埋点、旧追踪ID和旧可观测存储查询没有运行依赖；只输出元数据，正文仅经现有业务授权从NAS读取。采集由用户处理，本票不增加ES、TTL/清理或新身份体系；授权仍沿用项目已有身份判定。
 
@@ -87,3 +87,5 @@ Chromium 108.0.5359.29 实机检查已启动，但 Console dev server 的 `/api/
 2026-11-17：增加已结算且无 LLM Span 的 Run→JSONL→MySQL→API 合同测试。Run 汇总的 `llm_calls`、input/output Token 保持 NULL：仅凭没有投影到 Span 的记录无法区分真实零调用短路与被丢弃/缺失的模型 Span，不能伪造 0；若将来需要精确零值，须由业务结算提供独立可信的执行完整性/零调用事实。测试 `test_run_without_model_span_keeps_usage_summary_unknown` 在隔离 MySQL/API 通过。
 
 2026-11-18：后端复核发现 RetryChatModel 的非流式空输出会触发一次真实请求重试，但不发 `model.retry_scheduled`，导致首个 request-attempt 只被后续 Span 创建逻辑标为泛化 `model_retry`。现复用受保护的重试回调发出受控 `EmptyModelOutputError` 事实，保持原立即重试策略不变；新增 model factory→JSONL 合同断言两条物理尝试、失败原因、`retry_of` Link 及 prompt/回复不落日志。模型调用、观测 core 与 Provider 定向套件 62 passed，目标 pre-commit 全绿。零调用来源仍保持未知；页面和浏览器验收按用户要求暂停。
+
+2026-11-26：OpenAI 兼容请求的首批实现和独立回归已验收，历史缺测语义已验证。见[首批测试报告](../../model-request-observability/test-report.md)。 [本轮交付](../followup-completion-report.md)
