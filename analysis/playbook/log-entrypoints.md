@@ -34,7 +34,7 @@ Hook 机制的埋点以运行时日志为入口，不写入 `swe_tracing_spans`�
 
 ## 独立 Agent 可观测
 
-独立 Agent 可观测向 stdout 输出受限单行 JSON，与现有 Tracing、Hook telemetry、Runtime Diagnostic 分别独立；不得把旧 trace_id 视为新 Run/Attempt 身份。排查时区分未入库/未投影、父节点尚未加载、确实缺失以及 NAS 正文未保存；缺少事件不能判定业务失败。部署、恢复日志、密钥、降级和离线迁移步骤见[正文证据运维](../../docs/deployment/agent-observability-operations.md)。
+独立 Agent 可观测事件在 stdout 中以固定前缀 `AGENTOBS `（末尾一个空格）开头，后接单行 JSON。采集器解开容器日志封装后按 `^AGENTOBS ` 过滤，移除前缀并把 JSON 写入 `swe_agentobs_inbox.payload_text`。执行链路使用 `obs_run_id` 和 `obs_attempt_id` 定位。排查时分别核对入库状态、父节点关联和 NAS 正文保存状态。部署和恢复步骤见[正文证据运维](../../docs/deployment/agent-observability-operations.md)。
 
 ## query error dump
 

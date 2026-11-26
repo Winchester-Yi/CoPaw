@@ -1639,6 +1639,29 @@ def test_queue_budget_counts_in_flight_event_and_shutdown_is_bounded():
     emitter.close()
 
 
+def test_stdout_prefix_covers_run_and_health_events(capsys):
+    emitter = JsonlEmitter(EmitterConfig())
+    try:
+        Observability(emitter=emitter).admit_run(
+            scope=Scope("svc", "src", "tenant", "agent"),
+            enabled=True,
+        )
+        assert not emitter.emit({"event_name": "observer.health"})
+    finally:
+        assert emitter.close() == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    events = []
+    for line in lines:
+        assert line.startswith("AGENTOBS ")
+        events.append(_validate_payload(line.removeprefix("AGENTOBS ")))
+    assert {event["event_name"] for event in events} == {
+        "run.accepted",
+        "asset.used",
+        "observer.health",
+    }
+
+
 def test_health_reports_accumulated_drops_after_writer_unblocks(monkeypatch):
     monkeypatch.setattr(
         "swe.observability.emitter._HEALTH_INTERVAL_SECONDS",

@@ -1042,29 +1042,33 @@ class BackgroundSubAgentSupervisor:
         return process
 
     def _start_event_reader(self, handle: _ActiveRun, run_id: str) -> None:
-        """把 worker 的 JSONL stdout 转发给父进程 emitter。"""
+        """把 worker stdout 中的观测事件转发给父进程 emitter。"""
+        from ...observability.emitter import (
+            STDOUT_EVENT_PREFIX,
+            default_emitter,
+        )
+
         stream = getattr(handle.process, "stdout", None)
         if stream is None:
             return
+        prefix = STDOUT_EVENT_PREFIX.encode("ascii")
+        read_limit = _MAX_WORKER_EVENT_BYTES + len(prefix) + 1
         span_id = None
         if handle.observability_carrier is not None:
             span_id = handle.observability_carrier.get("obs_span_id")
 
         def pump() -> None:
             try:
-                while line := stream.readline(_MAX_WORKER_EVENT_BYTES + 1):
+                while line := stream.readline(read_limit):
                     if not line.endswith(b"\n"):
                         while line and not line.endswith(b"\n"):
-                            line = stream.readline(_MAX_WORKER_EVENT_BYTES + 1)
+                            line = stream.readline(read_limit)
                         continue
+                    line = line.removeprefix(prefix)
                     if span_id is None or len(line) > _MAX_WORKER_EVENT_BYTES:
                         continue
                     forwarded = False
                     try:
-                        from ...observability.emitter import (
-                            default_emitter,
-                        )
-
                         forwarded = default_emitter().emit_raw(line)
                     except Exception:
                         logger.warning(

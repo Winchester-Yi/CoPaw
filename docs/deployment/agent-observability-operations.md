@@ -1,6 +1,12 @@
 # 独立 Agent 可观测：正文证据恢复运维
 
-本文说明当前独立 Agent 可观测的正文证据恢复、密钥和工作区绑定操作。它使用独立 MySQL 投影和会话 NAS，不使用旧 Tracing 的身份或数据。日志采集器仍由部署方负责：SWE 输出受限 JSONL，采集器须将其送入独立观测库的 `swe_agentobs_inbox`；仅看到容器 stdout 不代表已入库或已投影。
+本文说明当前独立 Agent 可观测的正文证据恢复、密钥和工作区绑定操作。它使用独立 MySQL 投影和会话 NAS。
+
+## 日志采集
+
+SWE 写入应用进程的 stdout，每条观测事件以固定前缀 `AGENTOBS `（末尾一个空格）开头，后接 UTF-8 单行 JSON。前台直接启动时可在终端看到。使用仓库的 Supervisor 模板时，Supervisor 将应用进程的 stdout 重定向到容器内的 `/var/log/app.out.log`。采集入口由现场的进程启动和日志转发配置决定。
+
+采集器还原完整日志行后，按 `^AGENTOBS ` 匹配并移除一次行首前缀，将 JSON 文本参数化写入独立观测库的 `swe_agentobs_inbox.payload_text`。24 KiB 的入库上限按 JSON 文本计算。采集器可以先解析 JSON 做格式检查。Swe 投影器负责完整的协议校验、事件去重与乱序归并，并将字段写入 `swe_agentobs_events`、`swe_agentobs_runs`、`swe_agentobs_attempts` 和 `swe_agentobs_spans`。处理结果记录在 inbox 的 `processing_state`，待处理的原始文本在处理后清空。
 
 ## 部署与启用
 
