@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import AsyncMock
 import json
 import os
@@ -762,7 +763,7 @@ async def test_workspace_registration_retries_in_background(monkeypatch):
 async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
     monkeypatch,
     tmp_path,
-):
+):  # pylint: disable=too-many-statements
     import asyncio
     from contextlib import asynccontextmanager
     from io import StringIO
@@ -775,12 +776,12 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
     from swe.observability.context import bind_context
     from swe.observability.emitter import JsonlEmitter
     from swe.observability.instrumentation import (
-        Observability,
         ObservabilityModelWrapper,
         mark_pending_message_evidence,
     )
     from swe.observability.models import Scope
     from swe.observability.outbox import verify_event
+    from swe.observability.runner_lifecycle import prepare_query_run
 
     monkeypatch.setenv("SWE_AGENTOBS_ENABLED", "true")
     monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "test-key")
@@ -796,6 +797,20 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
     schema_read = asyncio.Event()
     commit = asyncio.Event()
     entered = asyncio.Event()
+    root_lookup_started = asyncio.Event()
+    release_root_lookup = threading.Event()
+    loop = asyncio.get_running_loop()
+    real_resolve = Path.resolve
+    workspace_root = tmp_path.resolve()
+
+    def delayed_resolve(path, *args, **kwargs):
+        if path == workspace_root:
+            assert threading.current_thread() is not threading.main_thread()
+            loop.call_soon_threadsafe(root_lookup_started.set)
+            assert release_root_lookup.wait(timeout=3)
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", delayed_resolve)
 
     class Connection:
         config = SimpleNamespace(database="observability")
@@ -827,7 +842,7 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
         async def fetch_one(self, *_args):
             return {
                 **scope.fields,
-                "workspace_root": str(tmp_path).encode(),
+                "workspace_root": str(workspace_root).encode(),
                 "storage_authority": "legacy",
             }
 
@@ -842,7 +857,9 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
             pass
 
     class Workspace:
-        workspace_dir = tmp_path
+        workspace_dir = workspace_root
+        agent_id = "a"
+        tenant_id = "t"
 
     monkeypatch.setattr(
         "swe.app.conversation_storage.runtime.resolved_scope",
@@ -855,6 +872,10 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
         lambda: "unit",
     )
     monkeypatch.setattr(outbox_runtime, "storage_authority", lambda: "legacy")
+    monkeypatch.setattr(
+        "swe.observability.runner_lifecycle.service_unit_id",
+        lambda: "unit",
+    )
     connection = Connection()
     app = SimpleNamespace(
         state=SimpleNamespace(
@@ -871,15 +892,8 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
         "swe.observability.instrumentation.default_emitter",
         lambda: emitter,
     )
-    context = (
-        Observability()
-        .prepare_run(
-            scope=Scope("unit", "s", "t", "a"),
-            business_ref={"chat_id": "chat"},
-            enabled=True,
-        )
-        .with_updates(workspace_binding=(str(tmp_path), "legacy"))
-    )
+    request = SimpleNamespace(source_id="s", channel_meta={"chat_id": "chat"})
+    question = Msg("user", "private question", "user")
 
     class Model:
         stream = False
@@ -891,6 +905,8 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
             )
 
     async def model_answer():
+        context = prepare_query_run(workspace, request, [question])
+        assert context.scope == Scope("unit", "s", "t", "a")
         with bind_context(context):
             response = await ObservabilityModelWrapper(
                 Model(),
@@ -908,19 +924,25 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
     assert (
         await asyncio.wait_for(manager.get_agent("agent"), 0.25) is workspace
     )
-    assert not scope_registered(scope_dict, (str(tmp_path), "legacy"))
+    assert not scope_registered(scope_dict, (str(workspace_root), "legacy"))
     schema_read.set()
+    await asyncio.wait_for(root_lookup_started.wait(), 0.5)
+    try:
+        blocked = await asyncio.wait_for(model_answer(), 0.25)
+        assert "agent_observability_outbox" not in (blocked.metadata or {})
+    finally:
+        release_root_lookup.set()
     await entered.wait()
     assert (
         await asyncio.wait_for(manager.get_agent("agent"), 0.25) is workspace
     )
-    assert not scope_registered(scope_dict, (str(tmp_path), "legacy"))
+    assert not scope_registered(scope_dict, (str(workspace_root), "legacy"))
     first = await asyncio.wait_for(model_answer(), 0.25)
     assert "agent_observability_outbox" not in (first.metadata or {})
     registration = manager._outbox_tasks["agent"]
     commit.set()
     await registration
-    assert scope_registered(scope_dict, (str(tmp_path), "legacy"))
+    assert scope_registered(scope_dict, (str(workspace_root), "legacy"))
     second = await model_answer()
     envelope = second.metadata["agent_observability_outbox"]
     assert verify_event(envelope)["message_id"] == second.id
@@ -933,12 +955,12 @@ async def test_request_does_not_wait_for_production_supervisor_or_scope_commit(
         for event in events
         if event.get("span_type") == "LLM"
         and event["event_name"] == "span.ended"
-    ] == ["succeeded", "succeeded"]
+    ] == ["succeeded", "succeeded", "succeeded"]
     assert [
         event["saved_state"]
         for event in events
         if event.get("content_type") == "assistant_answer"
-    ] == ["not_saved", "pending"]
+    ] == ["not_saved", "not_saved", "pending"]
 
 
 @pytest.mark.asyncio

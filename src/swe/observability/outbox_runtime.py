@@ -41,7 +41,7 @@ _CONFIG_EXECUTOR = ThreadPoolExecutor(
 )
 _CONFIG_SLOTS = threading.BoundedSemaphore(2)
 _CONFIG_TIMEOUT_SECONDS = 5.0
-_CONFIG_IN_FLIGHT: set[tuple[Path, str]] = set()
+_CONFIG_IN_FLIGHT: set[tuple[str, Path, str]] = set()
 _CONFIG_IN_FLIGHT_LOCK = threading.Lock()
 
 
@@ -96,14 +96,26 @@ def _load_recovery_root(path: Path, agent_id: str) -> Path:
     profile = config.agents.profiles.get(agent_id)
     if profile is None:
         raise ValueError("recovery agent unavailable")
-    root = Path(profile.workspace_dir).expanduser().resolve(strict=True)
+    return _existing_workspace_root(Path(profile.workspace_dir))
+
+
+def _existing_workspace_root(path: Path) -> Path:
+    root = path.expanduser().resolve(strict=True)
     if not root.is_dir():
         raise ValueError("recovery workspace unavailable")
     return root
 
 
 async def _resolve_recovery_root(path: Path, agent_id: str) -> Path:
-    key = (path, agent_id)
+    return await _read_workspace_path(
+        ("recovery", path, agent_id),
+        _load_recovery_root,
+        path,
+        agent_id,
+    )
+
+
+async def _read_workspace_path(key, read, *args) -> Path:
     with _CONFIG_IN_FLIGHT_LOCK:
         # The slot remains held until the submitted thread actually exits.
         if (
@@ -124,9 +136,8 @@ async def _resolve_recovery_root(path: Path, agent_id: str) -> Path:
         context = copy_context()
         work = _CONFIG_EXECUTOR.submit(
             context.run,
-            _load_recovery_root,
-            path,
-            agent_id,
+            read,
+            *args,
         )
     except BaseException:
         release()
@@ -186,8 +197,13 @@ async def start_recovery(app, manager, metadata_db):
 
     async def register(workspace):
         scope = resolved_scope(workspace, service_unit_id=service)
+        path = Path(workspace.workspace_dir)
         root = str(
-            Path(workspace.workspace_dir).expanduser().resolve(strict=True),
+            await _read_workspace_path(
+                ("registration", path, ""),
+                _existing_workspace_root,
+                path,
+            ),
         )
         await OutboxRecoveryStore(
             connection,

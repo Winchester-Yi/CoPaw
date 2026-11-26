@@ -31,8 +31,10 @@ def _trusted_workspace_binding(owner):
     if workspace_dir is None:
         return None
     try:
+        # Evidence capture compares this configured path to the canonical root
+        # validated by background registration. Never resolve NAS on this path.
         return (
-            str(Path(workspace_dir).expanduser().resolve(strict=True)),
+            str(Path(workspace_dir).expanduser().absolute()),
             storage_authority(),
         )
     except (OSError, RuntimeError, ValueError):
