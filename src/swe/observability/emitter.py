@@ -12,13 +12,13 @@ from collections import deque
 from typing import Any, TextIO
 from uuid import uuid4
 
-from .config import EmitterConfig
+from .config import EmitterConfig, project_resource
 from .models import MetadataEvent, new_id
 
 _HEALTH_INTERVAL_SECONDS = 30.0
 _ALLOWED_KEYS = frozenset(
     "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at attempt_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics delay_ms quality model tool asset asset_type asset_id asset_version asset_digest asset_source approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind event_type relation_type duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key tool_call_id tool_execution_id executor_kind timeout_budget_ms retry_index exit_code request_attempt_index skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
-) | {"dropped_events", "no_request_attempts"}
+) | {"dropped_events", "no_request_attempts", "resource"}
 _FORBIDDEN_KEYS = frozenset(
     "prompt messages input output content body text query parameters arguments result exception traceback api_key password secret".split(),
 )
@@ -145,6 +145,10 @@ def _project(value: Any, depth: int = 0, key: str | None = None) -> Any:
             normalized = str(child_key).lower()
             if normalized in _FORBIDDEN_KEYS or child_key not in _ALLOWED_KEYS:
                 continue
+            if child_key == "resource":
+                if depth == 0 and (resource := project_resource(item)):
+                    result["resource"] = resource
+                continue
             result[child_key] = _project(item, depth + 1, str(child_key))
         return result
     if isinstance(value, (list, tuple)):
@@ -243,6 +247,7 @@ class JsonlEmitter:
                 for key in (
                     "links",
                     "events",
+                    "resource",
                     "asset",
                     "model",
                     "tool",
@@ -324,22 +329,26 @@ class JsonlEmitter:
                 local_seq=self._health_seq,
                 attributes={"metrics": {"dropped_events": dropped}},
             )
-            payload = (
-                json.dumps(
-                    _project(event.to_dict()),
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
+            projected = _project(event.to_dict())
+            limit = min(
+                self.config.max_event_bytes,
+                self.config.max_queue_bytes,
             )
+            for _ in range(2):
+                payload = (
+                    json.dumps(projected, separators=(",", ":")).encode(
+                        "utf-8",
+                    )
+                    + b"\n"
+                )
+                if len(payload) <= limit:
+                    self._health_seq += 1
+                    return payload
+                if projected.pop("resource", None) is None:
+                    break
         except Exception:
             return b""
-        if len(payload) > min(
-            self.config.max_event_bytes,
-            self.config.max_queue_bytes,
-        ):
-            return b""
-        self._health_seq += 1
-        return payload
+        return b""
 
     def _write_loop(self) -> None:
         payload = b""

@@ -580,8 +580,9 @@ def _validate_tool_fields(event: dict[str, Any], tool: Any) -> None:
 
 
 def _semantic_json(event: dict[str, Any]) -> str:
+    provenance = {"event_id", "producer_id", "resource"}
     semantic = {
-        k: v for k, v in event.items() if k not in {"event_id", "producer_id"}
+        key: value for key, value in event.items() if key not in provenance
     }
     return json.dumps(
         semantic,
