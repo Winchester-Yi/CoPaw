@@ -85,6 +85,27 @@ const modelRequestFields = [
     ([key]) => key !== "tool_key" && key !== "business_subagent_key",
   ),
 ];
+const memorySpanFields: [string, string, boolean?][] = fields.filter(
+  ([key]) =>
+    ![
+      "model_key",
+      "provider_key",
+      "tool_key",
+      "business_subagent_key",
+      "request_model_key",
+      "response_model_key",
+      "finish_reason",
+      "time_to_first_chunk_us",
+      "time_to_first_visible_text_us",
+      "input_tokens",
+      "output_tokens",
+    ].includes(key),
+);
+const compactionStrategies: Record<string, string> = {
+  summary: "摘要压缩",
+  checkpoint_ready: "应用已就绪的 Checkpoint",
+  checkpoint_degraded: "应用降级 Checkpoint",
+};
 
 function requestValue(key: string, value: unknown, isTime?: boolean) {
   if (value == null) return "未获取";
@@ -654,6 +675,16 @@ export default function AttemptView({
   const isModelRequest =
     selectedSpan?.span_type === "LLM" &&
     selectedSpan.operation === "request_attempt";
+  const isCompaction =
+    selectedSpan?.span_type === "Context" &&
+    selectedSpan.operation === "compact";
+  const isCheckpoint = selectedSpan?.span_type === "Checkpoint";
+  const isMemorySpan = isCompaction || isCheckpoint;
+  const detailFields = isModelRequest
+    ? modelRequestFields
+    : isMemorySpan
+    ? memorySpanFields
+    : fields;
   const inspector = selectedSpan ? (
     <>
       <h3>{selectedSpan.name}</h3>
@@ -669,19 +700,59 @@ export default function AttemptView({
       />
       {tab === "details" ? (
         <dl>
-          {(isModelRequest ? modelRequestFields : fields).map(
-            ([key, label, isTime]) => (
-              <div key={key}>
-                <dt>{label}</dt>
+          {detailFields.map(([key, label, isTime]) => (
+            <div key={key}>
+              <dt>{label}</dt>
+              <dd>
+                {isModelRequest
+                  ? requestValue(key, selectedSpan[key], isTime)
+                  : isTime
+                  ? ms(selectedSpan[key])
+                  : shown(selectedSpan[key])}
+              </dd>
+            </div>
+          ))}
+          {isCompaction && (
+            <>
+              <div>
+                <dt>压缩策略</dt>
                 <dd>
-                  {isModelRequest
-                    ? requestValue(key, selectedSpan[key], isTime)
-                    : isTime
-                    ? ms(selectedSpan[key])
-                    : shown(selectedSpan[key])}
+                  {typeof selectedSpan.compaction_strategy === "string" &&
+                  Object.prototype.hasOwnProperty.call(
+                    compactionStrategies,
+                    selectedSpan.compaction_strategy,
+                  )
+                    ? compactionStrategies[selectedSpan.compaction_strategy]
+                    : shown(selectedSpan.compaction_strategy)}
                 </dd>
               </div>
-            ),
+              <div>
+                <dt>压缩前 Tokens（估算）</dt>
+                <dd>{shown(selectedSpan.context_before_tokens)}</dd>
+              </div>
+              <div>
+                <dt>压缩后 Tokens（估算）</dt>
+                <dd>{shown(selectedSpan.context_after_tokens)}</dd>
+              </div>
+            </>
+          )}
+          {isCheckpoint && (
+            <>
+              <div>
+                <dt>Checkpoint 动作</dt>
+                <dd>
+                  {selectedSpan.operation === "save"
+                    ? "保存"
+                    : selectedSpan.operation === "restore"
+                    ? "恢复"
+                    : shown(selectedSpan.operation)}
+                </dd>
+              </div>
+              <div>
+                <dt>Checkpoint ID</dt>
+                <dd>{shown(selectedSpan.checkpoint_id)}</dd>
+              </div>
+            </>
           )}
           {selectedSpan.subagent &&
             typeof selectedSpan.subagent === "object" &&
@@ -702,17 +773,19 @@ export default function AttemptView({
                 <dd>{shown(value)}</dd>
               </div>
             ))}
-          <div>
-            <dt>Tokens 合计</dt>
-            <dd>
-              {typeof selectedSpan.input_tokens === "number" &&
-              typeof selectedSpan.output_tokens === "number"
-                ? selectedSpan.input_tokens + selectedSpan.output_tokens
-                : isModelRequest
-                ? "未获取"
-                : "—"}
-            </dd>
-          </div>
+          {!isMemorySpan && (
+            <div>
+              <dt>Tokens 合计</dt>
+              <dd>
+                {typeof selectedSpan.input_tokens === "number" &&
+                typeof selectedSpan.output_tokens === "number"
+                  ? selectedSpan.input_tokens + selectedSpan.output_tokens
+                  : isModelRequest
+                  ? "未获取"
+                  : "—"}
+              </dd>
+            </div>
+          )}
         </dl>
       ) : tab === "evidence" ? (
         <SpanEvidence

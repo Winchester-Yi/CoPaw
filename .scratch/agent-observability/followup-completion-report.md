@@ -10,4 +10,6 @@
 
 子代理对写入队列、Resource、重试关联和压缩边界做了独立检视。已处理持续积压时健康摘要可能饥饿，以及观测专用估算新增等待点的问题。Agent Attempt 关联当前可从 Run 级 API 读取，单个 Span 的 Inspector 根据所选 Span 展示关联。
 
+Console 的 Span 详情已补齐上下文压缩策略、前后 Token 估算和 Checkpoint 动作及 ID。历史缺测值显示为「—」，实际零值显示为「0」。
+
 目标 MySQL 的 DDL 与数据库集成已验收。目标集群内运行、共享 NAS、实际采集器、正式外部审批通道及现场 360 浏览器仍待验收。 [测试报告](followup-test-report.md)

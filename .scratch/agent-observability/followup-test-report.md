@@ -10,6 +10,8 @@
 | Console | Vitest 82 项通过。Chrome 158.0.8127.88 和 Chromium 108.0.5359.29 实测 1280、1440 宽度下的 `hideMenu=true` 总览与键盘交互，API 响应使用受控数据。 |
 | 静态检查 | 每个功能提交通过仓库 pre-commit 检查。 |
 
+上下文压缩和 Checkpoint 详情追加验证。AttemptView 定向测试 11 项通过，TypeScript、目标 ESLint 和生产构建通过。Chrome 158.0.8127.88 和 Chromium 108.0.5359.29 使用受控 API 数据，在 1280 和 1440 宽度的 `hideMenu=true` 页面通过键盘选择，验证压缩策略、零值、缺测值和完整 Checkpoint ID。
+
 ## 目标 MySQL 验收
 
 在用户提供的 MySQL 8.0.46 实例上使用 TLS 连接。服务器使用 16 KiB InnoDB 页和严格 SQL 模式。独立测试库成功执行五张基础表、两张恢复表与 ACK 索引的 DDL。完整运行 `tests/integrated/observability` 和 `tests/integrated/conversation_storage`，共 **74 项通过，0 失败，0 跳过**，耗时 17 分 10 秒。覆盖模型请求使用量、重试与取消、乱序投影、正文证据恢复、租约和 ACK、会话存储、审批审计。结束后删除本轮创建的两个测试库，并核验残留为 0。

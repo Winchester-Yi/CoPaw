@@ -229,6 +229,67 @@ it("shows request facts and distinguishes missing usage from zero", async () => 
   );
 });
 
+it("shows compaction estimates and checkpoint actions in the selected span", async () => {
+  const checkpointId = "750ade7f-fcce-4f4a-aa51-fc2a1273ced1";
+  request.mockResolvedValue({
+    spans: [
+      {
+        ...span("compaction", null),
+        span_type: "Context",
+        operation: "compact",
+        compaction_strategy: "checkpoint_degraded",
+        context_before_tokens: 0,
+        context_after_tokens: null,
+      },
+      ...["save", "restore"].map((operation) => ({
+        ...span(`checkpoint-${operation}`, null),
+        span_type: "Checkpoint",
+        operation,
+        checkpoint_id: operation === "save" ? checkpointId : null,
+      })),
+    ],
+    spans_next_cursor: null,
+  });
+  render(
+    <MemoryRouter>
+      <AttemptView
+        runId="run"
+        attempts={attempts}
+        runStatus="succeeded"
+        projectedAt={null}
+        onRunRefresh={() => {}}
+      />
+    </MemoryRouter>,
+  );
+
+  fireEvent.click(await screen.findByRole("treeitem", { name: /compaction/ }));
+  expect(screen.getByText("压缩策略").nextSibling).toHaveTextContent(
+    "应用降级 Checkpoint",
+  );
+  expect(
+    screen.getByText("压缩前 Tokens（估算）").nextSibling,
+  ).toHaveTextContent("0");
+  expect(
+    screen.getByText("压缩后 Tokens（估算）").nextSibling,
+  ).toHaveTextContent("—");
+  expect(screen.queryByText("Tokens 合计")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("treeitem", { name: /checkpoint-save/ }));
+  expect(screen.getByText("Checkpoint 动作").nextSibling).toHaveTextContent(
+    "保存",
+  );
+  expect(screen.getByText("Checkpoint ID").nextSibling).toHaveTextContent(
+    checkpointId,
+  );
+  expect(screen.queryByText("压缩策略")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("treeitem", { name: /checkpoint-restore/ }));
+  expect(screen.getByText("Checkpoint 动作").nextSibling).toHaveTextContent(
+    "恢复",
+  );
+  expect(screen.getByText("Checkpoint ID").nextSibling).toHaveTextContent("—");
+});
+
 it("keeps the Attempt overview visible in a narrow container", async () => {
   class NarrowObserver {
     callback: ResizeObserverCallback;
