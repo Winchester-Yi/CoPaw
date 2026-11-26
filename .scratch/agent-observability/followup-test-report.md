@@ -10,6 +10,10 @@
 | Console | Vitest 82 项通过。Chrome 158.0.8127.88 和 Chromium 108.0.5359.29 实测 1280、1440 宽度下的 `hideMenu=true` 总览与键盘交互，API 响应使用受控数据。 |
 | 静态检查 | 每个功能提交通过仓库 pre-commit 检查。 |
 
+## 目标 MySQL 验收
+
+在用户提供的 MySQL 8.0.46 实例上使用 TLS 连接。服务器使用 16 KiB InnoDB 页和严格 SQL 模式。独立测试库成功执行五张基础表、两张恢复表与 ACK 索引的 DDL。完整运行 `tests/integrated/observability` 和 `tests/integrated/conversation_storage`，共 **74 项通过，0 失败，0 跳过**，耗时 17 分 10 秒。覆盖模型请求使用量、重试与取消、乱序投影、正文证据恢复、租约和 ACK、会话存储、审批审计。结束后删除本轮创建的两个测试库，并核验残留为 0。
+
 ## 现场待验收
 
-当前机器可访问的 Kubernetes 上下文为本地 OrbStack。目标集群、MySQL、共享 NAS、实际日志采集器、正式外部审批通道和现场 360 Chromium 108.0.5359.95 未能实测。现场需要验证采集入库和 ACK、签名正文读取、数据库断连与实例重启、租约接管，以及真实外部审批触发工具恢复。 [部署验收](../../docs/deployment/agent-observability-operations.md#工作区路径或-authority-离线变更)
+目标集群内应用到 MySQL 的连接、共享 NAS、实际日志采集器、正式外部审批通道和现场 360 Chromium 108.0.5359.95 待实测。现场还需验证采集入库和 ACK、签名正文读取、数据库断连与实例重启、租约接管，以及真实外部审批触发工具恢复。 [部署验收](../../docs/deployment/agent-observability-operations.md#工作区路径或-authority-离线变更)
