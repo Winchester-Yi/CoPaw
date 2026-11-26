@@ -29,7 +29,8 @@ import fcntl
 from agentscope.message import Msg
 
 from swe.constant import SECRET_DIR
-from swe.observability.instrumentation import Observability
+from swe.observability.context import current_context
+from swe.observability.instrumentation import Observability, SpanHandle
 from swe.performance_metrics import increment, measure_storage_operation
 from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
@@ -66,6 +67,22 @@ _MAX_EVIDENCE_SCAN_BYTES = 64 * 1024 * 1024
 _CURSOR_SIGNATURE_SIZE = hashlib.sha256().digest_size
 _CURSOR_SECRET_ENV_VAR = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
 _CURSOR_SECRET_FILE_NAME = "conversation-archive-cursor-secret"
+
+
+def _checkpoint_span(
+    chat_id: str,
+    operation: str,
+    *,
+    defer_start: bool = False,
+) -> SpanHandle | None:
+    context = current_context()
+    if context is None or context.business_ref.get("chat_id") != chat_id:
+        return None
+    return Observability().span(
+        "Checkpoint",
+        operation,
+        defer_start=defer_start,
+    )
 
 
 async def _durable_thread(function, *args):
@@ -334,6 +351,13 @@ class ConversationArchiveStore:
             if storage.exists:
                 return storage.head()
             state = self._read_checkpoint_state_locked(canonical)
+            persisted = False
+            if check_persistence:
+                try:
+                    persisted = self._checkpoint_path(canonical).is_file()
+                except OSError:
+                    # Missing telemetry must not invalidate a successful read.
+                    pass
             return {
                 "version": 1,
                 "epoch": state.current_epoch,
@@ -343,8 +367,7 @@ class ConversationArchiveStore:
                 ),
                 "applied_event_sequence": state.record.applied_event_sequence,
                 "checkpoint_revision": state.record.revision,
-                "checkpoint_persisted": check_persistence
-                and self._checkpoint_path(canonical).is_file(),
+                "checkpoint_persisted": persisted,
             }
 
     async def read_checkpoint_record(
@@ -1198,7 +1221,7 @@ class ConversationArchiveStore:
         canonical_chat_id: str,
         record: CheckpointRecord,
     ) -> None:
-        span = Observability().span("Checkpoint", "save")
+        span = _checkpoint_span(canonical_chat_id, "save")
         with span or nullcontext():
             self._write_checkpoint_locked(canonical_chat_id, record)
             if span is not None:
@@ -1397,7 +1420,7 @@ class ConversationArchiveStore:
                 self._evidence_epochs_path(chat_dir),
             )
             try:
-                span = Observability().span("Checkpoint", "save")
+                span = _checkpoint_span(canonical_chat_id, "save")
                 with span or nullcontext():
                     boundary = self._commit_locked(
                         canonical_chat_id,
@@ -2844,7 +2867,7 @@ def attach_conversation_archive(
                 canonical_chat_id,
                 record,
             )
-        span = Observability().span("Checkpoint", "restore", defer_start=True)
+        span = _checkpoint_span(canonical_chat_id, "restore", defer_start=True)
         try:
             head = await archive_store.read_checkpoint_head(
                 canonical_chat_id,

@@ -107,11 +107,18 @@ async def test_projection_exposes_markdown_not_checkpoint_json(
         .prepare_run(
             scope=Scope("swe", "source", "tenant", "agent"),
             enabled=True,
+            business_ref={"chat_id": chat_id},
         )
         .new_attempt()
     )
     with bind_context(context):
         await memory.install_checkpoint_projection()
+        other_chat_id = _chat_id()
+        other_record = CheckpointRecord.new(chat_id=other_chat_id, epoch=1)
+        await memory.chat_checkpoint_store.write_active_checkpoint(
+            other_chat_id,
+            other_record,
+        )
         await memory.chat_checkpoint_store.write_active_checkpoint(
             chat_id,
             record,
