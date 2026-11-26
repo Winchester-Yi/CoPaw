@@ -1861,3 +1861,57 @@ it("clears evidence and discards a late response when the selected agent changes
   fireEvent.click(screen.getByRole("tab", { name: "正文证据" }));
   expect(await screen.findByText('"new evidence"')).toBeInTheDocument();
 });
+
+it("marks backend error conditions and identifies unlisted span types", async () => {
+  const attempt = {
+    attempt_id: "a1",
+    attempt_index: 1,
+    status: "succeeded",
+    started_at: null,
+    ended_at: null,
+    duration_us: null,
+    quality: "complete",
+  };
+  const spans = [
+    { name: "flagged", has_error: 1 },
+    { name: "technical", technical_status: "ERROR" },
+    { name: "rejected", status: "rejected" },
+    { name: "other", span_type: "Guard" },
+  ].map((item, index) => ({
+    span_id: `s${index}`,
+    attempt_id: "a1",
+    parent_span_id: null,
+    span_type: "Tool",
+    operation: "execute",
+    started_at: null,
+    ended_at: null,
+    status: "succeeded",
+    quality: "complete",
+    duration_us: null,
+    ...item,
+  }));
+  request.mockImplementation((path: string) =>
+    Promise.resolve(
+      path.includes("capabilities")
+        ? { capture_enabled: true }
+        : path.includes("attempt_id=")
+        ? { spans, spans_next_cursor: null }
+        : { run, attempts: [attempt] },
+    ),
+  );
+  mount("/agent-observability/runs/abc");
+  for (const name of ["flagged", "technical", "rejected"]) {
+    const row = await screen.findByRole("treeitem", { name: new RegExp(name) });
+    expect(within(row).getByText("异常")).toBeInTheDocument();
+    expect(
+      (row.querySelector('[style*="background-color"]') as HTMLElement).style
+        .backgroundColor,
+    ).toBe("rgb(224, 77, 107)");
+  }
+  const other = screen.getByRole("treeitem", { name: /other/ });
+  expect(
+    (other.querySelector('[style*="background-color"]') as HTMLElement).style
+      .backgroundColor,
+  ).toBe("rgb(139, 107, 98)");
+  expect(screen.getByLabelText("Span 类型图例")).toHaveTextContent("其他类型");
+});

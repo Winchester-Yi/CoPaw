@@ -83,6 +83,14 @@ const fields: [string, string, boolean?][] = [
   ["input_tokens", "输入 Tokens"],
   ["output_tokens", "输出 Tokens"],
 ];
+const isErrorSpan = (span: Span) =>
+  span.has_error === true ||
+  span.has_error === 1 ||
+  String(span.technical_status || "").toUpperCase() === "ERROR" ||
+  ["error", "failed", "rejected", "timed_out"].includes(
+    (span.status || "").toLowerCase(),
+  );
+
 const requestFields: [string, string][] = [
   ["request_attempt_index", "请求序号"],
   ["streaming", "流式模式"],
@@ -1026,7 +1034,10 @@ export default function AttemptView({
                     aria-label="时间轴（相对 Attempt 起点）"
                   >
                     {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
-                      <span key={fraction}>
+                      <span
+                        key={fraction}
+                        style={{ left: `${fraction * 100}%` }}
+                      >
                         {Number.isFinite(origin)
                           ? ms((end - origin) * fraction * 1000)
                           : "—"}
@@ -1036,6 +1047,7 @@ export default function AttemptView({
                 </div>
                 {rows.map(
                   ({ span, depth, hasChildren, orphan, cycle }, index) => {
+                    const failed = isErrorSpan(span);
                     const start = stamp(span.started_at);
                     const finish = stamp(span.ended_at);
                     const left =
@@ -1139,6 +1151,7 @@ export default function AttemptView({
                               : "·"}
                           </button>
                           <span title={span.name}>{span.name}</span>{" "}
+                          {failed && <Tag color="error">异常</Tag>}
                           {cycle && <Tag>父链存在循环</Tag>}
                           {orphan && (
                             <Tag>
@@ -1155,9 +1168,7 @@ export default function AttemptView({
                                 width,
                                 Math.max(0, 100 - left),
                               )}%`,
-                              backgroundColor: ["error", "failed"].includes(
-                                (span.status || "").toLowerCase(),
-                              )
+                              backgroundColor: failed
                                 ? "#e04d6b"
                                 : spanColors[
                                     Object.keys(spanColors).find(
@@ -1165,7 +1176,7 @@ export default function AttemptView({
                                         key.toLowerCase() ===
                                         span.span_type.toLowerCase(),
                                     ) || ""
-                                  ] || "#647796",
+                                  ] || "#8b6b62",
                             }}
                           />
                           <span className={styles.barLabel}>
@@ -1188,6 +1199,10 @@ export default function AttemptView({
                     {label}
                   </span>
                 ))}
+                <span>
+                  <i style={{ backgroundColor: "#8b6b62" }} />
+                  其他类型
+                </span>
                 <span>
                   <i style={{ backgroundColor: "#e04d6b" }} />
                   异常

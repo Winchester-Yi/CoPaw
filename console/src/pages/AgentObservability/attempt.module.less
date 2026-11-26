@@ -32,7 +32,7 @@
   top: 0;
   z-index: 1;
   background: #f7f9fd;
-  padding: 10px 8px;
+  padding: 10px 0;
   border-bottom: 1px solid #d9dfe8;
 }
 .scroll {
@@ -154,9 +154,8 @@
 }
 
 .axis {
-  display: flex;
-  justify-content: space-between;
-  gap: 4px;
+  position: relative;
+  height: 17px;
   color: #627189;
   font-size: 11px;
 }
@@ -196,4 +195,19 @@
   flex: auto;
   border-left: 0;
   border-top: 1px solid #d9dfe8;
+}
+
+.header > strong {
+  padding-left: 8px;
+}
+.axis span {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.axis span:first-child {
+  transform: none;
+}
+.axis span:last-child {
+  transform: translateX(-100%);
 }
