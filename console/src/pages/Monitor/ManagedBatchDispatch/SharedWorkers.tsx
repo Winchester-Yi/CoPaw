@@ -15,6 +15,9 @@ import WorkerAdjustmentDetails from "./WorkerAdjustmentDetails";
 import workerStyles from "./workers.module.less";
 import WorkerTrendDialog, { type WorkerTrendScope } from "./WorkerTrendDialog";
 
+// 右栏面板固定 600px：一页 8 条调整记录刚好填满，避免分页下方留出大片空白。
+const PAGE_SIZE = 8;
+
 const capacityKey = (item: CronDispatchCapacityItem) =>
   JSON.stringify([item.provider_id, item.model_id]);
 
@@ -79,7 +82,10 @@ export default function SharedWorkers({
   const [pool, setPool] = useState<CronDispatchCapacityItem | null>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const events = value?.capacity_events || [];
-  const current = Math.min(page, Math.max(1, Math.ceil(events.length / 5)));
+  const current = Math.min(
+    page,
+    Math.max(1, Math.ceil(events.length / PAGE_SIZE)),
+  );
   return (
     <section className={workerStyles.workerGrid}>
       <div className={workerStyles.leftColumn}>
@@ -88,7 +94,6 @@ export default function SharedWorkers({
           <div className={styles.panelHeader}>
             <div>
               <h2>Source 维度模型策略</h2>
-              <span>共享模型池：新旧调度共同使用策略和容量</span>
             </div>
           </div>
           <Spin spinning={loading}>
@@ -162,7 +167,6 @@ export default function SharedWorkers({
         <div className={styles.panelHeader}>
           <div>
             <h2>Worker 变动</h2>
-            <span>共享容量；完整游标历史加载成功后才展示曲线</span>
           </div>
         </div>
         {error ? (
@@ -190,14 +194,16 @@ export default function SharedWorkers({
                   区间内调整记录（{events.length} 条）
                 </div>
                 <div className={styles.workerEventList}>
-                  {events.slice((current - 1) * 5, current * 5).map((event) => (
-                    <WorkerAdjustmentDetails key={event.id} item={event} />
-                  ))}
+                  {events
+                    .slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
+                    .map((event) => (
+                      <WorkerAdjustmentDetails key={event.id} item={event} />
+                    ))}
                 </div>
                 <Pagination
                   aria-label="新版容量记录分页"
                   current={current}
-                  pageSize={5}
+                  pageSize={PAGE_SIZE}
                   total={events.length}
                   showSizeChanger={false}
                   onChange={setPage}

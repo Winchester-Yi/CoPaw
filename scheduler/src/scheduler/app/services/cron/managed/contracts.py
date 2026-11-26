@@ -3,7 +3,19 @@
 
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class BatchFollowRequest(BaseModel):
+    """批调度看板和任务设置共用的关注等级。"""
+
+    model_config = ConfigDict(extra="forbid")
+    level: int = Field(
+        strict=True,
+        ge=0,
+        le=5,
+        description="关注等级，0 表示取消关注",
+    )
 
 
 @dataclass(frozen=True)

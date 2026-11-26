@@ -1,5 +1,7 @@
 import dayjs from "dayjs";
 import { Tag } from "antd";
+import { Star } from "lucide-react";
+import styles from "../CronBatchDispatch/index.module.less";
 
 export const labels: Record<string, string> = {
   received: "已接收",
@@ -46,3 +48,27 @@ export function settledStatusTag(status: string, settled: string | null) {
 }
 export const timeText = (value?: string | null) =>
   value ? dayjs(value).format("YYYY-MM-DD HH:mm:ss") : "-";
+
+/** 关注等级星标；0 与缺失都表示未关注，不展示。 */
+export function followLevelStars(level?: number | null) {
+  const raw = typeof level === "number" ? level : 0;
+  const value = Math.min(5, Math.max(0, raw));
+  if (value < 1) return null;
+  return (
+    <span
+      className={styles.followStars}
+      aria-label={`关注等级 ${value}`}
+      title={`关注等级 ${value}`}
+    >
+      {Array.from({ length: value }, (_, index) => (
+        <Star
+          key={index}
+          size={12}
+          fill="#f5b301"
+          strokeWidth={0}
+          aria-hidden="true"
+        />
+      ))}
+    </span>
+  );
+}

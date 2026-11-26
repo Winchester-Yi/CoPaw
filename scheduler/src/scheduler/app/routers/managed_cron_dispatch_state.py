@@ -14,6 +14,8 @@ from .managed_cron_management import (
     require_managed_runtime,
 )
 from .managed_cron_controls import control_error
+from ..services.cron.managed.batch_follow import set_task_follow_level
+from ..services.cron.managed.contracts import BatchFollowRequest
 from ..services.cron.managed.dispatch_state import DispatchStateService
 from ..services.cron.managed.dispatch_state_store import DispatchStateStore
 from ..services.cron.managed.identity import CallerIdentity
@@ -55,12 +57,34 @@ async def get_dispatch_state(
     caller: CallerIdentity = Depends(caller_identity),
     db=Depends(management_database),
 ):
-    """返回三态目标、配置版本、各对象实际模式归约和平台同步计数。
+    """返回三态目标、配置版本、平台同步计数及批调度父任务的关注等级。
 
     Header 使用源任务完整身份；查询不启停平台、不重新分发，临时混合状态通过 effective_state=mixed 明确表达。
     """
     try:
         return await DispatchStateStore(db).get(caller, job_id)
+    except Exception as exc:
+        raise control_error(exc) from exc
+
+
+@router.put(
+    "/{job_id}/batch-dispatch/follow",
+    summary="设置批调度父任务关注等级",
+)
+async def follow_managed_task(
+    job_id: str,
+    body: BatchFollowRequest,
+    caller: CallerIdentity = Depends(caller_identity),
+    db=Depends(management_database),
+):
+    """设置父任务关注等级，0 取消关注。使用完整父任务身份，限来源管理员。
+
+    已排队批次同步应用新等级，首次跑批前也可设置。
+    """
+    try:
+        return await set_task_follow_level(db, caller, job_id, body.level)
+    except PermissionError as exc:
+        raise HTTPException(403, "cron_batch_manager_required") from exc
     except Exception as exc:
         raise control_error(exc) from exc
 

@@ -332,7 +332,6 @@ export default function FailurePanel({
             刷新预览
           </Button>
         </Space>
-        <small>人工重试不改变调度模式；批入口暂停不阻止已受理队列执行。</small>
         {notice && <Alert type={notice.type} message={notice.text} showIcon />}
       </Space>
     </section>

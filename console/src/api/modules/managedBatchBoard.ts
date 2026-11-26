@@ -18,6 +18,7 @@ export interface ManagedBatch {
   model_id?: string | null;
   dispatch_paused?: boolean;
   batch_paused?: boolean;
+  batch_follow_level?: number | null;
   lock_owner?: string | null;
   active_count: number;
   waiting_count: number;
@@ -25,6 +26,7 @@ export interface ManagedBatch {
   logical_fire_at: string;
   physical_fire_at: string;
   created_at: string;
+  finished_at?: string | null;
 }
 export interface ManagedBatchMember {
   member_id: string;
@@ -106,6 +108,8 @@ export type ManagedFailureFilters = {
   end_time?: string;
   status?: string;
   has_members?: boolean;
+  follow_min?: number;
+  follow_max?: number;
   query?: string;
 };
 export interface ManagedFailureSummary {
@@ -233,10 +237,17 @@ function call<T>(
 /** 所有权限 Header 仍由统一认证层实时产生；不从批次记录推导角色。 */
 export const managedBatchBoard = {
   memberAttempts: (
-    source: string, batch: string, member: string, signal?: AbortSignal,
-  ) => call<{ items: ManagedMemberAttempt[] }>(
-    source, `${MONITOR}/batches/${idPath(batch)}/members/${idPath(member)}/attempts`, {}, signal,
-  ),
+    source: string,
+    batch: string,
+    member: string,
+    signal?: AbortSignal,
+  ) =>
+    call<{ items: ManagedMemberAttempt[] }>(
+      source,
+      `${MONITOR}/batches/${idPath(batch)}/members/${idPath(member)}/attempts`,
+      {},
+      signal,
+    ),
   pause: (source: string, batch: string, paused: boolean) =>
     request<{ batch_id: string; batch_paused: boolean }>(
       `${SCHEDULER}/${idPath(batch)}/pause`,
@@ -246,8 +257,32 @@ export const managedBatchBoard = {
         body: JSON.stringify({ paused }),
       },
     ),
-  failureSummary: (source: string, filters: ManagedFailureFilters, signal?: AbortSignal) =>
-    call<ManagedFailureSummary>(source, `${MONITOR}/failure-summary`, filters, signal),
+  follow: (
+    source: string,
+    batch: string,
+    level: number,
+    signal?: AbortSignal,
+  ) =>
+    request<{ batch_id: string; batch_follow_level: number }>(
+      `${SCHEDULER}/${idPath(batch)}/follow`,
+      {
+        method: "PUT",
+        headers: { "X-Source-Id": source },
+        body: JSON.stringify({ level }),
+        signal,
+      },
+    ),
+  failureSummary: (
+    source: string,
+    filters: ManagedFailureFilters,
+    signal?: AbortSignal,
+  ) =>
+    call<ManagedFailureSummary>(
+      source,
+      `${MONITOR}/failure-summary`,
+      filters,
+      signal,
+    ),
   batches: (source: string, filters: Filters, signal?: AbortSignal) =>
     call<ManagedBatchList>(source, `${MONITOR}/batches`, filters, signal),
   detail: (

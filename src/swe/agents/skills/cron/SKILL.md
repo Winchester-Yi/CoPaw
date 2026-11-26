@@ -2,7 +2,7 @@
 name: cron
 description: Use when the user requests future scheduled or recurring work, or asks to inspect or manage an existing scheduled task. | 用户要求未来定时、周期执行，或查询和管理已有定时任务时使用。
 metadata:
-  builtin_skill_version: "1.4"
+  builtin_skill_version: "1.5"
   swe:
     emoji: "⏰"
 ---
@@ -40,6 +40,29 @@ swe cron --request-id <本次创建请求ID> create \
 - `text` 类型发送固定文本；`agent` 类型执行提问；完整定义（包括 workflow）可用 `create -f job_spec.json`。
 - 创建 ID 不从文件指定，也不使用旧任务 ID。兼容参数 `--target-session` 不能指定新的任务会话绑定；以返回详情为准。
 - 默认普通调度，非工作日默认不执行。复杂日历策略使用当前 Scheduler 支持的完整 JSON 定义，不能凭普通 cron 推断法定工作日。
+
+## 回检（可选）
+
+回检是在任务产出结果后延迟一段时间，回到**原任务会话**里追问一次，确认结果是否真的落地。只有用户明确说“跑完 X 分钟后检查一下”“确认报告有没有生成”时才加；用户没提就不要主动加回检。
+
+```bash
+swe cron --request-id <本次创建请求ID> create \
+  --agent-id <agent_id> \
+  --type agent \
+  --name "每日待办报告" \
+  --cron "0 9 * * *" \
+  --timezone Asia/Shanghai \
+  --channel console \
+  --text "汇总今天的待办事项" \
+  --recheck-after 30m \
+  --recheck-instruction "检查今天的待办报告是否已生成并发送，未完成时说明缺了哪一步"
+```
+
+- `--recheck-after` 支持 `90s`、`30m`、`2h`、`1d` 或纯秒数，范围 60 秒到 7 天；`--recheck-instruction` 写清“检查什么、什么算成功或失败”，1–4000 字符。用户给的是自然语言延迟（“半小时后”）时换算成前者，不要自己编造更长的延迟。
+- 两个参数必须同时提供，且只支持 `--type agent`。只给其中一个、用于 `text` 任务、延迟越界都会直接报参数错误；不要改用 `-f` 文件绕过这些校验。
+- 回检在原任务会话里作为一次新的执行运行，不重跑父任务；父任务输出缺失或超长时回检记为 `cron_recheck_parent_output_unavailable` 并从结果里报出来，不会静默丢一档。
+- 触发时间是“父任务产出结果后 + 延迟”，不是 cron 到点时间。需要按业务时效判断时，把这一点跟用户说清楚。
+- 更新已有任务用同样的参数；取消回检用 `--no-recheck`。只改名称、时间、渠道等元信息不会动已有回检。
 
 ## 先核对回执，再报告完成
 

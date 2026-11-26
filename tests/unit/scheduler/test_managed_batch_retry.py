@@ -2,6 +2,7 @@
 """人工批重试保留逻辑成员，幂等响应与尝试指针在同一事务提交。"""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -272,6 +273,9 @@ async def test_retry_history_cannot_replace_another_batch(callback_setup):
 async def test_manual_business_retry_keeps_member_count_and_same_request_result(
     callback_setup,
 ):
+    from scheduler.app.services.cron.managed.batch_follow import (
+        set_batch_follow_level,
+    )
     from scheduler.app.services.cron.managed.batch_retry import (
         BatchRetryService,
     )
@@ -284,6 +288,7 @@ async def test_manual_business_retry_keeps_member_count_and_same_request_result(
         {"failure_type": "model_rate_limit", "label": "模型限流", "count": 1},
     ]
     command = retry_body(preview)
+    await set_batch_follow_level(db, caller, batch, 5)
     first = await service.retry(caller, batch, command)
     second = await service.retry(caller, batch, command)
     assert first["queued"] == 1
@@ -306,6 +311,7 @@ async def test_manual_business_retry_keeps_member_count_and_same_request_result(
     assert runs[1]["kind"] == "batch"
     assert runs[1]["scheduled_fire_at"] == runs[0]["scheduled_fire_at"]
     assert runs[1]["actor_id"] == caller.actor_id
+    assert json.loads(runs[1]["dispatch_meta_json"])["batch_follow_level"] == 5
 
 
 @pytest.mark.asyncio

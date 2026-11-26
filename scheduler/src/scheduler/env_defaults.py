@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 VALID_ENVS = ("dev", "prd")
 DEFAULT_ENV = "prd"
+SWE_SOURCE_ROUTES_ENV = "SCHEDULER_SWE_SOURCE_ROUTES"
 
 
 def _get_package_dir() -> Path:
@@ -45,7 +46,10 @@ def _load_env_json(env: str) -> dict[str, str]:
 
     result: dict[str, str] = {}
     for key, value in data.items():
-        result[key] = "" if value is None else str(value)
+        if key == SWE_SOURCE_ROUTES_ENV and isinstance(value, list):
+            result[key] = json.dumps(value, ensure_ascii=False)
+        else:
+            result[key] = "" if value is None else str(value)
     return result
 
 

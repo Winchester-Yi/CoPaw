@@ -15,7 +15,7 @@ from .daily_retry_enqueue import (
     prepare_retry,
 )
 from .daily_retry_scan import candidates, latest_reason
-from .daily_retry_filters import matches_locked_scope
+from .daily_retry_filters import FOLLOWED_BATCH, matches_locked_scope
 from .daily_retry_store import CALLS, DailyRetryCalls
 from .diagnostics import format_management_error
 from .executions import ExecutionConflict
@@ -146,6 +146,7 @@ class DailyFailureRetry:
         return len(page)
 
     async def _process_one(self, call_id, owner, row, filters):
+        followed_only = getattr(filters, "task_scope", None) == FOLLOWED_BATCH
         try:
             early = await latest_reason(self.db, row)
             if early:
@@ -185,6 +186,7 @@ class DailyFailureRetry:
                         receipt,
                         prepared,
                         max_attempts=max_attempts,
+                        followed_only=followed_only,
                     )
                 result, decision = row, "skipped"
                 if reason is None:
@@ -196,6 +198,7 @@ class DailyFailureRetry:
                         member,
                         prepared,
                         self.clock(),
+                        receipt=receipt,
                         max_attempts=max_attempts,
                     )
                 await self._commit_decision(

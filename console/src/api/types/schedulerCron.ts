@@ -181,6 +181,7 @@ export interface ManagedBroadcastTask {
 export interface ManagedDispatchState {
   job_id: string;
   state: ManagedDispatchMode;
+  batch_follow_level?: number | null;
   version: number;
   effective_state: ManagedDispatchMode | "mixed";
   operation_id?: string | null;

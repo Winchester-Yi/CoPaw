@@ -10,7 +10,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import BatchDetail from "./BatchDetail";
 import type { ManagedBatch } from "@/api/modules/managedBatchBoard";
 
-const api = vi.hoisted(() => ({ detail: vi.fn(), pause: vi.fn() }));
+const api = vi.hoisted(() => ({
+  detail: vi.fn(),
+  pause: vi.fn(),
+}));
 vi.mock("../../../api/modules/managedBatchBoard", () => ({
   managedBatchBoard: api,
 }));
@@ -439,4 +442,34 @@ it("暂停当前批并刷新，恢复使用同一批次身份", async () => {
     ["bank", "batch", false],
   ]);
   expect(changed).toHaveBeenCalledTimes(2);
+});
+
+it("详情信息条在批结束后展示完成时间", async () => {
+  const batch = {
+    batch_id: "batch-done",
+    job_id: "parent",
+    job_name: "日报",
+    member_count: 1,
+    status: "completed",
+    logical_fire_at: "2026-11-25T01:00:00Z",
+    created_at: "2026-11-25T01:00:05Z",
+    finished_at: "2026-11-25T01:20:00Z",
+  } as ManagedBatch;
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    events: [],
+    event_total: 0,
+  });
+  render(
+    <BatchDetail
+      source="bank"
+      actor="manager"
+      batch={batch}
+      refresh={0}
+      onQueued={() => {}}
+    />,
+  );
+  expect(await screen.findByText(/^完成 /)).toBeVisible();
 });

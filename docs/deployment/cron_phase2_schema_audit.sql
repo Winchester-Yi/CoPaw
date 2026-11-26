@@ -103,6 +103,12 @@ FROM (
   UNION ALL
   SELECT 'swe_cron_job_states' AS table_name, 'dispatch_state' AS column_name
   UNION ALL
+  SELECT 'swe_cron_job_states' AS table_name, 'batch_follow_level' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_job_states' AS table_name, 'batch_follow_updated_at' AS column_name
+  UNION ALL
+  SELECT 'swe_cron_job_states' AS table_name, 'batch_follow_updated_by' AS column_name
+  UNION ALL
   SELECT 'swe_cron_job_states' AS table_name, 'pause_reason' AS column_name
   UNION ALL
   SELECT 'swe_cron_job_states' AS table_name, 'auto_paused_at' AS column_name

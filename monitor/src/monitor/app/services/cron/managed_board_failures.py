@@ -89,6 +89,8 @@ async def failure_summary(
     *,
     child_status=None,
     has_members=None,
+    follow_min=None,
+    follow_max=None,
 ):
     where, params = sql.batch_where(
         source,
@@ -96,6 +98,8 @@ async def failure_summary(
         end,
         query,
         child_status=child_status,
+        follow_min=follow_min,
+        follow_max=follow_max,
     )
     rows = await db.fetch_all(
         summary_query(where, bool(status), has_members),

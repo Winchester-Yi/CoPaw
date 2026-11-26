@@ -6,11 +6,14 @@ import os
 import httpx
 
 from .identity import encode_scope
-from .swe_client import checked_base
+from ..swe_routing import checked_base, swe_base_for_source
 
 
 async def resolve_agent_model(current, spec):
-    base = checked_base(os.environ.get("SCHEDULER_SWE_API_BASE_URL", ""))
+    default_base = checked_base(
+        os.environ.get("SCHEDULER_SWE_API_BASE_URL", ""),
+    ).removesuffix("/api")
+    base = swe_base_for_source(current["source_id"], default_base)
     headers = {
         "X-User-Id": current["creator_user_id"],
         "X-Tenant-Id": current["tenant_id"],
@@ -20,7 +23,7 @@ async def resolve_agent_model(current, spec):
     }
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
         response = await client.post(
-            f"{base.removesuffix('/api')}/api/internal/cron/managed/resolve-model",
+            f"{base}/api/internal/cron/managed/resolve-model",
             headers=headers,
             json={"model_slot": spec.get("model_slot")},
         )

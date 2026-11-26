@@ -14,6 +14,7 @@ from .batch_failures import (
     read_batch,
 )
 from .batch_members import MEMBERS
+from .batch_follow import read_batch_follow_level
 from .batch_retry_contract import BatchRetryConflict, ManagedBatchRetryRequest
 from .definition import canonical, request_hash
 from .dispatch_events import EVENTS, append_run_event, failure_type
@@ -147,7 +148,7 @@ class BatchRetryService:
             result = await self._apply(
                 tx,
                 caller,
-                batch_id,
+                receipt,
                 command,
                 by_id,
                 digest,
@@ -197,12 +198,14 @@ class BatchRetryService:
         self,
         tx,
         caller,
-        batch_id,
+        receipt,
         command,
         rows,
         digest,
         retry_lane,
     ):
+        batch_id = receipt["batch_id"]
+        follow_level = await read_batch_follow_level(tx, receipt)
         results = []
         audit = {
             "batch_id": batch_id,
@@ -235,6 +238,7 @@ class BatchRetryService:
                     {**row, "retry_dispatch_lane": retry_lane},
                     batch_id,
                     digest,
+                    follow_level=follow_level,
                 )
             except ExecutionConflict as exc:
                 reason = str(exc)
@@ -300,6 +304,7 @@ class BatchRetryService:
         batch_id,
         digest,
         *,
+        follow_level,
         grant=None,
         retry_at=None,
     ):
@@ -326,6 +331,7 @@ class BatchRetryService:
                     for name in ("batch_created_at", "batch_queue_order")
                     if name in original_meta
                 },
+                "batch_follow_level": follow_level,
                 "dispatch_lane": row.get("retry_dispatch_lane")
                 or row.get("dispatch_lane")
                 or "normal",
@@ -343,6 +349,9 @@ class BatchRetryService:
                 "dispatch_owner": "",
                 "dispatch_lease_until": None,
                 "error_code": None,
+                "dispatch_meta_json": canonical(
+                    {**original_meta, "batch_follow_level": follow_level},
+                ),
                 "version": row["version"] + 1,
                 "updated_at": utc_now(),
             }

@@ -58,12 +58,18 @@ async def complete_run(db, run, status="error"):
 async def test_auto_retry_waits_five_minutes_and_replaces_history_on_completion(
     callback_setup,
 ):
+    from scheduler.app.services.cron.managed.batch_follow import (
+        set_batch_follow_level,
+    )
     from scheduler.app.services.cron.managed.dispatcher import (
         ExecutionDispatcher,
     )
     from tests.unit.scheduler.test_managed_cron_dispatcher import SweClient
 
-    db, _, _, original, now, worker = await failed_setup(callback_setup)
+    db, caller, batch, original, now, worker = await failed_setup(
+        callback_setup
+    )
+    await set_batch_follow_level(db, caller, batch, 4)
     assert await worker.tick() == 1
     assert await worker.tick() == 0
     retry = await db.fetch_one(
@@ -77,6 +83,7 @@ async def test_auto_retry_waits_five_minutes_and_replaces_history_on_completion(
     meta = json.loads(retry["dispatch_meta_json"])
     assert meta["previous_execution_id"] == original["execution_id"]
     assert meta["business_attempt"] == 2
+    assert meta["batch_follow_level"] == 4
     dispatcher = ExecutionDispatcher(db, SweClient(db), clock=lambda: now)
     assert (await dispatcher.dispatch_registered(retry["execution_id"]))[
         "status"

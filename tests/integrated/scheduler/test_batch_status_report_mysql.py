@@ -147,27 +147,73 @@ async def downstream_response(request, monitor, attempts):
             )
         assert response.status_code == 200
         snapshot = response.json()
-        assert len(snapshot["batches"]) == 1
-        assert snapshot["batches"][0]["status"] == "running"
-        assert snapshot["batches"][0]["subtasks"] == {
+        batches = {batch["name"]: batch for batch in snapshot["batches"]}
+        assert set(batches) == {"running", "main-failure", "subtask-failure"}
+        assert batches["running"]["status"] == "running"
+        assert batches["running"]["subtasks"] == {
             "failures": 1,
             "partial": 0,
             "timeouts": 1,
             "incomplete": 0,
         }
-        assert snapshot["batches"][0]["workers"][0]["occupied"] == 1
+        assert batches["running"]["workers"][0]["occupied"] == 1
+        assert batches["main-failure"]["failure_details"] == {
+            "main_count": 1,
+            "subtask_types": {},
+        }
+        assert batches["subtask-failure"]["failure_details"] == {
+            "main_count": 0,
+            "subtask_types": {"API + Prompt": 1},
+        }
         assert snapshot["pools"][0]["occupied"] == 1
         assert snapshot["pools"][0]["capacity"] == 10
         return response
-    attempts.append(body["recipient_id"])
-    assert "异步子任务异常 2" in body["text"]
-    assert "1 / 10" in body["text"]
+    attempts.append((body["recipient_id"], body["part_no"]))
+    if body["part_no"] == 1:
+        assert "关注批次共 3 个 · 已失败 2 · 运行中 1" in body["text"]
+        assert "1 / 10" in body["text"]
+        assert "异步子任务异常" not in body["text"]
+        assert "unfollowed" not in body["text"]
+    else:
+        assert body["part_no"] == 2
+        assert body["text"].count("主任务失败") == 2
+        assert "主任务失败 1 · 子任务失败 0" in body["text"]
+        assert "主任务失败 0 · 子任务失败 1（API + Prompt 1）" in body["text"]
+        assert "异步子任务异常" not in body["text"]
+        assert "批次共" not in body["text"]
+        assert f"{body['source_id']}:running" not in body["text"]
     if body["recipient_id"] == "00000001":
         return httpx.Response(
             200,
             json={"status": "failed", "error_code": "zhaohu_rejected"},
         )
     raise httpx.ReadTimeout("timeout", request=request)
+
+
+async def seed_report_batches(db, source):
+    when = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
+    for name, status, has_subtasks in (
+        ("running", "success", True),
+        ("skipped", "skipped", False),
+        ("main-failure", "error", False),
+        ("subtask-failure", "success", True),
+        ("unfollowed", "error", False),
+    ):
+        await seed_batch(db, source, name, when, status, subtask=has_subtasks)
+    await db.execute(
+        "UPDATE swe_cron_job_states SET batch_follow_level=3 "
+        "WHERE source_id=%s AND job_id<>'unfollowed'",
+        (source,),
+    )
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET settled_status='error', "
+        "settled_error_code='cron_async_subtasks_failed' WHERE execution_id=%s",
+        (source + ":subtask-failure",),
+    )
+    await db.execute(
+        "UPDATE swe_cron_executions SET async_status='error', error_type='API,Prompt' WHERE trace_id=%s",
+        (source + "-subtask-failure",),
+    )
 
 
 @pytest.mark.asyncio
@@ -177,22 +223,7 @@ async def test_mysql_each_call_creates_a_report_and_each_delivery_is_attempted_o
 ):
     db = report_mysql
     source = "report_" + uuid4().hex[:12]
-    when = datetime.now(timezone.utc).replace(microsecond=0)
-    await seed_batch(
-        db,
-        source,
-        "running",
-        when.replace(tzinfo=None),
-        "success",
-        subtask=True,
-    )
-    await seed_batch(
-        db,
-        source,
-        "skipped",
-        when.replace(tzinfo=None),
-        "skipped",
-    )
+    await seed_report_batches(db, source)
     await db.execute(
         """INSERT INTO swe_cron_dispatch_worker_capacity
            (worker_id,source_id,provider_id,model_id,effective_workers,running_count)
@@ -258,12 +289,16 @@ async def test_mysql_each_call_creates_a_report_and_each_delivery_is_attempted_o
             )
             assert len(claimed := [row for row in claims if row]) == 1
             await workers[0].collect(claimed[0])
+            pending = await store.pending_deliveries()
+            assert [part["part_no"] for part in pending] == [1, 1, 1]
             interrupted = next(
-                part
-                for part in await store.pending_deliveries()
-                if part["recipient_id"] == "00000003"
+                part for part in pending if part["recipient_id"] == "00000003"
             )
             assert await store.start_delivery(interrupted)
+            assert [
+                (part["recipient_id"], part["part_no"])
+                for part in await store.pending_deliveries()
+            ] == [("00000001", 1), ("00000002", 1)]
             await db.execute(
                 f"UPDATE {DELIVERIES} SET started_at=UTC_TIMESTAMP(6)-INTERVAL 90 SECOND "
                 "WHERE delivery_id=%s",
@@ -287,7 +322,15 @@ async def test_mysql_each_call_creates_a_report_and_each_delivery_is_attempted_o
                 result["recipients"][2]["issues"][0]["error_code"]
                 == "cron_report_delivery_expired"
             )
-            assert sorted(attempts) == ["00000001", "00000002"]
+            assert [item["total_parts"] for item in result["recipients"]] == [
+                2,
+                2,
+                2,
+            ]
+            assert [
+                [part for recipient, part in attempts if recipient == employee]
+                for employee in request["recipient_ids"]
+            ] == [[1, 2], [1, 2], [2]]
         finally:
             await db.execute(
                 f"DELETE FROM {DELIVERIES} WHERE report_id=%s",
@@ -297,14 +340,11 @@ async def test_mysql_each_call_creates_a_report_and_each_delivery_is_attempted_o
                 f"DELETE FROM {REPORTS} WHERE report_id IN (%s,%s)",
                 (identity, second_id),
             )
-            await db.execute(
-                "DELETE FROM swe_cron_subtasks WHERE trace_id=%s",
-                (source + "-running",),
-            )
-            await db.execute(
-                "DELETE FROM swe_cron_executions WHERE trace_id=%s",
-                (source + "-running",),
-            )
+            for table in ("swe_cron_subtasks", "swe_cron_executions"):
+                await db.execute(
+                    f"DELETE FROM {table} WHERE trace_id IN (%s,%s)",
+                    (source + "-running", source + "-subtask-failure"),
+                )
             for table in (
                 "swe_cron_managed_batch_members",
                 "swe_cron_managed_trigger_receipts",

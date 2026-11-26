@@ -612,3 +612,182 @@ def test_retry_does_not_claim_a_new_request_id_was_submitted(invoke):
     assert result.exit_code == 0, result.output
     assert calls[-1].content == b""
     assert "request_id" not in json.loads(result.output)
+
+
+def _create_args(*extra):
+    return [
+        "create",
+        "--type",
+        "agent",
+        "--name",
+        "回检任务",
+        "--cron",
+        "0 9 * * *",
+        "--channel",
+        "console",
+        "--text",
+        "生成日报",
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "seconds"),
+    [("90s", 90), ("30m", 1800), ("2h", 7200), ("1d", 86400), ("600", 600)],
+)
+def test_recheck_delay_parser_accepts_friendly_formats(raw, seconds):
+    assert cron_cmd._parse_recheck_delay(raw) == seconds
+
+
+@pytest.mark.parametrize("raw", ["30", "8d", "", "abc", "1w"])
+def test_recheck_delay_parser_rejects_invalid_values(raw):
+    with pytest.raises(Exception):
+        cron_cmd._parse_recheck_delay(raw)
+
+
+def test_create_sends_recheck_rule_accepted_by_scheduler_schema(invoke):
+    from scheduler.app.routers.managed_cron_management import CreateRequest
+    from scheduler.app.services.cron.managed.definition import normalize_spec
+    from scheduler.app.services.cron.managed.identity import CallerIdentity
+
+    run, calls, _ = invoke
+    result = run(
+        _create_args(
+            "--recheck-after",
+            "30m",
+            "--recheck-instruction",
+            "检查日报是否已生成并发送",
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    body = CreateRequest.model_validate(json.loads(calls[-1].content))
+    spec = normalize_spec(
+        body.spec,
+        CallerIdentity.from_headers(calls[-1].headers),
+        "server-created-id",
+    )
+    assert spec["recheck"] == {
+        "delay_seconds": 1800,
+        "instruction": "检查日报是否已生成并发送",
+    }
+
+
+def test_create_requires_recheck_pair_and_agent_type(invoke):
+    run, calls, _ = invoke
+
+    missing = run(_create_args("--recheck-after", "30m"))
+    assert missing.exit_code != 0
+    assert "used together" in missing.output
+
+    text_task = run(
+        [
+            "create",
+            "--type",
+            "text",
+            "--name",
+            "文本任务",
+            "--cron",
+            "0 9 * * *",
+            "--channel",
+            "console",
+            "--text",
+            "固定内容",
+            "--recheck-after",
+            "30m",
+            "--recheck-instruction",
+            "检查",
+        ],
+    )
+    assert text_task.exit_code != 0
+    assert "only valid for agent tasks" in text_task.output
+
+    too_soon = run(
+        _create_args(
+            "--recheck-after",
+            "30",
+            "--recheck-instruction",
+            "检查",
+        ),
+    )
+    assert too_soon.exit_code != 0
+    assert "between 60 seconds" in too_soon.output
+    assert not calls
+
+
+def test_update_sets_and_clears_recheck(invoke):
+    run, calls, _ = invoke
+    result = run(
+        [
+            "update",
+            "j1",
+            "--recheck-after",
+            "2h",
+            "--recheck-instruction",
+            "两小时后确认结果",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(calls[-1].content)["spec"]["recheck"] == {
+        "delay_seconds": 7200,
+        "instruction": "两小时后确认结果",
+    }
+
+    cleared = run(["update", "j1", "--no-recheck"])
+    assert cleared.exit_code == 0, cleared.output
+    spec = json.loads(calls[-1].content)["spec"]
+    assert "recheck" in spec and spec["recheck"] is None
+
+
+def test_update_rejects_mixed_recheck_flags(invoke):
+    run, calls, _ = invoke
+    result = run(
+        [
+            "update",
+            "j1",
+            "--no-recheck",
+            "--recheck-after",
+            "30m",
+            "--recheck-instruction",
+            "检查",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--no-recheck" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (_create_args("--recheck-after", ""), "recheck delay must look like"),
+        (
+            ["update", "j1", "--recheck-after", ""],
+            "recheck delay must look like",
+        ),
+        (
+            ["update", "j1", "--no-recheck", "--recheck-after", ""],
+            "--no-recheck",
+        ),
+    ],
+)
+def test_empty_recheck_delay_stops_before_sending_requests(
+    invoke,
+    args,
+    message,
+):
+    run, calls, _ = invoke
+    result = run(args)
+    assert result.exit_code != 0
+    assert message in result.output
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--recheck-after", "30m"), ("--recheck-instruction", "检查报告")],
+)
+def test_update_requires_recheck_pair_before_reading_job(invoke, args):
+    run, calls, _ = invoke
+    result = run(["update", "j1", *args])
+    assert result.exit_code != 0
+    assert "used together" in result.output
+    assert calls == []

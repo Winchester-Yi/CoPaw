@@ -34,6 +34,11 @@ FAILED = "(r.status='error' OR r.settled_status='error')"
 DONE = "(r.status IN ('error','skipped','cancelled') OR (r.status='success' AND r.settled_status IN ('success','error')))"
 ACTIVE = "(r.status IN ('dispatching','accepted','running') OR (r.status='success' AND r.settled_status IS NULL))"
 TEXT_RUN = "(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.spec_json,'$.task_type')),'')='text')"
+# 关注等级只在父任务有效时参与筛选；已删除或非 Scheduler 管理的父任务视为不可筛。
+FOLLOW_LEVEL = (
+    "CASE WHEN p.management_owner='scheduler' AND p.deleted_at IS NULL "
+    "THEN COALESCE(ps.batch_follow_level,0) ELSE NULL END"
+)
 MANIFEST_IDENTITY = " AND ".join(
     f"JSON_UNQUOTE(JSON_EXTRACT(c.members_json,CONCAT('$[',m.dispatch_order,'].identity[{index}]'))) COLLATE utf8mb4_bin=m.{name}"
     for index, name in enumerate(KEYS)
@@ -51,6 +56,8 @@ c.logical_fire_at,c.physical_fire_at,c.created_at,c.batch_paused,
 CAST(c.members_json AS JSON) AS members_json,
 JSON_UNQUOTE(JSON_EXTRACT(p.spec_json,'$.name')) AS job_name,
 CASE WHEN ps.dispatch_state='batch_paused' THEN 1 ELSE 0 END AS dispatch_paused,
+CASE WHEN p.management_owner='scheduler' AND p.deleted_at IS NULL
+    THEN ps.batch_follow_level END AS batch_follow_level,
 CASE WHEN p.management_owner='scheduler' THEN 0 ELSE 1 END AS invalid_parent
 FROM {RECEIPTS} c
 LEFT JOIN swe_cron_jobs_v2 p ON {identity_join('c', 'p')}
@@ -72,6 +79,8 @@ MAX(CASE WHEN m.member_role='parent' THEN r.provider_id END) AS provider_id,
 MAX(CASE WHEN m.member_role='parent' THEN r.model_id END) AS model_id,
 MAX(c.dispatch_paused) AS dispatch_paused,
 MAX(c.batch_paused) AS batch_paused,
+MAX(CASE WHEN {DONE} THEN COALESCE(r.settled_at,r.finished_at) END) AS finished_at,
+MAX(c.batch_follow_level) AS batch_follow_level,
 COUNT(m.member_id) AS member_count,
 SUM(CASE WHEN {DONE} THEN 1 ELSE 0 END) AS done_count,
 SUM(CASE WHEN {FAILED} THEN 1 ELSE 0 END) AS failed_count,
@@ -123,6 +132,8 @@ def batch_where(
     batch_id=None,
     *,
     child_status=None,
+    follow_min=None,
+    follow_max=None,
 ):
     clauses = [
         "c.source_id=%s",
@@ -150,6 +161,12 @@ def batch_where(
             "ELSE cr.status END=%s)",
         )
         params.append(child_status)
+    if follow_min is not None:
+        clauses.append(f"{FOLLOW_LEVEL}>=%s")
+        params.append(follow_min)
+    if follow_max is not None:
+        clauses.append(f"{FOLLOW_LEVEL}<=%s")
+        params.append(follow_max)
     if query:
         fields = (
             "c.batch_id",

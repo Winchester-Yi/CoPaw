@@ -413,6 +413,16 @@ class ManagedSchedulingService:
         store = ExecutionStore(tx, grant=TriggerGrant(key, kind))
         result = []
         first_order = None
+        follow_level = 0
+        if kind == "batch":
+            state = await tx.fetch_one(
+                "SELECT batch_follow_level FROM swe_cron_job_states "
+                f"WHERE {WHERE_JOB}",
+                key,
+            )
+            follow_level = (
+                int(state["batch_follow_level"] or 0) if state else 0
+            )
         for entry in ranked:
             row = entry["definition"]
             rank = entry["payload"]["dispatch_priority"]
@@ -439,6 +449,7 @@ class ManagedSchedulingService:
                     .replace(tzinfo=None)
                     .isoformat(" ")
                 )
+                metadata["batch_follow_level"] = follow_level
                 if first_order is not None:
                     metadata["batch_queue_order"] = first_order
             command = ExecutionRequest(

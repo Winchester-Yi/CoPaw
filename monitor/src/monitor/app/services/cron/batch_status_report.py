@@ -53,7 +53,11 @@ def batch_ctes(source, business_date, now):
     where, params = sql.batch_where(source, start)
     return (
         sql._aggregate_ctes(
-            where + " AND c.logical_fire_at<%s AND c.logical_fire_at<=%s",
+            where
+            + " AND c.logical_fire_at<%s AND c.logical_fire_at<=%s"
+            + " AND ps.batch_follow_level>=1"
+            + " AND p.management_owner='scheduler'"
+            + " AND p.deleted_at IS NULL",
         ),
         (*params, end, cutoff),
     )
@@ -69,7 +73,13 @@ async def batch_activity(reader, source, batches):
                 SELECT DISTINCT m.batch_id,r.execution_id,r.provider_id,r.model_id,
                     r.status,r.settled_status,r.settled_error_code,
                     {sql.TEXT_RUN} AS is_text,
-                    h.trace_id
+                    h.trace_id,
+                    CASE WHEN r.status='error' THEN 'main'
+                         WHEN r.settled_status='error' THEN 'subtask' END AS failure_stage,
+                    CASE WHEN r.status<>'error' AND r.settled_status='error' THEN
+                        CASE WHEN r.settled_error_code='cron_async_subtasks_timeout'
+                             THEN '超时' ELSE NULLIF(TRIM(h.error_type),'') END
+                    END COLLATE utf8mb4_bin AS subtask_error_type
                 FROM {sql.MEMBERS} m
                 JOIN {sql.RUNS} r ON r.execution_id=m.current_execution_id
                     AND {sql.identity_join('m', 'r')}
@@ -81,6 +91,7 @@ async def batch_activity(reader, source, batches):
                     AND m.batch_id IN ({placeholders})
             ), run_subtasks AS (
                 SELECT r.batch_id,r.execution_id,r.provider_id,r.model_id,
+                    r.failure_stage,r.subtask_error_type,
                     ({sql.ACTIVE} AND NOT r.is_text) AS occupies,
                     SUM(CASE WHEN s.status='FAIL' THEN 1 ELSE 0 END) AS failures,
                     SUM(CASE WHEN s.status='PART_SUC' THEN 1 ELSE 0 END) AS partial,
@@ -93,22 +104,43 @@ async def batch_activity(reader, source, batches):
                     AND s.trace_id COLLATE utf8mb4_bin=r.trace_id
                     AND s.status IN ('FAIL','PART_SUC','TIMEOUT')
                 GROUP BY r.batch_id,r.execution_id,r.provider_id,r.model_id,
-                    r.status,r.settled_status,r.settled_error_code,r.is_text
+                    r.status,r.settled_status,r.settled_error_code,r.is_text,
+                    r.failure_stage,r.subtask_error_type
             )
-            SELECT batch_id,provider_id,model_id,SUM(occupies) AS occupied,
+            SELECT batch_id,provider_id,model_id,failure_stage,subtask_error_type,
+                COUNT(*) AS member_count,SUM(occupies) AS occupied,
                 SUM(failures) AS failures,SUM(partial) AS partial,
                 SUM(timeouts) AS timeouts,SUM(incomplete) AS incomplete
-            FROM run_subtasks GROUP BY batch_id,provider_id,model_id
+            FROM run_subtasks
+            GROUP BY batch_id,provider_id,model_id,failure_stage,subtask_error_type
             ORDER BY batch_id,provider_id,model_id""",
             (source, source, *ids),
         )
         for row in rows:
             item = details.setdefault(
                 row["batch_id"],
-                {"subtasks": Counter(), "workers": []},
+                {
+                    "subtasks": Counter(),
+                    "failure_details": {
+                        "main_count": 0,
+                        "subtask_types": Counter(),
+                    },
+                    "workers": [],
+                },
             )
+            # Keep the previous snapshot counts available to older Scheduler instances.
             for field in ("failures", "partial", "timeouts", "incomplete"):
                 item["subtasks"][field] += int(row[field])
+            failure = item["failure_details"]
+            count = int(row["member_count"])
+            if row["failure_stage"] == "main":
+                failure["main_count"] += count
+            elif row["failure_stage"] == "subtask":
+                types = (row["subtask_error_type"] or "").split(",")
+                normalized = {value.strip() for value in types}
+                normalized.discard("")
+                name = " + ".join(sorted(normalized))
+                failure["subtask_types"][name or "未记录类型"] += count
             if row["occupied"]:
                 item["workers"].append(
                     pool_item(row, occupied=int(row["occupied"])),
@@ -193,21 +225,26 @@ async def collect(reader, source, business_date, now):
     for row in batches:
         info = activity.get(row["batch_id"], {})
         row["subtasks"] = dict(info.get("subtasks", {}))
+        row["failure_details"] = info.get("failure_details")
         row["workers"] = info.get("workers", [])
     return {
         "snapshot_at": now.isoformat(),
+        "batch_scope": "followed_batch",
         "batches": [
             {
                 "batch_id": row["batch_id"],
-                "name": row["job_name"] or row["job_id"],
+                "name": row["job_name"] or "未命名任务",
                 "logical_fire_at": sql.time_text(row["logical_fire_at"]),
+                "finished_at": sql.time_text(row.get("finished_at")),
                 "status": row["status"],
+                "follow_level": int(row.get("batch_follow_level") or 0),
                 **{
                     name: int(row[name])
                     for name in fields
                     if row["status"] != "unavailable"
                 },
                 "subtasks": row["subtasks"],
+                "failure_details": row["failure_details"],
                 "workers": row["workers"],
             }
             for row in batches

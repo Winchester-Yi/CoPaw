@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { SetStateAction } from "react";
 import { failureMessage } from "./helpers";
 
 /** 弹窗关闭或身份变化即停止轮询，迟到响应不更新其他工作区。 */
@@ -12,7 +13,7 @@ export function useManagedPanel<T>(
   const alive = useRef(false);
   const serial = useRef(0);
   /** 写请求已确认的新视图作废此前在途查询，避免迟到空结果覆盖受理进度。 */
-  const replaceValue = useCallback((next: T) => {
+  const replaceValue = useCallback((next: SetStateAction<T | null>) => {
     ++serial.current;
     setValue(next);
     setError(null);

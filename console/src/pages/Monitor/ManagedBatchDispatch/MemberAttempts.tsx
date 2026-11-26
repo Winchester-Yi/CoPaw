@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
-import { Alert, Button, Modal, Spin, Table, Tag } from "antd";
+import { Alert, Modal, Spin, Table, Tag } from "antd";
+import styles from "../CronBatchDispatch/index.module.less";
 import { managedBatchBoard, type ManagedMemberAttempt } from "@/api/modules/managedBatchBoard";
 import { labels, timeText } from "./format";
 import { useBoardResource } from "./useBoardResource";
@@ -42,8 +43,17 @@ export default function MemberAttempts({ count, ...target }: Target & { count: n
   const [open, setOpen] = useState(false);
   if (count === 0) return <span>重试次数：0</span>;
   return <>
-    <span>重试次数：<Button type="link" size="small" onClick={() => setOpen(true)}
-      aria-label={`重试次数 ${count}，查看尝试历史`}>{count}</Button></span>
+    <span>
+      重试次数：
+      <button
+        type="button"
+        className={styles.retryCount}
+        onClick={() => setOpen(true)}
+        aria-label={`重试次数 ${count}，查看尝试历史`}
+      >
+        {count}
+      </button>
+    </span>
     <Modal title="尝试历史" width={900} open={open} footer={null} onCancel={() => setOpen(false)}>
       {open && <History {...target} />}
     </Modal>

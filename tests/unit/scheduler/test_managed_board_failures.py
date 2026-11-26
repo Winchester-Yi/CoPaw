@@ -226,7 +226,12 @@ async def test_failure_summary_http_is_manager_only_and_read_only(
     from monitor.app.routers import managed_cron_board as api
 
     db = callback_setup[0]
-    await failed_batch(callback_setup)
+    from scheduler.app.services.cron.managed.batch_follow import (
+        set_batch_follow_level,
+    )
+
+    caller, batch_id = await failed_batch(callback_setup)
+    await set_batch_follow_level(db, caller, batch_id, 3)
     app = FastAPI()
     app.include_router(api.router, prefix="/api")
     app.dependency_overrides[api.board_service] = lambda: ManagedBoardQuery(db)
@@ -247,6 +252,14 @@ async def test_failure_summary_http_is_manager_only_and_read_only(
         response = await client.get(path, headers=headers)
         assert response.status_code == 200
         assert response.json()["total"] == 1
+        for level, total in ((3, 1), (0, 0)):
+            response = await client.get(
+                path,
+                headers=headers,
+                params={"follow_min": level, "follow_max": level},
+            )
+            assert response.status_code == 200
+            assert response.json()["total"] == total
         assert (
             await client.get(
                 path,

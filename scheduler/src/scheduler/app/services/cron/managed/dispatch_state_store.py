@@ -5,6 +5,8 @@ import json
 from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
+from .batch_follow import BATCH_MODES
+
 from .definition import canonical, request_hash, stable_id
 from .distribution import TASKS, _children
 from .operations import (
@@ -44,9 +46,13 @@ class DispatchStateStore:
             f"SELECT * FROM {CONTROLS} WHERE {WHERE_JOB}",
             key,
         )
-        objects = [root, *await _children(self.db, key, [])]
-        modes = []
-        for item in objects:
+        root_state = await self.db.fetch_one(
+            "SELECT dispatch_state,batch_follow_level FROM swe_cron_job_states "
+            f"WHERE {WHERE_JOB}",
+            key,
+        )
+        modes = [root_state["dispatch_state"]]
+        for item in await _children(self.db, key, []):
             state = await self.db.fetch_one(
                 f"SELECT dispatch_state FROM swe_cron_job_states WHERE {WHERE_JOB}",
                 tuple(item[name] for name in IDENTITY_FIELDS),
@@ -67,11 +73,16 @@ class DispatchStateStore:
                 control["state"] if control else root["state_dispatch_state"]
             ),
             "version": control["version"] if control else 1,
+            "batch_follow_level": (
+                root_state["batch_follow_level"]
+                if root_state["dispatch_state"] in BATCH_MODES
+                else None
+            ),
             "effective_state": effective,
             "sync_status": control["sync_status"] if control else "completed",
             "completed_count": counts.get(
                 "completed",
-                len(objects) if not control else 0,
+                len(modes) if not control else 0,
             ),
             "pending_count": counts.get("pending", 0)
             + counts.get("running", 0),

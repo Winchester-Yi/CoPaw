@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import timezone
 
 from . import executions
+from .batch_follow import followed_batch_reason, read_batch_follow_level
 from .batch_members import MEMBERS, RECEIPTS
 from .daily_retry_policy import (
     MARKER,
@@ -173,6 +174,7 @@ async def eligible_reason(
     prepared,
     *,
     max_attempts,
+    followed_only=False,
 ):
     if (
         row["source_id"] != call["source_id"]
@@ -194,8 +196,13 @@ async def eligible_reason(
     reason = await latest_reason(tx, row, lock=True)
     if reason:
         return reason
+    reason = relation_reason(row, member, receipt)
+    if reason:
+        return reason
+    if followed_only:
+        reason = await followed_batch_reason(tx, row, receipt)
     return (
-        relation_reason(row, member, receipt)
+        reason
         or await history_reason(tx, row)
         or native_retry_reason(row, current, member, max_attempts)
     )
@@ -260,6 +267,7 @@ async def enqueue_retry(
     prepared,
     now,
     *,
+    receipt,
     max_attempts,
 ):
     key = tuple(row[name] for name in IDENTITY_FIELDS)
@@ -268,6 +276,9 @@ async def enqueue_retry(
     if member:
         from .retry_priority import lane_for_batch
 
+        command.dispatch_meta["batch_follow_level"] = (
+            await read_batch_follow_level(tx, receipt)
+        )
         command.dispatch_meta["dispatch_lane"] = await lane_for_batch(
             tx,
             member["batch_id"],

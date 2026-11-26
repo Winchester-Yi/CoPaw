@@ -306,6 +306,17 @@ export const schedulerCronApi = {
     ),
   dispatchState: (context: ManagedCronContext, id: string) =>
     call<ManagedDispatchState>(context, `${jobPath(id)}/dispatch-state`),
+  setBatchFollowLevel: (
+    context: ManagedCronContext,
+    id: string,
+    level: number,
+  ) =>
+    write<{ batch_follow_level: number }>(
+      context,
+      `${jobPath(id)}/batch-dispatch/follow`,
+      "PUT",
+      { level },
+    ),
   setDispatchState: (
     context: ManagedCronContext,
     id: string,

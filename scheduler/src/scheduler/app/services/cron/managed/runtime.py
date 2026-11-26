@@ -27,6 +27,53 @@ from .recheck_worker import prepare_recheck_storage
 
 logger = logging.getLogger(__name__)
 
+# 恢复巡检单轮工作量上限：派发候选数、广播/删除/暂停分页、当日补跑页大小共用。
+MANAGED_RECOVERY_LIMIT_ENV = "SCHEDULER_MANAGED_RECOVERY_LIMIT"
+MANAGED_RECOVERY_LIMIT_DEFAULT = 32
+MANAGED_RECOVERY_LIMIT_MAX = 200
+# 恢复巡检轮询间隔：每轮结束后等待的秒数。
+MANAGED_RECOVERY_INTERVAL_ENV = "SCHEDULER_MANAGED_RECOVERY_INTERVAL_SECONDS"
+MANAGED_RECOVERY_INTERVAL_DEFAULT = 2
+MANAGED_RECOVERY_INTERVAL_MAX = 60
+
+
+def _bounded_int_env(name, default, maximum):
+    """读取正整数环境变量；缺失或非法时回退默认值，避免启动失败。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= maximum:
+        logger.warning(
+            "恢复巡检参数无效，回退默认值 env=%s default=%s max=%s",
+            name,
+            default,
+            maximum,
+        )
+        return default
+    return value
+
+
+def managed_recovery_limit():
+    """恢复巡检单轮上限，默认 32，取值 1-200。"""
+    return _bounded_int_env(
+        MANAGED_RECOVERY_LIMIT_ENV,
+        MANAGED_RECOVERY_LIMIT_DEFAULT,
+        MANAGED_RECOVERY_LIMIT_MAX,
+    )
+
+
+def managed_recovery_interval():
+    """恢复巡检轮询间隔秒数，默认 2，取值 1-60。"""
+    return _bounded_int_env(
+        MANAGED_RECOVERY_INTERVAL_ENV,
+        MANAGED_RECOVERY_INTERVAL_DEFAULT,
+        MANAGED_RECOVERY_INTERVAL_MAX,
+    )
+
 
 async def _fetch_batch_retry_overrides():
     client = SystemSweClient(os.environ.get(SWE_INTERNAL_API_BASE_URL_ENV, ""))
@@ -54,6 +101,7 @@ async def create_managed_worker(db):
         resources,
         platform,
         execution,
+        limit=managed_recovery_limit(),
         capacity=ManagedCapacityGate(legacy),
         rechecks_enabled=rechecks_enabled,
         retry_overrides=retry_policy.read_overrides,
@@ -118,7 +166,10 @@ async def managed_lifespan(app):
         return
     stop_event = asyncio.Event()
     task = asyncio.create_task(
-        worker.run_loop(stop_event=stop_event),
+        worker.run_loop(
+            stop_event=stop_event,
+            interval_seconds=managed_recovery_interval(),
+        ),
         name="managed-cron-service",
     )
     app.state.managed_cron_task = task

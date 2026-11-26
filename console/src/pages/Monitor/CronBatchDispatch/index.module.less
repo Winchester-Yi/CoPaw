@@ -450,6 +450,32 @@
   min-height: 0;
 }
 
+// 执行成员页签：表格占满剩余高度，分页贴住页签底部，与左侧 Batch 分页同一水平线。
+.memberPane {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.memberPane .detailPagination {
+  margin-top: auto;
+}
+
+// 新版执行成员表不展示顺位的虚线提示，悬停仍可查看优先详情。
+.memberPane .intentOrder {
+  border-bottom: 0;
+}
+
+// 关注等级星标：放在任务名下方，不与状态标签混排。
+.followStars {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  margin-top: 3px;
+  color: #f5b301;
+}
+
 .eventTab {
   min-height: 0;
 }
@@ -491,6 +517,22 @@
 
 .stackCell {
   min-width: 0;
+}
+
+// 重试次数延用正文样式，仅用颜色和指针提示可点击。
+.retryCount {
+  padding: 0;
+  color: var(--console-management-primary, #3769fc);
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.retryCount:focus-visible {
+  outline: 2px solid var(--console-management-primary, #3769fc);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .intentOrder {
@@ -805,8 +847,9 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 16px 0 0;
-  padding-top: 12px;
+  // 右栏面板固定 600px，压缩分页上下留白以多放一条记录。
+  margin: 8px 0 0;
+  padding-top: 8px;
   border-top: 1px solid var(--console-management-border, #e5e7eb);
 
   > li {

@@ -37,6 +37,67 @@ class ModeDatabase(DistributionDatabase):
         """)
 
 
+@pytest.mark.asyncio
+async def test_task_follow_level_is_editable_by_source_manager_before_first_batch(
+    mode_setup,
+):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from scheduler.app.routers import managed_cron_dispatch_state as routes
+
+    db, _, _ = mode_setup
+    db.add("source", dispatch_state="batch_enabled")
+    db.add("ordinary")
+    db.add("child", parent=("alice", "bank", "default", "source"))
+    app = FastAPI()
+    app.include_router(routes.router, prefix="/api")
+    app.dependency_overrides[routes.management_database] = lambda: db
+    root = "/api/scheduler/cron/jobs"
+    follow = f"{root}/source/batch-dispatch/follow"
+    view = f"{root}/source/dispatch-state"
+    creator = {"X-User-Id": "alice", "X-Source-Id": "bank"}
+    manager = {**creator, "X-User-Role": "manager"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        assert (await client.get(view, headers=creator)).json()[
+            "batch_follow_level"
+        ] == 0
+        denied = await client.put(follow, json={"level": 4}, headers=creator)
+        assert denied.status_code == 403
+        invalid = await client.put(
+            follow,
+            json={"level": True},
+            headers=manager,
+        )
+        assert invalid.status_code == 422
+        for job_id in ("ordinary", "child"):
+            response = await client.put(
+                f"{root}/{job_id}/batch-dispatch/follow",
+                json={"level": 4},
+                headers=manager,
+            )
+            assert response.status_code == 404
+        wrong_source = await client.put(
+            follow,
+            json={"level": 4},
+            headers={**manager, "X-Source-Id": "BANK"},
+        )
+        assert wrong_source.status_code == 404
+        for level in (4, 0):
+            response = await client.put(
+                follow,
+                json={"level": level},
+                headers=manager,
+            )
+            assert response.json() == {"batch_follow_level": level}
+            assert (await client.get(view, headers=creator)).json()[
+                "batch_follow_level"
+            ] == level
+
+
 class ModePlatform(PlatformClient):
     def __init__(self):
         super().__init__()

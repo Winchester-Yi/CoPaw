@@ -32,8 +32,13 @@ def _batch_order(*, direct=False):
             f"CASE WHEN {standalone} THEN r.updated_at END,"
             f"CASE WHEN {standalone} THEN r.queue_order END,"
         )
+    level = (
+        "COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT("
+        "r.dispatch_meta_json,'$.batch_follow_level')) AS SIGNED),0)"
+    )
     return (
         f" ORDER BY {standalone_order}CASE WHEN r.dispatch_lane='urgent' THEN 0 ELSE 1 END,"
+        f"{level} DESC,"
         f"{received},{first},r.dispatch_order,r.queue_order"
     )
 

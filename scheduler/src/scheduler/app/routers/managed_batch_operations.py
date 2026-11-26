@@ -24,6 +24,7 @@ from ..services.cron.managed.batch_retry import (
     BatchRetryService,
     ManagedBatchRetryRequest,
 )
+from ..services.cron.managed.contracts import BatchFollowRequest
 from ..services.cron.managed.identity import CallerIdentity
 
 router = APIRouter(
@@ -123,6 +124,24 @@ async def _dispatch_urgent(db, dispatcher, results):
 class BatchPauseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     paused: bool = Field(strict=True)
+
+
+@router.put(
+    "/{batch_id}/follow",
+    dependencies=[Depends(require_managed_runtime)],
+)
+async def follow_batch_task(
+    batch_id: str,
+    body: BatchFollowRequest,
+    caller: CallerIdentity = Depends(caller_identity),
+    db=Depends(management_database),
+):
+    from ..services.cron.managed.batch_follow import set_batch_follow_level
+
+    try:
+        return await set_batch_follow_level(db, caller, batch_id, body.level)
+    except Exception as exc:
+        raise batch_error(exc) from exc
 
 
 @router.put(

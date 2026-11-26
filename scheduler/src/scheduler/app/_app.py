@@ -37,6 +37,7 @@ from .services.cron.managed.runtime import (
 )
 from .services.cron.system.runtime import system_lifespan
 from .services.cron.batch_status_report.runtime import report_lifespan
+from .services.cron.swe_routing import validate_swe_source_routes
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ async def lifespan(fastapi_app: FastAPI):
     """Scheduler application lifecycle."""
     logger.info("Cron Scheduler service starting up")
     logger.info("Environment: %s", ENV_NAME)
+    validate_swe_source_routes()
 
     db_initialized = False
     if DB_HOST:

@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from .batch_failures import display_error_messages, member_rows
+from .batch_follow import read_batch_follow_level
 from .batch_members import MEMBERS, RECEIPTS, BatchRelationUnavailable
 from .batch_retry import BatchRetryGrant, BatchRetryService, _utc
 from .batch_retry_policy import BatchRetryPolicyUnavailable, max_batch_attempts
@@ -233,6 +234,7 @@ class AutoBatchRetry:
             row,
             receipt["batch_id"],
             digest,
+            follow_level=await read_batch_follow_level(tx, receipt),
             grant=BatchRetryGrant(key, require_manager=False),
             retry_at=due.replace(tzinfo=timezone.utc),
         )

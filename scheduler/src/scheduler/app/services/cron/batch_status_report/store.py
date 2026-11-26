@@ -201,7 +201,7 @@ class ReportStore:
         batch_count = len(snapshot["batches"])
         has_issues = any(
             batch["status"] == "unavailable"
-            or batch["subtasks"].get("incomplete")
+            or (batch["failed_count"] > 0 and not batch.get("failure_details"))
             for batch in snapshot["batches"]
         )
         at = (
@@ -212,7 +212,7 @@ class ReportStore:
         async with transaction(self.db) as tx:
             changed = await tx.execute(
                 f"UPDATE {REPORTS} SET status='sending',snapshot_at=%s,batch_count=%s,"
-                "snapshot_json=%s,parts_json=%s,template_version=1,error_code=%s,lease_token=NULL,"
+                "snapshot_json=%s,parts_json=%s,template_version=4,error_code=%s,lease_token=NULL,"
                 "lease_until=NULL WHERE report_id=%s AND status='collecting' "
                 "AND lease_token=%s AND lease_until>UTC_TIMESTAMP(6)",
                 (

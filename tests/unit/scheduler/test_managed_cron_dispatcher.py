@@ -2,6 +2,8 @@
 """验证派发重用持久执行身份，并以共库受理事实为准。"""
 
 import asyncio
+import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,6 +11,10 @@ import pytest
 from tests.unit.scheduler.test_managed_cron_executions import (
     enqueue,
     execution_setup,
+)
+from tests.unit.scheduler.test_managed_cron_callbacks import (
+    callback_setup,
+    create_source,
 )
 
 
@@ -122,6 +128,61 @@ async def test_unconfirmed_dispatch_waits_for_each_retry_deadline(
         ).fetchone()[0]
         == 1
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("previous_attempts", "requeue_status"),
+    [(0, "queued"), (2, "dispatch_failed")],
+)
+async def test_requeue_refreshes_follow_level_after_dispatch_attempt(
+    callback_setup,
+    previous_attempts,
+    requeue_status,
+):
+    from scheduler.app.services.cron.managed.batch_follow import (
+        set_batch_follow_level,
+    )
+    from scheduler.app.services.cron.managed.dispatcher import (
+        ExecutionDispatcher,
+    )
+    from scheduler.app.services.cron.managed.scheduling import (
+        ManagedSchedulingService,
+    )
+
+    db, caller, _ = callback_setup
+    created = await create_source(callback_setup, mode="batch_enabled")
+    batch = await ManagedSchedulingService(db).run_batch(
+        caller,
+        created["job_id"],
+    )
+    row = await db.fetch_one(
+        "SELECT execution_id FROM swe_cron_execution_runs",
+    )
+    await db.execute(
+        "UPDATE swe_cron_execution_runs SET dispatch_attempt=%s",
+        (previous_attempts,),
+    )
+
+    class Unconfirmed:
+        async def execute(self, claimed, _caller):
+            assert claimed["status"] == "dispatching"
+            await set_batch_follow_level(
+                db,
+                replace(caller, is_manager=True),
+                batch["batch_id"],
+                5,
+            )
+
+    result = await ExecutionDispatcher(db, Unconfirmed()).dispatch_registered(
+        row["execution_id"],
+    )
+    assert result["status"] == requeue_status
+    saved = await db.fetch_one(
+        "SELECT dispatch_meta_json FROM swe_cron_execution_runs WHERE execution_id=%s",
+        (row["execution_id"],),
+    )
+    assert json.loads(saved["dispatch_meta_json"])["batch_follow_level"] == 5
 
 
 @pytest.mark.asyncio

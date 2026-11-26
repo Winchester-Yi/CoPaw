@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { validate as isUuid } from "uuid";
 import {
   Alert,
@@ -87,12 +87,12 @@ const memberColumns = (
   {
     title: "顺位",
     dataIndex: "member_order",
-    width: 60,
+    width: 52,
     render: (_, item) => <PriorityOrder item={item} />,
   },
   {
     title: "角色 / 用户",
-    width: 145,
+    width: 118,
     render: (_, item) => (
       <div className={styles.stackCell}>
         <strong>
@@ -107,7 +107,7 @@ const memberColumns = (
   },
   {
     title: "任务 / 执行",
-    width: 220,
+    width: 196,
     render: (_, item) => (
       <div className={styles.stackCell}>
         <strong>{item.job_name || item.job_id}</strong>
@@ -128,7 +128,7 @@ const memberColumns = (
   },
   {
     title: "状态 / 子任务",
-    width: 160,
+    width: 132,
     render: (_, item) => (
       <>
         {statusTag(item.status)}
@@ -138,7 +138,7 @@ const memberColumns = (
   },
   {
     title: "模型 / 热度",
-    width: 180,
+    width: 156,
     render: (_, item) => (
       <div className={styles.stackCell}>
         <strong title={`${item.provider_id || "-"} / ${item.model_id || "-"}`}>
@@ -150,7 +150,7 @@ const memberColumns = (
   },
   {
     title: "时间",
-    width: 245,
+    width: 226,
     render: (_, item) => (
       <div className={styles.stackCell}>
         <span>最早 {timeText(item.not_before_at)}</span>
@@ -169,17 +169,8 @@ const memberColumns = (
     ),
   },
   {
-    title: "error_type",
-    dataIndex: "error_type",
-    width: 130,
-    ellipsis: true,
-    render: (value: string | null | undefined) => (
-      <Tooltip title={value ?? "-"}>{value ?? "-"}</Tooltip>
-    ),
-  },
-  {
     title: "结果 / 错误",
-    width: 200,
+    width: 180,
     render: (_, item) => {
       const failed =
         ["error", "dispatch_failed"].includes(item.status) ||
@@ -196,6 +187,15 @@ const memberColumns = (
         </Tooltip>
       );
     },
+  },
+  {
+    title: "子任务错误",
+    dataIndex: "error_type",
+    width: 112,
+    ellipsis: true,
+    render: (value: string | null | undefined) => (
+      <Tooltip title={value ?? "-"}>{value ?? "-"}</Tooltip>
+    ),
   },
 ];
 
@@ -272,6 +272,16 @@ export default function BatchDetail({
         ),
       }
     : null;
+  const finishedAt =
+    ["completed", "failed"].includes(current.status) && current.finished_at
+      ? timeText(current.finished_at)
+      : null;
+  const metaItems = [
+    `父任务 ${batch.job_id}`,
+    `计划 ${timeText(batch.logical_fire_at)}`,
+    `回调 ${timeText(batch.created_at)}`,
+    ...(finishedAt ? [`完成 ${finishedAt}`] : []),
+  ];
   return (
     <div className={styles.detailContent}>
       <div className={styles.detailHead}>
@@ -286,7 +296,7 @@ export default function BatchDetail({
             </span>
           </p>
         </div>
-        <Space>
+        <Space wrap>
           {statusTag(data?.batch.status || batch.status)}
           {current.batch_paused && <span>本批已暂停</span>}
           <Tooltip title="暂停本批后续派发和重试；已交接的执行继续完成，后续新批次不受影响">
@@ -317,11 +327,13 @@ export default function BatchDetail({
       </div>
       <div
         className={styles.detailMeta}
-        style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}
+        style={{
+          gridTemplateColumns: `repeat(${metaItems.length}, minmax(0, 1fr))`,
+        }}
       >
-        <span>父任务 {batch.job_id}</span>
-        <span>计划 {timeText(batch.logical_fire_at)}</span>
-        <span>回调 {timeText(batch.created_at)}</span>
+        {metaItems.map((text) => (
+          <span key={text}>{text}</span>
+        ))}
       </div>
       {detail.error && <Alert type="error" showIcon message={detail.error} />}
       <Tabs
@@ -345,7 +357,7 @@ export default function BatchDetail({
             key: "members",
             label: `执行成员 (${data?.member_total ?? batch.member_count})`,
             children: emptyBatchDetail || (
-              <div className={styles.intentTab}>
+              <div className={`${styles.intentTab} ${styles.memberPane}`}>
                 <div className={styles.intentFilters}>
                   <Input
                     aria-label="筛选新版执行成员"
@@ -429,7 +441,7 @@ export default function BatchDetail({
                   columns={memberColumns(source, batch.batch_id)}
                   dataSource={data?.members || []}
                   pagination={false}
-                  scroll={{ x: 1410, y: 292 }}
+                  scroll={{ x: 1172, y: 332 }}
                   expandable={{
                     expandedRowRender: (item) => (
                       <div>

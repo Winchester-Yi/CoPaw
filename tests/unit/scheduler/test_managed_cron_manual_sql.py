@@ -33,6 +33,9 @@ def _definitions():
 
 def test_manual_create_covers_exactly_new_protocol_tables():
     definitions = _definitions()
+    follow_sql = (ROOT / "scripts/sql/cron_batch_follow.sql").read_text(
+        encoding="utf-8",
+    )
     assert set(definitions) == MANAGED_TABLES
     for table, body in definitions.items():
         columns = set(
@@ -42,6 +45,10 @@ def test_manual_create_covers_exactly_new_protocol_tables():
                 re.M,
             ),
         )
+        if table == "swe_cron_job_states":
+            columns.update(
+                re.findall(r"^\s+ADD COLUMN (\w+)\s", follow_sql, re.M),
+            )
         assert set(REQUIRED_COLUMNS[table].split()) <= columns, table
         for line in body.splitlines():
             if re.match(

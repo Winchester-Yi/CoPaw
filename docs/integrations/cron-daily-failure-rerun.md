@@ -43,7 +43,8 @@ Headers 只需 `Content-Type: application/json`，不需要用户身份 Header�
 }
 ```
 
-- `task_scope` 支持 `all`（全部，默认）、`batch`（新版批调度）和 `ordinary`（独立普通任务）。已被真实批次复用的普通执行随批次处理。
+- `task_scope` 支持 `all`（全部，默认）、`batch`（新版批调度）、`ordinary`（独立普通任务）和 `followed_batch`（新版看板中关注等级为 `1`–`5` 的父任务批次）。已被真实批次复用的普通执行随批次处理。
+- 平台仅补跑关注批次时，传 `{"source_id":"RMASSIST","task_scope":"followed_batch"}`。先执行 `scripts/sql/cron_batch_follow.sql`，升级所有 Scheduler 实例并按需设置父任务关注等级，再切换定时作业。空清单命中零个；传 `job_ids` 时取交集。 [关注上线顺序](../superpowers/specs/2026-11-25-cron-batch-follow-design.md#6-实施顺序和验收)
 - `job_ids` 可传最多 1000 个任务 ID，按大小写精确匹配。传普通任务或批子任务 ID 时只匹配该任务。传批调度父任务 ID 时匹配该父任务名下批次的所有符合条件的失败成员。省略或传 `null` 时按任务 ID 不限范围，传空数组时匹配零个任务。
 - 两个筛选条件同时传入时取交集，并在调用受理时冻结。所有结果仍按当日窗口、最新一轮和现有自动重试规则判断。
 

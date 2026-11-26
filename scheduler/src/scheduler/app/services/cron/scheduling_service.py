@@ -34,6 +34,7 @@ from .dispatch_intent_service import (
     get_cron_dispatch_intent_service,
 )
 from .workflow_binding import resolve_workflow_batch_jobs
+from .swe_routing import swe_base_for_source
 
 if TYPE_CHECKING:
     from .managed.feedback import ManagedCapacityFeedback
@@ -204,7 +205,9 @@ class SweCronCallbackClient:
         swe_server_domain: str = "",
         passthrough_headers: Mapping[str, Any] | None = None,
     ) -> str | None:
-        base_url = (swe_server_domain or self._base_url).rstrip("/")
+        base_url = (
+            swe_server_domain or swe_base_for_source(source_id, self._base_url)
+        ).rstrip("/")
         if not base_url:
             raise RuntimeError("SWE callback base URL is not configured")
         headers = _extract_b3_passthrough_headers(passthrough_headers)

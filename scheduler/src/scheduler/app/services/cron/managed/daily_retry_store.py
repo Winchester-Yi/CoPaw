@@ -8,6 +8,7 @@ from .daily_retry_audit import record_filters
 from .daily_retry_filters import (
     FILTERED_QUEUED,
     FILTERED_RUNNING,
+    FOLLOWED_BATCH,
     DailyRetryFilters,
 )
 from .daily_retry_policy import day_window, utc_time
@@ -78,6 +79,10 @@ class DailyRetryCalls:
         filters = DailyRetryFilters(task_scope=task_scope, job_ids=job_ids)
         filtered = filters.task_scope != "all" or filters.job_ids is not None
         await self.ready()
+        if filters.task_scope == FOLLOWED_BATCH:
+            await self.db.fetch_all(
+                "SELECT batch_follow_level FROM swe_cron_job_states LIMIT 0",
+            )
         date, start, end = day_window(self.clock())
         async with transaction(self.db) as tx:
             maximum = await tx.fetch_one(

@@ -8,7 +8,9 @@ Scheduler 异步受理调度平台的作业回调，Monitor 读取新版批次�
 2. 部署 Monitor、SWE 和 Scheduler。在 Scheduler 设置 `SCHEDULER_SWE_INTERNAL_API_BASE_URL`，填写 Scheduler 可直连的 SWE 内网根地址，供简报取数和投递使用。SWE 通过 `SWE_MONITOR_API_URL` 向 Monitor 取数。已配置 `SWE_INTERNAL_TOKEN` 的环境继续沿用同一令牌。简报后台在共库表和独立地址就绪后启动。
 3. 在调度平台注册作业，直接调用 Scheduler 内网地址。平台接口依赖现有内网访问边界，可达调用方可以提交来源和收件人。Scheduler 简报入口及 SWE、Monitor 内部接口仅供可信内网使用，招乎投递路径关闭代理自动重放。
 
-SWE 读取 `default_<source_id>` 下默认 Agent 的招乎配置。渠道需已启用，员工号查询须返回匹配的 `sapId` 和有效的 `ystId`。招乎只发送统计文本，正文按 2048 个 UTF-8 字节拆分。
+关注筛选随 Monitor 与 Scheduler 共同上线，判据为父任务关注等级 `1`–`5`。按 [关注上线顺序](../superpowers/specs/2026-11-25-cron-batch-follow-design.md#6-实施顺序和验收) 先执行 `scripts/sql/cron_batch_follow.sql` 并为各来源设置关注等级。批次概况和明细使用关注范围，共享模型池展示全来源占用。
+
+SWE 读取 `default_<source_id>` 下默认 Agent 的招乎配置。渠道需已启用，员工号查询须返回匹配的 `sapId` 和有效的 `ystId`。新版简报先发送单独一条汇总，再按顺序发送逐批明细。每条正文最多 2048 个 UTF-8 字节，查询接口中的 `part_no=1` 对应汇总。升级时部署新版 Monitor 和 Scheduler，即可为新生成的快照使用此格式。
 
 如果测试环境已执行上一版建表 SQL，可把原作业标识和计划时刻列改为可空，保留历史数据。首次部署直接执行当前建表 SQL。
 

@@ -26,7 +26,7 @@
 1. 数据库负责人先在实际共库执行只读的 [结构核对 SQL](cron_phase2_schema_audit.sql)，保存数据库版本、缺列、列类型/精度、索引和引擎结果。
 2. 缺整表时选择执行 [完整建表 SQL](cron_phase2_manual_create.sql) 中相应语句，每列与每表都有中文 COMMENT。它覆盖两张第一阶段基础表和七张新协议表，不是“再建九张不同的表”。已有表不会被 CREATE IF NOT EXISTS 自动升级。
 3. 已有草案按 [人工升级 SQL](cron_phase2_manual_upgrade.sql) 逐条核对。不要一键运行全部 ALTER；同名列/索引要核对类型与定义。非空执行表缺冻结模型、顺序或水位时，先导出真实结构和相关数据再制定回填，不能虚构历史事实或删表重建。
-4. 再运行结构核对，缺列结果必须为空；所有新时间为 DATETIME(6)/UTC，唯一键、自增索引与完整 CREATE 一致。静态测试只检查材料和代码契约，不替代 MySQL 实际 DDL/事务验证。
+4. 根据结构核对结果，在 `swe_cron_job_states` 补齐 [批调度关注列](../../scripts/sql/cron_batch_follow.sql)，再重新核对。缺列结果必须为空，所有新时间为 DATETIME(6)/UTC，唯一键、自增索引与完整 CREATE 一致。静态测试检查材料和代码契约，实际 DDL 与事务另用 MySQL 验证。
 5. 部署 SWE 和 Scheduler；确认新后台已准备且正常启动，再从一个专用测试用户、少量目标、暂停批调度开始。不要对真实全量任务直接试运行。
 
 SQL 为人工交付文件，应用不会读取执行。执行前由数据库负责人核对 MySQL 版本、InnoDB、utf8mb4、索引最大长度及行格式；四段身份组合索引需支持相应字节长度。不要在旧表上盲目整体改字符集或排序规则。不存在生产实测证据时不能宣称数据库验证通过。
@@ -61,6 +61,30 @@ Worker 调整按子任务采样前，在共库核对并补齐 [反馈统计列](
 
 - 网关把 `/api/scheduler/cron/jobs` 与新版 `/api/scheduler/cron/ordinary/callback`、`/batch/callback` 转发 Scheduler；旧入口仍指向原服务。Console 新页为 `/scheduler-cron-jobs`，原页 `/cron-jobs` 不变。
 - `SCHEDULER_SWE_API_BASE_URL` 为 Scheduler 可达的 SWE/网关根地址；`SWE_SERVER_DOMAIN` 为平台可达且能路由新版回调的根地址。使用现有 `SWE_CRON_SCHEDULER_*` 平台配置，不新加必配内部 Token。连接参数不全时不能创建真实启用定时器验收。
+- 如需按来源路由，在 Scheduler 的 `config/envs/dev.json` 或 `prd.json` 中填写 `SCHEDULER_SWE_SOURCE_ROUTES`。同一组来源共用一对地址：
+
+  ```json
+  {
+    "SCHEDULER_SWE_API_BASE_URL": "https://swe-a.example",
+    "SCHEDULER_SWE_INTERNAL_API_BASE_URL": "http://swe-a.internal",
+    "SCHEDULER_SWE_SOURCE_ROUTES": [
+      {
+        "source_ids": ["SOURCE_A1", "SOURCE_A2"],
+        "api_base_url": "https://swe-a.example",
+        "internal_api_base_url": "http://swe-a.internal"
+      },
+      {
+        "source_ids": ["SOURCE_B1", "SOURCE_B2"],
+        "api_base_url": "https://swe-b.example",
+        "internal_api_base_url": "http://swe-b.internal"
+      }
+    ]
+  }
+  ```
+
+  来源命中后，迁移、执行等原先走网关的请求用 `api_base_url`，简报取数和发送用 `internal_api_base_url`。两项地址都需要填写，可与全局默认地址相同。来源 ID 区分大小写且只能出现一次。未命中时，使用同类型的全局默认地址。旧版回调始终优先使用任务记录里的 SWE 地址，记录缺少地址时才按来源选择网关地址。跨来源的批重试配置查询始终使用全局内网地址。来源路由默认配置为空数组。
+- `SCHEDULER_MANAGED_RECOVERY_LIMIT` 可选，默认 `32`，取值 `1`–`200`。每个模型池和直派队列每轮各最多取这么多条派发候选，广播、删除、暂停也使用该值作为分页上限。当日失败补跑的每页上限取该值与 `100` 中的较小值。模型池有效 Worker 大于 32 时建议调到不小于最大池容量。配置缺失时使用 32，非法值回退 32 并记录告警。
+- `SCHEDULER_MANAGED_RECOVERY_INTERVAL_SECONDS` 可选，默认 `2`，取值 `1`–`60`。恢复巡检每轮结束后等待的秒数，实际周期为本轮耗时加该值。调小让派发更快跟上 Worker 释放，调大降低数据库轮询频率；缺失或非法值回退 2 并打一条告警。
 - 沿用可信网关身份：X-User-Id 为真实操作者，X-Tenant-Id/X-Source-Id/X-Agent-Id 为目标任务。角色由网关核验，不手工伪造 manager/admin。三服务共库不代表工作区/会话/产物共盘，必须验证同一身份路由到可访问实际资源的 SWE 实例。
 - 外部平台已确认只传注册参数解码后的固定 Body、不传 Header。新版回调也保留 jobParam 编码封装兼容。平台注册引用、完整任务身份及 scope 须匹配共库记录；平台入口沿用可信内网边界，数据库引用核验本身不是来源认证。平台未确认时区字段，注册 payload 沿用既有协议；本轮至少验证 Asia/Shanghai，不能据此承诺任意时区的平台触发正确。
 - 2026-10-17用户确认平台没有注册查询接口：无已保存平台ID按注册失败处理，错误码platform_registration_failed，原操作人工retry再次新增；已有ID只续办后续步骤。可能留下重复/孤立定时器，删除只能关闭已知ID，验收时须知晓此风险，不再等待平台查回协议。

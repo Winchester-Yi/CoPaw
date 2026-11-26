@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Select, Space, Typography } from "antd";
 import { Button, Modal } from "@agentscope-ai/design";
 import { schedulerCronApi } from "@/api/modules/schedulerCron";
+import { followLevelOptions } from "@/constants/batchFollow";
+import { useIframeStore } from "@/stores/iframeStore";
 import type {
   ManagedCronContext,
   ManagedDispatchMode,
@@ -35,10 +37,14 @@ export function ManagedModeSettings({
   const [sending, setSending] = useState(false);
   const [priorityDirty, setPriorityDirty] = useState(false);
   const [prioritySaving, setPrioritySaving] = useState(false);
+  const [followSaving, setFollowSaving] = useState(false);
+  const canEditFollowLevel = useIframeStore(
+    (store) => store.manager || store.isSuperManager,
+  );
   useEffect(() => {
-    onBusyChange?.(sending || prioritySaving);
+    onBusyChange?.(sending || prioritySaving || followSaving);
     return () => onBusyChange?.(false);
-  }, [sending, prioritySaving, onBusyChange]);
+  }, [sending, prioritySaving, followSaving, onBusyChange]);
   const request = useRef(new RequestIdentity());
   const priorityRequest = useRef(new RequestIdentity());
   const load = useCallback(async () => {
@@ -58,8 +64,32 @@ export function ManagedModeSettings({
     );
     return () => onDirtyChange?.(false);
   }, [onDirtyChange, sending, priorityDirty, target, state]);
-  const locked =
-    !state || state.sync_status !== "completed" || sending || panel.loading;
+  const controlsBusy = sending || followSaving || panel.loading;
+  const locked = !state || state.sync_status !== "completed" || controlsBusy;
+  const followLocked = controlsBusy || prioritySaving;
+  const changeFollowLevel = async (level: number) => {
+    if (typeof state?.batch_follow_level !== "number" || followLocked) return;
+    setFollowSaving(true);
+    panel.setError(null);
+    try {
+      const updated = await schedulerCronApi.setBatchFollowLevel(
+        context,
+        job.id,
+        level,
+      );
+      if (panel.alive.current) {
+        panel.replaceValue((value) =>
+          typeof value?.state.batch_follow_level === "number"
+            ? { ...value, state: { ...value.state, ...updated } }
+            : value,
+        );
+      }
+    } catch (failure) {
+      if (panel.alive.current) panel.setError(failureMessage(failure));
+    } finally {
+      if (panel.alive.current) setFollowSaving(false);
+    }
+  };
   const change = async (retry = false) => {
     if (!panel.alive.current || !state || sending) return;
     setSending(true);
@@ -126,7 +156,11 @@ export function ManagedModeSettings({
             }))}
           />
           <Space>
-            <Button onClick={() => void panel.reload()} loading={panel.loading}>
+            <Button
+              onClick={() => void panel.reload()}
+              loading={panel.loading}
+              disabled={followSaving}
+            >
               刷新进度
             </Button>
             <Button
@@ -142,11 +176,38 @@ export function ManagedModeSettings({
               提交切换
             </Button>
             {state.sync_status === "failed" && state.operation_id && (
-              <Button disabled={sending} onClick={() => void change(true)}>
+              <Button
+                disabled={sending || followSaving}
+                onClick={() => void change(true)}
+              >
                 重试原切换
               </Button>
             )}
           </Space>
+          {typeof state.batch_follow_level === "number" && (
+            <Space wrap>
+              <Typography.Text>批调度优先级</Typography.Text>
+              {canEditFollowLevel ? (
+                <Select
+                  aria-label="批调度优先级"
+                  style={{ minWidth: 120 }}
+                  value={state.batch_follow_level}
+                  options={followLevelOptions}
+                  disabled={followLocked}
+                  loading={followSaving}
+                  onChange={(level) => void changeFollowLevel(level)}
+                />
+              ) : (
+                <Typography.Text>
+                  {
+                    followLevelOptions.find(
+                      (option) => option.value === state.batch_follow_level,
+                    )?.label
+                  }
+                </Typography.Text>
+              )}
+            </Space>
+          )}
         </Space>
       )}
       {panel.value && (

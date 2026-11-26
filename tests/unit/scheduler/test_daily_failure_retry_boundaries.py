@@ -125,8 +125,8 @@ async def test_partial_item_failure_rolls_back_then_continues(
     await scenario.run()
     original = module.enqueue_retry
 
-    async def broken(tx, call, row, *args):
-        result = await original(tx, call, row, *args)
+    async def broken(tx, call, row, *args, **kwargs):
+        result = await original(tx, call, row, *args, **kwargs)
         if row["execution_id"] == first["execution_id"]:
             raise RuntimeError("private-sql private-token")
         return result
@@ -161,8 +161,8 @@ async def test_expired_worker_cannot_commit_enqueue_or_cursor(
     call = await service.calls.submit("bank")
     original = module.enqueue_retry
 
-    async def expire(*args):
-        result = await original(*args)
+    async def expire(*args, **kwargs):
+        result = await original(*args, **kwargs)
         scenario.now[0] += timedelta(seconds=181)
         return result
 

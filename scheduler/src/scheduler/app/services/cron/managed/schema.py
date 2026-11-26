@@ -15,6 +15,7 @@ REQUIRED_COLUMNS = {
     "swe_cron_job_states": (
         "tenant_id source_id agent_id job_id task_chat_id task_session_id "
         "ordinary_external_job_id batch_external_job_id dispatch_state "
+        "batch_follow_level batch_follow_updated_at batch_follow_updated_by "
         "pause_reason date_window_paused date_window_sync_required auto_paused_at next_run_at next_run_times_json "
         "last_status last_run_at last_prefetch_at last_error "
         "has_scheduled_result latest_scheduled_preview "

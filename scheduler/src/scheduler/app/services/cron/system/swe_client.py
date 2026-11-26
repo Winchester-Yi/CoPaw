@@ -4,7 +4,7 @@
 import httpx
 
 from ..managed.identity import encode_scope
-from ..managed.swe_client import checked_base
+from ..swe_routing import checked_base, swe_base_for_source
 
 
 class SystemSweClient:
@@ -25,7 +25,13 @@ class SystemSweClient:
         }
 
     async def _request(self, method, action, *, headers, **kwargs):
-        url = f"{self.base_url}/api/internal/cron/system/{action}"
+        source_id = headers.get("X-Source-Id")
+        base = (
+            swe_base_for_source(source_id, self.base_url)
+            if source_id is not None
+            else self.base_url
+        )
+        url = f"{base}/api/internal/cron/system/{action}"
         if self.http is not None:
             response = await self.http.request(
                 method,

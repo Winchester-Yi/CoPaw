@@ -19,6 +19,9 @@
 
 ```bash
 swe cron --request-id create-example create --type agent --name "CLI测试" --cron "0 9 * * *" --timezone Asia/Shanghai --channel console --text "输出测试报告" --agent-id default --tenant-id alice --source-id RMASSIST
+swe cron --request-id create-recheck create --type agent --name "带回调检查的测试" --cron "0 9 * * *" --timezone Asia/Shanghai --channel console --text "输出测试报告" --recheck-after 30m --recheck-instruction "检查测试报告是否已生成并发送" --agent-id default --tenant-id alice --source-id RMASSIST
+swe cron update JOB_ID --recheck-after 2h --recheck-instruction "两小时后确认结果" --agent-id default --tenant-id alice --source-id RMASSIST
+swe cron update JOB_ID --no-recheck --agent-id default --tenant-id alice --source-id RMASSIST
 swe cron operation JOB_ID OPERATION_ID --agent-id default --tenant-id alice --source-id RMASSIST
 swe cron list --agent-id default --tenant-id alice --source-id RMASSIST
 swe cron get JOB_ID --agent-id default --tenant-id alice --source-id RMASSIST
@@ -39,6 +42,7 @@ swe cron delete JOB_ID --agent-id default --tenant-id alice --source-id RMASSIST
 4. 503 可能已经保存原操作；CLI 输出操作回执后非零退出，不自动重发。先 operation 查询，问题解决后用 `swe cron retry JOB_ID OPERATION_ID ...` 续办原操作。
 5. 传输超时输出稳定 request_id，不暴露底层异常中的私密字符串。创建响应丢失可用完全相同的请求参数和原 request_id 重提；其他动作先查询详情及原操作，不用新 ID 盲目覆盖。
 6. update 中 --enabled/--no-enabled 如果试图改变当前状态会被拒绝，使用 pause/resume；会话绑定/所属用户不通过 update 迁移。
+7. 回检仅支持 `--type agent`：`--recheck-after`（`90s`/`30m`/`2h`/`1d` 或秒数，60 秒–7 天）与 `--recheck-instruction`（1–4000 字符）必须成对出现，只给一个或用于 `text` 任务会直接报参数错误、不发送请求；`-f/--file` 与回检参数互斥。`--no-recheck` 取消已有回检，不能与设置参数同时使用。
 
 ## 验证边界
 

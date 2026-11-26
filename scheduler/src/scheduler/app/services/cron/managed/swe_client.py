@@ -1,25 +1,16 @@
 # -*- coding: utf-8 -*-
 """触发 SWE 资源准备；SWE 从共用操作日志核对任务和权限。"""
 
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 import logging
 
 import httpx
 
 from .identity import encode_scope
 from .diagnostics import format_swe_response_body
+from ..swe_routing import checked_base, swe_base_for_source
 
 logger = logging.getLogger(__name__)
-
-
-def checked_base(value):
-    value = value.rstrip("/")
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("cron_service_url_not_configured")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("invalid_cron_service_url")
-    return value
 
 
 class ManagedSweClient:
@@ -82,7 +73,8 @@ class ManagedSweClient:
         }
         if action == "migration-snapshot":
             body.pop("operation_id")
-        url = f"{self.base_url}/api/internal/cron/managed/{action}"
+        base = swe_base_for_source(caller.source_id, self.base_url)
+        url = f"{base}/api/internal/cron/managed/{action}"
         if self.http is not None:
             response = await self.http.post(url, headers=headers, json=body)
         else:

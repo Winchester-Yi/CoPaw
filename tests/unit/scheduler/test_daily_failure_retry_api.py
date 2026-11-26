@@ -97,11 +97,10 @@ async def test_invalid_body_runtime_and_storage_have_no_fake_acceptance(
 @pytest.mark.asyncio
 async def test_filtered_call_persists_scope_and_targets_batch_parent(
     scenario,
-    monkeypatch,
 ):
-    from scheduler.app.services.cron.managed import daily_retry_scan
+    async def overrides():
+        return {"bank": 1}
 
-    monkeypatch.setattr(daily_retry_scan, "CRON_BATCH_MAX_ATTEMPTS", 1)
     ordinary = await scenario.run()
     another = await scenario.run()
     await scenario.run()
@@ -114,7 +113,12 @@ async def test_filtered_call_persists_scope_and_targets_batch_parent(
         (child["execution_id"],),
     )
     await scenario.batch()
-    service = DailyFailureRetry(scenario.db, clock=scenario.clock, page_size=1)
+    service = DailyFailureRetry(
+        scenario.db,
+        clock=scenario.clock,
+        page_size=1,
+        retry_overrides=overrides,
+    )
     app = FastAPI()
     app.include_router(api.router, prefix="/api")
     app.dependency_overrides[api.daily_service] = lambda: service
@@ -151,6 +155,7 @@ async def test_filtered_call_persists_scope_and_targets_batch_parent(
                 scenario.db,
                 clock=scenario.clock,
                 page_size=1,
+                retry_overrides=overrides,
             )
             for _ in range(count + 1):
                 await resumed.tick()

@@ -10,7 +10,7 @@ import httpx
 
 from .....config.constant import SWE_INTERNAL_API_BASE_URL_ENV
 from ....database.connection import get_db_connection
-from ..managed.swe_client import checked_base
+from ..swe_routing import checked_base, swe_base_for_source
 from .render import render_parts
 from .store import ReportStore
 
@@ -31,8 +31,13 @@ class BatchReportWorker:
 
     async def collect(self, report):
         try:
+            base = swe_base_for_source(
+                report["source_id"],
+                self.swe_url,
+                internal=True,
+            )
             response = await self.client.post(
-                self.swe_url + SWE_REPORT_PATH + "/snapshot",
+                f"{base}{SWE_REPORT_PATH}/snapshot",
                 json={
                     "source_id": report["source_id"],
                     "business_date": str(report["business_date"]),
@@ -57,17 +62,26 @@ class BatchReportWorker:
             return
         try:
             snapshot = response.json()
-            parts = render_parts(
-                report["source_id"],
-                report["business_date"],
-                snapshot,
-                PART_BYTES,
-            )
+            parts = None
+            if snapshot.get("batch_scope") == "followed_batch":
+                parts = render_parts(
+                    report["source_id"],
+                    report["business_date"],
+                    snapshot,
+                    PART_BYTES,
+                )
         except (ValueError, KeyError, TypeError, AttributeError):
             await self.store.collection_failed(
                 report,
                 "cron_report_invalid_snapshot",
                 False,
+            )
+            return
+        if parts is None:
+            await self.store.collection_failed(
+                report,
+                "cron_report_snapshot_scope_unavailable",
+                True,
             )
             return
         await self.store.freeze(report, snapshot, parts)
@@ -76,8 +90,13 @@ class BatchReportWorker:
         if not await self.store.start_delivery(part):
             return
         try:
+            base = swe_base_for_source(
+                part["source_id"],
+                self.swe_url,
+                internal=True,
+            )
             response = await self.client.post(
-                self.swe_url + SWE_REPORT_PATH + "/send-part",
+                f"{base}{SWE_REPORT_PATH}/send-part",
                 json=part,
                 headers=self.swe_headers,
                 timeout=30,

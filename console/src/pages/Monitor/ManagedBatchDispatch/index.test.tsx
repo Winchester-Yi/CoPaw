@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   workerTrends: vi.fn(),
   failureSummary: vi.fn(),
   failures: vi.fn(),
+  follow: vi.fn(),
 }));
 const context = vi.hoisted(() => ({
   source: "bank",
@@ -177,7 +178,9 @@ it("整个时间区间在未来时不请求趋势接口", async () => {
       onClose={() => {}}
     />,
   );
-  expect(await screen.findByText("当前时间范围内暂无趋势记录")).toBeInTheDocument();
+  expect(
+    await screen.findByText("当前时间范围内暂无趋势记录"),
+  ).toBeInTheDocument();
   expect(api.workerTrends).not.toHaveBeenCalled();
 });
 
@@ -314,7 +317,7 @@ it("零成员不伪造百分之百完成率，空数据没有旧接口回退", a
     ).toContain("-"),
   );
   expect(within(overview).queryByText("100%")).toBeNull();
-  expect(await screen.findByText("当前范围内暂无 Batch")).toBeTruthy();
+  expect(await screen.findByText("当前范围内暂无批次")).toBeTruthy();
   expect(api.detail).not.toHaveBeenCalled();
 });
 it("共享容量中途失败明确标记不完整，不显示成功曲线", async () => {
@@ -391,4 +394,188 @@ it("运行中批次只提示入口暂停，不误称已入队任务暂停", asyn
   render(<ManagedBatchDispatchPage />);
   expect(await screen.findByText("批调度入口已暂停")).toBeInTheDocument();
   expect(screen.queryByText("后续调度已暂停")).toBeNull();
+});
+
+it("批次进入终态时在列表展示完成时间", async () => {
+  const batch = {
+    batch_id: "batch-done",
+    job_id: "parent",
+    job_name: "日报",
+    member_count: 2,
+    done_count: 2,
+    failed_count: 0,
+    success_count: 2,
+    skipped_count: 0,
+    active_count: 0,
+    waiting_count: 0,
+    completion_rate: 1,
+    status: "completed",
+    logical_fire_at: "2026-11-25T01:00:00Z",
+    physical_fire_at: "2026-11-25T00:59:00Z",
+    created_at: "2026-11-25T01:00:05Z",
+    finished_at: "2026-11-25T01:20:00Z",
+    dispatch_paused: false,
+    batch_paused: false,
+  };
+  api.batches.mockResolvedValue({
+    items: [batch],
+    total: 1,
+    stats: {
+      total_batches: 1,
+      total_members: 2,
+      done_members: 2,
+      failed_members: 0,
+      running_batches: 0,
+    },
+  });
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    events: [],
+    event_total: 0,
+  });
+  render(<ManagedBatchDispatchPage />);
+  // 列表行与详情信息条各展示一处完成时间。
+  expect(await screen.findAllByText(/^完成 /)).toHaveLength(2);
+});
+
+it("右键任务可设置关注等级并刷新列表", async () => {
+  const batch = {
+    batch_id: "batch-ctx",
+    job_id: "parent",
+    job_name: "右键测试任务",
+    member_count: 1,
+    done_count: 1,
+    failed_count: 0,
+    success_count: 1,
+    skipped_count: 0,
+    active_count: 0,
+    waiting_count: 0,
+    completion_rate: 1,
+    status: "completed",
+    batch_follow_level: 0,
+    logical_fire_at: "2026-11-25T01:00:00Z",
+    physical_fire_at: "2026-11-25T00:59:00Z",
+    created_at: "2026-11-25T01:00:05Z",
+    finished_at: "2026-11-25T01:20:00Z",
+    dispatch_paused: false,
+    batch_paused: false,
+  };
+  api.batches.mockResolvedValue({
+    items: [batch],
+    total: 1,
+    stats: {
+      total_batches: 1,
+      total_members: 1,
+      done_members: 1,
+      failed_members: 0,
+      running_batches: 0,
+    },
+  });
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    events: [],
+    event_total: 0,
+  });
+  api.follow.mockResolvedValue({
+    batch_id: "batch-ctx",
+    batch_follow_level: 4,
+  });
+  render(<ManagedBatchDispatchPage />);
+  // 任务名同时出现在列表行与详情标题，取可点击的列表行。
+  const matches = await screen.findAllByText("右键测试任务");
+  const row = matches.map((node) => node.closest("button")).find(Boolean);
+  expect(row).not.toBeNull();
+  fireEvent.contextMenu(row as HTMLElement);
+  fireEvent.click(await screen.findByText("关注 L4"));
+  await waitFor(() =>
+    expect(api.follow).toHaveBeenCalledWith("bank", "batch-ctx", 4),
+  );
+  await waitFor(() => expect(api.batches).toHaveBeenCalledTimes(2));
+});
+
+it("有关注等级时在任务名下方展示星星图标", async () => {
+  const batch = {
+    batch_id: "batch-stars",
+    job_id: "parent",
+    job_name: "星标测试任务",
+    member_count: 1,
+    done_count: 1,
+    failed_count: 0,
+    success_count: 1,
+    skipped_count: 0,
+    active_count: 0,
+    waiting_count: 0,
+    completion_rate: 1,
+    status: "completed",
+    batch_follow_level: 3,
+    logical_fire_at: "2026-11-25T01:00:00Z",
+    physical_fire_at: "2026-11-25T00:59:00Z",
+    created_at: "2026-11-25T01:00:05Z",
+    finished_at: "2026-11-25T01:20:00Z",
+    dispatch_paused: false,
+    batch_paused: false,
+  };
+  api.batches.mockResolvedValue({
+    items: [batch],
+    total: 1,
+    stats: {
+      total_batches: 1,
+      total_members: 1,
+      done_members: 1,
+      failed_members: 0,
+      running_batches: 0,
+    },
+  });
+  api.detail.mockResolvedValue({
+    batch,
+    members: [],
+    member_total: 0,
+    events: [],
+    event_total: 0,
+  });
+  render(<ManagedBatchDispatchPage />);
+  const stars = await screen.findByLabelText("关注等级 3");
+  expect(stars.querySelectorAll("svg")).toHaveLength(3);
+  // 等级不再出现在状态/进度列。
+  expect(
+    within(stars.closest("button") as HTMLElement).queryByText("关注 L3"),
+  ).toBeNull();
+});
+
+it("按关注等级筛选批次", async () => {
+  api.batches.mockResolvedValue({
+    items: [],
+    total: 0,
+    stats: {
+      total_batches: 0,
+      total_members: 0,
+      done_members: 0,
+      failed_members: 0,
+      running_batches: 0,
+    },
+  });
+  render(<ManagedBatchDispatchPage />);
+  await waitFor(() => expect(api.batches).toHaveBeenCalled());
+  const lastFilters = () =>
+    api.batches.mock.lastCall?.[1] as Record<string, unknown>;
+  const pick = async (label: string) => {
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "关注等级筛选" }));
+    fireEvent.click(await screen.findByText(label, { exact: true }));
+  };
+
+  await pick("已关注");
+  await waitFor(() => expect(lastFilters().follow_min).toBe(1));
+  expect(lastFilters().follow_max).toBeUndefined();
+
+  await pick("未关注");
+  await waitFor(() => expect(lastFilters().follow_max).toBe(0));
+  expect(lastFilters().follow_min).toBeUndefined();
+
+  await pick("关注 L3");
+  await waitFor(() => expect(lastFilters().follow_min).toBe(3));
+  expect(lastFilters().follow_max).toBe(3);
 });
