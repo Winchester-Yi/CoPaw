@@ -409,7 +409,7 @@ def start_query_retry_attempt(
     if previous is None:
         return None
     try:
-        return _OBSERVABILITY.start_attempt(previous)
+        return _OBSERVABILITY.start_attempt(previous, retry=True)
     except Exception:
         return None
 

@@ -347,6 +347,12 @@ def _assert_agent_retry_lifecycle(records):
     assert len(starts) == len(ends) == 2
     assert starts[1]["attempt_index"] == 2
     assert starts[1]["predecessor_attempt_id"] == starts[0]["obs_attempt_id"]
+    assert starts[1]["links"] == [
+        {
+            "relation_type": "retry_of",
+            "obs_attempt_id": starts[0]["obs_attempt_id"],
+        },
+    ]
     assert ends[0]["obs_attempt_id"] == starts[0]["obs_attempt_id"]
     assert ends[0]["status"] == "failed"
     assert ends[1]["obs_attempt_id"] == starts[1]["obs_attempt_id"]

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import io
 import json
@@ -41,7 +42,7 @@ def _sse(*, choices=(), usage=None, model=MODEL):
                 "model": model,
                 "choices": list(choices),
                 "usage": usage,
-            }
+            },
         )
         + "\n\n"
     ).encode()
@@ -89,7 +90,13 @@ class _SSEStream(httpx.AsyncByteStream):
         self.closed = True
 
 
-def _adapter(transport, *, adapter_class=OpenAIChatModelCompat, stream=True):
+def _adapter(
+    transport,
+    *,
+    adapter_class=OpenAIChatModelCompat,
+    stream=True,
+    retry_config=None,
+):
     adapter = adapter_class(
         "requested-alias",
         api_key="fake-key",
@@ -108,7 +115,7 @@ def _adapter(transport, *, adapter_class=OpenAIChatModelCompat, stream=True):
     model = ObservabilityModelWrapper(
         RetryChatModel(
             adapter,
-            retry_config=RetryConfig(enabled=False),
+            retry_config=retry_config or RetryConfig(enabled=False),
             rate_limit_config=RateLimitConfig(max_qpm=0),
             on_retry=on_retry,
         ),
@@ -129,7 +136,8 @@ def _ends(records, operation):
 
 
 @pytest.mark.parametrize(
-    "adapter_class", [OpenAIChatModelCompat, KimiChatModel]
+    "adapter_class",
+    [OpenAIChatModelCompat, KimiChatModel],
 )
 async def test_actual_sdk_sse_merges_finish_and_usage(capture, adapter_class):
     async def respond(request):
@@ -150,8 +158,8 @@ async def test_actual_sdk_sse_merges_finish_and_usage(capture, adapter_class):
                             "delta": {
                                 "content": "private output</think>first text",
                             },
-                        }
-                    ]
+                        },
+                    ],
                 ),
                 _sse(
                     choices=[
@@ -159,15 +167,15 @@ async def test_actual_sdk_sse_merges_finish_and_usage(capture, adapter_class):
                             "index": 0,
                             "delta": {"content": "。"},
                             "finish_reason": "stop",
-                        }
-                    ]
+                        },
+                    ],
                 ),
                 _sse(
                     usage={
                         "prompt_tokens": 333,
                         "completion_tokens": 11,
                         "total_tokens": 344,
-                    }
+                    },
                 ),
                 b"data: [DONE]\n\n",
             ),
@@ -210,7 +218,7 @@ async def test_actual_sdk_nonstreaming_response_preserves_zero(capture):
                             "content": "private output",
                         },
                         "finish_reason": "length",
-                    }
+                    },
                 ],
                 "usage": {
                     "prompt_tokens": 0,
@@ -253,7 +261,7 @@ async def test_stream_terminal_retains_acquired_facts(capture, outcome):
                 "prompt_tokens": 0,
                 "completion_tokens": 2,
                 "total_tokens": 2,
-            }
+            },
         ),
         after_frames=terminal,
     )
@@ -298,6 +306,53 @@ async def test_stream_terminal_retains_acquired_facts(capture, outcome):
     assert request["metrics"]["input_tokens"] == 0
     assert request["metrics"]["output_tokens"] == 2
     assert request["metrics"]["first_chunk_us"] >= 0
+
+
+async def test_cancelled_model_retry_keeps_retry_links_without_recovery(
+    capture,
+    monkeypatch,
+):
+    sent = asyncio.Event()
+    calls = 0
+
+    async def transport(_request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                503,
+                json={"error": {"message": "unavailable"}},
+            )
+        sent.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "swe.providers.retry_chat_model._compute_backoff",
+        lambda *_: 0,
+    )
+    adapter, model = _adapter(
+        transport,
+        stream=False,
+        retry_config=RetryConfig(enabled=True, max_retries=1),
+    )
+    context, read = capture
+    async with adapter.client:
+        with bind_context(context):
+            task = asyncio.create_task(model(MESSAGES))
+        await asyncio.wait_for(sent.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    records = read()
+    first, second = _ends(records, "request_attempt")
+    assert (first["status"], second["status"]) == ("failed", "cancelled")
+    assert {
+        (link["relation_type"], link["obs_span_id"])
+        for event in records
+        if event.get("event_type") == "link.added"
+        for link in event.get("links", [])
+    } == {("retry_next", second["obs_span_id"])}
 
 
 async def test_interleaved_calls_close_and_finish_their_own_request(capture):
@@ -435,7 +490,8 @@ async def test_close_propagates_through_trace_wrappers_without_capture(
         TracingModelWrapper(
             "openai",
             TokenRecordingModelWrapper(
-                "openai", AgentTraceModelWrapper(adapter)
+                "openai",
+                AgentTraceModelWrapper(adapter),
             ),
             trace_context={
                 "trace_id": "trace",
@@ -472,7 +528,7 @@ async def test_structured_sdk_length_error_preserves_response_facts(capture):
                         "index": 0,
                         "finish_reason": "length",
                         "message": {"role": "assistant", "content": "{"},
-                    }
+                    },
                 ],
                 "usage": {
                     "prompt_tokens": 12,

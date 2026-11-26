@@ -2846,6 +2846,12 @@ def _assert_retry_attempt_records(records):
     ]
     assert len(retry_events) == 1
     assert len(attempt_starts) == 2
+    assert retry_events[0]["links"] == [
+        {
+            "relation_type": "cause",
+            "obs_span_id": attempt_starts[0]["obs_span_id"],
+        },
+    ]
     assert attempt_starts[1]["links"] == [
         {
             "relation_type": "retry_of",
@@ -2879,6 +2885,13 @@ def _assert_retry_recovery_detail(detail, link_pages):
             "obs_span_id": request_attempts[0]["span_id"],
         },
     ]
+    first, second = (span["span_id"] for span in request_attempts)
+    assert {
+        (link["relation_type"], link["obs_span_id"])
+        for item in link_pages
+        if item["entity_id"] == first
+        for link in item["metadata"].get("links", [])
+    } == {("retry_next", second), ("recovered_by", second)}
 
 
 @pytest.mark.asyncio

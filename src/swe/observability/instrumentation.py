@@ -75,7 +75,11 @@ class SpanHandle:
         self._compacted_tool_output_ids: set[str] = set()
 
     def event(self, name: str, **attributes: Any) -> bool:
-        if self._ended and name not in {"evidence.pending", "evidence.linked"}:
+        if self._ended and name not in {
+            "evidence.pending",
+            "evidence.linked",
+            "link.added",
+        }:
             return False
         local_seq = self._event_sequence
         self._event_sequence += 1
@@ -93,6 +97,22 @@ class SpanHandle:
                     "event_type": name[:64],
                 },
             ),
+        )
+
+    def link_to(self, relation_type: str, target: SpanHandle) -> bool:
+        if (
+            target.span_id == self.span_id
+            or target._context.obs_run_id != self._context.obs_run_id
+        ):
+            return False
+        return self.event(
+            "link.added",
+            links=[
+                {
+                    "relation_type": relation_type,
+                    "obs_span_id": target.span_id,
+                },
+            ],
         )
 
     def mark_tool_output_compacted(self, message_id: str) -> bool:
@@ -606,6 +626,7 @@ class _ModelRequest:
         self.streaming = bool(span._base["streaming"])
         self.metrics: dict[str, Any] = {}
         self.response: dict[str, Any] = {}
+        self.confirmed_retry = False
         self.saw_openai_response = False
         self.output_frame = True
 
@@ -646,6 +667,7 @@ class _ModelCall:
         self.handle = handle
         self.count_requests = count_requests
         self.request: _ModelRequest | None = None
+        self.retried_requests: list[SpanHandle] = []
         self.started_requests = 0
         self.metrics: dict[str, Any] = {}
 
@@ -677,7 +699,14 @@ class _ModelCall:
 
     def end(self, **attributes: Any) -> None:
         if self.request is not None:
+            successful = (
+                attributes.get("status") == "succeeded"
+                and not self.request.span._ended
+            )
             self.request.end(**attributes)
+            if successful:
+                for failed in self.retried_requests:
+                    failed.link_to("recovered_by", self.request.span)
             self.metrics.update(
                 {
                     name: self.request.metrics[name]
@@ -702,18 +731,27 @@ def record_model_retry(
     call = _current_model_call.get()
     if call is None:
         return
-    if call.request is not None:
+    links = []
+    if call.request is not None and not call.request.span._ended:
+        call.request.confirmed_retry = True
         call.request.end(
             status="failed",
             technical_status="ERROR",
             has_error=True,
             error_type=error_type,
         )
+        links.append(
+            {
+                "relation_type": "cause",
+                "obs_span_id": call.request.span.span_id,
+            },
+        )
     call.handle.event(
         "model.retry_scheduled",
         retries=attempt,
         error_type=error_type,
         metrics={"delay_ms": max(0, int(delay_seconds * 1000))},
+        links=links,
     )
 
 
@@ -765,6 +803,10 @@ def record_model_request_attempt(
             **attributes,
         )
     if span is not None:
+        if previous is not None:
+            previous.span.link_to("retry_next", span)
+            if previous.confirmed_retry:
+                call.retried_requests.append(previous.span)
         call.request = _ModelRequest(span)
 
 
@@ -1221,10 +1263,22 @@ class Observability:
     def start_attempt(
         self,
         context: ObservabilityContext,
+        *,
+        retry: bool = False,
     ) -> ObservabilityContext:
         attempt = context.new_attempt()
         emitter = self._emitter_for(attempt)
         if emitter is not None:
+            attributes: dict[str, Any] = {
+                "started_at": attempt.attempt_started_at,
+            }
+            if retry and context.obs_attempt_id is not None:
+                attributes["links"] = [
+                    {
+                        "relation_type": "retry_of",
+                        "obs_attempt_id": context.obs_attempt_id,
+                    },
+                ]
             emitter.emit(
                 MetadataEvent(
                     event_name="attempt.started",
@@ -1233,7 +1287,7 @@ class Observability:
                     entity_id=attempt.obs_attempt_id or "",
                     phase_key="started",
                     local_seq=0,
-                    attributes={"started_at": attempt.attempt_started_at},
+                    attributes=attributes,
                 ),
             )
         return attempt
