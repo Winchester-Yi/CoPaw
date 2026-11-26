@@ -182,6 +182,53 @@ it("distinguishes running intervals from unknown quality and displays projected 
   expect(screen.getByText("开始时间")).toBeInTheDocument();
 });
 
+it("shows request facts and distinguishes missing usage from zero", async () => {
+  request.mockResolvedValue({
+    spans: [
+      {
+        ...span("provider-request", null),
+        span_type: "LLM",
+        operation: "request_attempt",
+        request_attempt_index: 2,
+        response_model_key: "deepseek-v4-flash",
+        model_key_source: "response",
+        streaming: true,
+        finish_reason: "stop",
+        input_tokens: 0,
+        output_tokens: null,
+      },
+    ],
+    spans_next_cursor: null,
+  });
+  render(
+    <MemoryRouter>
+      <AttemptView
+        runId="run"
+        attempts={attempts}
+        runStatus="succeeded"
+        projectedAt={null}
+        onRunRefresh={() => {}}
+      />
+    </MemoryRouter>,
+  );
+  fireEvent.click(
+    await screen.findByRole("treeitem", { name: /provider-request/ }),
+  );
+  expect(screen.getByText("请求序号").nextSibling).toHaveTextContent("2");
+  expect(screen.getByText("实际模型").nextSibling).toHaveTextContent(
+    "deepseek-v4-flash",
+  );
+  expect(screen.getByText("流式模式").nextSibling).toHaveTextContent("流式");
+  expect(screen.getByText("结束原因").nextSibling).toHaveTextContent("stop");
+  expect(screen.getByText("输入 Tokens").nextSibling).toHaveTextContent("0");
+  expect(screen.getByText("输出 Tokens").nextSibling).toHaveTextContent(
+    "未获取",
+  );
+  expect(screen.getByText("Tokens 合计").nextSibling).toHaveTextContent(
+    "未获取",
+  );
+});
+
 it("keeps the Attempt overview visible in a narrow container", async () => {
   class NarrowObserver {
     callback: ResizeObserverCallback;

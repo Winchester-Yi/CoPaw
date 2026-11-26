@@ -74,6 +74,23 @@ const fields: [string, string, boolean?][] = [
   ["input_tokens", "输入 Tokens"],
   ["output_tokens", "输出 Tokens"],
 ];
+const requestFields: [string, string][] = [
+  ["request_attempt_index", "请求序号"],
+  ["streaming", "流式模式"],
+  ["model_key_source", "模型来源"],
+];
+
+function requestValue(key: string, value: unknown, isTime?: boolean) {
+  if (value == null) return "未获取";
+  if (key === "streaming" && typeof value === "boolean") {
+    return value ? "流式" : "非流式";
+  }
+  if (key === "model_key_source") {
+    if (value === "response") return "Provider 响应";
+    if (value === "request_fallback") return "请求模型";
+  }
+  return isTime ? ms(value) : shown(value);
+}
 
 export default function AttemptView({
   runId,
@@ -628,6 +645,9 @@ export default function AttemptView({
     focus.current = target;
     if (narrow) setDrawer(true);
   };
+  const isModelRequest =
+    selectedSpan?.span_type === "LLM" &&
+    selectedSpan.operation === "request_attempt";
   const inspector = selectedSpan ? (
     <>
       <h3>{selectedSpan.name}</h3>
@@ -643,14 +663,20 @@ export default function AttemptView({
       />
       {tab === "details" ? (
         <dl>
-          {fields.map(([key, label, isTime]) => (
-            <div key={key}>
-              <dt>{label}</dt>
-              <dd>
-                {isTime ? ms(selectedSpan[key]) : shown(selectedSpan[key])}
-              </dd>
-            </div>
-          ))}
+          {(isModelRequest ? [...requestFields, ...fields] : fields).map(
+            ([key, label, isTime]) => (
+              <div key={key}>
+                <dt>{label}</dt>
+                <dd>
+                  {isModelRequest
+                    ? requestValue(key, selectedSpan[key], isTime)
+                    : isTime
+                    ? ms(selectedSpan[key])
+                    : shown(selectedSpan[key])}
+                </dd>
+              </div>
+            ),
+          )}
           {selectedSpan.subagent &&
             typeof selectedSpan.subagent === "object" &&
             Object.entries(
@@ -676,6 +702,8 @@ export default function AttemptView({
               {typeof selectedSpan.input_tokens === "number" &&
               typeof selectedSpan.output_tokens === "number"
                 ? selectedSpan.input_tokens + selectedSpan.output_tokens
+                : isModelRequest
+                ? "未获取"
                 : "—"}
             </dd>
           </div>

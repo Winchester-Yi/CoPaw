@@ -51,6 +51,38 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it("shows known partial model usage and leaves an unknown Run total empty", async () => {
+  request.mockImplementation((path: string) =>
+    Promise.resolve(
+      path.includes("capabilities")
+        ? { capture_enabled: true }
+        : {
+            run: {
+              ...run,
+              llm_calls: 1,
+              request_attempt_count: 2,
+              input_tokens_known_requests: 1,
+              output_tokens_known_requests: 0,
+              input_tokens: 20,
+              output_tokens: null,
+            },
+            attempts: [],
+          },
+    ),
+  );
+  mount("/agent-observability/runs/abc");
+  const summary = await screen.findByRole("region", { name: "Run 摘要" });
+  expect(
+    within(summary).getByText("模型请求次数").nextSibling,
+  ).toHaveTextContent("2");
+  expect(
+    within(summary).getByText("输入 Tokens").nextSibling,
+  ).toHaveTextContent("已观测 20");
+  expect(
+    within(summary).getByText("输出 Tokens").nextElementSibling,
+  ).toBeEmptyDOMElement();
+});
+
 it("shows the Run data quality independently of its status", async () => {
   request.mockImplementation((path: string) =>
     Promise.resolve(
