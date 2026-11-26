@@ -18,6 +18,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
@@ -28,6 +29,7 @@ import fcntl
 from agentscope.message import Msg
 
 from swe.constant import SECRET_DIR
+from swe.observability.instrumentation import Observability
 from swe.performance_metrics import increment, measure_storage_operation
 from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
@@ -310,10 +312,22 @@ class ConversationArchiveStore:
             )
         return storage
 
-    async def read_checkpoint_head(self, chat_id: str) -> dict[str, Any]:
-        return await _durable_thread(self._checkpoint_head, chat_id)
+    async def read_checkpoint_head(
+        self,
+        chat_id: str,
+        check_persistence: bool = False,
+    ) -> dict[str, Any]:
+        return await _durable_thread(
+            self._checkpoint_head,
+            chat_id,
+            check_persistence,
+        )
 
-    def _checkpoint_head(self, chat_id: str) -> dict[str, Any]:
+    def _checkpoint_head(
+        self,
+        chat_id: str,
+        check_persistence: bool = False,
+    ) -> dict[str, Any]:
         canonical = self._validate_chat_id(chat_id)
         with self._chat_lock(canonical):
             storage = CheckpointStorageV2(self.path_for(canonical))
@@ -329,6 +343,8 @@ class ConversationArchiveStore:
                 ),
                 "applied_event_sequence": state.record.applied_event_sequence,
                 "checkpoint_revision": state.record.revision,
+                "checkpoint_persisted": check_persistence
+                and self._checkpoint_path(canonical).is_file(),
             }
 
     async def read_checkpoint_record(
@@ -1065,7 +1081,7 @@ class ConversationArchiveStore:
                 ].sequence,
                 archived_through=canonical_boundary_id,
             )
-            self._write_checkpoint_locked(canonical_chat_id, record)
+            self._publish_observed_checkpoint(canonical_chat_id, record)
             return record
 
     async def read_checkpoint_state(
@@ -1175,7 +1191,21 @@ class ConversationArchiveStore:
     ) -> None:
         canonical_chat_id = self._validate_chat_id(chat_id)
         with self._chat_lock(canonical_chat_id):
+            self._publish_observed_checkpoint(canonical_chat_id, record)
+
+    def _publish_observed_checkpoint(
+        self,
+        canonical_chat_id: str,
+        record: CheckpointRecord,
+    ) -> None:
+        span = Observability().span("Checkpoint", "save")
+        with span or nullcontext():
             self._write_checkpoint_locked(canonical_chat_id, record)
+            if span is not None:
+                span.end(
+                    status="succeeded",
+                    checkpoint_id=record.checkpoint_id,
+                )
 
     async def write_pending_candidate(
         self,
@@ -1249,7 +1279,7 @@ class ConversationArchiveStore:
                 )
                 if not validation.is_valid:
                     continue
-                self._write_checkpoint_locked(
+                self._publish_observed_checkpoint(
                     canonical_chat_id,
                     candidate.record,
                 )
@@ -1367,11 +1397,18 @@ class ConversationArchiveStore:
                 self._evidence_epochs_path(chat_dir),
             )
             try:
-                boundary = self._commit_locked(
-                    canonical_chat_id,
-                    archived_messages,
-                    checkpoint=record,
-                )
+                span = Observability().span("Checkpoint", "save")
+                with span or nullcontext():
+                    boundary = self._commit_locked(
+                        canonical_chat_id,
+                        archived_messages,
+                        checkpoint=record,
+                    )
+                    if span is not None:
+                        span.end(
+                            status="succeeded",
+                            checkpoint_id=record.checkpoint_id,
+                        )
             except Exception:
                 # The batch is intentionally still invisible without a manifest
                 # entry. Restore the two derived files so the pending candidate
@@ -2807,7 +2844,39 @@ def attach_conversation_archive(
                 canonical_chat_id,
                 record,
             )
-        head = await archive_store.read_checkpoint_head(canonical_chat_id)
+        span = Observability().span("Checkpoint", "restore", defer_start=True)
+        try:
+            head = await archive_store.read_checkpoint_head(
+                canonical_chat_id,
+                check_persistence=span is not None,
+            )
+        except Exception:
+            if span is not None:
+                span.start()
+                span.end(
+                    status="failed",
+                    technical_status="ERROR",
+                    has_error=True,
+                    error_type="checkpoint_read_failed",
+                )
+            raise
+        if head["version"] != 2 and not head.get("checkpoint_persisted"):
+            span = None
+        if span is not None:
+            span.start()
+
+        with span or nullcontext():
+            active = await restore_checkpoint_projection(head)
+            if span is not None:
+                span.end(
+                    status="succeeded",
+                    checkpoint_id=active.checkpoint_id,
+                )
+            return active
+
+    async def restore_checkpoint_projection(
+        head: dict[str, Any],
+    ) -> CheckpointRecord:
         active = await archive_store.read_checkpoint_record(
             canonical_chat_id,
             head,

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from .emitter import _project
+from .emitter import COMPACTION_STRATEGIES, _project
 from .store import ObservabilityStore
 
 _MAX_BATCH = 32
@@ -325,6 +325,10 @@ def _validate_lifecycle_event(event: dict[str, Any]) -> None:
     _validate_related_ids(event)
     _validate_scope(event)
     _validate_lifecycle_values(event)
+    if event.get("span_type") in {"Context", "Checkpoint"} or any(
+        key in event for key in ("compaction_strategy", "checkpoint_id")
+    ):
+        _validate_memory_span(event)
 
 
 def _validate_entity_identity(event: dict[str, Any]) -> None:
@@ -503,6 +507,27 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         > 24 * 1024
     ):
         raise ValueError("event_too_large")
+
+
+def _validate_memory_span(event: dict[str, Any]) -> None:
+    span_type = event.get("span_type")
+    operation = event.get("operation")
+    strategy = event.get("compaction_strategy")
+    checkpoint_id = event.get("checkpoint_id")
+    if span_type == "Context":
+        if operation != "compact" or strategy not in COMPACTION_STRATEGIES:
+            raise ValueError("invalid_compaction_strategy")
+    elif strategy is not None:
+        raise ValueError("invalid_compaction_strategy")
+    if span_type == "Checkpoint" and operation not in {"save", "restore"}:
+        raise ValueError("invalid_checkpoint_operation")
+    if checkpoint_id is not None:
+        if span_type != "Checkpoint":
+            raise ValueError("invalid_checkpoint_identity")
+        try:
+            _require_uuid(event, "checkpoint_id")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid_checkpoint_identity") from exc
 
 
 def _validate_links(event: dict[str, Any]) -> None:

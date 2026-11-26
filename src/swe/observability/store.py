@@ -1221,7 +1221,14 @@ def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
             if input_tokens is not None and output_tokens is not None
             else None
         )
-    if span_type not in {"LLM", "Tool", "Guard", "SubAgent"} or not isinstance(
+    if span_type not in {
+        "LLM",
+        "Tool",
+        "Guard",
+        "SubAgent",
+        "Context",
+        "Checkpoint",
+    } or not isinstance(
         metadata_text,
         str,
     ):
@@ -1231,6 +1238,16 @@ def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         return result
     if not isinstance(metadata, dict):
+        return result
+    if span_type == "Context":
+        result["compaction_strategy"] = metadata.get("compaction_strategy")
+        metrics = metadata.get("metrics")
+        if isinstance(metrics, dict):
+            for metric in ("context_before_tokens", "context_after_tokens"):
+                result[metric] = metrics.get(metric)
+        return result
+    if span_type == "Checkpoint":
+        result["checkpoint_id"] = metadata.get("checkpoint_id")
         return result
     if span_type == "LLM":
         if result.get("operation") == "request_attempt":

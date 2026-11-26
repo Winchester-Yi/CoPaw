@@ -2,6 +2,7 @@
 """Regression coverage for chat-scoped compaction archive integration."""
 
 import json
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import uuid
@@ -17,6 +18,9 @@ from swe.agents.memory.conversation_archive import (
 from swe.agents.memory.chat_checkpoint import CheckpointEvent
 from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
 from swe.config.config import ToolResultCompactConfig
+from swe.observability import Observability, Scope, bind_context
+from swe.observability.emitter import JsonlEmitter
+from swe.observability.projector import _validate_payload
 
 
 def _chat_id() -> str:
@@ -363,7 +367,7 @@ async def test_automatic_compaction_emits_only_one_boundary_event(
     )
     memory = SimpleNamespace(
         get_compressed_summary=lambda: "",
-        get_memory=AsyncMock(return_value=[message]),
+        get_memory=AsyncMock(side_effect=[[message], [message], []]),
         archive_compacted_messages=AsyncMock(return_value=boundary),
         update_compressed_summary=AsyncMock(),
     )
@@ -375,7 +379,7 @@ async def test_automatic_compaction_emits_only_one_boundary_event(
         compact_memory=AsyncMock(return_value="summary"),
     )
     running = SimpleNamespace(
-        memory_compact_threshold=1,
+        memory_compact_threshold=10,
         memory_compact_reserve=0,
         tool_result_compact=ToolResultCompactConfig(enabled=False),
         memory_summary=SimpleNamespace(memory_summary_enabled=False),
@@ -385,9 +389,13 @@ async def test_automatic_compaction_emits_only_one_boundary_event(
         "swe.agents.hooks.memory_compaction.load_agent_config",
         lambda *_args, **_kwargs: SimpleNamespace(running=running),
     )
+
+    async def count(messages, **kwargs):
+        return 3 if messages or "text" in kwargs else 0
+
     monkeypatch.setattr(
         "swe.agents.hooks.memory_compaction.get_swe_token_counter",
-        lambda _config: SimpleNamespace(count=AsyncMock(return_value=0)),
+        lambda _config: SimpleNamespace(count=count),
     )
     agent = SimpleNamespace(
         name="agent",
@@ -399,7 +407,22 @@ async def test_automatic_compaction_emits_only_one_boundary_event(
         _request_context={"chat_id": _chat_id()},
     )
 
-    await MemoryCompactionHook(manager)(agent, {})
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = (
+        Observability()
+        .prepare_run(
+            scope=Scope("swe", "source", "tenant", "agent"),
+            enabled=True,
+        )
+        .new_attempt()
+    )
+    with bind_context(context):
+        await MemoryCompactionHook(manager)(agent, {})
 
     printed = agent.print.await_args.args[0]
     assert printed.content == [{"type": "text", "text": ""}]
@@ -408,6 +431,18 @@ async def test_automatic_compaction_emits_only_one_boundary_event(
         == "boundary-1"
     )
     assert agent.print.await_count == 1
+    assert emitter.close() == 0
+    started, ended = [
+        _validate_payload(line) for line in sink.getvalue().splitlines()
+    ]
+    assert started["span_type"] == ended["span_type"] == "Context"
+    assert started["event_name"] == "span.started"
+    assert ended["event_name"] == "span.ended"
+    assert ended["status"] == "succeeded"
+    assert ended["compaction_strategy"] == "summary"
+    assert ended["metrics"]["context_before_tokens"] == 6
+    assert "context_after_tokens" not in ended["metrics"]
+    assert message.get_text_content() not in sink.getvalue()
 
 
 @pytest.mark.asyncio

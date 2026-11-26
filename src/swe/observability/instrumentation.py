@@ -1299,6 +1299,7 @@ class Observability:
         *,
         name: str | None = None,
         parent_span_id: str | None = None,
+        defer_start: bool = False,
         **attributes: Any,
     ) -> SpanHandle | None:
         context = current_context()
@@ -1318,7 +1319,8 @@ class Observability:
             name=name or operation,
             attributes=attributes,
         )
-        handle.start()
+        if not defer_start:
+            handle.start()
         return handle
 
     def end_carried_span(
