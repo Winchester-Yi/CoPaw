@@ -128,6 +128,16 @@ export interface CustomerField {
   value: string;
 }
 
+export interface CustomerSkillResult {
+  skillId: string;
+  skillName: string;
+  jobId?: string | null;
+  filename?: string | null;
+  traceId?: string | null;
+  templateId?: number | null;
+  resultId?: string | null;
+}
+
 export interface Customer {
   /** 页面内唯一标识：`${skillId}|${custUid}`（同一客户可出现在多个任务下） */
   id: string;
@@ -144,6 +154,7 @@ export interface Customer {
   task: string;
   /** 客户名单接口 skillList 返回的去重技能名称 */
   skillNames?: string[];
+  skillList?: CustomerSkillResult[];
   /** 接口原始接触状态：0 未接触、1 已接触，其余或缺失为未知。 */
   touched?: number | null;
   /** 保险客户跟踪状态：0 未追踪、1 已追踪；缺失时不允许发起新增。 */

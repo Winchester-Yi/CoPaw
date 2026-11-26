@@ -290,6 +290,46 @@ def _effective_subagent_skills(context, definition):
     return []
 
 
+def _background_delegation_spec(
+    request_context,
+    start_request,
+) -> DelegationSpec:
+    return DelegationSpec(
+        parent_thread_id=str(
+            request_context.get("session_id") or "",
+        ),
+        parent_chat_id=str(
+            request_context.get("chat_id") or "",
+        ),
+        parent_msgid=str(
+            request_context.get("msgid") or "",
+        ),
+        goal_id=str(request_context.get("goal_id") or ""),
+        name=start_request.name,
+        objective=start_request.objective,
+        background=start_request.background,
+    )
+
+
+def _start_background_observability_span(context, attributes):
+    if context is None or not context.capture_enabled:
+        return None
+    return _OBSERVABILITY.span(
+        "SubAgent",
+        "agent.execute",
+        subagent=attributes,
+    )
+
+
+def _end_untransferred_start_span(
+    span,
+    transferred: bool,
+    status: str,
+) -> None:
+    if span is not None and not transferred:
+        span.end(status=status)
+
+
 def _create_start_subagent_tool(
     context: _BackgroundSubagentToolContext,
     directory: str,
@@ -344,19 +384,14 @@ def _create_start_subagent_tool(
                 "mode": "background",
                 "execution_agent_key": definition.name,
             }
-            if (
-                observability_context is not None
-                and observability_context.capture_enabled
-            ):
-                observability_span = _OBSERVABILITY.span(
-                    "SubAgent",
-                    "agent.execute",
-                    subagent=subagent_attributes,
+            observability_span = _start_background_observability_span(
+                observability_context,
+                subagent_attributes,
+            )
+            if observability_span is not None:
+                start_context["agent_observability_context"] = (
+                    observability_span.to_carrier()
                 )
-                if observability_span is not None:
-                    start_context["agent_observability_context"] = (
-                        observability_span.to_carrier()
-                    )
             dependency_view = await run_runtime_state_work(
                 initialize_community_expert_dependency_view,
                 workspace_dir=context.workspace_dir,
@@ -367,20 +402,9 @@ def _create_start_subagent_tool(
                 start_context["_expert_dependency_view_root"] = str(
                     dependency_view,
                 )
-            spec = DelegationSpec(
-                parent_thread_id=str(
-                    context.request_context.get("session_id") or "",
-                ),
-                parent_chat_id=str(
-                    context.request_context.get("chat_id") or "",
-                ),
-                parent_msgid=str(
-                    context.request_context.get("msgid") or "",
-                ),
-                goal_id=str(context.request_context.get("goal_id") or ""),
-                name=start_request.name,
-                objective=start_request.objective,
-                background=start_request.background,
+            spec = _background_delegation_spec(
+                context.request_context,
+                start_request,
             )
             goal_id = str(context.request_context.get("goal_id") or "").strip()
             if goal_id:
@@ -425,19 +449,19 @@ def _create_start_subagent_tool(
                 scope=context.tool_scope,
             )
         except asyncio.CancelledError:
-            if (
-                observability_span is not None
-                and not observability_span_transferred
-                and not supervisor_start_in_progress
-            ):
-                observability_span.end(status="cancelled")
+            if not supervisor_start_in_progress:
+                _end_untransferred_start_span(
+                    observability_span,
+                    observability_span_transferred,
+                    "cancelled",
+                )
             raise
-        except Exception as exc:
-            if (
-                observability_span is not None
-                and not observability_span_transferred
-            ):
-                observability_span.end(status="failed")
+        except Exception:
+            _end_untransferred_start_span(
+                observability_span,
+                observability_span_transferred,
+                "failed",
+            )
             return _json_response(
                 {
                     "status": "failed",

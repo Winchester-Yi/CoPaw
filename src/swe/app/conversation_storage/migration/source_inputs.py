@@ -36,31 +36,14 @@ def _inspect_input_entry(
     max_total_file_bytes,
     total_file_bytes,
 ):
-    details = path.lstat()
-    if stat.S_ISLNK(details.st_mode):
-        if not allow_in_root_symlinks:
-            raise SourceInputInvalid(
-                "source contains symlink; explicit regular-file snapshot required",
-            )
-        try:
-            resolved = path.resolve(strict=True)
-        except FileNotFoundError:
-            if skip_unselected_unsafe and path not in explicit:
-                return None, total_file_bytes
-            raise SourceInputInvalid(
-                "selected source symlink is broken",
-            ) from None
-        if not resolved.is_relative_to(trusted):
-            if skip_unselected_unsafe and path not in explicit:
-                return None, total_file_bytes
-            raise SourceInputInvalid("selected source path escapes workspace")
-        details = resolved.stat()
-    if not (stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)):
-        if skip_unselected_unsafe and path not in explicit:
-            return None, total_file_bytes
-        raise SourceInputInvalid(
-            "source contains unsupported filesystem object",
-        )
+    details = _input_entry_stat(
+        path,
+        trusted,
+        allow_in_root_symlinks=allow_in_root_symlinks,
+        skip_unsafe=skip_unselected_unsafe and path not in explicit,
+    )
+    if details is None:
+        return None, total_file_bytes
     if path not in found:
         if entry_limit is not None and len(found) >= entry_limit:
             raise MigrationCapacityError(
@@ -83,6 +66,35 @@ def _inspect_input_entry(
                     )
         found[path] = details
     return details, total_file_bytes
+
+
+def _input_entry_stat(path, trusted, *, allow_in_root_symlinks, skip_unsafe):
+    details = path.lstat()
+    if stat.S_ISLNK(details.st_mode):
+        if not allow_in_root_symlinks:
+            raise SourceInputInvalid(
+                "source contains symlink; explicit regular-file snapshot required",
+            )
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError:
+            if skip_unsafe:
+                return None
+            raise SourceInputInvalid(
+                "selected source symlink is broken",
+            ) from None
+        if not resolved.is_relative_to(trusted):
+            if skip_unsafe:
+                return None
+            raise SourceInputInvalid("selected source path escapes workspace")
+        details = resolved.stat()
+    if not (stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)):
+        if skip_unsafe:
+            return None
+        raise SourceInputInvalid(
+            "source contains unsupported filesystem object",
+        )
+    return details
 
 
 def safe_input_entries(

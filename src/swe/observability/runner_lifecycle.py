@@ -99,32 +99,14 @@ def prepare_query_run(
     except Exception:
         return None
     meta = getattr(request, "channel_meta", None) or {}
-    source_id = (
-        source_id
-        or getattr(request, "source_id", None)
-        or meta.get("source_id")
-        or "default"
+    source_id, tenant_id = _query_scope_ids(
+        owner,
+        request,
+        meta,
+        source_id,
+        tenant_id,
     )
-    if not tenant_id:
-        tenant_id = getattr(
-            owner,
-            "tenant_id",
-            None,
-        ) or resolve_runtime_tenant_id(
-            "default",
-            str(source_id),
-        )
-    if chat_id is None:
-        candidate = meta.get("chat_id")
-        chat_id = (
-            candidate if isinstance(candidate, str) and candidate else None
-        )
-    business_ref = {"root_question_msgid": question_id}
-    if chat_id:
-        business_ref["chat_id"] = chat_id
-    session_id = getattr(request, "session_id", None)
-    if isinstance(session_id, str) and session_id:
-        business_ref["session_id"] = session_id
+    business_ref = _query_business_ref(request, meta, chat_id, question_id)
     try:
         context = _OBSERVABILITY.prepare_run(
             scope=Scope(
@@ -144,6 +126,40 @@ def prepare_query_run(
         return context
     except Exception:
         return None
+
+
+def _query_scope_ids(owner, request, meta, source_id, tenant_id):
+    source_id = (
+        source_id
+        or getattr(request, "source_id", None)
+        or meta.get("source_id")
+        or "default"
+    )
+    if not tenant_id:
+        tenant_id = getattr(
+            owner,
+            "tenant_id",
+            None,
+        ) or resolve_runtime_tenant_id(
+            "default",
+            str(source_id),
+        )
+    return source_id, tenant_id
+
+
+def _query_business_ref(request, meta, chat_id, question_id) -> dict[str, str]:
+    if chat_id is None:
+        candidate = meta.get("chat_id")
+        chat_id = (
+            candidate if isinstance(candidate, str) and candidate else None
+        )
+    business_ref = {"root_question_msgid": question_id}
+    if chat_id:
+        business_ref["chat_id"] = chat_id
+    session_id = getattr(request, "session_id", None)
+    if isinstance(session_id, str) and session_id:
+        business_ref["session_id"] = session_id
+    return business_ref
 
 
 def approval_context_carrier() -> dict[str, Any] | None:
@@ -239,23 +255,19 @@ def approval_identity_matches(owner: Any, request: Any, pending: Any) -> bool:
         or getattr(request, "source_id", None)
         or meta.get("source_id")
     )
-    if (
-        extra.get("source_id")
-        and source_id
-        and extra["source_id"] != source_id
-    ):
+    if not _optional_identity_matches(extra.get("source_id"), source_id):
         return False
     tenant_id = get_current_effective_tenant_id()
-    if (
-        extra.get("tenant_id")
-        and tenant_id
-        and extra["tenant_id"] != tenant_id
-    ):
+    if not _optional_identity_matches(extra.get("tenant_id"), tenant_id):
         return False
-    agent_id = getattr(owner, "agent_id", None)
-    if extra.get("agent_id") and agent_id and extra["agent_id"] != agent_id:
-        return False
-    return True
+    return _optional_identity_matches(
+        extra.get("agent_id"),
+        getattr(owner, "agent_id", None),
+    )
+
+
+def _optional_identity_matches(stored: Any, current: Any) -> bool:
+    return not stored or not current or stored == current
 
 
 def record_approval_requested(

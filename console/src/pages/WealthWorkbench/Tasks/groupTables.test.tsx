@@ -808,12 +808,28 @@ describe("经营分类独立表格", () => {
 describe("客户清单操作埋点", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it.each(["business", "customer", "pending"] as const)(
-    "%s 只上报洞察和电访，使用客户标识和工作台来源",
-    async (view) => {
+  it.each([
+    ["business", 2, false],
+    ["customer", 2, false],
+    ["pending", 2, false],
+    ["customer", 1, true],
+    ["customer", 1, false],
+    ["customer", 0, false],
+  ] as const)(
+    "%s 有 %i 项技能时按项上报电访和洞察（缺少结果 ID：%s）",
+    async (view, skillCount, missingResult) => {
       const customer = state.customers[0];
       customer.custUid = "CUST-001";
       customer.bbkOrgId = "ORG-001";
+      customer.skillList = Array.from({ length: skillCount }, (_, index) => ({
+        skillId: `skill-${index}`,
+        skillName: `场景${index}`,
+        jobId: `job-${index}`,
+        filename: `customer-list-${index}.html`,
+        traceId: `trace-${index}`,
+        templateId: 128 + index,
+        resultId: missingResult ? undefined : `result-${index}`,
+      }));
       state.pendingCustomers = state.customers;
       const recordClick = vi
         .spyOn(htmlPreviewEventsApi, "recordClick")
@@ -839,9 +855,12 @@ describe("客户清单操作埋点", () => {
         ["客户洞察", "insight"],
         ["电访", "phone"],
       ]) {
+        recordClick.mockClear();
         fireEvent.click(screen.getAllByRole("button", { name: label })[0]);
-        expect(recordClick).toHaveBeenLastCalledWith(
-          expect.objectContaining({
+        expect(recordClick).toHaveBeenCalledTimes(Math.max(skillCount, 1));
+        recordClick.mock.calls.forEach(([payload], index) => {
+          const skill = customer.skillList?.[index];
+          expect(payload).toMatchObject({
             customer_id: "CUST-001",
             customer_name: customer.name,
             customer_info: { customer_id: "CUST-001", name: customer.name },
@@ -852,16 +871,26 @@ describe("客户清单操作埋点", () => {
             event_type: "button_click",
             page_source: "WP_AGENT_WORKSPACE_TASK_LIST",
             platform_source: "WP",
-          }),
-        );
-        const payload =
-          recordClick.mock.calls[recordClick.mock.calls.length - 1][0];
-        expect(payload.file_url).toBeUndefined();
-        expect(Number.isNaN(Date.parse(payload.clicked_at!))).toBe(false);
-        expect(payload.template_type).toBeUndefined();
+            cron_task_id: skill?.jobId,
+            trace_id: skill?.traceId,
+            file_name: skill?.filename,
+          });
+          expect(payload.template_type).toBe(
+            skill?.resultId ? "sub" : undefined,
+          );
+          expect(payload.template_id).toBe(
+            skill?.resultId ? skill.templateId : undefined,
+          );
+          expect(payload.result_id).toBe(skill?.resultId);
+          expect(payload.file_url).toBeUndefined();
+          expect(Number.isNaN(Date.parse(payload.clicked_at!))).toBe(false);
+          expect(payload.clicked_at).toBe(
+            recordClick.mock.calls[0][0].clicked_at,
+          );
+        });
       }
       await Promise.resolve();
-      expect(recordClick).toHaveBeenCalledTimes(2);
+      expect(signature).toHaveBeenCalledTimes(2);
       expect(signature).toHaveBeenLastCalledWith("CUST-001", "ORG-001");
       expect(win.location.href).not.toBe("");
     },

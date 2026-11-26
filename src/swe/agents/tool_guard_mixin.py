@@ -2487,21 +2487,7 @@ class ToolGuardMixin:
         }
         if operation_group is not None:
             extra["operation_group"] = operation_group
-        extra["agent_id"] = self._request_context.get("agent_id")
-        extra["tenant_id"] = self._request_context.get("tenant_id")
-        extra["source_id"] = self._request_context.get("source_id")
-        goal_id = str(self._request_context.get("goal_id") or "").strip()
-        if goal_id:
-            extra["goal_id"] = goal_id
-        chat_id = str(self._request_context.get("chat_id") or "").strip()
-        msgid = str(self._request_context.get("msgid") or "").strip()
-        if chat_id:
-            extra["chat_id"] = chat_id
-        if chat_id and msgid:
-            extra["msgid"] = msgid
-        execution_identity = self._request_context.get("execution_identity")
-        if isinstance(execution_identity, dict):
-            extra["execution_identity"] = dict(execution_identity)
+        self._add_approval_request_identity(extra)
         from ..observability.runner_lifecycle import approval_context_carrier
 
         observability_context = approval_context_carrier()
@@ -2522,6 +2508,23 @@ class ToolGuardMixin:
             if siblings:
                 extra["sibling_tool_calls"] = siblings
         return extra
+
+    def _add_approval_request_identity(self, extra: dict[str, Any]) -> None:
+        extra["agent_id"] = self._request_context.get("agent_id")
+        extra["tenant_id"] = self._request_context.get("tenant_id")
+        extra["source_id"] = self._request_context.get("source_id")
+        goal_id = str(self._request_context.get("goal_id") or "").strip()
+        if goal_id:
+            extra["goal_id"] = goal_id
+        chat_id = str(self._request_context.get("chat_id") or "").strip()
+        msgid = str(self._request_context.get("msgid") or "").strip()
+        if chat_id:
+            extra["chat_id"] = chat_id
+        if chat_id and msgid:
+            extra["msgid"] = msgid
+        execution_identity = self._request_context.get("execution_identity")
+        if isinstance(execution_identity, dict):
+            extra["execution_identity"] = dict(execution_identity)
 
     @staticmethod
     def _approval_thinking_blocks(original_msg: Any) -> list[dict[str, Any]]:

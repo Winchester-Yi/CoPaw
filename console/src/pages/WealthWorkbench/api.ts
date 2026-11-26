@@ -20,6 +20,7 @@ import { defaultMonitoring } from "./monitoring";
 import type {
   Account,
   Customer,
+  CustomerSkillResult,
   DistributeTarget,
   Draft,
   Plan,
@@ -343,11 +344,6 @@ export async function fetchSkillStats(
 // 客户名单查询：统一 request 调用 /agent/workspace/name-list
 // ---------------------------------------------------------------------------
 
-interface NameListSkillView {
-  skillId: string;
-  skillName: string;
-}
-
 export interface NameListSkillInput {
   skillId: string;
   custNum?: number;
@@ -375,7 +371,7 @@ interface NameListItemView {
   bbkOrgId?: string | null;
   filename?: string | null;
   recomReason?: string | null;
-  skillList?: NameListSkillView[];
+  skillList?: CustomerSkillResult[];
   strongContactTime?: string | null;
   touchMethod?: string | null;
   touched?: number | null;
@@ -575,6 +571,7 @@ export async function fetchTodayCustomers(
         id,
         custUid: item.custUid,
         skillId: task.skillId,
+        skillList: item.skillList,
         name: item.custNm,
         label: "",
         reason,
@@ -660,6 +657,7 @@ async function fetchCustomerViewCustomers(
       id: item.custUid,
       custUid: item.custUid,
       skillId: scenes[0]?.skillId ?? skillIds[0] ?? "",
+      skillList: item.skillList,
       name: item.custNm,
       label: labels.join("、"),
       skillNames,

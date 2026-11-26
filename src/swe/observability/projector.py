@@ -404,17 +404,11 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         or event.get("operation") != "chat"
     ):
         raise ValueError("invalid_request_attempt_coverage")
-    if (
-        "has_error" in event
-        and event["has_error"] is not None
-        and not isinstance(event["has_error"], bool)
-    ):
+    has_error = event.get("has_error")
+    if has_error is not None and not isinstance(has_error, bool):
         raise ValueError("invalid_error_flag")
-    if (
-        "streaming" in event
-        and event["streaming"] is not None
-        and not isinstance(event["streaming"], bool)
-    ):
+    streaming = event.get("streaming")
+    if streaming is not None and not isinstance(streaming, bool):
         raise ValueError("invalid_streaming_flag")
     if event.get("model_key_source") not in {
         None,
@@ -423,35 +417,9 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
     }:
         raise ValueError("invalid_model_key_source")
     if event["event_name"] == "span.event":
-        if event.get("phase_key") != "event":
-            raise ValueError("invalid_event_slot")
-        if event.get("event_type") not in {
-            "model.retry_scheduled",
-            "model.request_attempt_started",
-            "tool.retry_scheduled",
-            "tool.recovered",
-            "evidence.pending",
-            "evidence.linked",
-            "link.added",
-            "retry",
-        }:
-            raise ValueError("invalid_event_type")
+        _validate_span_event_fields(event)
     if event["event_name"] == "asset.used":
-        asset = event.get("asset")
-        if not isinstance(asset, dict) or not asset:
-            raise ValueError("invalid_asset")
-        for key in (
-            "asset_type",
-            "asset_id",
-            "asset_version",
-            "asset_digest",
-            "asset_source",
-        ):
-            value = asset.get(key)
-            if value is not None and (
-                not isinstance(value, str) or not _TOKEN.fullmatch(value)
-            ):
-                raise ValueError("invalid_asset")
+        _validate_asset_fields(event.get("asset"))
     tool = event.get("tool")
     if (
         event.get("span_type") == "Tool"
@@ -462,38 +430,9 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
     if tool is not None:
         _validate_tool_fields(event, tool)
     _validate_links(event)
-    _timestamp(event.get("occurred_at"))
-    _timestamp(event.get("run_started_at"))
-    # 可选时间字段必须在入库前解析，否则坏值会在投影事务中途抛错，
-    # 导致整批回滚并让该行永久卡住。
-    for key in ("started_at", "ended_at", "attempt_started_at"):
-        value = event.get(key)
-        if value is None:
-            continue
-        try:
-            _timestamp(value)
-        except ValueError as exc:
-            raise ValueError(f"invalid_{key}") from exc
-    for key in ("attempt_index", "step_index", "request_attempt_index"):
-        value = event.get(key)
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 0 <= value <= 0xFFFFFFFF
-        ):
-            raise ValueError("invalid_ordinal")
-    metrics = event.get("metrics") or {}
-    if not isinstance(metrics, dict):
-        raise ValueError("invalid_metrics")
-    for metric_key, value in metrics.items():
-        if isinstance(value, bool) and metric_key.endswith("_known"):
-            continue
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 0 <= value <= 0xFFFFFFFFFFFFFFFF
-        ):
-            raise ValueError("invalid_metric")
+    _validate_lifecycle_timestamps(event)
+    _validate_lifecycle_ordinals(event)
+    _validate_lifecycle_metrics(event)
     if (
         len(
             json.dumps(
@@ -528,6 +467,80 @@ def _validate_memory_span(event: dict[str, Any]) -> None:
             _require_uuid(event, "checkpoint_id")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid_checkpoint_identity") from exc
+
+
+def _validate_span_event_fields(event: dict[str, Any]) -> None:
+    if event.get("phase_key") != "event":
+        raise ValueError("invalid_event_slot")
+    if event.get("event_type") not in {
+        "model.retry_scheduled",
+        "model.request_attempt_started",
+        "tool.retry_scheduled",
+        "tool.recovered",
+        "evidence.pending",
+        "evidence.linked",
+        "link.added",
+        "retry",
+    }:
+        raise ValueError("invalid_event_type")
+
+
+def _validate_asset_fields(asset: Any) -> None:
+    if not isinstance(asset, dict) or not asset:
+        raise ValueError("invalid_asset")
+    for key in (
+        "asset_type",
+        "asset_id",
+        "asset_version",
+        "asset_digest",
+        "asset_source",
+    ):
+        value = asset.get(key)
+        if value is not None and (
+            not isinstance(value, str) or not _TOKEN.fullmatch(value)
+        ):
+            raise ValueError("invalid_asset")
+
+
+def _validate_lifecycle_timestamps(event: dict[str, Any]) -> None:
+    _timestamp(event.get("occurred_at"))
+    _timestamp(event.get("run_started_at"))
+    # 可选时间字段必须在入库前解析，否则坏值会在投影事务中途抛错，
+    # 导致整批回滚并让该行永久卡住。
+    for key in ("started_at", "ended_at", "attempt_started_at"):
+        value = event.get(key)
+        if value is None:
+            continue
+        try:
+            _timestamp(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid_{key}") from exc
+
+
+def _validate_lifecycle_ordinals(event: dict[str, Any]) -> None:
+    for key in ("attempt_index", "step_index", "request_attempt_index"):
+        value = event.get(key)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 0xFFFFFFFF
+        ):
+            raise ValueError("invalid_ordinal")
+
+
+def _validate_lifecycle_metrics(event: dict[str, Any]) -> None:
+    metrics = event.get("metrics") or {}
+    if not isinstance(metrics, dict):
+        raise ValueError("invalid_metrics")
+    for metric_key, value in metrics.items():
+        if isinstance(value, bool) and metric_key.endswith("_known"):
+            continue
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 0xFFFFFFFFFFFFFFFF
+        ):
+            raise ValueError("invalid_metric")
 
 
 def _validate_links(event: dict[str, Any]) -> None:
@@ -827,39 +840,10 @@ class InboxProjector:
         run_id = event.get("obs_run_id")
         if not await self._ensure_run_row(session, event, metadata):
             return 3
-        if event.get("obs_attempt_id"):
-            existing_attempt = await session.fetch_one(
-                "SELECT run_id FROM swe_agentobs_attempts WHERE attempt_id=%s FOR UPDATE",
-                (event["obs_attempt_id"],),
-            )
-            if existing_attempt and existing_attempt["run_id"] != run_id:
-                return 3
-            if run_id:
-                attempt_index = event.get("attempt_index") or 1
-                index_row = await session.fetch_one(
-                    "SELECT attempt_id FROM swe_agentobs_attempts "
-                    "WHERE run_id=%s AND attempt_index=%s FOR UPDATE",
-                    (run_id, attempt_index),
-                )
-                if (
-                    index_row is not None
-                    and index_row["attempt_id"] != event["obs_attempt_id"]
-                ):
-                    return 3
-        if event.get("obs_span_id"):
-            existing_span = await session.fetch_one(
-                "SELECT run_id,attempt_id,parent_span_id,span_type,operation,metadata_text "
-                "FROM swe_agentobs_spans WHERE span_id=%s FOR UPDATE",
-                (event["obs_span_id"],),
-            )
-            if existing_span and (
-                existing_span["run_id"] != run_id
-                or existing_span["attempt_id"] != event.get("obs_attempt_id")
-                or existing_span["parent_span_id"]
-                != event.get("parent_obs_span_id")
-                or _span_shape_conflicts(event, existing_span)
-            ):
-                return 3
+        if not await self._attempt_identity_matches(session, event, run_id):
+            return 3
+        if not await self._span_identity_matches(session, event, run_id):
+            return 3
         attempt_id = event.get("obs_attempt_id")
         span_id = event.get("obs_span_id")
         occurred_at = _timestamp(event["occurred_at"])
@@ -879,10 +863,15 @@ class InboxProjector:
                 run_id,
                 attempt_id,
                 span_id,
-                context_scope.get("service_unit_id", "").encode() or None,
-                context_scope.get("source_id", "").encode() or None,
-                context_scope.get("tenant_id", "").encode() or None,
-                context_scope.get("agent_id", "").encode() or None,
+                *(
+                    context_scope.get(field, "").encode() or None
+                    for field in (
+                        "service_unit_id",
+                        "source_id",
+                        "tenant_id",
+                        "agent_id",
+                    )
+                ),
                 occurred_at,
                 ingest_id,
                 event["producer_id"],
@@ -906,6 +895,45 @@ class InboxProjector:
             return 1 if _semantic_json(prior) == semantic else 3
         await self._project_entity(session, event, metadata)
         return 1
+
+    async def _attempt_identity_matches(self, session, event, run_id) -> bool:
+        if event.get("obs_attempt_id"):
+            existing_attempt = await session.fetch_one(
+                "SELECT run_id FROM swe_agentobs_attempts WHERE attempt_id=%s FOR UPDATE",
+                (event["obs_attempt_id"],),
+            )
+            if existing_attempt and existing_attempt["run_id"] != run_id:
+                return False
+            if run_id:
+                attempt_index = event.get("attempt_index") or 1
+                index_row = await session.fetch_one(
+                    "SELECT attempt_id FROM swe_agentobs_attempts "
+                    "WHERE run_id=%s AND attempt_index=%s FOR UPDATE",
+                    (run_id, attempt_index),
+                )
+                if (
+                    index_row is not None
+                    and index_row["attempt_id"] != event["obs_attempt_id"]
+                ):
+                    return False
+        return True
+
+    async def _span_identity_matches(self, session, event, run_id) -> bool:
+        if event.get("obs_span_id"):
+            existing_span = await session.fetch_one(
+                "SELECT run_id,attempt_id,parent_span_id,span_type,operation,metadata_text "
+                "FROM swe_agentobs_spans WHERE span_id=%s FOR UPDATE",
+                (event["obs_span_id"],),
+            )
+            if existing_span and (
+                existing_span["run_id"] != run_id
+                or existing_span["attempt_id"] != event.get("obs_attempt_id")
+                or existing_span["parent_span_id"]
+                != event.get("parent_obs_span_id")
+                or _span_shape_conflicts(event, existing_span)
+            ):
+                return False
+        return True
 
     async def _ensure_run_row(
         self,
@@ -952,6 +980,10 @@ class InboxProjector:
             "capture_enabled,ended_at,status FROM swe_agentobs_runs WHERE run_id=%s FOR UPDATE",
             (run_id,),
         )
+        return self._run_identity_matches(stored, event, scope, business, name)
+
+    @staticmethod
+    def _run_identity_matches(stored, event, scope, business, name) -> bool:
         if stored is None:
             return False
         if stored["capture_enabled"] != int(bool(event["capture_enabled"])):
@@ -994,215 +1026,242 @@ class InboxProjector:
             or event.get("started_at")
             or event["occurred_at"],
         )
-        if run_id:
-            business = event.get("business_ref") or {}
-            is_run_fact = name.startswith("run.")
-            await session.execute(
-                "INSERT INTO swe_agentobs_runs "
-                "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,session_key,capture_enabled,"
-                "started_at,ended_at,status,quality,terminal_fact_source,duration_us,metadata_text) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
-                "IF(ended_at IS NULL AND VALUES(status) IS NOT NULL AND "
-                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
-                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.occurred_at')),''),"
-                "VALUES(status),status)),"
-                "quality=IF(VALUES(ended_at) IS NOT NULL,VALUES(quality),quality),"
-                "terminal_fact_source=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(terminal_fact_source),terminal_fact_source),terminal_fact_source),"
-                "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
-                "duration_us=COALESCE(VALUES(duration_us),duration_us),"
-                "metadata_text=IF(VALUES(status) IS NOT NULL AND "
-                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
-                "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.occurred_at')),''),"
-                "VALUES(metadata_text),metadata_text)",
-                (
-                    run_id,
-                    scope["service_unit_id"].encode(),
-                    scope["source_id"].encode(),
-                    scope["tenant_id"].encode(),
-                    scope["agent_id"].encode(),
-                    business.get("chat_id", "").encode(),
-                    business.get("root_question_msgid", "").encode(),
-                    business.get("session_id", "").encode() or None,
-                    int(bool(event["capture_enabled"])),
-                    started,
-                    (
-                        _timestamp(event["ended_at"])
-                        if name == "run.ended" and event.get("ended_at")
-                        else None
-                    ),
-                    event.get("status") if is_run_fact else None,
-                    "observed" if name == "run.ended" else "partial",
-                    event.get("terminal_fact_source") if is_run_fact else None,
-                    (
-                        (event.get("metrics") or {}).get("duration_us")
-                        if name == "run.ended"
-                        else None
-                    ),
-                    metadata,
-                ),
-            )
-        if (
-            name in {"attempt.started", "attempt.ended"}
-            and run_id
-            and event.get("obs_attempt_id")
+        if not run_id:
+            return
+        await self._project_run(
+            session,
+            event,
+            metadata,
+            run_id,
+            scope,
+            started,
+        )
+        if name in {"attempt.started", "attempt.ended"} and event.get(
+            "obs_attempt_id",
         ):
-            is_attempt_end = name == "attempt.ended"
-            await session.execute(
-                "INSERT INTO swe_agentobs_attempts (attempt_id,run_id,attempt_index,predecessor_attempt_id,started_at,ended_at,status,metadata_text) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
-                "status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
-                "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
-                "ended_at=COALESCE(ended_at,VALUES(ended_at)),metadata_text=VALUES(metadata_text)",
-                (
-                    event["obs_attempt_id"],
-                    run_id,
-                    event.get("attempt_index") or 1,
-                    event.get("predecessor_attempt_id"),
-                    _timestamp(
-                        event.get("started_at")
-                        or event.get("attempt_started_at")
-                        or event["occurred_at"],
-                    ),
-                    (
-                        _timestamp(event["ended_at"])
-                        if is_attempt_end and event.get("ended_at")
-                        else None
-                    ),
-                    event.get("status") if is_attempt_end else "running",
-                    metadata,
-                ),
-            )
-        if (
-            name in {"span.started", "span.ended"}
-            and run_id
-            and event.get("obs_span_id")
-        ):
-            is_end = name == "span.ended"
-            has_start = is_end and await session.fetch_one(
-                "SELECT 1 FROM swe_agentobs_events "
-                "WHERE entity_kind='span' AND entity_id=%s "
-                "AND phase_key='started' AND local_seq=0 AND event_name='span.started'",
-                (event["obs_span_id"],),
-            )
-            await session.execute(
-                "INSERT INTO swe_agentobs_spans (span_id,run_id,attempt_id,parent_span_id,span_type,operation,kind,name,step_index,"
-                "started_at,ended_at,status,technical_status,has_error,error_type,quality,duration_us,time_to_first_chunk_us,"
-                "time_to_first_visible_text_us,input_tokens,output_tokens,model_key,provider_key,request_model_key,"
-                "response_model_key,model_key_source,streaming,finish_reason,tool_key,metadata_text) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
-                "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
-                "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
-                "technical_status=COALESCE(VALUES(technical_status),technical_status),has_error=COALESCE(VALUES(has_error),has_error),"
-                "error_type=COALESCE(VALUES(error_type),error_type),"
-                "quality=CASE WHEN VALUES(ended_at) IS NOT NULL THEN VALUES(quality) "
-                "WHEN ended_at IS NOT NULL THEN 'observed' ELSE quality END,"
-                "duration_us=COALESCE(VALUES(duration_us),duration_us),"
-                "time_to_first_chunk_us=COALESCE(VALUES(time_to_first_chunk_us),time_to_first_chunk_us),"
-                "time_to_first_visible_text_us=COALESCE(VALUES(time_to_first_visible_text_us),time_to_first_visible_text_us),"
-                "input_tokens=COALESCE(VALUES(input_tokens),input_tokens),"
-                "output_tokens=COALESCE(VALUES(output_tokens),output_tokens),"
-                "model_key=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(model_key),model_key),model_key),"
-                "provider_key=COALESCE(VALUES(provider_key),provider_key),"
-                "request_model_key=COALESCE(VALUES(request_model_key),request_model_key),"
-                "response_model_key=COALESCE(VALUES(response_model_key),response_model_key),"
-                "model_key_source=IF(VALUES(ended_at) IS NOT NULL OR ended_at IS NULL,"
-                "COALESCE(VALUES(model_key_source),model_key_source),model_key_source),"
-                "streaming=COALESCE(VALUES(streaming),streaming),"
-                "finish_reason=COALESCE(VALUES(finish_reason),finish_reason),"
-                "tool_key=COALESCE(VALUES(tool_key),tool_key),"
-                "metadata_text=IF(VALUES(ended_at) IS NOT NULL OR ended_at IS NULL,"
-                "VALUES(metadata_text),metadata_text)",
-                (
-                    event["obs_span_id"],
-                    run_id,
-                    event.get("obs_attempt_id"),
-                    event.get("parent_obs_span_id"),
-                    event.get("span_type", "Custom"),
-                    event.get("operation") or "unknown",
-                    event.get("kind") or "INTERNAL",
-                    event.get("name") or "unknown",
-                    event.get("step_index"),
-                    _timestamp(
-                        event.get("started_at") or event["occurred_at"],
-                    ),
-                    (
-                        _timestamp(event["ended_at"])
-                        if is_end and event.get("ended_at")
-                        else None
-                    ),
-                    event.get("status") if is_end else "running",
-                    event.get("technical_status"),
-                    (
-                        int(bool(event["has_error"]))
-                        if "has_error" in event
-                        else None
-                    ),
-                    event.get("error_type"),
-                    "observed" if has_start else "partial",
-                    (event.get("metrics") or {}).get("duration_us"),
-                    (event.get("metrics") or {}).get("first_chunk_us"),
-                    (event.get("metrics") or {}).get("first_visible_text_us"),
-                    (event.get("metrics") or {}).get("input_tokens"),
-                    (event.get("metrics") or {}).get("output_tokens"),
-                    event.get("response_model_key")
-                    or event.get("request_model_key"),
-                    event.get("provider_key"),
-                    event.get("request_model_key"),
-                    event.get("response_model_key"),
-                    event.get("model_key_source"),
-                    (
-                        int(event["streaming"])
-                        if isinstance(event.get("streaming"), bool)
-                        else None
-                    ),
-                    event.get("finish_reason"),
-                    (event.get("tool") or {}).get("tool_key"),
-                    metadata,
-                ),
-            )
-            if is_end:
-                await session.execute(
-                    "UPDATE swe_agentobs_runs SET "
-                    "span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
-                    "WHERE run_id=%s), "
-                    "error_span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
-                    "WHERE run_id=%s AND (has_error=1 OR "
-                    "technical_status='ERROR')), "
-                    "tool_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
-                    "WHERE run_id=%s AND span_type='Tool' "
-                    "AND ended_at IS NOT NULL) "
-                    "WHERE run_id=%s",
-                    (run_id, run_id, run_id, run_id),
-                )
-            if event.get("span_type") == "LLM" and event.get("operation") in {
-                "chat",
-                "request_attempt",
-            }:
-                await session.execute(
-                    "UPDATE swe_agentobs_runs SET "
-                    "llm_calls=(SELECT NULLIF(COUNT(*),0) FROM swe_agentobs_spans "
-                    "WHERE run_id=%s AND span_type='LLM' AND operation='chat'), "
-                    "input_tokens=(SELECT SUM(input_tokens) "
-                    "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
-                    "AND operation='request_attempt' AND ended_at IS NOT NULL), "
-                    "output_tokens=(SELECT SUM(output_tokens) "
-                    "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
-                    "AND operation='request_attempt' AND ended_at IS NOT NULL), "
-                    "agent_loops=(SELECT CASE "
-                    "WHEN COUNT(*)>0 AND COUNT(*)=COUNT(step_index) "
-                    "THEN COUNT(DISTINCT CONCAT("
-                    "COALESCE(parent_span_id,attempt_id), ':', step_index)) "
-                    "ELSE NULL END FROM swe_agentobs_spans "
-                    "WHERE run_id=%s AND span_type='LLM' AND operation='chat' "
-                    "AND ended_at IS NOT NULL) "
-                    "WHERE run_id=%s",
-                    (run_id, run_id, run_id, run_id, run_id),
-                )
-        if run_id and (
-            name == "run.ended"
-            or name == "attempt.started"
-            or (name == "attempt.ended" and event.get("ended_at"))
+            await self._project_attempt(session, event, metadata, run_id)
+        if name in {"span.started", "span.ended"} and event.get("obs_span_id"):
+            await self._project_span(session, event, metadata, run_id)
+        if name in {"run.ended", "attempt.started"} or (
+            name == "attempt.ended" and event.get("ended_at")
         ):
             await _refresh_active_duration(session, run_id)
+
+    async def _project_run(
+        self,
+        session,
+        event,
+        metadata,
+        run_id,
+        scope,
+        started,
+    ) -> None:
+        name = event["event_name"]
+        business = event.get("business_ref") or {}
+        is_run_fact = name.startswith("run.")
+        await session.execute(
+            "INSERT INTO swe_agentobs_runs "
+            "(run_id,service_unit_key,source_key,tenant_key,agent_key,chat_key,root_question_key,session_key,capture_enabled,"
+            "started_at,ended_at,status,quality,terminal_fact_source,duration_us,metadata_text) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
+            "IF(ended_at IS NULL AND VALUES(status) IS NOT NULL AND "
+            "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
+            "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.occurred_at')),''),"
+            "VALUES(status),status)),"
+            "quality=IF(VALUES(ended_at) IS NOT NULL,VALUES(quality),quality),"
+            "terminal_fact_source=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(terminal_fact_source),terminal_fact_source),terminal_fact_source),"
+            "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
+            "duration_us=COALESCE(VALUES(duration_us),duration_us),"
+            "metadata_text=IF(VALUES(status) IS NOT NULL AND "
+            "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(VALUES(metadata_text),'$.occurred_at')),'') > "
+            "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.occurred_at')),''),"
+            "VALUES(metadata_text),metadata_text)",
+            (
+                run_id,
+                scope["service_unit_id"].encode(),
+                scope["source_id"].encode(),
+                scope["tenant_id"].encode(),
+                scope["agent_id"].encode(),
+                business.get("chat_id", "").encode(),
+                business.get("root_question_msgid", "").encode(),
+                business.get("session_id", "").encode() or None,
+                int(bool(event["capture_enabled"])),
+                started,
+                (
+                    _timestamp(event["ended_at"])
+                    if name == "run.ended" and event.get("ended_at")
+                    else None
+                ),
+                event.get("status") if is_run_fact else None,
+                "observed" if name == "run.ended" else "partial",
+                event.get("terminal_fact_source") if is_run_fact else None,
+                (
+                    (event.get("metrics") or {}).get("duration_us")
+                    if name == "run.ended"
+                    else None
+                ),
+                metadata,
+            ),
+        )
+
+    async def _project_attempt(self, session, event, metadata, run_id) -> None:
+        is_attempt_end = event["event_name"] == "attempt.ended"
+        await session.execute(
+            "INSERT INTO swe_agentobs_attempts (attempt_id,run_id,attempt_index,predecessor_attempt_id,started_at,ended_at,status,metadata_text) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+            "status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
+            "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+            "ended_at=COALESCE(ended_at,VALUES(ended_at)),metadata_text=VALUES(metadata_text)",
+            (
+                event["obs_attempt_id"],
+                run_id,
+                event.get("attempt_index") or 1,
+                event.get("predecessor_attempt_id"),
+                _timestamp(
+                    event.get("started_at")
+                    or event.get("attempt_started_at")
+                    or event["occurred_at"],
+                ),
+                (
+                    _timestamp(event["ended_at"])
+                    if is_attempt_end and event.get("ended_at")
+                    else None
+                ),
+                event.get("status") if is_attempt_end else "running",
+                metadata,
+            ),
+        )
+
+    async def _project_span(self, session, event, metadata, run_id) -> None:
+        is_end = event["event_name"] == "span.ended"
+        has_start = is_end and await session.fetch_one(
+            "SELECT 1 FROM swe_agentobs_events "
+            "WHERE entity_kind='span' AND entity_id=%s "
+            "AND phase_key='started' AND local_seq=0 AND event_name='span.started'",
+            (event["obs_span_id"],),
+        )
+        await session.execute(
+            "INSERT INTO swe_agentobs_spans (span_id,run_id,attempt_id,parent_span_id,span_type,operation,kind,name,step_index,"
+            "started_at,ended_at,status,technical_status,has_error,error_type,quality,duration_us,time_to_first_chunk_us,"
+            "time_to_first_visible_text_us,input_tokens,output_tokens,model_key,provider_key,request_model_key,"
+            "response_model_key,model_key_source,streaming,finish_reason,tool_key,metadata_text) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE status=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(status),status),"
+            "IF(ended_at IS NULL,COALESCE(VALUES(status),status),status)),"
+            "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
+            "technical_status=COALESCE(VALUES(technical_status),technical_status),has_error=COALESCE(VALUES(has_error),has_error),"
+            "error_type=COALESCE(VALUES(error_type),error_type),"
+            "quality=CASE WHEN VALUES(ended_at) IS NOT NULL THEN VALUES(quality) "
+            "WHEN ended_at IS NOT NULL THEN 'observed' ELSE quality END,"
+            "duration_us=COALESCE(VALUES(duration_us),duration_us),"
+            "time_to_first_chunk_us=COALESCE(VALUES(time_to_first_chunk_us),time_to_first_chunk_us),"
+            "time_to_first_visible_text_us=COALESCE(VALUES(time_to_first_visible_text_us),time_to_first_visible_text_us),"
+            "input_tokens=COALESCE(VALUES(input_tokens),input_tokens),"
+            "output_tokens=COALESCE(VALUES(output_tokens),output_tokens),"
+            "model_key=IF(VALUES(ended_at) IS NOT NULL,COALESCE(VALUES(model_key),model_key),model_key),"
+            "provider_key=COALESCE(VALUES(provider_key),provider_key),"
+            "request_model_key=COALESCE(VALUES(request_model_key),request_model_key),"
+            "response_model_key=COALESCE(VALUES(response_model_key),response_model_key),"
+            "model_key_source=IF(VALUES(ended_at) IS NOT NULL OR ended_at IS NULL,"
+            "COALESCE(VALUES(model_key_source),model_key_source),model_key_source),"
+            "streaming=COALESCE(VALUES(streaming),streaming),"
+            "finish_reason=COALESCE(VALUES(finish_reason),finish_reason),"
+            "tool_key=COALESCE(VALUES(tool_key),tool_key),"
+            "metadata_text=IF(VALUES(ended_at) IS NOT NULL OR ended_at IS NULL,"
+            "VALUES(metadata_text),metadata_text)",
+            (
+                event["obs_span_id"],
+                run_id,
+                event.get("obs_attempt_id"),
+                event.get("parent_obs_span_id"),
+                event.get("span_type", "Custom"),
+                event.get("operation") or "unknown",
+                event.get("kind") or "INTERNAL",
+                event.get("name") or "unknown",
+                event.get("step_index"),
+                _timestamp(
+                    event.get("started_at") or event["occurred_at"],
+                ),
+                (
+                    _timestamp(event["ended_at"])
+                    if is_end and event.get("ended_at")
+                    else None
+                ),
+                event.get("status") if is_end else "running",
+                event.get("technical_status"),
+                (
+                    int(bool(event["has_error"]))
+                    if "has_error" in event
+                    else None
+                ),
+                event.get("error_type"),
+                "observed" if has_start else "partial",
+                (event.get("metrics") or {}).get("duration_us"),
+                (event.get("metrics") or {}).get("first_chunk_us"),
+                (event.get("metrics") or {}).get("first_visible_text_us"),
+                (event.get("metrics") or {}).get("input_tokens"),
+                (event.get("metrics") or {}).get("output_tokens"),
+                event.get("response_model_key")
+                or event.get("request_model_key"),
+                event.get("provider_key"),
+                event.get("request_model_key"),
+                event.get("response_model_key"),
+                event.get("model_key_source"),
+                (
+                    int(event["streaming"])
+                    if isinstance(event.get("streaming"), bool)
+                    else None
+                ),
+                event.get("finish_reason"),
+                (event.get("tool") or {}).get("tool_key"),
+                metadata,
+            ),
+        )
+        await self._refresh_span_totals(session, event, run_id, is_end)
+
+    async def _refresh_span_totals(
+        self,
+        session,
+        event,
+        run_id,
+        is_end,
+    ) -> None:
+        if is_end:
+            await session.execute(
+                "UPDATE swe_agentobs_runs SET "
+                "span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                "WHERE run_id=%s), "
+                "error_span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND (has_error=1 OR "
+                "technical_status='ERROR')), "
+                "tool_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND span_type='Tool' "
+                "AND ended_at IS NOT NULL) "
+                "WHERE run_id=%s",
+                (run_id, run_id, run_id, run_id),
+            )
+        if event.get("span_type") == "LLM" and event.get("operation") in {
+            "chat",
+            "request_attempt",
+        }:
+            await session.execute(
+                "UPDATE swe_agentobs_runs SET "
+                "llm_calls=(SELECT NULLIF(COUNT(*),0) FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND span_type='LLM' AND operation='chat'), "
+                "input_tokens=(SELECT SUM(input_tokens) "
+                "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
+                "AND operation='request_attempt' AND ended_at IS NOT NULL), "
+                "output_tokens=(SELECT SUM(output_tokens) "
+                "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
+                "AND operation='request_attempt' AND ended_at IS NOT NULL), "
+                "agent_loops=(SELECT CASE "
+                "WHEN COUNT(*)>0 AND COUNT(*)=COUNT(step_index) "
+                "THEN COUNT(DISTINCT CONCAT("
+                "COALESCE(parent_span_id,attempt_id), ':', step_index)) "
+                "ELSE NULL END FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND span_type='LLM' AND operation='chat' "
+                "AND ended_at IS NOT NULL) "
+                "WHERE run_id=%s",
+                (run_id, run_id, run_id, run_id, run_id),
+            )

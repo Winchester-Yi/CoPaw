@@ -653,6 +653,38 @@ describe("WealthWorkbench api", () => {
     },
   );
 
+  it.each(["business", "customer", "pending"] as const)(
+    "客户名单 %s 保留所有技能的点击埋点上下文",
+    async (view) => {
+      const skillResult = {
+        skillId: TASK.skillId,
+        skillName: TASK.sceneName,
+        jobId: "job-001",
+        filename: "customer-list.html",
+        traceId: "trace-001",
+        templateId: 128,
+        resultId: "result-001",
+      };
+      const skillList = [{ ...skillResult, skillId: "other" }, skillResult];
+      mockRequest.mockResolvedValueOnce({
+        items: [
+          {
+            ...NAME_LIST_FIXTURE[0],
+            skillList,
+          },
+          NAME_LIST_FIXTURE[1],
+        ],
+      });
+      const { customers } =
+        view === "pending"
+          ? await api.fetchPendingCustomers([TASK], "10086")
+          : await api.fetchTodayCustomers([TASK], "10086", view);
+
+      expect(customers[0].skillList).toEqual(skillList);
+      expect(customers[1].skillList).toBeUndefined();
+    },
+  );
+
   it("fetchTodayCustomers 按任务上下文映射名单并去重", async () => {
     const { customers: customers } = await api.fetchTodayCustomers(
       [

@@ -168,7 +168,7 @@ export function Opportunities({
  */
 async function openOutboundLink(
   kind: "dial" | "insight",
-  c: Pick<Customer, "custUid" | "bbkOrgId" | "name">,
+  c: Pick<Customer, "custUid" | "bbkOrgId" | "name" | "skillList">,
 ) {
   // 埋点：电访 button_id=phone，客户洞察 button_id=insight
   reportTaskClick(c, kind === "dial" ? "phone" : "insight");
@@ -197,7 +197,7 @@ async function openOutboundLink(
 
 /** 客户清单的洞察 / 电访点击；操作者与机构信息由 recordClick 补齐。 */
 function reportTaskClick(
-  c: Pick<Customer, "custUid" | "name">,
+  c: Pick<Customer, "custUid" | "name" | "skillList">,
   buttonId: "phone" | "insight",
 ) {
   const buttonName = buttonId === "phone" ? "电访" : "客户洞察";
@@ -217,9 +217,25 @@ function reportTaskClick(
     page_source: "WP_AGENT_WORKSPACE_TASK_LIST",
     platform_source: "WP",
   };
-  htmlPreviewEventsApi.recordClick(payload).catch(() => {
-    // 埋点失败不影响主流程，静默丢弃
-  });
+  const skills = c.skillList?.length ? c.skillList : [undefined];
+  for (const skill of skills) {
+    const hasTemplateResult = skill?.templateId != null && !!skill.resultId;
+    htmlPreviewEventsApi
+      .recordClick({
+        ...payload,
+        cron_task_id: skill?.jobId || undefined,
+        trace_id: skill?.traceId || undefined,
+        file_name: skill?.filename || undefined,
+        ...(hasTemplateResult && {
+          template_type: "sub",
+          template_id: skill.templateId,
+          result_id: skill.resultId,
+        }),
+      })
+      .catch(() => {
+        // 埋点失败不影响主流程，静默丢弃
+      });
+  }
 }
 
 function contactMethodLabel(method: string) {
@@ -577,10 +593,10 @@ export default function Tasks({ page }: { page: TaskPageKind }) {
       const u = new URL(c.link);
       u.searchParams.set("_t", String(seq));
       u.searchParams.set("headBbk", String(true));
-      u.searchParams.set("pzEnable", String(true))
+      u.searchParams.set("pzEnable", String(true));
       previewUrl = u.toString();
     } catch {
-      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}&headBbk=true&Enable=true`;
+      previewUrl = `${c.link}${c.link.includes("?") ? "&" : "?"}_t=${seq}&headBbk=true&pzEnable=true`;
     }
     // 经营方案以 iframe 铺满整个弹窗：不渲染标题头部、正文无内边距、
     // iframe 无边框。plain 弹窗通过弹窗类专用宽度铺满可用区域。

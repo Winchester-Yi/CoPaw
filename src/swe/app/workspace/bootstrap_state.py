@@ -73,28 +73,12 @@ def inspect_bootstrap_readiness(
     missing_paths: list[Path] = []
     invalid_json_paths: list[Path] = []
 
-    config_path = tenant_dir / "config.json"
-    config_payload = _read_json_object(
-        config_path,
+    _check_default_workspace_config(
+        tenant_dir,
+        expected_workspace_dir,
         missing_paths,
         invalid_json_paths,
     )
-    if config_payload is not None:
-        try:
-            config = Config.model_validate(config_payload)
-            profile = config.agents.profiles.get("default")
-            if (
-                profile is None
-                or profile.id != "default"
-                or not profile.enabled
-                or not _same_path(
-                    profile.workspace_dir,
-                    expected_workspace_dir,
-                )
-            ):
-                invalid_json_paths.append(config_path)
-        except Exception:
-            invalid_json_paths.append(config_path)
 
     _require_directory(workspace_dir, missing_paths)
     for directory_name in _REQUIRED_WORKSPACE_DIRECTORIES:
@@ -143,6 +127,36 @@ def inspect_bootstrap_readiness(
         invalid_json_paths=invalid,
         reason=reason,
     )
+
+
+def _check_default_workspace_config(
+    tenant_dir: Path,
+    expected_workspace_dir: Path,
+    missing_paths: list[Path],
+    invalid_json_paths: list[Path],
+) -> None:
+    config_path = tenant_dir / "config.json"
+    config_payload = _read_json_object(
+        config_path,
+        missing_paths,
+        invalid_json_paths,
+    )
+    if config_payload is not None:
+        try:
+            config = Config.model_validate(config_payload)
+            profile = config.agents.profiles.get("default")
+            if (
+                profile is None
+                or profile.id != "default"
+                or not profile.enabled
+                or not _same_path(
+                    profile.workspace_dir,
+                    expected_workspace_dir,
+                )
+            ):
+                invalid_json_paths.append(config_path)
+        except Exception:
+            invalid_json_paths.append(config_path)
 
 
 def write_bootstrap_json(path: Path, payload: dict[str, Any]) -> None:

@@ -740,24 +740,21 @@ async def _migrate_source(
         :3
     ]
     row = None
-    replace_binding = False
+    previous_identity = None
     if apply:
         if resume_from is not None:
             _check_resume_membership(workspaces, resume_from[0])
-        row = await database.fetch_one(
-            f"SELECT migration_id,manifest_digest,published FROM {SOURCES} WHERE "
-            + SOURCE_PREDICATE,
-            source_key,
-        )
+        row = await _read_source_binding(database, source_key)
         if row is not None:
-            original_identity = (row["migration_id"], row["manifest_digest"])
-            replace_binding = original_identity != (migration_id, digest)
-            if not replace_binding and row["published"]:
+            bound_identity = (row["migration_id"], row["manifest_digest"])
+            if bound_identity != (migration_id, digest):
+                previous_identity = bound_identity
+            elif row["published"]:
                 return "skipped", []
 
     if live_registry:
         workspaces = await asyncio.to_thread(_live_registries, workspaces)
-    if replace_binding:
+    if previous_identity is not None:
         await _check_resume_bindings(
             database,
             source_key,
@@ -777,6 +774,91 @@ async def _migrate_source(
         if row is not None and progress is not None
         else {}
     )
+    eligible, failures = await _preflight_source_workspaces(
+        workspaces,
+        completed,
+        progress,
+        skipped_workspaces,
+        full_audit=full_audit,
+    )
+    if not apply or (not eligible and not completed):
+        return ("failed" if failures else "ready"), failures
+
+    await _write_source_binding(
+        database,
+        source_key,
+        (migration_id, digest),
+        row,
+        previous_identity,
+    )
+    failures.extend(
+        await _import_source_workspaces(
+            database,
+            eligible,
+            progress,
+            full_audit=full_audit,
+        ),
+    )
+    if failures:
+        return "failed", failures
+    await _publish_source_binding(database, source_key, migration_id, digest)
+    return "ready", []
+
+
+async def _read_source_binding(database, source_key):
+    return await database.fetch_one(
+        f"SELECT migration_id,manifest_digest,published FROM {SOURCES} WHERE "
+        + SOURCE_PREDICATE,
+        source_key,
+    )
+
+
+async def _write_source_binding(
+    database,
+    source_key,
+    identity,
+    row,
+    original_identity,
+):
+    migration_id, digest = identity
+    if row is None:
+        await database.execute(
+            f"INSERT INTO {SOURCES} (service_unit_key,tenant_key,source_key,migration_id,manifest_digest) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (*source_key, migration_id, digest),
+        )
+    elif original_identity is not None:
+        changed = await database.execute(
+            f"UPDATE {SOURCES} SET migration_id=%s,manifest_digest=%s WHERE "
+            + SOURCE_PREDICATE
+            + " AND migration_id=%s AND manifest_digest=%s AND published=0",
+            (migration_id, digest, *source_key, *original_identity),
+        )
+        if changed != 1:
+            raise ConflictError("source binding changed during resume")
+
+
+async def _publish_source_binding(database, source_key, migration_id, digest):
+    if (
+        await database.execute(
+            f"UPDATE {SOURCES} SET published=1 WHERE "
+            + SOURCE_PREDICATE
+            + " AND migration_id=%s AND manifest_digest=%s AND published=0",
+            (*source_key, migration_id, digest),
+        )
+        != 1
+    ):
+        raise ConflictError("source binding changed before publication")
+
+
+async def _preflight_source_workspaces(
+    workspaces,
+    completed,
+    progress,
+    skipped_workspaces,
+    *,
+    full_audit,
+):
     eligible, failures = [], []
     for item in workspaces:
         try:
@@ -808,24 +890,17 @@ async def _migrate_source(
             )
             if registry.chats or not session_failures:
                 eligible.append((item, registry, session_failures))
-    if not apply or (not eligible and not completed):
-        return ("failed" if failures else "ready"), failures
+    return eligible, failures
 
-    if row is None:
-        await database.execute(
-            f"INSERT INTO {SOURCES} (service_unit_key,tenant_key,source_key,migration_id,manifest_digest) "
-            "VALUES (%s,%s,%s,%s,%s)",
-            (*source_key, migration_id, digest),
-        )
-    elif replace_binding:
-        changed = await database.execute(
-            f"UPDATE {SOURCES} SET migration_id=%s,manifest_digest=%s WHERE "
-            + SOURCE_PREDICATE
-            + " AND migration_id=%s AND manifest_digest=%s AND published=0",
-            (migration_id, digest, *source_key, *original_identity),
-        )
-        if changed != 1:
-            raise ConflictError("source binding changed during resume")
+
+async def _import_source_workspaces(
+    database,
+    eligible,
+    progress,
+    *,
+    full_audit,
+):
+    failures = []
     for item, registry, session_failures in eligible:
         try:
             await _import_verified_workspace(
@@ -842,19 +917,7 @@ async def _migrate_source(
             if error.errno != ER_CHECK_CONSTRAINT_VIOLATED:
                 raise
             failures.append(_workspace_failure(item, "import", error))
-    if failures:
-        return "failed", failures
-    if (
-        await database.execute(
-            f"UPDATE {SOURCES} SET published=1 WHERE "
-            + SOURCE_PREDICATE
-            + " AND migration_id=%s AND manifest_digest=%s AND published=0",
-            (*source_key, migration_id, digest),
-        )
-        != 1
-    ):
-        raise ConflictError("source binding changed before publication")
-    return "ready", []
+    return failures
 
 
 async def _import_verified_workspace(

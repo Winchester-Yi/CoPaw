@@ -286,12 +286,13 @@ export function createSidebarNavigation(
           icon: <SparkSearchLine size={size} />,
           visible: visibility.showGovernanceDashboards,
         },
-        {
-          key: "analytics-claw-data-overview",
-          label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
-          icon: <SparkBarChartLine size={size} />,
-          visible: visibility.showClawDashboards,
-        },
+        // 暂时隐藏 Claw 数据看板入口，恢复时取消下方注释。
+        // {
+        //   key: "analytics-claw-data-overview",
+        //   label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+        //   icon: <SparkBarChartLine size={size} />,
+        //   visible: visibility.showClawDashboards,
+        // },
         {
           key: "analytics-claw-skill-data-overview",
           label: t("nav.analyticsClawSkillDataOverview", "Claw技能运行看板"),

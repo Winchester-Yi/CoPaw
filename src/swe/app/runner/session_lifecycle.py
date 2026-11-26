@@ -248,52 +248,72 @@ async def _admit_user_turn(
         and existing.get("message") == message
         and not is_reexecution
     )
-    if not is_reconnect and observability_context is not None:
-        carrier = (
-            existing.get("agent_observability_context")
-            if isinstance(existing, dict)
-            else None
+    if is_reconnect:
+        return turn_id, False, None
+    if observability_context is not None:
+        observability_context = _link_predecessor_run(
+            existing,
+            observability_context,
         )
-        if isinstance(carrier, dict):
-            try:
-                from ...observability.models import ObservabilityContext
-
-                previous = ObservabilityContext.from_carrier(carrier)
-                business_ref = {
-                    **observability_context.business_ref,
-                    "predecessor_run_id": previous.obs_run_id,
-                }
-                observability_context = observability_context.with_updates(
-                    business_ref=business_ref,
-                )
-            except Exception:
-                pass
-    if not is_reconnect:
-        admitted_state = {
-            "status": "admitted",
-            "message": message,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        if isinstance(existing, dict) and "admission_order" in existing:
-            admitted_state["admission_order"] = existing["admission_order"]
-        if execution_id is not None:
-            admitted_state["execution_id"] = execution_id
-        chat_id = channel_meta.get("chat_id")
-        if isinstance(chat_id, str) and chat_id:
-            admitted_state["chat_id"] = chat_id
-        if observability_context is not None:
-            admitted_state["agent_observability_context"] = (
-                observability_context.to_carrier()
-            )
-        turn_states[turn_id] = admitted_state
-    if not is_reconnect:
-        execution.mark_state_dirty()
-        await execution.commit_state(state)
-    return (
-        turn_id,
-        not is_reconnect,
-        (observability_context if not is_reconnect else None),
+    turn_states[turn_id] = _admitted_turn_state(
+        existing,
+        message,
+        channel_meta,
+        execution_id,
+        observability_context,
     )
+    execution.mark_state_dirty()
+    await execution.commit_state(state)
+    return turn_id, True, observability_context
+
+
+def _link_predecessor_run(existing, observability_context):
+    carrier = (
+        existing.get("agent_observability_context")
+        if isinstance(existing, dict)
+        else None
+    )
+    if isinstance(carrier, dict):
+        try:
+            from ...observability.models import ObservabilityContext
+
+            previous = ObservabilityContext.from_carrier(carrier)
+            business_ref = {
+                **observability_context.business_ref,
+                "predecessor_run_id": previous.obs_run_id,
+            }
+            observability_context = observability_context.with_updates(
+                business_ref=business_ref,
+            )
+        except Exception:
+            pass
+    return observability_context
+
+
+def _admitted_turn_state(
+    existing,
+    message,
+    channel_meta,
+    execution_id,
+    observability_context,
+):
+    admitted_state = {
+        "status": "admitted",
+        "message": message,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if isinstance(existing, dict) and "admission_order" in existing:
+        admitted_state["admission_order"] = existing["admission_order"]
+    if execution_id is not None:
+        admitted_state["execution_id"] = execution_id
+    chat_id = channel_meta.get("chat_id")
+    if isinstance(chat_id, str) and chat_id:
+        admitted_state["chat_id"] = chat_id
+    if observability_context is not None:
+        admitted_state["agent_observability_context"] = (
+            observability_context.to_carrier()
+        )
+    return admitted_state
 
 
 if TYPE_CHECKING:

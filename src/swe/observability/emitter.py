@@ -10,7 +10,6 @@ import threading
 import time
 from collections import deque
 from typing import Any, TextIO
-from uuid import uuid4
 
 from .config import EmitterConfig, project_resource
 from .models import MetadataEvent, new_id
@@ -173,25 +172,57 @@ def _project(value: Any, depth: int = 0, key: str | None = None) -> Any:
             return None
         return [_project(item, depth + 1) for item in value[:32]]
     if isinstance(value, str):
-        if key in _TOKEN_FIELDS and not _TOKEN_PATTERN.fullmatch(value):
-            return None
-        if key in _ENUM_FIELDS and value not in _ENUM_FIELDS[key]:
-            return None
-        if (
-            key in {"name", "operation", "reason_code", "decision"}
-            and value not in _REGISTERED_LABELS
-        ):
-            return None
-        return value[:256]
+        return _project_string(value, key)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return None
 
 
-def _encode_event(event: dict[str, Any]) -> bytes:
+def _project_string(value: str, key: str | None) -> str | None:
+    if key in _TOKEN_FIELDS and not _TOKEN_PATTERN.fullmatch(value):
+        return None
+    if key in _ENUM_FIELDS and value not in _ENUM_FIELDS[key]:
+        return None
+    if (
+        key in {"name", "operation", "reason_code", "decision"}
+        and value not in _REGISTERED_LABELS
+    ):
+        return None
+    return value[:256]
+
+
+def _validate_projected_event(projected: Any) -> None:
+    if not isinstance(projected, dict):
+        raise ValueError("event must be an object")
+    if not _REQUIRED_FIELDS.issubset(projected):
+        raise ValueError("event is missing required protocol fields")
+    if projected["schema_version"] != 1:
+        raise ValueError("unsupported event schema")
+    if projected["event_name"] != "observer.health":
+        if not {
+            "obs_run_id",
+            "run_started_at",
+            "capture_enabled",
+            "scope",
+        }.issubset(projected):
+            raise ValueError("run events require identity and scope")
+        scope = projected["scope"]
+        if not isinstance(scope, dict) or not all(
+            scope.get(key)
+            for key in (
+                "service_unit_id",
+                "source_id",
+                "tenant_id",
+                "agent_id",
+            )
+        ):
+            raise ValueError("run event scope is incomplete")
+
+
+def _encode_event(projected: dict[str, Any]) -> bytes:
     return (
         json.dumps(
-            event,
+            projected,
             ensure_ascii=False,
             separators=(",", ":"),
             allow_nan=False,
@@ -237,31 +268,7 @@ class JsonlEmitter:
                 event.to_dict() if isinstance(event, MetadataEvent) else event
             )
             projected = _project(raw)
-            if not isinstance(projected, dict):
-                raise ValueError("event must be an object")
-            if not _REQUIRED_FIELDS.issubset(projected):
-                raise ValueError("event is missing required protocol fields")
-            if projected["schema_version"] != 1:
-                raise ValueError("unsupported event schema")
-            if projected["event_name"] != "observer.health":
-                if not {
-                    "obs_run_id",
-                    "run_started_at",
-                    "capture_enabled",
-                    "scope",
-                }.issubset(projected):
-                    raise ValueError("run events require identity and scope")
-                scope = projected["scope"]
-                if not isinstance(scope, dict) or not all(
-                    scope.get(key)
-                    for key in (
-                        "service_unit_id",
-                        "source_id",
-                        "tenant_id",
-                        "agent_id",
-                    )
-                ):
-                    raise ValueError("run event scope is incomplete")
+            _validate_projected_event(projected)
             payload = _encode_event(projected)
             limit = min(
                 self.config.max_event_bytes,

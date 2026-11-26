@@ -439,8 +439,6 @@ def _business_population_projection(
         observation_available=observation_available,
     )
     unresolved_runs = _unresolved_business_runs(turns, runs, runs_by_key)
-    settled = counts["settled"] if observation_available else None
-    success = counts["success"] if observation_available else None
     return {
         "business": {
             "turn_count": len(turns),
@@ -458,38 +456,13 @@ def _business_population_projection(
                 counts["observed"] / len(turns) if turns else None
             ),
         },
-        "runs": {
-            "population_source": "business_settled_runs_linked_by_exact_identity",
-            "status": "available" if observation_available else "unavailable",
-            "settled_count": settled,
-            "success_count": success,
-            "non_success_count": (
-                settled - success
-                if settled is not None and success is not None
-                else None
-            ),
-            "by_terminal_status": (
-                terminal_statuses if observation_available else None
-            ),
-            "capture_enabled_count": (
-                sum(run.get("capture_enabled") in (True, 1) for run in runs)
-                if observation_available
-                else None
-            ),
-            "capture_disabled_count": (
-                sum(run.get("capture_enabled") in (False, 0) for run in runs)
-                if observation_available
-                else None
-            ),
-            "success_rate": (
-                success / settled
-                if settled and observation_available
-                else None
-            ),
-            "unresolved_count": (
-                len(unresolved_runs) if observation_available else None
-            ),
-        },
+        "runs": _population_run_summary(
+            runs,
+            terminal_statuses,
+            counts,
+            unresolved_runs,
+            observation_available,
+        ),
         "items": items[:item_limit],
         "items_has_more": len(items) > item_limit,
         "unresolved_runs": [
@@ -508,6 +481,46 @@ def _business_population_projection(
             for run in unresolved_runs[:item_limit]
         ],
         "unresolved_runs_has_more": len(unresolved_runs) > item_limit,
+    }
+
+
+def _population_run_summary(
+    runs,
+    terminal_statuses,
+    counts,
+    unresolved_runs,
+    observation_available,
+):
+    if not observation_available:
+        return {
+            "population_source": "business_settled_runs_linked_by_exact_identity",
+            "status": "unavailable",
+            "settled_count": None,
+            "success_count": None,
+            "non_success_count": None,
+            "by_terminal_status": None,
+            "capture_enabled_count": None,
+            "capture_disabled_count": None,
+            "success_rate": None,
+            "unresolved_count": None,
+        }
+    settled = counts["settled"]
+    success = counts["success"]
+    return {
+        "population_source": "business_settled_runs_linked_by_exact_identity",
+        "status": "available",
+        "settled_count": settled,
+        "success_count": success,
+        "non_success_count": settled - success,
+        "by_terminal_status": terminal_statuses,
+        "capture_enabled_count": sum(
+            run.get("capture_enabled") in (True, 1) for run in runs
+        ),
+        "capture_disabled_count": sum(
+            run.get("capture_enabled") in (False, 0) for run in runs
+        ),
+        "success_rate": success / settled if settled else None,
+        "unresolved_count": len(unresolved_runs),
     }
 
 
@@ -954,32 +967,12 @@ async def list_runs(
         cursor_scope=cursor_scope,
         has_cursor=decoded is not None,
     )
-    start_at = start or (
-        datetime.fromisoformat(cursor_scope["start"])
-        if cursor_scope
-        else datetime.now(timezone.utc) - timedelta(hours=24)
+    start_at, end_at = _run_list_window(
+        start,
+        end,
+        cursor_scope,
+        has_cursor=decoded is not None,
     )
-    end_at = end or (
-        datetime.fromisoformat(cursor_scope["end"])
-        if cursor_scope
-        else datetime.now(timezone.utc)
-    )
-    if decoded:
-        _check_cursor_window(start, end, cursor_scope)
-    exact_identity = any(
-        filters[key] is not None
-        for key in ("run_id", "attempt_id", "session_id")
-    )
-    if start_at.tzinfo is None or end_at.tzinfo is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Time filters must include a timezone",
-        )
-    if end_at <= start_at or end_at - start_at > _MAX_WINDOW:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid run-list time window",
-        )
     scope = {
         **authority,
         "start": start_at.isoformat(),
@@ -987,85 +980,33 @@ async def list_runs(
         **filters,
     }
     before = decoded[:2] if decoded else None
-    store = getattr(request.app.state, "agent_observability_store", None)
-    if not isinstance(store, ObservabilityStore):
-        raise HTTPException(
-            status_code=503,
-            detail="Agent observability storage unavailable",
-        )
-    try:
-        candidate_count = await store.count_run_candidates(
-            service_unit_id=service_unit_id(),
-            source_ids=sources,
-            tenant_id=_request_tenant_id(request),
-            start_at=(
-                start
-                if exact_identity and start is not None
-                else (None if exact_identity else start_at)
-            ),
-            end_at=(
-                end
-                if exact_identity and end is not None
-                else (None if exact_identity else end_at)
-            ),
-            run_id=filters["run_id"],
-            attempt_id=filters["attempt_id"],
-            session_id=filters["session_id"],
-            agent_id=filters["agent_id"],
-            status=filters["status"],
-            min_duration_us=(
-                filters["min_duration_ms"] * 1000
-                if filters["min_duration_ms"] is not None
-                else None
-            ),
-            sort_by=filters["sort_by"],
-            max_candidates=_MAX_RUN_CANDIDATES,
-        )
-        if candidate_count > _MAX_RUN_CANDIDATES:
-            raise HTTPException(
-                status_code=422,
-                detail="range_too_large",
-            )
-        rows = await store.list_runs(
-            service_unit_id=service_unit_id(),
-            source_ids=sources,
-            tenant_id=_request_tenant_id(request),
-            limit=limit + 1,
-            before=before,
-            start_at=(
-                start
-                if exact_identity and start is not None
-                else (None if exact_identity else start_at)
-            ),
-            end_at=(
-                end
-                if exact_identity and end is not None
-                else (None if exact_identity else end_at)
-            ),
-            run_id=filters["run_id"],
-            attempt_id=filters["attempt_id"],
-            session_id=filters["session_id"],
-            agent_id=filters["agent_id"],
-            status=filters["status"],
-            min_duration_us=(
-                filters["min_duration_ms"] * 1000
-                if filters["min_duration_ms"] is not None
-                else None
-            ),
-            sort_by=filters["sort_by"],
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        if _is_mysql_query_timeout(exc):
-            raise HTTPException(
-                status_code=503,
-                detail="Agent observability query exceeded its 5-second budget",
-            ) from exc
-        raise HTTPException(
-            status_code=503,
-            detail="Agent observability query unavailable",
-        ) from exc
+    store = _request_observability_store(request)
+    query_filters = _run_list_store_filters(
+        filters,
+        start,
+        end,
+        start_at,
+        end_at,
+    )
+    rows = await _load_run_list_page(
+        store,
+        request,
+        sources,
+        query_filters,
+        limit,
+        before,
+    )
+    return _run_list_response(rows, limit, sort_by, scope, start_at, end_at)
+
+
+def _run_list_response(
+    rows,
+    limit,
+    sort_by,
+    scope,
+    start_at,
+    end_at,
+) -> RunListResponse:
     has_more = len(rows) > limit
     rows = rows[:limit]
     next_cursor = None
@@ -1097,6 +1038,106 @@ async def list_runs(
     if response_size > _MAX_RUN_RESPONSE_BYTES:
         raise HTTPException(status_code=413, detail="run_response_too_large")
     return response
+
+
+def _run_list_window(start, end, cursor_scope, *, has_cursor):
+    start_at = start or (
+        datetime.fromisoformat(cursor_scope["start"])
+        if cursor_scope
+        else datetime.now(timezone.utc) - timedelta(hours=24)
+    )
+    end_at = end or (
+        datetime.fromisoformat(cursor_scope["end"])
+        if cursor_scope
+        else datetime.now(timezone.utc)
+    )
+    if has_cursor:
+        _check_cursor_window(start, end, cursor_scope)
+    if start_at.tzinfo is None or end_at.tzinfo is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Time filters must include a timezone",
+        )
+    if end_at <= start_at or end_at - start_at > _MAX_WINDOW:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid run-list time window",
+        )
+    return start_at, end_at
+
+
+def _request_observability_store(request: Request) -> ObservabilityStore:
+    store = getattr(request.app.state, "agent_observability_store", None)
+    if not isinstance(store, ObservabilityStore):
+        raise HTTPException(
+            status_code=503,
+            detail="Agent observability storage unavailable",
+        )
+    return store
+
+
+def _run_list_store_filters(filters, start, end, start_at, end_at):
+    exact_identity = any(
+        filters[key] is not None
+        for key in ("run_id", "attempt_id", "session_id")
+    )
+    min_duration_ms = filters["min_duration_ms"]
+    return {
+        "start_at": start if exact_identity else start_at,
+        "end_at": end if exact_identity else end_at,
+        "run_id": filters["run_id"],
+        "attempt_id": filters["attempt_id"],
+        "session_id": filters["session_id"],
+        "agent_id": filters["agent_id"],
+        "status": filters["status"],
+        "min_duration_us": (
+            min_duration_ms * 1000 if min_duration_ms is not None else None
+        ),
+        "sort_by": filters["sort_by"],
+    }
+
+
+async def _load_run_list_page(
+    store,
+    request,
+    sources,
+    query_filters,
+    limit,
+    before,
+):
+    try:
+        candidate_count = await store.count_run_candidates(
+            service_unit_id=service_unit_id(),
+            source_ids=sources,
+            tenant_id=_request_tenant_id(request),
+            **query_filters,
+            max_candidates=_MAX_RUN_CANDIDATES,
+        )
+        if candidate_count > _MAX_RUN_CANDIDATES:
+            raise HTTPException(
+                status_code=422,
+                detail="range_too_large",
+            )
+        return await store.list_runs(
+            service_unit_id=service_unit_id(),
+            source_ids=sources,
+            tenant_id=_request_tenant_id(request),
+            limit=limit + 1,
+            before=before,
+            **query_filters,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if _is_mysql_query_timeout(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Agent observability query exceeded its 5-second budget",
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Agent observability query unavailable",
+        ) from exc
 
 
 def _serialize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1939,16 +1980,8 @@ async def _read_pending_online(  # pylint: disable=too-many-statements
 
 
 async def _nas_message_occurrence(workspace, request, run, reference):
-    from agentscope.message import Msg
-
     from ..app.conversation_storage.runtime import resolved_scope
-    from ..app.runner import api
-    from ..app.runner.query_attempt import (
-        _get_memory_entry_message,
-        _get_persisted_memory_entries,
-    )
     from .identity import same_tenant_scope
-    from .nas_evidence import nas_reference
 
     unavailable = {"status": "unavailable", "message": None}
     chat_id = reference["chat_id"]
@@ -1980,6 +2013,31 @@ async def _nas_message_occurrence(workspace, request, run, reference):
     if reference.get("occurrence_id") is not None:
         return unavailable
 
+    messages = await _find_nas_evidence_messages(
+        workspace,
+        chat,
+        reference,
+    )
+    if not messages or await workspace.chat_manager.get_chat(chat_id) != chat:
+        return unavailable
+    payload = _nas_evidence_payload(messages[0], chat.session_id, reference)
+    return (
+        {"status": "available", "message": payload} if payload else unavailable
+    )
+
+
+async def _find_nas_evidence_messages(workspace, chat, reference):
+    from agentscope.message import Msg
+
+    from ..app.runner import api
+    from ..app.runner.query_attempt import (
+        _get_memory_entry_message,
+        _get_persisted_memory_entries,
+    )
+    from .nas_evidence import nas_reference
+
+    chat_id = reference["chat_id"]
+
     def matches(message):
         return (
             isinstance(message, dict)
@@ -2005,12 +2063,7 @@ async def _nas_message_occurrence(workspace, request, run, reference):
             lambda message: matches(message.to_dict()),
             limit=1,
         )
-    if not messages or await workspace.chat_manager.get_chat(chat_id) != chat:
-        return unavailable
-    payload = _nas_evidence_payload(messages[0], chat.session_id, reference)
-    return (
-        {"status": "available", "message": payload} if payload else unavailable
-    )
+    return messages
 
 
 def _nas_evidence_payload(message, session_id, reference):
@@ -2099,25 +2152,12 @@ async def _load_evidence_item(
     )
     if status not in {"available", "compacted"} and not pending_reference:
         return item, history, workspace
+    if not _evidence_reference_matches_run(reference, run):
+        item["status"] = "unresolved"
+        return item, history, workspace
     chat_id = reference.get("chat_id")
     message_id = reference.get("message_id")
     occurrence_no = reference.get("occurrence_id")
-    if (
-        not isinstance(chat_id, str)
-        or not isinstance(message_id, str)
-        or (
-            occurrence_no is not None
-            and (type(occurrence_no) is not int or occurrence_no < 0)
-        )
-    ):
-        item["status"] = "unresolved"
-        return item, history, workspace
-    run_chat = run.get("chat_key")
-    if isinstance(run_chat, bytes):
-        run_chat = run_chat.decode("utf-8", errors="replace")
-    if isinstance(run_chat, str) and run_chat and chat_id != run_chat:
-        item["status"] = "unresolved"
-        return item, history, workspace
     if history is None:
         try:
             from ..app.runner.api import get_workspace
@@ -2200,6 +2240,25 @@ async def _load_evidence_item(
             expected_digest=expected_digest,
         )
     return item, history, workspace
+
+
+def _evidence_reference_matches_run(reference, run) -> bool:
+    chat_id = reference.get("chat_id")
+    message_id = reference.get("message_id")
+    occurrence_no = reference.get("occurrence_id")
+    if (
+        not isinstance(chat_id, str)
+        or not isinstance(message_id, str)
+        or (
+            occurrence_no is not None
+            and (type(occurrence_no) is not int or occurrence_no < 0)
+        )
+    ):
+        return False
+    run_chat = run.get("chat_key")
+    if isinstance(run_chat, bytes):
+        run_chat = run_chat.decode("utf-8", errors="replace")
+    return not (isinstance(run_chat, str) and run_chat and chat_id != run_chat)
 
 
 def _set_evidence_content(
@@ -2614,12 +2673,7 @@ async def performance_overview(
     operation = operation if isinstance(operation, str) else None
     sources = _authorized_sources(request, source_id)
     window_start, window_end = _performance_window(start, end)
-    store = getattr(request.app.state, "agent_observability_store", None)
-    if not isinstance(store, ObservabilityStore):
-        raise HTTPException(
-            status_code=503,
-            detail="Agent observability storage unavailable",
-        )
+    store = _request_observability_store(request)
     rows = await _load_performance_samples(
         store,
         sources=sources,
@@ -2631,31 +2685,91 @@ async def performance_overview(
         operation=operation,
         tenant_id=_request_tenant_id(request),
     )
-    durations = [
-        row["duration_us"]
-        for row in rows
-        if row.get("duration_us") is not None
-    ]
+    return _performance_response(rows, window_start, window_end, run_status)
+
+
+def _performance_response(
+    rows,
+    window_start,
+    window_end,
+    run_status,
+) -> PerformanceResponse:
+    run_metrics = _performance_run_metrics(rows)
+    durations = _known_performance_values(rows, "duration_us")
+    grouped: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("span_type") or "unknown")
+        grouped[key] = grouped.get(key, 0) + 1
+    sample_start_at, sample_end_at = _performance_sample_bounds(rows)
+    return PerformanceResponse(
+        population_source="observed_ended_spans",
+        window_start=window_start,
+        window_end=window_end,
+        generated_at=datetime.now(timezone.utc),
+        sample_count=len(rows),
+        sample_start_at=sample_start_at,
+        sample_end_at=sample_end_at,
+        sample_quality=_performance_sample_quality(rows),
+        **run_metrics,
+        duration_us={
+            "known_count": len(durations),
+            "p50": _nearest_rank(durations, 0.50),
+            "p95": _nearest_rank(durations, 0.95),
+            "p99": _nearest_rank(durations, 0.99),
+        },
+        tool_failures=_performance_tool_failures(rows),
+        run_status_filter=run_status,
+        llm=_performance_llm_metrics(rows),
+        by_span_type=[
+            {"span_type": key, "count": count}
+            for key, count in sorted(grouped.items())
+        ],
+    )
+
+
+def _known_performance_values(rows, key):
+    return [row[key] for row in rows if row.get(key) is not None]
+
+
+def _performance_run_metrics(rows):
     runs_by_id = {
         row["run_id"]: row
         for row in rows
         if isinstance(row.get("run_id"), str)
     }
-    run_elapsed = [
-        row["run_duration_us"]
-        for row in runs_by_id.values()
-        if row.get("run_duration_us") is not None
-    ]
-    active = [
-        row["active_duration_us"]
-        for row in runs_by_id.values()
-        if row.get("active_duration_us") is not None
-    ]
-    loops = [
-        row["agent_loops"]
-        for row in runs_by_id.values()
-        if row.get("agent_loops") is not None
-    ]
+    run_elapsed = _known_performance_values(
+        runs_by_id.values(),
+        "run_duration_us",
+    )
+    active = _known_performance_values(
+        runs_by_id.values(),
+        "active_duration_us",
+    )
+    loops = _known_performance_values(runs_by_id.values(), "agent_loops")
+    return {
+        "run_count": len(runs_by_id),
+        "run_elapsed_us": {
+            "known_count": len(run_elapsed),
+            "p50": _nearest_rank(run_elapsed, 0.50),
+            "p95": _nearest_rank(run_elapsed, 0.95),
+            "p99": _nearest_rank(run_elapsed, 0.99),
+        },
+        "active_duration_us": {
+            "known_count": len(active),
+            "p50": _nearest_rank(active, 0.50),
+            "p95": _nearest_rank(active, 0.95),
+            "p99": _nearest_rank(active, 0.99),
+        },
+        "agent_loops": {
+            "known_count": len(loops),
+            "total": sum(loops) if loops else None,
+            "p50": _nearest_rank(loops, 0.50),
+            "p95": _nearest_rank(loops, 0.95),
+        },
+    }
+
+
+def _performance_tool_failures(rows):
     tools = [row for row in rows if row.get("span_type") == "Tool"]
     uncancelled_tools = [
         row for row in tools if row.get("status") != "cancelled"
@@ -2668,6 +2782,19 @@ async def performance_overview(
             or row.get("status") in {"failed", "rejected", "timed_out"}
         )
     ]
+    return {
+        "count": len(tool_failures),
+        "sample_count": len(uncancelled_tools),
+        "cancelled_count": len(tools) - len(uncancelled_tools),
+        "rate": (
+            len(tool_failures) / len(uncancelled_tools)
+            if uncancelled_tools
+            else None
+        ),
+    }
+
+
+def _performance_llm_metrics(rows):
     llm = [
         row
         for row in rows
@@ -2702,79 +2829,22 @@ async def performance_overview(
         "p95": _nearest_rank(first_chunk, 0.95),
         "p99": _nearest_rank(first_chunk, 0.99),
     }
-    grouped: dict[str, int] = {}
-    for row in rows:
-        key = str(row.get("span_type") or "unknown")
-        grouped[key] = grouped.get(key, 0) + 1
-    sample_start_at, sample_end_at = _performance_sample_bounds(rows)
-    return PerformanceResponse(
-        population_source="observed_ended_spans",
-        window_start=window_start,
-        window_end=window_end,
-        generated_at=datetime.now(timezone.utc),
-        sample_count=len(rows),
-        sample_start_at=sample_start_at,
-        sample_end_at=sample_end_at,
-        sample_quality=_performance_sample_quality(rows),
-        run_count=len(runs_by_id),
-        run_elapsed_us={
-            "known_count": len(run_elapsed),
-            "p50": _nearest_rank(run_elapsed, 0.50),
-            "p95": _nearest_rank(run_elapsed, 0.95),
-            "p99": _nearest_rank(run_elapsed, 0.99),
+    return {
+        "call_count": len(llm),
+        "request_attempt_count": len(request_attempts),
+        "usage_known_count": usage_known,
+        "input_tokens_known_count": input_known,
+        "output_tokens_known_count": output_known,
+        "usage_coverage": (
+            usage_known / len(request_attempts) if request_attempts else None
+        ),
+        "first_chunk_us": first_chunk_percentiles,
+        # Legacy field name, now using the request-attempt sample set.
+        "ttft_us": first_chunk_percentiles,
+        "first_visible_text_us": {
+            "known_count": len(visible),
+            "p50": _nearest_rank(visible, 0.50),
+            "p95": _nearest_rank(visible, 0.95),
+            "p99": _nearest_rank(visible, 0.99),
         },
-        active_duration_us={
-            "known_count": len(active),
-            "p50": _nearest_rank(active, 0.50),
-            "p95": _nearest_rank(active, 0.95),
-            "p99": _nearest_rank(active, 0.99),
-        },
-        agent_loops={
-            "known_count": len(loops),
-            "total": sum(loops) if loops else None,
-            "p50": _nearest_rank(loops, 0.50),
-            "p95": _nearest_rank(loops, 0.95),
-        },
-        duration_us={
-            "known_count": len(durations),
-            "p50": _nearest_rank(durations, 0.50),
-            "p95": _nearest_rank(durations, 0.95),
-            "p99": _nearest_rank(durations, 0.99),
-        },
-        tool_failures={
-            "count": len(tool_failures),
-            "sample_count": len(uncancelled_tools),
-            "cancelled_count": len(tools) - len(uncancelled_tools),
-            "rate": (
-                len(tool_failures) / len(uncancelled_tools)
-                if uncancelled_tools
-                else None
-            ),
-        },
-        run_status_filter=run_status,
-        llm={
-            "call_count": len(llm),
-            "request_attempt_count": len(request_attempts),
-            "usage_known_count": usage_known,
-            "input_tokens_known_count": input_known,
-            "output_tokens_known_count": output_known,
-            "usage_coverage": (
-                usage_known / len(request_attempts)
-                if request_attempts
-                else None
-            ),
-            "first_chunk_us": first_chunk_percentiles,
-            # Legacy field name, now using the request-attempt sample set.
-            "ttft_us": first_chunk_percentiles,
-            "first_visible_text_us": {
-                "known_count": len(visible),
-                "p50": _nearest_rank(visible, 0.50),
-                "p95": _nearest_rank(visible, 0.95),
-                "p99": _nearest_rank(visible, 0.99),
-            },
-        },
-        by_span_type=[
-            {"span_type": key, "count": count}
-            for key, count in sorted(grouped.items())
-        ],
-    )
+    }

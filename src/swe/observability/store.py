@@ -811,51 +811,8 @@ class ObservabilityStore:
             )
         refs_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in rows:
-            raw = row.get("metadata_text")
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="replace")
-            try:
-                metadata = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(metadata, dict):
-                continue
-            reference = metadata.get("content_ref")
-            if not isinstance(reference, dict):
-                reference = {
-                    key: metadata.get(key)
-                    for key in (
-                        "chat_id",
-                        "message_id",
-                        "occurrence_id",
-                        "reference_id",
-                        "content_type",
-                        "saved_state",
-                    )
-                    if metadata.get(key) is not None
-                }
-            if not isinstance(reference, dict):
-                continue
-            if row.get("legacy_pending_ambiguous"):
-                reference = {**reference, "saved_state": "unresolved"}
-            safe = {
-                key: reference[key]
-                for key in (
-                    "chat_id",
-                    "message_id",
-                    "occurrence_id",
-                    "reference_id",
-                    "content_type",
-                    "saved_state",
-                )
-                if key in reference
-                and (
-                    isinstance(reference[key], str)
-                    or type(reference[key]) is int
-                )
-            }
+            safe = _evidence_ref_for_row(row)
             if safe:
-                safe["evidence_ref"] = f"event:{row['event_id']}"
                 identity = tuple(
                     safe.get(key)
                     for key in (
@@ -1230,6 +1187,52 @@ def _span_search_where(
     return where, params
 
 
+def _evidence_ref_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    raw = row.get("metadata_text")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    if not isinstance(raw, (str, bytearray)):
+        return None
+    try:
+        metadata = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    reference = metadata.get("content_ref")
+    if not isinstance(reference, dict):
+        reference = {
+            key: metadata.get(key)
+            for key in (
+                "chat_id",
+                "message_id",
+                "occurrence_id",
+                "reference_id",
+                "content_type",
+                "saved_state",
+            )
+            if metadata.get(key) is not None
+        }
+    if row.get("legacy_pending_ambiguous"):
+        reference = {**reference, "saved_state": "unresolved"}
+    safe = {
+        key: reference[key]
+        for key in (
+            "chat_id",
+            "message_id",
+            "occurrence_id",
+            "reference_id",
+            "content_type",
+            "saved_state",
+        )
+        if key in reference
+        and (isinstance(reference[key], str) or type(reference[key]) is int)
+    }
+    if safe:
+        safe["evidence_ref"] = f"event:{row['event_id']}"
+    return safe
+
+
 def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
     metadata_text = result.pop("metadata_text", None)
@@ -1289,27 +1292,7 @@ def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
             )
         return result
     if span_type in {"Tool", "Guard"}:
-        tool = metadata.get("tool")
-        if not isinstance(tool, dict):
-            return result
-        projected = {
-            key: tool[key]
-            for key in _TOOL_API_FIELDS
-            if key in tool
-            and (
-                isinstance(tool[key], str)
-                or (span_type == "Tool" and type(tool[key]) is int)
-            )
-        }
-        tool_key = result.get("tool_key")
-        if isinstance(tool_key, bytes):
-            tool_key = tool_key.decode("utf-8")
-        if not isinstance(tool_key, str):
-            tool_key = tool.get("tool_key")
-        if isinstance(tool_key, str):
-            projected["tool_key"] = tool_key
-        if projected:
-            result["tool"] = projected
+        _add_tool_span_metadata(result, metadata, span_type)
         return result
 
     subagent = metadata.get("subagent")
@@ -1323,3 +1306,31 @@ def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
     if projected:
         result["subagent"] = projected
     return result
+
+
+def _add_tool_span_metadata(
+    result: dict[str, Any],
+    metadata: dict[str, Any],
+    span_type: str,
+) -> None:
+    tool = metadata.get("tool")
+    if not isinstance(tool, dict):
+        return
+    projected = {
+        key: tool[key]
+        for key in _TOOL_API_FIELDS
+        if key in tool
+        and (
+            isinstance(tool[key], str)
+            or (span_type == "Tool" and type(tool[key]) is int)
+        )
+    }
+    tool_key = result.get("tool_key")
+    if isinstance(tool_key, bytes):
+        tool_key = tool_key.decode("utf-8")
+    if not isinstance(tool_key, str):
+        tool_key = tool.get("tool_key")
+    if isinstance(tool_key, str):
+        projected["tool_key"] = tool_key
+    if projected:
+        result["tool"] = projected

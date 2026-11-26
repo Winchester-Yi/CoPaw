@@ -333,13 +333,7 @@ class ApprovalService:
                 ApprovalDecision.DENIED.value,
                 ApprovalDecision.TIMEOUT.value,
             }:
-                async with self._resolved_audit_lock:
-                    await self._persist_request(replay)
-                    await self.record_event(
-                        replay,
-                        "resolved",
-                        status=replay.status,
-                    )
+                await self._record_resolution(replay)
             return replay, False
         if pending is None:
             return None, False
@@ -356,6 +350,15 @@ class ApprovalService:
         if not pending.future.done():
             pending.future.set_result(decision)
 
+        await self._wake_resolved_goal(pending, decision)
+        await self._record_resolution(pending)
+        return pending, True
+
+    async def _wake_resolved_goal(
+        self,
+        pending: PendingApproval,
+        decision: ApprovalDecision,
+    ) -> None:
         goal_id = str(pending.extra.get("goal_id") or "").strip()
         if goal_id:
             try:
@@ -374,6 +377,7 @@ class ApprovalService:
                     exc_info=True,
                 )
 
+    async def _record_resolution(self, pending: PendingApproval) -> None:
         async with self._resolved_audit_lock:
             await self._persist_request(pending)
             await self.record_event(
@@ -381,7 +385,6 @@ class ApprovalService:
                 "resolved",
                 status=pending.status,
             )
-        return pending, True
 
     @staticmethod
     def _record_terminal_approval(

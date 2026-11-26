@@ -69,6 +69,7 @@
 - 菜单定义、可见性规则和展开／折叠数据转换集中在 `console/src/layouts/sidebarNavigation.tsx`；`Sidebar.tsx` 保留状态订阅、渲染和交互。新增显示条件时先检查 `getSidebarVisibility`，避免在两种渲染分支各写一遍。
 - 当前行为有意在本次纯重构中保留：`hideChat=true` 时，展开模式隐藏聊天、运营看板和用户消息；折叠模式仅隐藏用户消息。专家社区和 Hook 管理仅在展开模式出现。`source === "RMASSIST"` 与 `space === "RM_ASSISTANCE"` 是两个独立条件。
 - 展开模式通过 `layouts/constants.ts` 的 `KEY_TO_PATH` 跳转，折叠模式也复用该映射，但技能运行看板保留原有 `collapsedPath`：该项尚无展开模式路由映射。修复该差异应作为独立行为变更处理。
+- “claw数据看板”入口暂时通过注释菜单定义隐藏。恢复入口见 `console/src/layouts/sidebarNavigation.tsx` 中的 `analytics-claw-data-overview`。
 - 回归入口为 `console/src/layouts/Sidebar.test.tsx`，覆盖身份、来源、空间、bbk、hideChat 组合下两种模式的菜单顺序及既有跳转差异。先确认预期业务规则，再更新测试，避免通过结构整理改变菜单范围。
 
 ## 按来源查询租户及机构过滤

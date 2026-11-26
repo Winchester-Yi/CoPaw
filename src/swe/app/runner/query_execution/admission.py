@@ -65,30 +65,15 @@ async def stream_admission(
                 user_id=user_id,
                 query=query,
             )
-            turn_id = None
-            is_new_turn = False
-            if approval_context is not None:
-                run_context = approval_context
-            elif (
-                session_execution is not None
-                and not is_command
-                and approval_decision != "unresolved"
-            ):
-                candidate_context = prepare_query_run(owner, request, msgs)
-                turn_id, is_new_turn, run_context = (
-                    await admit_user_turn_with_creation(
-                        session_execution,
-                        msgs=msgs,
-                        request=request,
-                        observability_context=candidate_context,
-                    )
-                )
-                if is_new_turn:
-                    accept_query_run(run_context)
-                if hasattr(session_execution, "observed_turn_id"):
-                    session_execution.observed_turn_id = turn_id
-            else:
-                run_context = None
+            turn_id, run_context = await _admit_observed_turn(
+                owner,
+                session_execution,
+                msgs,
+                request,
+                approval_context,
+                approval_decision,
+                is_command,
+            )
             attempt_context = (
                 start_query_attempt(run_context)
                 if approval_decision in {None, "approved"}
@@ -154,6 +139,37 @@ async def stream_admission(
                         )
 
 
+async def _admit_observed_turn(
+    owner,
+    session_execution,
+    msgs,
+    request,
+    approval_context,
+    approval_decision,
+    is_command,
+):
+    if approval_context is not None:
+        return None, approval_context
+    if (
+        session_execution is None
+        or is_command
+        or approval_decision == "unresolved"
+    ):
+        return None, None
+    candidate_context = prepare_query_run(owner, request, msgs)
+    turn_id, is_new_turn, run_context = await admit_user_turn_with_creation(
+        session_execution,
+        msgs=msgs,
+        request=request,
+        observability_context=candidate_context,
+    )
+    if is_new_turn:
+        accept_query_run(run_context)
+    if hasattr(session_execution, "observed_turn_id"):
+        session_execution.observed_turn_id = turn_id
+    return turn_id, run_context
+
+
 async def _approval_continuation(
     owner: Any,
     *,
@@ -170,7 +186,6 @@ async def _approval_continuation(
         _denial_request_id,
         _is_approval,
         _is_denial,
-        _request_matches_external_approval_submission,
         _select_pending_approval,
     )
 
@@ -186,20 +201,16 @@ async def _approval_continuation(
         request_id=request_id,
         user_id=user_id,
     )
-    if pending is None and request_id:
-        completed = await service.get_request(request_id)
-        if (
-            completed is not None
-            and completed.session_id == session_id
-            and completed.user_id == user_id
-            and completed.status in {"approved", "denied", "timeout"}
+    if pending is None:
+        if request_id and await _is_completed_approval(
+            service,
+            request_id,
+            session_id,
+            user_id,
         ):
             return None, "unresolved"
-    if (
-        pending is None
-        or pending.status != "pending"
-        or pending.user_id != user_id
-    ):
+        return None, None
+    if pending.status != "pending" or pending.user_id != user_id:
         return None, None
     timeout_seconds = getattr(owner, "_APPROVAL_TIMEOUT_SECONDS", None)
     if (
@@ -207,16 +218,39 @@ async def _approval_continuation(
         and time.time() - pending.created_at > timeout_seconds
     ):
         decision = "timed_out"
-    extra = pending.extra if isinstance(pending.extra, dict) else {}
-    submission = extra.get("external_submission")
-    if isinstance(submission, dict):
-        if not _request_matches_external_approval_submission(
-            request,
-            submission,
-        ):
-            return None, None
+    if not _matches_approval_submission(request, pending):
+        return None, None
     context = restore_approval_context(owner, request, pending)
     return (context, decision) if context is not None else (None, "unresolved")
+
+
+def _matches_approval_submission(request, pending) -> bool:
+    from ..runner import _request_matches_external_approval_submission
+
+    extra = pending.extra if isinstance(pending.extra, dict) else {}
+    submission = extra.get("external_submission")
+    return not isinstance(
+        submission,
+        dict,
+    ) or _request_matches_external_approval_submission(
+        request,
+        submission,
+    )
+
+
+async def _is_completed_approval(
+    service,
+    request_id,
+    session_id,
+    user_id,
+) -> bool:
+    completed = await service.get_request(request_id)
+    return (
+        completed is not None
+        and completed.session_id == session_id
+        and completed.user_id == user_id
+        and completed.status in {"approved", "denied", "timeout"}
+    )
 
 
 async def _stream_admitted_query(

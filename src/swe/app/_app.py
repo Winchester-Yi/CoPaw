@@ -839,6 +839,63 @@ async def _shutdown_lifespan_resources_impl(
     db_connection: Any | None,
 ) -> None:
     """按依赖顺序关闭生命周期资源。"""
+    transient_cleanup = await _stop_lifespan_background_services(app)
+
+    await _stop_lifespan_tracing_and_heartbeat()
+    await _stop_lifespan_evidence_recovery(app)
+    manager_stopped = await _stop_multi_agent_manager(app)
+    pool_stopped = await _stop_tenant_workspace_pool(app)
+    await _stop_lifespan_subagents_and_emitter()
+
+    if transient_cleanup is not None:
+        from ..agents.memory.base_memory_manager import summary_task_stats
+
+        # Existing workspace shutdown can swallow service close failures.
+        # Never reset under summaries that resisted cancellation.
+        if (
+            manager_stopped
+            and pool_stopped
+            and not summary_task_stats()["pending"]
+        ):
+            await transient_cleanup.reset()
+        else:
+            logger.warning("Skipping transient memory reset: producers remain")
+
+    history_recorder = getattr(
+        app.state,
+        "skill_scan_history_recorder",
+        None,
+    )
+    if history_recorder is not None:
+        try:
+            await asyncio.wait_for(
+                history_recorder.stop(),
+                timeout=_SKILL_SCAN_HISTORY_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            logger.info("Skill scan history recorder stopped")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out stopping skill scan history recorder; "
+                "continuing application shutdown",
+            )
+        except Exception as e:
+            logger.warning("Error stopping skill scan history recorder: %s", e)
+    _detach_lifespan_skill_scan_history()
+
+    await _close_lifespan_observability(app)
+    if db_connection:
+        try:
+            await db_connection.close()
+            logger.info("Database connection closed")
+        except Exception as e:
+            logger.warning("Error closing database connection: %s", e)
+
+    logger.info("Application shutdown complete")
+
+    shutdown_logger()
+
+
+async def _stop_lifespan_background_services(app: FastAPI) -> Any:
     await _stop_system_cron_tasks(app)
     transient_cleanup = getattr(app.state, "transient_memory_cleanup", None)
     if transient_cleanup is not None:
@@ -891,7 +948,10 @@ async def _shutdown_lifespan_resources_impl(
             await cron_notification_worker.stop()
         except Exception as e:
             logger.warning("Error stopping cron notification worker: %s", e)
+    return transient_cleanup
 
+
+async def _stop_lifespan_tracing_and_heartbeat() -> None:
     try:
         await close_trace_manager()
         logger.info("Tracing manager closed")
@@ -907,6 +967,9 @@ async def _shutdown_lifespan_resources_impl(
         await stop_service_heartbeat()
     except Exception as e:
         logger.warning("Error stopping service heartbeat: %s", e)
+
+
+async def _stop_lifespan_evidence_recovery(app: FastAPI) -> None:
     recovery_start = getattr(
         app.state,
         "agent_observability_recovery_start",
@@ -927,8 +990,9 @@ async def _shutdown_lifespan_resources_impl(
             "Error stopping evidence recovery: %s",
             type(exc).__name__,
         )
-    manager_stopped = await _stop_multi_agent_manager(app)
-    pool_stopped = await _stop_tenant_workspace_pool(app)
+
+
+async def _stop_lifespan_subagents_and_emitter() -> None:
     try:
         from ..agents.tools.subagent_background import (
             get_default_background_subagent_supervisor,
@@ -961,39 +1025,8 @@ async def _shutdown_lifespan_resources_impl(
             e,
         )
 
-    if transient_cleanup is not None:
-        from ..agents.memory.base_memory_manager import summary_task_stats
 
-        # Existing workspace shutdown can swallow service close failures.
-        # Never reset under summaries that resisted cancellation.
-        if (
-            manager_stopped
-            and pool_stopped
-            and not summary_task_stats()["pending"]
-        ):
-            await transient_cleanup.reset()
-        else:
-            logger.warning("Skipping transient memory reset: producers remain")
-
-    history_recorder = getattr(
-        app.state,
-        "skill_scan_history_recorder",
-        None,
-    )
-    if history_recorder is not None:
-        try:
-            await asyncio.wait_for(
-                history_recorder.stop(),
-                timeout=_SKILL_SCAN_HISTORY_SHUTDOWN_TIMEOUT_SECONDS,
-            )
-            logger.info("Skill scan history recorder stopped")
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Timed out stopping skill scan history recorder; "
-                "continuing application shutdown",
-            )
-        except Exception as e:
-            logger.warning("Error stopping skill scan history recorder: %s", e)
+def _detach_lifespan_skill_scan_history() -> None:
     try:
         from ..security.skill_scanner import (
             install_skill_scan_history_recorder,
@@ -1003,6 +1036,8 @@ async def _shutdown_lifespan_resources_impl(
     except Exception as e:
         logger.warning("Error detaching skill scan history recorder: %s", e)
 
+
+async def _close_lifespan_observability(app: FastAPI) -> None:
     from .crons.auth_mirror import set_cron_auth_repository
 
     set_cron_auth_repository(None)
@@ -1029,16 +1064,6 @@ async def _shutdown_lifespan_resources_impl(
             await agent_observability_connection.close()
         except Exception as e:
             logger.warning("Error closing Agent observability database: %s", e)
-    if db_connection:
-        try:
-            await db_connection.close()
-            logger.info("Database connection closed")
-        except Exception as e:
-            logger.warning("Error closing database connection: %s", e)
-
-    logger.info("Application shutdown complete")
-
-    shutdown_logger()
 
 
 async def _supervise_evidence_recovery(app, manager, db_connection):

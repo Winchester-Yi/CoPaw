@@ -96,13 +96,14 @@ const expandedLabels = [
   "nav.security",
   "Skill 配置",
   "系统特性配置",
+  "定时任务迁移",
   "系统自检",
+  "Agent 可观测",
   "运营看板",
   "质量工程看板",
   "批调度监控",
   "批调度看板（新）",
   "定时任务追踪",
-  "Claw数据看板",
   "Claw技能运行看板",
   "Messages",
   "异步任务中心",
@@ -110,25 +111,31 @@ const expandedLabels = [
 ];
 const conditionalLabels = new Set([
   "场景预设管理",
-  "Skill 配置",
   "系统特性配置",
+  "定时任务迁移",
   "系统自检",
+  "Agent 可观测",
   "质量工程看板",
   "批调度监控",
   "批调度看板（新）",
   "定时任务追踪",
-  "Claw数据看板",
   "Claw技能运行看板",
   "异步任务中心",
 ]);
-const managementLabels = ["场景预设管理", "系统特性配置", "系统自检"];
+const managementLabels = [
+  "场景预设管理",
+  "系统特性配置",
+  "定时任务迁移",
+  "系统自检",
+  "Agent 可观测",
+];
 const governanceLabels = [
   "质量工程看板",
   "批调度监控",
   "批调度看板（新）",
   "定时任务追踪",
 ];
-const clawLabels = ["Claw数据看板", "Claw技能运行看板"];
+const clawLabels = ["Claw技能运行看板"];
 
 describe("Sidebar behavior preservation", () => {
   const scenarios: {
@@ -136,7 +143,7 @@ describe("Sidebar behavior preservation", () => {
     state: Partial<typeof iframeState>;
     visible: string[];
   }[] = [
-    { name: "default", state: {}, visible: ["Skill 配置", "异步任务中心"] },
+    { name: "default", state: {}, visible: ["异步任务中心"] },
     {
       name: "other source",
       state: { source: "OTHER" },
@@ -146,32 +153,22 @@ describe("Sidebar behavior preservation", () => {
     {
       name: "super manager",
       state: { isSuperManager: true },
-      visible: [
-        "Skill 配置",
-        "异步任务中心",
-        ...managementLabels,
-        ...governanceLabels,
-      ],
+      visible: ["异步任务中心", ...managementLabels, ...governanceLabels],
     },
     {
       name: "manager",
       state: { manager: true },
-      visible: [
-        "Skill 配置",
-        "异步任务中心",
-        ...managementLabels,
-        ...governanceLabels,
-      ],
+      visible: ["异步任务中心", ...managementLabels, ...governanceLabels],
     },
     {
       name: "RM space without bbk",
       state: { space: "RM_ASSISTANCE", manager: true },
-      visible: ["Skill 配置", ...managementLabels, ...clawLabels],
+      visible: [...managementLabels, ...clawLabels],
     },
     {
       name: "RM space other bbk",
       state: { space: "RM_ASSISTANCE", bbk: "200", isSuperManager: true },
-      visible: ["Skill 配置", ...managementLabels, ...clawLabels],
+      visible: [...managementLabels, ...clawLabels],
     },
     {
       name: "RM space bbk 100 manager",
@@ -191,7 +188,7 @@ describe("Sidebar behavior preservation", () => {
     {
       name: "RM space bbk 100 regular user",
       state: { space: "RM_ASSISTANCE", bbk: "100" },
-      visible: ["Skill 配置", "异步任务中心", ...clawLabels],
+      visible: ["异步任务中心", ...clawLabels],
     },
   ];
 
@@ -249,7 +246,10 @@ describe("Sidebar behavior preservation", () => {
       "/analytics/claw-skill-data-overview",
     );
 
-    fireEvent.click(screen.getByText("Claw数据看板"));
+    fireEvent.click(screen.getByText("运营看板"));
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/analytics/business-overview",
+    );
     fireEvent.click(screen.getByRole("button"));
     const skillLink = container.querySelector(
       '[data-tooltip-title="Claw技能运行看板"]',
@@ -272,7 +272,7 @@ describe("Sidebar skill config visibility", () => {
     expect(screen.getByText("Skill 配置")).toBeInTheDocument();
   });
 
-  it("hides the skill config menu for other sources", () => {
+  it("shows the skill config menu for other sources", () => {
     iframeState.source = "OTHER";
 
     render(
@@ -281,7 +281,7 @@ describe("Sidebar skill config visibility", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText("Skill 配置")).not.toBeInTheDocument();
+    expect(screen.getByText("Skill 配置")).toBeInTheDocument();
   });
 });
 
@@ -290,29 +290,22 @@ function LocationProbe() {
 }
 
 describe("Sidebar Claw report navigation", () => {
-  it("places the Claw dashboard after operations and navigates to its route", () => {
+  it("hides the Claw data dashboard menu in the RM_ASSISTANCE space", () => {
     iframeState.source = "OTHER";
     iframeState.space = "RM_ASSISTANCE";
-    render(
+    const { container } = render(
       <MemoryRouter>
         <Sidebar selectedKey="analytics-business-overview" />
-        <LocationProbe />
       </MemoryRouter>,
     );
 
-    const operations = screen.getByText("运营看板");
-    const claw = screen.getByText("Claw数据看板");
-    expect(
-      operations.compareDocumentPosition(claw) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-
-    fireEvent.click(claw);
-    expect(screen.getByTestId("location")).toHaveTextContent(
-      "/analytics/claw-data-overview",
-    );
-    expect(screen.getAllByText("Claw数据看板")).toHaveLength(1);
+    expect(screen.queryByText("Claw数据看板")).not.toBeInTheDocument();
     expect(screen.getByText("Claw技能运行看板")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(
+      container.querySelector('[data-tooltip-title="Claw数据看板"]'),
+    ).not.toBeInTheDocument();
   });
 
   it("hides the Claw dashboards outside the RM_ASSISTANCE space", () => {
