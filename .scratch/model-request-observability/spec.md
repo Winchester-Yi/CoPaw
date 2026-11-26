@@ -1,6 +1,6 @@
 # 模型请求可观测首批交付
 
-Status: ready-for-agent
+Status: resolved
 
 ## 目标
 
@@ -33,3 +33,5 @@ Status: ready-for-agent
 | [04 Run 摘要和请求详情](issues/04-run-summary-and-request-details.md) | Console 展示及首批端到端验收 | 02、03 |
 
 跨 Run 模型请求次数、用量覆盖和首输出延迟分布归入后续性能总览。其他埋点专项沿用总体设计与既有事项。 [性能总览 Issue 14](../agent-observability/issues/14-observed-performance-overview.md)
+
+[测试报告](test-report.md) · [功能完成报告](completion-report.md)
