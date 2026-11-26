@@ -1435,10 +1435,70 @@ def test_worker_end_fallback_only_when_worker_did_not_end(
         ),
     ]
 
-    calls.clear()
-    handle.saw_subagent_end = True
+    assert handle.saw_subagent_end
     supervisor._emit_worker_end_fallback(handle, record)
-    assert calls == []
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reapers_emit_one_worker_end_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    supervisor = BackgroundSubAgentSupervisor()
+    handle = _active_run(
+        tmp_path,
+        _PipeProcess(returncode=0),
+        carrier={"obs_span_id": "span-1"},
+    )
+    scope = handle.scope
+    run_id = "run-1"
+    supervisor._active_for_scope(scope)[run_id] = handle
+    both_reaping = asyncio.Event()
+    reapers = 0
+    record = SimpleNamespace(
+        run_id=run_id,
+        status="completed",
+        result=None,
+        errors=[],
+    )
+
+    async def mark_exited(_self, _run_id, *, exit_code):
+        nonlocal reapers
+        assert exit_code == 0
+        reapers += 1
+        if reapers == 2:
+            both_reaping.set()
+        await both_reaping.wait()
+        return record
+
+    monkeypatch.setattr(
+        PerRunSubAgentRunStore,
+        "mark_worker_exited",
+        mark_exited,
+    )
+    calls = []
+
+    class Observability:
+        def end_carried_span(self, carrier, *, status, **_attributes):
+            calls.append((carrier["obs_span_id"], status))
+            return True
+
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.Observability",
+        Observability,
+    )
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            supervisor.reap_run(scope, run_id),
+            supervisor.reap_run(scope, run_id),
+        ),
+        timeout=2,
+    )
+    assert results == [record, record]
+    assert calls == [("span-1", "succeeded")]
 
 
 @pytest.mark.asyncio

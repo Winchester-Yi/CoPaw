@@ -1169,7 +1169,7 @@ class BackgroundSubAgentSupervisor:
             }
             if record.result is not None:
                 subagent["result_status"] = record.result.status
-            Observability().end_carried_span(
+            handle.saw_subagent_end = Observability().end_carried_span(
                 carrier,
                 status=status,
                 subagent=subagent,
