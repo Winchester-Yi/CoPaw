@@ -537,10 +537,12 @@ class ToolGuardMixin:
             )
             if structured_failure and failure_type not in _TOOL_FAILURE_TYPES:
                 failure_type = "tool_failure"
-            failed = failure_type is not None
             technical_failure = failure_type in _TECHNICAL_TOOL_FAILURE_TYPES
+            status = "failed" if failure_type else "succeeded"
+            if failure_type == "tool_timeout":
+                status = "timed_out"
             span.end(
-                status="failed" if failed else "succeeded",
+                status=status,
                 technical_status=("ERROR" if technical_failure else "OK"),
                 has_error=technical_failure,
                 **(
@@ -1565,6 +1567,11 @@ class ToolGuardMixin:
         reason: str,
     ) -> NoReturn:
         """Record a terminal pre-tool stop and cancel peer tool calls."""
+        self._observe_guard_decision(
+            tool_call,
+            "rejected",
+            reason_code="hook_stop",
+        )
         await self._acting_hook_stopped(tool_call, tool_name, reason)
         self._request_pre_tool_terminal_stop(reason)
         raise PreToolUseTerminalStop(reason)

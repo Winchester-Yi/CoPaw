@@ -53,3 +53,5 @@ Priority: P0
 2026-11-16：进一步让生命周期与模型 Span 共用生产同款的模块级 default emitter，在真实标准/专家 Runner MySQL 用例验证同一 JSONL 同时包含 Run/Attempt 和 LLM Span；投影后数据库与 Run 详情 API 的 input/output Token 均与 Span 结束事件一致。此断言发现并修复 span UPSERT 未合并结束事件 Token 的缺陷。两种模式 2 passed，observability 单元/模型关键路径 39 passed，相关 pre-commit 全部通过。仍待指定 Chromium 108.0.5359.95/360 验收和真实外网 Provider 验收。
 
 2026-11-18 后续：增加准入采集快照回归，分别验证准入时 enabled 后全局开关关闭仍沿用该 Run 的 capture snapshot，以及准入时 disabled 后全局开关打开不为既有请求补造 Run/Attempt。两个方向通过，生命周期单测文件 2 项回归通过；目标文件 pre-commit 全绿。真实 Chromium108/360 页面验收按用户要求暂停。
+
+2026-11-26：可重试的 Agent 失败在退避前结束当前 Attempt，退避完成后创建继任 Attempt。退避中取消的定向回归验证失败 Attempt 已结算且无继任 Attempt。

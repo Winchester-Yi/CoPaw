@@ -177,6 +177,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 前端 reconnect 触发：[console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.tsx](/Users/shixiangyi/code/Swe/console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.tsx)
 - 前端请求 owner 透传：[console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/useChatRequest.tsx](/Users/shixiangyi/code/Swe/console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/useChatRequest.tsx)
 
+## 独立可观测的模型性能与执行终态
+
+- 跨 Run 的模型用量覆盖与首输出分布从已结束的 `LLM/request_attempt` Span 读取。逻辑调用数从 `LLM/chat` 读取。先核对筛选窗口、请求尝试数及两个延迟指标各自的已知样本数。 [性能聚合](../../src/swe/observability/query.py) · [Console 总览](../../console/src/pages/AgentObservability/RunOverview.tsx)
+- Run 活动时间由 Attempt 区间计算。排查 Agent 重试时间时，核对失败 Attempt 的结束事件和下一 Attempt 的开始事件，退避在两者之间。 [Agent 重试](../../src/swe/app/runner/query_attempt.py)
+- PreToolUse STOP 留下 `Guard/rejected` 和 `hook_stop`，本地工具硬超时留下 `Tool/timed_out` 和 `tool_timeout`。 [工具执行与短路](../../src/swe/agents/tool_guard_mixin.py)
+
 ## Console 第二轮提问 / OpenAI system role 顺序
 
 - 后端 query 生命周期：[src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)

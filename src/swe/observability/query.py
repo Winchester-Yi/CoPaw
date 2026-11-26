@@ -2679,22 +2679,29 @@ async def performance_overview(
         if row.get("span_type") == "LLM"
         and row.get("operation") == "request_attempt"
     ]
-    usage_known = [
-        row
-        for row in llm
-        if row.get("input_tokens") is not None
-        and row.get("output_tokens") is not None
-    ]
-    ttft = [
+    input_known = output_known = usage_known = 0
+    for row in request_attempts:
+        has_input = row.get("input_tokens") is not None
+        has_output = row.get("output_tokens") is not None
+        input_known += has_input
+        output_known += has_output
+        usage_known += has_input and has_output
+    first_chunk = [
         row["time_to_first_chunk_us"]
-        for row in llm
+        for row in request_attempts
         if row.get("time_to_first_chunk_us") is not None
     ]
     visible = [
         row["time_to_first_visible_text_us"]
-        for row in llm
+        for row in request_attempts
         if row.get("time_to_first_visible_text_us") is not None
     ]
+    first_chunk_percentiles = {
+        "known_count": len(first_chunk),
+        "p50": _nearest_rank(first_chunk, 0.50),
+        "p95": _nearest_rank(first_chunk, 0.95),
+        "p99": _nearest_rank(first_chunk, 0.99),
+    }
     grouped: dict[str, int] = {}
     for row in rows:
         key = str(row.get("span_type") or "unknown")
@@ -2748,17 +2755,22 @@ async def performance_overview(
         llm={
             "call_count": len(llm),
             "request_attempt_count": len(request_attempts),
-            "usage_known_count": len(usage_known),
-            "usage_coverage": len(usage_known) / len(llm) if llm else None,
-            "ttft_us": {
-                "known_count": len(ttft),
-                "p50": _nearest_rank(ttft, 0.50),
-                "p95": _nearest_rank(ttft, 0.95),
-            },
+            "usage_known_count": usage_known,
+            "input_tokens_known_count": input_known,
+            "output_tokens_known_count": output_known,
+            "usage_coverage": (
+                usage_known / len(request_attempts)
+                if request_attempts
+                else None
+            ),
+            "first_chunk_us": first_chunk_percentiles,
+            # Legacy field name, now using the request-attempt sample set.
+            "ttft_us": first_chunk_percentiles,
             "first_visible_text_us": {
                 "known_count": len(visible),
                 "p50": _nearest_rank(visible, 0.50),
                 "p95": _nearest_rank(visible, 0.95),
+                "p99": _nearest_rank(visible, 0.99),
             },
         },
         by_span_type=[

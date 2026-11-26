@@ -113,6 +113,7 @@ async def stream_admission(
                     run_context,
                     attempt_context,
                     waiting_for_approval=False,
+                    attempt_ref=attempt_context_ref,
                 )
             stream = _stream_admitted_query(
                 owner,
@@ -142,6 +143,7 @@ async def stream_admission(
                             identity,
                             waiting_for_approval=waiting_for_approval,
                             attempt=attempt_context_ref["value"],
+                            clear_attempt=attempt_context_ref["value"] is None,
                         )
                     else:
                         finish_query_run(

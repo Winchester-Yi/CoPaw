@@ -76,7 +76,50 @@ const performance = {
   run_count: 0,
   duration_us: { known_count: 0, p50: null, p95: null, p99: null },
   tool_failures: { count: 0, sample_count: 0, rate: null },
+  llm: {
+    call_count: 0,
+    request_attempt_count: 0,
+    first_chunk_us: { known_count: 0, p50: null, p95: null, p99: null },
+  },
 };
+it("reports coverage and latency for ended request attempts", async () => {
+  request.mockImplementation((url: string) =>
+    Promise.resolve(
+      url.includes("business-population")
+        ? business
+        : {
+            ...performance,
+            sample_count: 3,
+            llm: {
+              call_count: 1,
+              request_attempt_count: 2,
+              usage_known_count: 1,
+              input_tokens_known_count: 2,
+              output_tokens_known_count: 1,
+              first_chunk_us: { known_count: 1, p50: 0, p95: 0, p99: 0 },
+              first_visible_text_us: {
+                known_count: 0,
+                p50: null,
+                p95: null,
+                p99: null,
+              },
+            },
+          },
+    ),
+  );
+  render(
+    <RunOverview
+      source="s"
+      start="2026-01-01T00:00:00Z"
+      end="2026-01-01T01:00:00Z"
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "展开总览" }));
+  expect(await screen.findByText(/已结束请求尝试 2/)).toBeInTheDocument();
+  expect(screen.getByText(/输入 2\/2 · 输出 1\/2/)).toBeInTheDocument();
+  expect(screen.getByText(/首有效 chunk.*P50 0 ms/)).toBeInTheDocument();
+  expect(screen.getByText(/首可见文本.*P50 —/)).toBeInTheDocument();
+});
 it("uses the same current source and range, and changes range without retaining old data", async () => {
   request.mockImplementation((url: string) =>
     Promise.resolve(
@@ -95,6 +138,7 @@ it("uses the same current source and range, and changes range without retaining 
   expect(
     screen.getByText("当前时间范围内没有观测性能样本"),
   ).toBeInTheDocument();
+  expect(screen.queryByText("模型请求性能")).not.toBeInTheDocument();
   expect(request).toHaveBeenCalledTimes(2);
   for (const [url, options] of request.mock.calls) {
     expect(new URLSearchParams(url.split("?")[1]).get("start")).toBe(

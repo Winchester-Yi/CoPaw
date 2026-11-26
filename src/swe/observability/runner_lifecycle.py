@@ -476,10 +476,15 @@ def defer_query_run_settlement(
     attempt: ObservabilityContext | None,
     *,
     waiting_for_approval: bool,
+    attempt_ref: dict[str, Any] | None = None,
 ) -> None:
     pending = getattr(owner, "_agent_observability_contexts", None)
     if context is not None and isinstance(pending, dict):
-        pending[identity] = (context, attempt, waiting_for_approval)
+        pending[identity] = (
+            context,
+            attempt_ref if attempt_ref is not None else attempt,
+            waiting_for_approval,
+        )
 
 
 def update_deferred_query_run_approval(
@@ -510,7 +515,13 @@ def take_query_run_settlement(owner: Any, identity: Any):
     pending = getattr(owner, "_agent_observability_contexts", None)
     if not isinstance(pending, dict):
         return None
-    return pending.pop(identity, None)
+    observation = pending.pop(identity, None)
+    if observation is None:
+        return None
+    context, attempt, waiting_for_approval = observation
+    if isinstance(attempt, dict):
+        attempt = attempt["value"]
+    return context, attempt, waiting_for_approval
 
 
 def finish_deferred_query_run(

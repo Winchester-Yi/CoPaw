@@ -25,6 +25,15 @@ type Performance = {
   run_count: number;
   duration_us: Percentiles;
   tool_failures: { count: number; sample_count: number; rate: number | null };
+  llm?: {
+    call_count: number;
+    request_attempt_count: number;
+    usage_known_count: number;
+    input_tokens_known_count: number;
+    output_tokens_known_count: number;
+    first_chunk_us: Percentiles;
+    first_visible_text_us: Percentiles;
+  };
 };
 type Load<T> =
   | { state: "loading" }
@@ -36,6 +45,42 @@ const displayNumber = (value: number | null) =>
   value == null ? "—" : value.toLocaleString();
 const millis = (value: number | null) =>
   value == null ? "—" : `${(value / 1000).toLocaleString()} ms`;
+
+function ModelPerformance({ llm }: { llm: NonNullable<Performance["llm"]> }) {
+  const requests = llm.request_attempt_count;
+  const coverage = (known: number) =>
+    `${displayNumber(known)}/${displayNumber(requests)}`;
+  return (
+    <div>
+      <h3>模型请求性能</h3>
+      <p>
+        已观测逻辑调用 {displayNumber(llm.call_count)} · 已结束请求尝试{" "}
+        {displayNumber(requests)}
+      </p>
+      {requests > 0 && (
+        <>
+          <p>
+            请求用量覆盖 · 输入 {coverage(llm.input_tokens_known_count)} · 输出{" "}
+            {coverage(llm.output_tokens_known_count)} · 两项均获取{" "}
+            {coverage(llm.usage_known_count)}
+          </p>
+          {(
+            [
+              ["首有效 chunk", llm.first_chunk_us],
+              ["首可见文本", llm.first_visible_text_us],
+            ] as const
+          ).map(([label, stats]) => (
+            <p key={label}>
+              {label}（已知样本 {displayNumber(stats.known_count)}）· P50{" "}
+              {millis(stats.p50)} / P95 {millis(stats.p95)} / P99{" "}
+              {millis(stats.p99)}
+            </p>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
 
 export default function RunOverview({
   source,
@@ -193,6 +238,11 @@ export default function RunOverview({
                       {performance.data.tool_failures.sample_count}，不含取消）
                     </p>
                   )}
+                  {performance.data.llm?.first_chunk_us &&
+                    (performance.data.llm.call_count > 0 ||
+                      performance.data.llm.request_attempt_count > 0) && (
+                      <ModelPerformance llm={performance.data.llm} />
+                    )}
                 </>
               )}
               {(business.state === "error" ||

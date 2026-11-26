@@ -711,6 +711,51 @@ def test_early_stop_settlement_is_not_reopened_by_stream_finally(monkeypatch):
     assert emitter.events[-1]["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("during_retry_backoff", [False, True])
+def test_early_stop_settles_only_live_attempt(
+    monkeypatch,
+    during_retry_backoff,
+):
+    emitter = _setup(monkeypatch)
+    owner = SimpleNamespace(_agent_observability_contexts={})
+    identity = object()
+    context = runner_lifecycle.admit_query_run(
+        SimpleNamespace(agent_id="agent-a"),
+        _request(),
+        [_message()],
+    )
+    first = runner_lifecycle.start_query_attempt(context)
+    attempt_ref = {"value": first}
+    runner_lifecycle.defer_query_run_settlement(
+        owner,
+        identity,
+        context,
+        first,
+        waiting_for_approval=False,
+        attempt_ref=attempt_ref,
+    )
+    runner_lifecycle.end_query_attempt(first, status="failed")
+    second = (
+        None
+        if during_retry_backoff
+        else runner_lifecycle.start_query_retry_attempt(first)
+    )
+    attempt_ref["value"] = second
+
+    runner_lifecycle.finish_deferred_query_run(owner, identity, "cancelled")
+
+    ended = [
+        (event["obs_attempt_id"], event["status"])
+        for event in emitter.events
+        if event["event_name"] == "attempt.ended"
+    ]
+    expected = [(first.obs_attempt_id, "failed")]
+    if second is not None:
+        expected.append((second.obs_attempt_id, "cancelled"))
+    assert ended == expected
+    assert emitter.events[-1]["status"] == "cancelled"
+
+
 def test_stopped_approval_wait_settles_run_as_cancelled(monkeypatch):
     emitter = _setup(monkeypatch)
     owner = SimpleNamespace(_agent_observability_contexts={})

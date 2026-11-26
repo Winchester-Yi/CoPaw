@@ -123,6 +123,7 @@ _REGISTERED_LABELS = {
     "shell_policy_denied",
     "policy_denied",
     "hook_denied",
+    "hook_stop",
     "hook_waiting_approval",
 }
 

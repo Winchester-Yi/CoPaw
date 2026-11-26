@@ -2137,10 +2137,17 @@ async def test_performance_overview_uses_nearest_rank_and_explicit_coverage():
         "rate": 1 / 2,
     }
     assert result.run_status_filter is None
-    assert result.llm["usage_known_count"] == 1
+    assert result.llm["usage_known_count"] == 0
     assert result.llm["call_count"] == 1
     assert result.llm["request_attempt_count"] == 1
-    assert result.llm["usage_coverage"] == 1
+    assert result.llm["usage_coverage"] == 0
+    assert result.llm["first_chunk_us"] == {
+        "known_count": 1,
+        "p50": 2,
+        "p95": 2,
+        "p99": 2,
+    }
+    assert result.llm["first_visible_text_us"]["known_count"] == 0
     store.count_performance_candidates.assert_awaited_once()
 
     store.count_performance_candidates.return_value = 1
@@ -2155,7 +2162,7 @@ async def test_performance_overview_uses_nearest_rank_and_explicit_coverage():
     )
     assert request_attempt.llm["call_count"] == 0
     assert request_attempt.llm["request_attempt_count"] == 1
-    assert request_attempt.llm["usage_coverage"] is None
+    assert request_attempt.llm["usage_coverage"] == 0
 
 
 @pytest.mark.asyncio

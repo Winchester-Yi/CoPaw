@@ -51,3 +51,5 @@ Chromium 108.0.5359.29 页面检查同样被 dev server 的认证/配置/模板 
 2026-11-18：新增独立真实 ToolGuard producer→Inbox→Projector→manager Run Detail MySQL 合同，覆盖结构化 `permission_denied` 与 `RuntimeError`。前者投影为 Tool `failed/OK/has_error=false`，根 Run 可保持 `succeeded`；后者投影为 Tool `failed/ERROR/has_error=true/error_type=RuntimeError` 并由合同结算根 Run `failed`。验证原工具各调用一次、跨 Source 404、参数和异常正文不进入 JSONL/API。随机 `_test` schema 两参数均通过（23.90s），删除后核验余数为 0；ToolGuard 单测 10 passed，目标 pre-commit 全绿。Tool Inspector 和 Chromium108/360 验收仍未完成。
 
 同日继续：终态 MySQL 合同扩展覆盖同一 Span 上 conflicting parent 身份被隔离、重复 ended 不增加事件、late start 不覆盖失败终态，以及仅有 `quality.start_observed=false` 的自包含 ended Span 投影为 partial。该合同在随机隔离 `_test` schema 通过；期间发现 projector 原先仅凭 started_at 字段将明确标记未观察到 start 的 Span 错记为 observed，现改为尊重显式质量标记，调整后 MySQL 合同再次通过并确认隔离库已删除。相关 Observability core/ingest 单测 71 passed，目标 pre-commit 全绿。端到端 UI/浏览器验收仍未完成。
+
+2026-11-26：PreToolUse STOP 上报 Guard 拒绝与受控原因 `hook_stop`。本地工具硬超时上报 `timed_out` 和 `tool_timeout`，保留技术错误标记。定向单测与隔离 MySQL 投影验证通过。

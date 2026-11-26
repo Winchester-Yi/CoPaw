@@ -2391,6 +2391,7 @@ async def test_mysql_span_end_replay_and_late_start_preserve_one_terminal_fact()
                 "phase": "tool_execution",
             },
         )
+        ended["status"] = "timed_out"
         duplicate_end = dict(ended)
         conflict_end = {
             **ended,
@@ -2500,7 +2501,7 @@ async def test_mysql_span_end_replay_and_late_start_preserve_one_terminal_fact()
             span for span in spans if span["span_id"] == orphan_span_id
         )
         assert len(spans) == 2
-        assert original["status"] == "failed"
+        assert original["status"] == "timed_out"
         assert original["technical_status"] == "ERROR"
         assert original["has_error"] == 1
         assert original["error_type"] == "tool_timeout"
@@ -2957,7 +2958,9 @@ async def test_mysql_performance_counts_logical_calls_separately_from_attempts(
         assert performance["llm"]["call_count"] == 1
         assert performance["llm"]["request_attempt_count"] == 2
         assert performance["llm"]["usage_known_count"] == 1
-        assert performance["llm"]["usage_coverage"] == 1
+        assert performance["llm"]["usage_coverage"] == 0.5
+        assert performance["llm"]["input_tokens_known_count"] == 1
+        assert performance["llm"]["output_tokens_known_count"] == 1
         assert performance["run_count"] == 1
         assert run_id == records[0]["obs_run_id"]
         detail = detail_response.json()

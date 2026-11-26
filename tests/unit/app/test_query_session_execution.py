@@ -15,6 +15,7 @@ from agentscope.message import Msg
 
 from swe.app.runner.query_attempt import (
     _save_and_close_session_execution,
+    _stream_retry_attempts,
     stream_query_after_preflight,
 )
 from swe.app.runner.query_contracts import (
@@ -948,6 +949,63 @@ class _RecordingOwner:
 
     async def _end_trace_if_needed(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_in_backoff", [False, True])
+async def test_observability_attempt_ends_before_retry_backoff(
+    monkeypatch,
+    cancel_in_backoff,
+):
+    from swe.observability import runner_lifecycle
+
+    original, next_attempt = object(), object()
+    attempt_ref = {"value": original}
+    wait_for_backoff = AsyncMock()
+    settled = []
+
+    def finish(context, *, status):
+        settled.append((context, status))
+
+    def start(previous):
+        assert previous is original
+        wait_for_backoff.assert_awaited_once()
+        return next_attempt
+
+    class Owner(_RecordingOwner):
+        async def _stream_retry_backoff_notice(self, **_kwargs):
+            assert settled == [(original, "failed")]
+            assert attempt_ref["value"] is None
+            await wait_for_backoff()
+            if cancel_in_backoff:
+                raise asyncio.CancelledError
+            yield Msg("assistant", "retry", "assistant"), False
+
+    monkeypatch.setattr(runner_lifecycle, "end_query_attempt", finish)
+    monkeypatch.setattr(runner_lifecycle, "start_query_retry_attempt", start)
+    owner = Owner()
+    events = _stream_retry_attempts(
+        owner,
+        attempt_state_ref={},
+        retry_state=owner._new_retry_state(),
+        attempt_input=SimpleNamespace(session_execution=None),
+        outcome=SimpleNamespace(),
+        trace_id=None,
+        request=SimpleNamespace(),
+        session_execution=None,
+        session_id="session",
+        retry_settings=(2, 1, 0, 0),
+        observability_attempt_ref=attempt_ref,
+    )
+    if cancel_in_backoff:
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in events:
+                pass
+        assert attempt_ref["value"] is None
+    else:
+        async for _ in events:
+            pass
+        assert attempt_ref["value"] is next_attempt
 
 
 @pytest.mark.asyncio
