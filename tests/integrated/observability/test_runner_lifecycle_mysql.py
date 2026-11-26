@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -223,7 +224,7 @@ async def _assert_projected_run_available(
         api_llm_span = next(
             span
             for span in detail_response.json()["spans"]
-            if span["span_type"] == "LLM" and span["operation"] == "chat"
+            if span["span_id"] == llm_span["span_id"]
         )
         assert api_llm_span["input_tokens"] == llm_span["input_tokens"]
         assert api_llm_span["output_tokens"] == llm_span["output_tokens"]
@@ -315,18 +316,23 @@ def _assert_run_model_summary(row, api_row, records):
     )
     assert row["agent_loops"] == expected_agent_loops
     assert api_row["agent_loops"] == expected_agent_loops
+    request_ends = [
+        record
+        for record in records
+        if record.get("event_name") == "span.ended"
+        and record.get("span_type") == "LLM"
+        and record.get("operation") == "request_attempt"
+    ]
+    assert api_row["request_attempt_count"] == len(request_ends)
     for field in ("input_tokens", "output_tokens"):
         values = [
-            (record.get("metrics") or {}).get(field)
-            for record in logical_model_ends
+            (record.get("metrics") or {}).get(field) for record in request_ends
         ]
-        expected = (
-            sum(value for value in values if value is not None)
-            if all(value is not None for value in values)
-            else None
-        )
+        known = [value for value in values if value is not None]
+        expected = sum(known) if known else None
         assert row[field] == expected
         assert api_row[field] == row[field]
+        assert api_row[f"{field}_known_requests"] == len(known)
 
 
 def _assert_agent_retry_lifecycle(records):
@@ -442,7 +448,8 @@ async def _assert_llm_span_projection(store, records, run_id):
             for record in records
             if record["event_name"] == "span.ended"
             and record["span_type"] == "LLM"
-            and record.get("operation") == "chat"
+            and record.get("operation") == "request_attempt"
+            and record["status"] == "succeeded"
         ),
         None,
     )
@@ -452,7 +459,7 @@ async def _assert_llm_span_projection(store, records, run_id):
     llm_span = next(
         span
         for span in projected_spans
-        if span["span_type"] == "LLM" and span["operation"] == "chat"
+        if span["span_id"] == model_end["obs_span_id"]
     )
     assert llm_span["input_tokens"] == model_end["metrics"]["input_tokens"]
     assert llm_span["output_tokens"] == model_end["metrics"]["output_tokens"]
@@ -592,6 +599,7 @@ def _install_deterministic_provider(monkeypatch, *, streaming=False):
     from agentscope.model._model_response import ChatResponse
     from agentscope.model._model_usage import ChatUsage
     from swe.agents import model_factory
+    from swe.observability.instrumentation import observe_openai_response
     from swe.tracing import agent_trace_model_wrapper
     from tests.integrated.critical_paths.conftest import (
         DeterministicChatModel,
@@ -610,24 +618,34 @@ def _install_deterministic_provider(monkeypatch, *, streaming=False):
             metadata={"model": "response-model", "finish_reason": "stop"},
         ),
     ] * 4
-    if streaming:
 
-        class DeterministicStreamingChatModel(DeterministicChatModel):
-            def __init__(self):
-                super().__init__(responses, stream=True)
+    class ObservedDeterministicChatModel(DeterministicChatModel):
+        async def __call__(self, *args, **kwargs):
+            def observe():
+                observe_openai_response(
+                    SimpleNamespace(
+                        model="response-model",
+                        choices=[SimpleNamespace(finish_reason="stop")],
+                        usage=SimpleNamespace(
+                            prompt_tokens=3,
+                            completion_tokens=4,
+                        ),
+                    ),
+                )
 
-            async def __call__(self, *args, **kwargs):
-                self.calls.append({"args": args, "kwargs": kwargs})
-                item = self.responses.pop(0)
+            if not self.stream:
+                observe()
+                return await super().__call__(*args, **kwargs)
+            self.calls.append({"args": args, "kwargs": kwargs})
+            item = self.responses.pop(0)
 
-                async def chunks():
-                    yield item
+            async def chunks():
+                observe()
+                yield item
 
-                return chunks()
+            return chunks()
 
-        model = DeterministicStreamingChatModel()
-    else:
-        model = DeterministicChatModel(responses)
+    model = ObservedDeterministicChatModel(responses, stream=streaming)
     provider_manager = FakeProviderManager(CopyableFakeProvider(model))
 
     async def get_provider_manager(_tenant_id=None):
@@ -736,7 +754,7 @@ async def _emit_model_failure_records(monkeypatch, failure_mode):
 
     class FailingModel:
         model_name = "test-model"
-        stream = failure_mode == "stream"
+        stream = failure_mode != "request"
 
         async def __call__(self, *_args, **_kwargs):
             nonlocal source_closed
@@ -750,7 +768,14 @@ async def _emit_model_failure_records(monkeypatch, failure_mode):
                         content=[
                             {"type": "text", "text": "private partial output"},
                         ],
+                        usage=(
+                            SimpleNamespace(input_tokens=10, output_tokens=0)
+                            if failure_mode == "cancelled"
+                            else None
+                        ),
                     )
+                    if failure_mode == "cancelled":
+                        raise asyncio.CancelledError
                     raise RuntimeError("private stream failure detail")
                 finally:
                     source_closed = True
@@ -775,12 +800,15 @@ async def _emit_model_failure_records(monkeypatch, failure_mode):
             result = await wrapped([{"text": "private prompt body"}])
             async for _chunk in result:
                 pass
-        except RuntimeError:
-            pass
+        except (RuntimeError, asyncio.CancelledError) as exc:
+            assert isinstance(exc, asyncio.CancelledError) == (
+                failure_mode == "cancelled"
+            )
         else:
             raise AssertionError("model failure did not propagate")
-        observer.end_attempt(attempt, status="failed")
-        observer.end_run(context, status="failed")
+        status = "cancelled" if failure_mode == "cancelled" else "failed"
+        observer.end_attempt(attempt, status=status)
+        observer.end_run(context, status=status)
     assert emitter.close(timeout=1) == 0
     records = [json.loads(line) for line in sink.getvalue().splitlines()]
     assert all(
@@ -796,7 +824,7 @@ async def _emit_model_failure_records(monkeypatch, failure_mode):
             "private prompt body",
         )
     )
-    if failure_mode == "stream":
+    if failure_mode != "request":
         assert source_closed
 
     return records, context.obs_run_id
@@ -830,22 +858,25 @@ async def _project_model_failure(connection, records, run_id, failure_mode):
             "WHERE run_id=%s AND operation='request_attempt'",
             (run_id,),
         )
-    assert run["status"] == "failed"
+    cancelled = failure_mode == "cancelled"
+    status = "cancelled" if cancelled else "failed"
+    assert run["status"] == status
     assert run["ended_at"] is not None
     assert run["llm_calls"] == 1
-    assert run["input_tokens"] is None
-    assert run["output_tokens"] is None
-    assert llm_span["status"] == "failed"
-    assert llm_span["technical_status"] == "ERROR"
-    assert llm_span["error_type"] == "RuntimeError"
-    assert llm_span["streaming"] == int(failure_mode == "stream")
-    assert request_attempt["status"] == "failed"
-    assert request_attempt["error_type"] == "RuntimeError"
+    assert run["input_tokens"] == (10 if cancelled else None)
+    assert run["output_tokens"] == (0 if cancelled else None)
+    assert llm_span["status"] == status
+    assert llm_span["streaming"] == int(failure_mode != "request")
+    assert request_attempt["status"] == status
+    if not cancelled:
+        assert llm_span["technical_status"] == "ERROR"
+        assert llm_span["error_type"] == "RuntimeError"
+        assert request_attempt["error_type"] == "RuntimeError"
     return store
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_mode", ["request", "stream"])
+@pytest.mark.parametrize("failure_mode", ["request", "stream", "cancelled"])
 async def test_model_failure_projects_through_mysql_and_authorized_api(
     monkeypatch,
     failure_mode,
@@ -889,11 +920,14 @@ async def test_model_failure_projects_through_mysql_and_authorized_api(
             )
         assert response.status_code == 200
         run = response.json()["run"]
-        assert run["status"] == "failed"
+        cancelled = failure_mode == "cancelled"
+        status = "cancelled" if cancelled else "failed"
+        assert run["status"] == status
         assert run["ended_at"]
         assert run["llm_calls"] == 1
-        assert run["input_tokens"] is None
-        assert run["output_tokens"] is None
+        assert run["request_attempt_count"] == 1
+        assert run["input_tokens"] == (10 if cancelled else None)
+        assert run["output_tokens"] == (0 if cancelled else None)
         api_span = next(
             span
             for span in response.json()["spans"]
@@ -905,11 +939,25 @@ async def test_model_failure_projects_through_mysql_and_authorized_api(
             if span["span_type"] == "LLM"
             and span["operation"] == "request_attempt"
         )
-        assert api_span["status"] == "failed"
-        assert api_span["technical_status"] == "ERROR"
-        assert api_span["error_type"] == "RuntimeError"
-        assert api_request_attempt["status"] == "failed"
-        assert api_request_attempt["error_type"] == "RuntimeError"
+        assert api_span["status"] == status
+        assert api_request_attempt["status"] == status
+        request_end = next(
+            record
+            for record in records
+            if record["event_name"] == "span.ended"
+            and record.get("operation") == "request_attempt"
+        )
+        assert (
+            api_request_attempt["request_attempt_index"]
+            == request_end["request_attempt_index"]
+        )
+        assert api_request_attempt["total_tokens"] == (
+            10 if cancelled else None
+        )
+        if not cancelled:
+            assert api_span["technical_status"] == "ERROR"
+            assert api_span["error_type"] == "RuntimeError"
+            assert api_request_attempt["error_type"] == "RuntimeError"
         assert "metadata_text" not in api_span
     finally:
         await connection.close()
