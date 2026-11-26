@@ -19,7 +19,6 @@ from agentscope_runtime.engine.app import AgentApp
 from ..config import load_config  # pylint: disable=no-name-in-module
 from ..config.utils import get_config_path
 from ..constant import (
-    DOCS_ENABLED,
     LOG_LEVEL_ENV,
     CORS_ORIGINS,
     WORKING_DIR,
@@ -1233,9 +1232,10 @@ async def lifespan(
 
 app = FastAPI(
     lifespan=lifespan,
-    docs_url="/docs" if DOCS_ENABLED else None,
-    redoc_url="/redoc" if DOCS_ENABLED else None,
-    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    swagger_ui_oauth2_redirect_url=None,
 )
 from .conversation_storage.tenant_admission import (
     TenantNotPublished,
