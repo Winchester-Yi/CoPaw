@@ -46,14 +46,26 @@ def _production_sse() -> bytes:
     return (sample.split("```text\n", 1)[1].split("```", 1)[0] + "\n").encode()
 
 
-async def _capture_sse(monkeypatch):
+async def _capture_sse(monkeypatch, *, retry=False, cancel=False):
+    provider_requests = 0
+
     def respond(request):
+        nonlocal provider_requests
+        provider_requests += 1
         payload = json.loads(request.content)
         assert payload["stream_options"]["include_usage"] is True
+        if retry and provider_requests == 1:
+            return httpx.Response(500, json={"error": {"message": "retry"}})
+        sample = _production_sse()
+        if retry:
+            sample = sample.replace(
+                b'"prompt_tokens": 333',
+                b'"prompt_tokens": 20',
+            ).replace(b'"total_tokens": 344', b'"total_tokens": 31')
         return httpx.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
-            content=_production_sse(),
+            content=sample,
         )
 
     sink = StringIO()
@@ -69,6 +81,7 @@ async def _capture_sse(monkeypatch):
     client = AsyncOpenAI(
         api_key="test-key",
         base_url="https://model.test/v1",
+        max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     adapter = OpenAIChatModelCompat(
@@ -94,7 +107,12 @@ async def _capture_sse(monkeypatch):
                     model="requested-alias",
                 ),
                 provider=provider,
-                retry_config=RetryConfig(enabled=False),
+                retry_config=RetryConfig(
+                    enabled=retry,
+                    max_retries=1,
+                    backoff_base=0,
+                    backoff_cap=0,
+                ),
                 rate_limit_config=RateLimitConfig(max_qpm=0),
             ),
         )
@@ -102,10 +120,15 @@ async def _capture_sse(monkeypatch):
             stream = await model(
                 [{"role": "user", "content": "private input"}]
             )
-            output = [chunk async for chunk in stream]
+            if cancel:
+                output = [await anext(stream)]
+                await stream.aclose()
+            else:
+                output = [chunk async for chunk in stream]
         assert output[-1].content == [{"type": "text", "text": "。"}]
-        observer.end_attempt(attempt, status="succeeded")
-        observer.end_run(run, status="succeeded")
+        status = "cancelled" if cancel else "succeeded"
+        observer.end_attempt(attempt, status=status)
+        observer.end_run(run, status=status)
     finally:
         await client.close()
         assert emitter.close() == 0
@@ -129,10 +152,16 @@ def _test_api(store):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["production", "retry", "cancel"])
 async def test_production_sse_projects_to_authorized_request_detail(
     monkeypatch,
+    scenario,
 ):
-    run, lines = await _capture_sse(monkeypatch)
+    run, lines = await _capture_sse(
+        monkeypatch,
+        retry=scenario == "retry",
+        cancel=scenario == "cancel",
+    )
     connection = DatabaseConnection(_test_db_config())
     await connection.connect()
     try:
@@ -162,7 +191,11 @@ async def test_production_sse_projects_to_authorized_request_detail(
                 headers={**headers, "X-Source-Id": "different-source"},
             )
             assert denied.status_code == 404
-        _assert_production_request(response.json())
+        detail = response.json()
+        if scenario == "production":
+            _assert_production_request(detail)
+        else:
+            _assert_retry_or_cancel(detail, scenario)
     finally:
         await connection.close()
 
@@ -185,3 +218,24 @@ def _assert_production_request(detail):
     assert request["finish_reason"] == "stop"
     assert (request["input_tokens"], request["output_tokens"]) == (333, 11)
     assert request["total_tokens"] == 344
+
+
+def _assert_retry_or_cancel(detail, scenario):
+    run = detail["run"]
+    requests = [
+        span
+        for span in detail["spans"]
+        if span["operation"] == "request_attempt"
+    ]
+    assert run["llm_calls"] == 1
+    if scenario == "retry":
+        assert run["request_attempt_count"] == 2
+        assert run["input_tokens"] == 20
+        assert run["input_tokens_known_requests"] == 1
+        assert [row["status"] for row in requests] == ["failed", "succeeded"]
+        assert [row["input_tokens"] for row in requests] == [None, 20]
+    else:
+        assert run["request_attempt_count"] == 1
+        assert run["input_tokens"] is None
+        assert requests[0]["status"] == "cancelled"
+        assert requests[0]["input_tokens"] is None

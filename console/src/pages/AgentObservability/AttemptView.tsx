@@ -79,6 +79,12 @@ const requestFields: [string, string][] = [
   ["streaming", "流式模式"],
   ["model_key_source", "模型来源"],
 ];
+const modelRequestFields = [
+  ...requestFields,
+  ...fields.filter(
+    ([key]) => key !== "tool_key" && key !== "business_subagent_key",
+  ),
+];
 
 function requestValue(key: string, value: unknown, isTime?: boolean) {
   if (value == null) return "未获取";
@@ -663,7 +669,7 @@ export default function AttemptView({
       />
       {tab === "details" ? (
         <dl>
-          {(isModelRequest ? [...requestFields, ...fields] : fields).map(
+          {(isModelRequest ? modelRequestFields : fields).map(
             ([key, label, isTime]) => (
               <div key={key}>
                 <dt>{label}</dt>

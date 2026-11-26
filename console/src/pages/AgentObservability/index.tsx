@@ -18,8 +18,6 @@ type Run = {
   duration_us: number | null;
   llm_calls: number | null;
   request_attempt_count?: number | null;
-  input_tokens_known_requests?: number | null;
-  output_tokens_known_requests?: number | null;
   tool_calls: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
@@ -45,17 +43,8 @@ const tokens = (run: Run) =>
     : (run.input_tokens + run.output_tokens).toLocaleString();
 const calls = (run: Run) =>
   `模型 ${value(run.llm_calls)} / 工具 ${value(run.tool_calls)}`;
-const observedTokens = (
-  count: number | null,
-  knownRequests: number | null | undefined,
-  requests: number | null | undefined,
-) => {
-  if (count == null) return "";
-  const formatted = count.toLocaleString();
-  return requests != null && knownRequests != null && knownRequests === requests
-    ? formatted
-    : `已观测 ${formatted}`;
-};
+const observedTokens = (count: number | null) =>
+  count == null ? "" : `已观测 ${count.toLocaleString()}`;
 const date = (v: string | null) => (v ? new Date(v).toLocaleString() : "—");
 const statuses = [
   "accepted",
@@ -453,32 +442,24 @@ function ObservabilityView({
               <strong>{duration(detail.run.duration_us)}</strong>
             </div>
             <div>
-              <span>调用</span>
-              <strong>{calls(detail.run)}</strong>
+              <span>模型逻辑调用</span>
+              <strong>{value(detail.run.llm_calls)}</strong>
             </div>
             <div>
               <span>模型请求次数</span>
               <strong>{value(detail.run.request_attempt_count)}</strong>
             </div>
             <div>
+              <span>工具调用</span>
+              <strong>{value(detail.run.tool_calls)}</strong>
+            </div>
+            <div>
               <span>输入 Tokens</span>
-              <strong>
-                {observedTokens(
-                  detail.run.input_tokens,
-                  detail.run.input_tokens_known_requests,
-                  detail.run.request_attempt_count,
-                )}
-              </strong>
+              <strong>{observedTokens(detail.run.input_tokens)}</strong>
             </div>
             <div>
               <span>输出 Tokens</span>
-              <strong>
-                {observedTokens(
-                  detail.run.output_tokens,
-                  detail.run.output_tokens_known_requests,
-                  detail.run.request_attempt_count,
-                )}
-              </strong>
+              <strong>{observedTokens(detail.run.output_tokens)}</strong>
             </div>
             <Button onClick={() => setExceptionRequest((n) => n + 1)}>
               定位异常
