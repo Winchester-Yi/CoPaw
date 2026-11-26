@@ -112,6 +112,7 @@ logs/
 !.codex/skills/copaw-f2e-review/agents/openai.yaml
 *.tmp
 skills-lock.json
+.scratch/
 
 # Build cache
 .cache/  # Includes conda_unpack_wheels/ for Windows packaging workaround
