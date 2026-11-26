@@ -10,8 +10,12 @@
 }
 .layout {
   display: flex;
-  gap: 16px;
-  align-items: flex-start;
+  gap: 0;
+  align-items: stretch;
+  background: #fff;
+  border: 1px solid #e1e7ef;
+  border-radius: 12px;
+  overflow: hidden;
 }
 .timeline {
   flex: 1;
@@ -27,8 +31,8 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #fff;
-  padding: 10px 0;
+  background: #f7f9fd;
+  padding: 10px 8px;
   border-bottom: 1px solid #d9dfe8;
 }
 .scroll {
@@ -87,6 +91,13 @@
   border-left: 1px solid #e6eaf0;
   display: flex;
   align-items: center;
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(25% - 1px),
+    #e1e7ef calc(25% - 1px),
+    #e1e7ef 25%
+  );
 }
 .bar {
   position: absolute;
@@ -107,7 +118,7 @@
   flex: 0 0 300px;
   min-width: 0;
   border-left: 1px solid #d9dfe8;
-  padding-left: 16px;
+  padding: 16px;
 }
 .root dl,
 :global(.ant-drawer-body) dl {
@@ -140,4 +151,49 @@
 .toolbar input {
   width: 260px;
   max-width: 100%;
+}
+
+.axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  color: #627189;
+  font-size: 11px;
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px;
+  color: #627189;
+  font-size: 12px;
+}
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+@media (max-width: 900px) {
+  .layout {
+    flex-direction: column;
+  }
+  .inspector {
+    flex: auto;
+    border-left: 0;
+    border-top: 1px solid #d9dfe8;
+  }
+}
+
+.narrow {
+  flex-direction: column;
+}
+.narrow .inspector {
+  flex: auto;
+  border-left: 0;
+  border-top: 1px solid #d9dfe8;
 }

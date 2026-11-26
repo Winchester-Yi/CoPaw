@@ -197,14 +197,8 @@ it("shows a real parent cycle and opens its linked target on a narrow view", asy
     expect(await screen.findByText("父链存在循环")).toBeInTheDocument();
     expect(screen.getAllByRole("treeitem")).toHaveLength(2);
     expect(
-      await screen.findByRole("dialog", { name: "节点详情" }),
+      await screen.findByRole("complementary", { name: "节点详情" }),
     ).toHaveTextContent("cycle s2");
-    fireEvent.click(
-      within(screen.getByRole("dialog", { name: "节点详情" })).getByRole(
-        "button",
-        { name: /close/i },
-      ),
-    );
     fireEvent.click(screen.getByRole("button", { name: "收起 cycle s1" }));
     expect(
       screen.queryByRole("treeitem", { name: /cycle s2/ }),
@@ -215,7 +209,7 @@ it("shows a real parent cycle and opens its linked target on a narrow view", asy
 });
 
 it.each(["link", "search", "errors"])(
-  "opens the narrow detail drawer and restores focus after %s location",
+  "shows inline details after %s location",
   async (mode) => {
     const originalObserver = globalThis.ResizeObserver;
     class NarrowObserver {
@@ -286,16 +280,11 @@ it.each(["link", "search", "errors"])(
         );
       }
       expect(
-        await screen.findByRole("dialog", { name: "节点详情" }),
-      ).toBeInTheDocument();
-      fireEvent.click(
-        within(screen.getByRole("dialog", { name: "节点详情" })).getByRole(
-          "button",
-          { name: /close/i },
-        ),
-      );
-      await waitFor(() =>
-        expect(screen.getByRole("treeitem", { name: /target/ })).toHaveFocus(),
+        await screen.findByRole("complementary", { name: "节点详情" }),
+      ).toHaveTextContent("target");
+      expect(screen.getByRole("treeitem", { name: /target/ })).toHaveAttribute(
+        "aria-selected",
+        "true",
       );
     } finally {
       vi.stubGlobal("ResizeObserver", originalObserver);

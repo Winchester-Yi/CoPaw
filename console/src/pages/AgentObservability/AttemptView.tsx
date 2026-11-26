@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Drawer, Input, Spin, Tabs, Tag } from "antd";
+import { Alert, Button, Input, Spin, Tabs, Tag } from "antd";
 import { useLocation, useNavigate } from "react-router-dom";
 import { request } from "../../api/request";
 import SpanEvidence from "./SpanEvidence";
@@ -17,6 +17,15 @@ type Attempt = {
   quality: string | null;
 };
 const EMPTY_ATTEMPTS: Attempt[] = [];
+const spanColors: Record<string, string> = {
+  Agent: "#425cc8",
+  Loop: "#647796",
+  LLM: "#7855cd",
+  Tool: "#078477",
+  SubAgent: "#2681ba",
+  Context: "#aa6715",
+  Checkpoint: "#617493",
+};
 type Span = {
   span_id: string;
   attempt_id: string | null;
@@ -185,13 +194,11 @@ export default function AttemptView({
   const [error, setError] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [narrow, setNarrow] = useState(false);
-  const [drawer, setDrawer] = useState(false);
   const [tab, setTab] = useState("details");
+  const [narrow, setNarrow] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const scrollAnchor = useRef<{ id: string; top: number } | null>(null);
   const resolvedLocation = useRef<string | null>(null);
-  const focus = useRef<HTMLElement | null>(null);
   const generation = useRef(0);
   const pageRequest = useRef<symbol | null>(null);
   const acquirePageRequest = () => {
@@ -389,19 +396,14 @@ export default function AttemptView({
       root.current?.querySelectorAll<HTMLElement>("[data-span-id]") || [],
     ).find((el) => el.dataset.spanId === selected);
     node?.scrollIntoView?.({ block: "nearest" });
-    if (narrow && node) {
-      focus.current = node;
-      setDrawer(true);
-    }
-    // The target effect loads its path before selecting it; later refreshes must
-    // preserve the reader's scroll position rather than scroll back to it.
+    // Preserve the reader's scroll position on later refreshes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationVersion, narrow]);
+  }, [locationVersion]);
   useEffect(() => {
     const el = root.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(([entry]) =>
-      setNarrow(entry.contentRect.width < 1000),
+      setNarrow(entry.contentRect.width < 900),
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -414,7 +416,6 @@ export default function AttemptView({
     setObservedAt(0);
     setSelected(null);
     setCollapsed(new Set());
-    setDrawer(false);
     setError(false);
     if (!selectedAttempt) {
       setLoading(false);
@@ -665,12 +666,10 @@ export default function AttemptView({
       : []),
   );
   const selectedSpan = spans.find((s) => s.span_id === selected);
-  const select = (id: string, target: HTMLElement) => {
+  const select = (id: string) => {
     setSelected(id);
     setTarget(null);
     updateLink(selectedAttempt || null, id);
-    focus.current = target;
-    if (narrow) setDrawer(true);
   };
   const isModelRequest =
     selectedSpan?.span_type === "LLM" &&
@@ -1017,15 +1016,23 @@ export default function AttemptView({
               )}
             </div>
           )}
-          {narrow && !selected && (
-            <aside className={styles.mobileOverview}>{inspector}</aside>
-          )}
-          <div className={styles.layout}>
+          <div className={`${styles.layout} ${narrow ? styles.narrow : ""}`}>
             <div className={styles.timeline}>
               <div className={styles.scroll} role="tree" aria-label="执行树">
                 <div className={styles.header} role="presentation">
                   <strong>Span 树</strong>
-                  <strong>时间轴（相对 Attempt 起点）</strong>
+                  <div
+                    className={styles.axis}
+                    aria-label="时间轴（相对 Attempt 起点）"
+                  >
+                    {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
+                      <span key={fraction}>
+                        {Number.isFinite(origin)
+                          ? ms((end - origin) * fraction * 1000)
+                          : "—"}
+                      </span>
+                    ))}
+                  </div>
                 </div>
                 {rows.map(
                   ({ span, depth, hasChildren, orphan, cycle }, index) => {
@@ -1065,11 +1072,11 @@ export default function AttemptView({
                         }
                         aria-selected={selected === span.span_id}
                         tabIndex={0}
-                        onClick={(e) => select(span.span_id, e.currentTarget)}
+                        onClick={() => select(span.span_id)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            select(span.span_id, e.currentTarget);
+                            select(span.span_id);
                           } else if (
                             e.key === "ArrowDown" ||
                             e.key === "ArrowUp"
@@ -1142,7 +1149,24 @@ export default function AttemptView({
                         <div className={styles.track}>
                           <span
                             className={styles.bar}
-                            style={{ left: `${left}%`, width: `${width}%` }}
+                            style={{
+                              left: `${left}%`,
+                              width: `${Math.min(
+                                width,
+                                Math.max(0, 100 - left),
+                              )}%`,
+                              backgroundColor: ["error", "failed"].includes(
+                                (span.status || "").toLowerCase(),
+                              )
+                                ? "#e04d6b"
+                                : spanColors[
+                                    Object.keys(spanColors).find(
+                                      (key) =>
+                                        key.toLowerCase() ===
+                                        span.span_type.toLowerCase(),
+                                    ) || ""
+                                  ] || "#647796",
+                            }}
                           />
                           <span className={styles.barLabel}>
                             {span.ended_at
@@ -1156,6 +1180,18 @@ export default function AttemptView({
                     );
                   },
                 )}
+              </div>
+              <div className={styles.legend} aria-label="Span 类型图例">
+                {Object.entries(spanColors).map(([label, color]) => (
+                  <span key={label}>
+                    <i style={{ backgroundColor: color }} />
+                    {label}
+                  </span>
+                ))}
+                <span>
+                  <i style={{ backgroundColor: "#e04d6b" }} />
+                  异常
+                </span>
               </div>
               {!loading && !spans.length && <p>此片段暂无 Span</p>}
               {error && (
@@ -1182,22 +1218,10 @@ export default function AttemptView({
                 </Button>
               )}
             </div>
-            {!narrow && <aside className={styles.inspector}>{inspector}</aside>}
+            <aside className={styles.inspector} aria-label="节点详情">
+              {inspector}
+            </aside>
           </div>
-          <Drawer
-            title="节点详情"
-            open={narrow && drawer}
-            onClose={() => {
-              setDrawer(false);
-              setTimeout(() => focus.current?.focus(), 0);
-            }}
-            afterOpenChange={(open) => {
-              if (!open) setTimeout(() => focus.current?.focus(), 0);
-            }}
-            width="min(440px, 100%)"
-          >
-            {inspector}
-          </Drawer>
         </>
       )}
     </div>

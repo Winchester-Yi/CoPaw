@@ -44,19 +44,28 @@
   outline-offset: -2px;
 }
 .summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 24px;
-  padding: 20px 0;
-  border-top: 1px solid #e8e8e8;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 0;
   > div {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    min-width: 120px;
+    min-width: 0;
+    padding: 12px 16px;
+    background: #f4f7fb;
+    border: 1px solid #e1e7ef;
+    border-radius: 8px;
     overflow-wrap: anywhere;
   }
   span {
     color: #667085;
+  }
+}
+
+@media (max-width: 700px) {
+  .summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
