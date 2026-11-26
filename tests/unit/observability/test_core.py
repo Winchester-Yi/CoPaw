@@ -319,9 +319,8 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     assert ended["span_type"] == "LLM"
     assert ended["metrics"]["input_tokens"] == 3
     assert ended["metrics"]["output_tokens"] == 4
-    assert ended["response_model_key"] == "actual-response-model"
-    assert ended["model_key_source"] == "response"
-    assert ended["finish_reason"] == "stop"
+    assert "response_model_key" not in ended
+    assert "finish_reason" not in ended
     assets = [
         json.loads(line)
         for line in payload.splitlines()
@@ -911,9 +910,10 @@ async def test_model_retry_projects_request_attempt_spans_without_duplicate_usag
         async def __call__(self, *_args, **_kwargs):
             self.calls += 1
             if self.calls == 1:
-                return SimpleNamespace(content=[])
+                return SimpleNamespace(content=[], usage={"input_tokens": 10})
             return SimpleNamespace(
                 content=[{"type": "text", "text": "private answer"}],
+                usage={"input_tokens": 20, "output_tokens": 0},
             )
 
     async def on_attempt(index, streaming):
@@ -974,8 +974,13 @@ async def test_model_retry_projects_request_attempt_spans_without_duplicate_usag
         and record.get("operation") == "chat"
         and record["event_name"] == "span.ended"
     )
-    assert logical_end["metrics"].get("input_tokens") is None
-    assert logical_end["metrics"].get("output_tokens") is None
+    assert [record["metrics"]["input_tokens"] for record in attempt_ends] == [
+        10,
+        20,
+    ]
+    assert "output_tokens" not in attempt_ends[0]["metrics"]
+    assert attempt_ends[1]["metrics"]["output_tokens"] == 0
+    assert logical_end["metrics"]["input_tokens"] == 20
     assert "private answer" not in stream.getvalue()
 
 
@@ -1026,9 +1031,8 @@ async def test_model_wrapper_records_first_nonempty_stream_chunk(monkeypatch):
     assert ended["metrics"]["first_chunk_us"] >= 0
     assert ended["metrics"]["first_visible_text_us"] >= 0
     assert ended["metrics"]["usage_known"] is True
-    assert ended["response_model_key"] == "stream-response-model"
-    assert ended["model_key_source"] == "response"
-    assert ended["finish_reason"] == "stop"
+    assert "response_model_key" not in ended
+    assert "finish_reason" not in ended
 
 
 @pytest.mark.asyncio
@@ -1081,7 +1085,7 @@ async def test_model_wrapper_preserves_latest_stream_usage_snapshot(
     assert ended["metrics"]["output_tokens"] == 4
     assert "first_chunk_us" not in ended["metrics"]
     assert "first_visible_text_us" not in ended["metrics"]
-    assert ended["response_model_key"] == "actual-model"
+    assert "response_model_key" not in ended
 
 
 @pytest.mark.asyncio
@@ -1308,7 +1312,7 @@ async def test_model_wrapper_keeps_concurrent_run_spans_isolated(monkeypatch):
             call_id = messages[0]["call_id"]
             return SimpleNamespace(
                 content=[{"type": "text", "text": f"private-{call_id}"}],
-                metadata={"model": f"response-{call_id}"},
+                usage={"input_tokens": 1 if call_id == "first" else 2},
             )
 
     observer = Observability()
@@ -1335,12 +1339,12 @@ async def test_model_wrapper_keeps_concurrent_run_spans_isolated(monkeypatch):
     ended = [
         record for record in records if record["event_name"] == "span.ended"
     ]
-    run_to_response = {
-        record["obs_run_id"]: record["response_model_key"] for record in ended
-    }
-    assert run_to_response == {
-        context.obs_run_id: f"response-{call_id}"
-        for call_id, context in contexts.items()
+    assert {
+        record["obs_run_id"]: record["metrics"]["input_tokens"]
+        for record in ended
+    } == {
+        contexts["first"].obs_run_id: 1,
+        contexts["second"].obs_run_id: 2,
     }
     assert "private-first" not in stream.getvalue()
     assert "private-second" not in stream.getvalue()
@@ -1666,19 +1670,30 @@ def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
 
 
 def test_emit_raw_forwards_child_lines_and_rejects_bad_payloads():
-    """worker 转发只接受合法单行 JSON，并计入丢弃计数。"""
+    """worker 转发验证正式协议，并再次应用元数据白名单。"""
     stream = io.StringIO()
     emitter = JsonlEmitter(EmitterConfig(), stream=stream)
-    line = b'{"event_name":"span.ended","obs_span_id":"span-1"}\n'
+    original = io.StringIO()
+    child = JsonlEmitter(EmitterConfig(), stream=original)
+    Observability(child).admit_run(
+        scope=Scope("unit", "source", "tenant", "agent"),
+        enabled=True,
+    )
+    assert child.close() == 0
+    expected = json.loads(original.getvalue().splitlines()[0])
+    line = (
+        json.dumps({**expected, "content": "internal body"}).encode() + b"\n"
+    )
 
     assert emitter.emit_raw(line) is True
+    assert emitter.emit_raw(b'{"content":"internal body"}\n') is False
     assert emitter.emit_raw(b"not-json") is False
     assert emitter.emit_raw(b"") is False
     assert emitter.emit_raw(b'{"ok":1}' + b"x" * (24 * 1024)) is False
     emitter.close()
 
-    assert stream.getvalue() == line.decode("utf-8")
-    assert emitter.dropped_count == 3
+    assert json.loads(stream.getvalue()) == expected
+    assert emitter.dropped_count == 4
 
 
 def test_service_unit_prefers_business_env_then_legacy(monkeypatch):

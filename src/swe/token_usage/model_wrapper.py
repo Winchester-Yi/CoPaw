@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Model wrapper that records token usage from LLM responses."""
 
+from contextlib import aclosing
 from datetime import date
 from typing import Any, AsyncGenerator, Literal, Type
 
@@ -10,18 +11,27 @@ from agentscope.model._model_usage import ChatUsage
 from pydantic import BaseModel
 
 from .manager import get_token_usage_manager
+from ..utils.close_aware_stream import CloseAwareStream
 
 
 class TokenRecordingModelWrapper(ChatModelBase):
     """Wraps a ChatModelBase to record token usage on each call."""
 
     def __init__(self, provider_id: str, model: ChatModelBase) -> None:
+        self._model = model
         super().__init__(
             model_name=getattr(model, "model_name", "unknown"),
             stream=getattr(model, "stream", True),
         )
-        self._model = model
         self._provider_id = provider_id
+
+    @property
+    def stream(self) -> bool:
+        return self._model.stream
+
+    @stream.setter
+    def stream(self, value: bool) -> None:
+        self._model.stream = value
 
     def _extract_usage(self, result: ChatResponse) -> ChatUsage | None:
         """Extract usage from result using same logic as old version.
@@ -88,7 +98,7 @@ class TokenRecordingModelWrapper(ChatModelBase):
         )
 
         if isinstance(result, AsyncGenerator):
-            return self._wrap_stream(result)
+            return CloseAwareStream(self._wrap_stream(result), result.aclose)
 
         # Extract usage using same logic as old version
         usage = self._extract_usage(result)
@@ -100,10 +110,11 @@ class TokenRecordingModelWrapper(ChatModelBase):
         stream: AsyncGenerator[ChatResponse, None],
     ) -> AsyncGenerator[ChatResponse, None]:
         last_usage: ChatUsage | None = None
-        async for chunk in stream:
-            if getattr(chunk, "usage", None) is not None:
-                last_usage = chunk.usage
-            yield chunk
+        async with aclosing(stream):
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    last_usage = chunk.usage
+                yield chunk
 
         # Try model's _last_usage if no usage from stream
         if last_usage is None:

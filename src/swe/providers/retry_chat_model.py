@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Awaitable
 
 from agentscope.model import ChatModelBase
 from agentscope.model._model_response import ChatResponse
+
+from ..observability.instrumentation import record_model_response_observation
+from ..utils.close_aware_stream import CloseAwareStream
 
 from ..constant import (
     DEFAULT_LLM_CHAT_MAX_CONCURRENT,
@@ -330,8 +334,8 @@ class RetryChatModel(ChatModelBase):
             Callable[[int, bool], Awaitable[None]] | None
         ) = None,
     ) -> None:
-        super().__init__(model_name=inner.model_name, stream=inner.stream)
         self._inner = inner
+        super().__init__(model_name=inner.model_name, stream=inner.stream)
         self._on_retry = on_retry
         self._on_request_attempt = on_request_attempt
         self._retry_config = _normalize_retry_config(retry_config)
@@ -350,6 +354,14 @@ class RetryChatModel(ChatModelBase):
 
     # Expose the real model's class so that formatter mapping keeps working
     # when code inspects ``model.__class__`` after wrapping.
+    @property
+    def stream(self) -> bool:
+        return self._inner.stream
+
+    @stream.setter
+    def stream(self, value: bool) -> None:
+        self._inner.stream = value
+
     @property
     def inner_class(self) -> type:
         return self._inner.__class__
@@ -475,7 +487,7 @@ class RetryChatModel(ChatModelBase):
                         f"{limiter_scope.agent_id}, workload={workload})",
                     ) from exc
 
-                await self._notify_request_attempt(call_attempt)
+                await self._notify_request_attempt(call_attempt, kwargs)
                 result = await asyncio.wait_for(
                     self._inner(*args, **kwargs),
                     timeout=self._call_timeout,
@@ -486,19 +498,30 @@ class RetryChatModel(ChatModelBase):
                     # _consume_stream_with_slot internally and handles
                     # retries on stream failure.
                     owns_semaphore = False
-                    return self._wrap_stream(
-                        result,
-                        args,
-                        kwargs,
-                        transient_attempt,
-                        attempts,
-                        call_attempt,
-                        limiter,
-                        limiter_scope,
-                        workload,
-                        acquire_timeout,
+
+                    async def close_unstarted() -> None:
+                        try:
+                            await result.aclose()
+                        finally:
+                            limiter.release()
+
+                    return CloseAwareStream(
+                        self._wrap_stream(
+                            result,
+                            args,
+                            kwargs,
+                            transient_attempt,
+                            attempts,
+                            call_attempt,
+                            limiter,
+                            limiter_scope,
+                            workload,
+                            acquire_timeout,
+                        ),
+                        close_unstarted,
                     )
 
+                record_model_response_observation(result)
                 if not _has_usable_model_output(result):
                     if empty_output_retries_remaining <= 0:
                         raise EmptyModelOutputError(
@@ -582,11 +605,20 @@ class RetryChatModel(ChatModelBase):
         await self._notify_retry(attempt, max_attempts, exc, delay)
         await asyncio.sleep(delay)
 
-    async def _notify_request_attempt(self, attempt: int) -> None:
+    async def _notify_request_attempt(
+        self, attempt: int, kwargs: dict
+    ) -> None:
         if self._on_request_attempt is None:
             return
         try:
-            await self._on_request_attempt(attempt, bool(self.stream))
+            stream = kwargs.get(
+                "stream",
+                getattr(self._inner, "generate_kwargs", {}).get(
+                    "stream",
+                    self.stream,
+                ),
+            )
+            await self._on_request_attempt(attempt, bool(stream))
         except Exception:
             pass
 
@@ -639,8 +671,12 @@ class RetryChatModel(ChatModelBase):
         stream: AsyncGenerator[ChatResponse, None],
         limiter: LLMRateLimiter,
     ) -> AsyncGenerator[tuple[ChatResponse, bool], None]:
-        async for chunk in self._consume_stream_with_slot(stream, limiter):
-            yield chunk, _has_usable_model_output(chunk)
+        async with aclosing(
+            self._consume_stream_with_slot(stream, limiter),
+        ) as chunks:
+            async for chunk in chunks:
+                record_model_response_observation(chunk)
+                yield chunk, _has_usable_model_output(chunk)
 
     async def _consume_empty_output_retry(
         self,
@@ -692,15 +728,15 @@ class RetryChatModel(ChatModelBase):
         try:
             try:
                 has_usable_output = False
-                async for (
-                    chunk,
-                    chunk_usable,
-                ) in self._consume_stream_with_usage(
-                    stream,
-                    limiter,
-                ):
-                    has_usable_output = has_usable_output or chunk_usable
-                    yield chunk
+                async with aclosing(
+                    self._consume_stream_with_usage(
+                        stream,
+                        limiter,
+                    )
+                ) as chunks:
+                    async for chunk, chunk_usable in chunks:
+                        has_usable_output = has_usable_output or chunk_usable
+                        yield chunk
                 if has_usable_output:
                     return  # stream completed without error
                 empty_output_retries_remaining = (
@@ -735,7 +771,9 @@ class RetryChatModel(ChatModelBase):
                     )
                     acquired = True
 
-                    await self._notify_request_attempt(call_attempt)
+                    await self._notify_request_attempt(
+                        call_attempt, call_kwargs
+                    )
                     result = await asyncio.wait_for(
                         self._inner(*call_args, **call_kwargs),
                         timeout=self._call_timeout,
@@ -744,17 +782,17 @@ class RetryChatModel(ChatModelBase):
                     if isinstance(result, AsyncGenerator):
                         owns_semaphore = False
                         has_usable_output = False
-                        async for (
-                            chunk,
-                            chunk_usable,
-                        ) in self._consume_stream_with_usage(
-                            result,
-                            limiter,
-                        ):
-                            has_usable_output = (
-                                has_usable_output or chunk_usable
+                        async with aclosing(
+                            self._consume_stream_with_usage(
+                                result,
+                                limiter,
                             )
-                            yield chunk
+                        ) as chunks:
+                            async for chunk, chunk_usable in chunks:
+                                has_usable_output = (
+                                    has_usable_output or chunk_usable
+                                )
+                                yield chunk
                         if has_usable_output:
                             return  # stream completed without error
                         empty_output_retries_remaining = await self._consume_empty_output_retry(
@@ -765,6 +803,7 @@ class RetryChatModel(ChatModelBase):
                         )
                         continue
 
+                    record_model_response_observation(result)
                     if _has_usable_model_output(result):
                         yield result
                         return

@@ -6,11 +6,13 @@ Provides TracingModelWrapper that intercepts LLM calls to record tracing events.
 
 import asyncio
 import logging
+from contextlib import aclosing
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional, Sequence, Union
 
 from agentscope.model._model_response import ChatResponse
 
+from ..utils.close_aware_stream import CloseAwareStream
 from .manager import get_trace_manager, get_current_trace
 
 logger = logging.getLogger(__name__)
@@ -147,11 +149,11 @@ class TracingModelWrapper:
             # Handle streaming response
             if isinstance(result, AsyncGenerator):
                 if span_id:
-                    return self._wrap_stream(
-                        result,
-                        trace_ctx,
-                        trace_mgr,
-                        span_id,
+                    return CloseAwareStream(
+                        self._wrap_stream(
+                            result, trace_ctx, trace_mgr, span_id
+                        ),
+                        result.aclose,
                     )
                 # No span_id, just return the stream without tracing
                 return result
@@ -227,12 +229,13 @@ class TracingModelWrapper:
         """Wrap streaming response to collect token usage."""
         last_usage = None
         chunk_count = 0
-        async for chunk in stream:
-            chunk_count += 1
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage:
-                last_usage = chunk_usage
-            yield chunk
+        async with aclosing(stream):
+            async for chunk in stream:
+                chunk_count += 1
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage:
+                    last_usage = chunk_usage
+                yield chunk
 
         # Extract tokens from stream usage
         input_tokens, output_tokens = self._extract_stream_tokens(last_usage)
@@ -422,3 +425,11 @@ class TracingModelWrapper:
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to wrapped model."""
         return getattr(self._model, name)
+
+    @property
+    def stream(self) -> bool:
+        return self._model.stream
+
+    @stream.setter
+    def stream(self, value: bool) -> None:
+        self._model.stream = value

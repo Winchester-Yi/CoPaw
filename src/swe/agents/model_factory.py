@@ -1126,7 +1126,11 @@ def create_model_and_formatter(
             tenant_id=tenant_id,
             agent_id=resolved_agent_id,
             on_retry=on_model_retry,
-            on_request_attempt=on_model_request_attempt,
+            on_request_attempt=(
+                None
+                if getattr(model, "observes_provider_requests", False)
+                else on_model_request_attempt
+            ),
         )
         from ..observability.instrumentation import ObservabilityModelWrapper
 
@@ -1134,6 +1138,7 @@ def create_model_and_formatter(
             wrapped_model,
             provider_key=provider_id,
             model_key=resolved_slot.model,
+            count_requests=True,
         )
 
         return wrapped_model, formatter

@@ -12,9 +12,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
 
+from ..utils.close_aware_stream import CloseAwareStream
 from .config import capture_enabled
 from .context import bind_context, current_context
-from .emitter import JsonlEmitter, default_emitter
+from .emitter import JsonlEmitter, _TOKEN_PATTERN, default_emitter
 from .models import (
     MetadataEvent,
     ObservabilityContext,
@@ -244,8 +245,8 @@ class SpanHandle:
         return False
 
 
-_current_model_span: ContextVar[SpanHandle | None] = ContextVar(
-    "agentobs_current_model_span",
+_current_model_call: ContextVar[_ModelCall | None] = ContextVar(
+    "agentobs_current_model_call",
     default=None,
 )
 _current_tool_span: ContextVar[SpanHandle | None] = ContextVar(
@@ -256,10 +257,6 @@ _pending_model_response_spans: ContextVar[
     dict[tuple[str, str], SpanHandle | None] | None
 ] = ContextVar(
     "agentobs_pending_model_response_spans",
-    default=None,
-)
-_current_model_request_attempt: ContextVar[SpanHandle | None] = ContextVar(
-    "agentobs_current_model_request_attempt",
     default=None,
 )
 
@@ -603,22 +600,115 @@ def current_agent_step_index() -> int | None:
     return _current_agent_step_index.get()
 
 
+class _ModelRequest:
+    def __init__(self, span: SpanHandle) -> None:
+        self.span = span
+        self.streaming = bool(span._base["streaming"])
+        self.metrics: dict[str, Any] = {}
+        self.response: dict[str, Any] = {}
+        self.saw_openai_response = False
+        self.output_frame = True
+
+    def observe_output(self, value: Any) -> None:
+        if not self.streaming or not self.output_frame:
+            return
+        if "first_visible_text_us" in self.metrics:
+            return
+        visible_text = _has_visible_model_text(value)
+        if not visible_text and not _has_model_output(value):
+            return
+        elapsed = max(
+            0, (time.monotonic_ns() - self.span._started_clock) // 1000
+        )
+        self.metrics.setdefault("first_chunk_us", elapsed)
+        if visible_text:
+            self.metrics.setdefault("first_visible_text_us", elapsed)
+
+    def observe_usage(self, usage: dict[str, int]) -> None:
+        self.metrics.update(usage)
+        if usage:
+            self.metrics["usage_known"] = all(
+                name in self.metrics
+                for name in ("input_tokens", "output_tokens")
+            )
+
+    def end(self, **attributes: Any) -> None:
+        self.span.end(
+            metrics=self.metrics,
+            **{"model_key_source": "request_fallback", **self.response},
+            **attributes,
+        )
+
+
+class _ModelCall:
+    def __init__(self, handle: SpanHandle, count_requests: bool) -> None:
+        self.handle = handle
+        self.count_requests = count_requests
+        self.request: _ModelRequest | None = None
+        self.started_requests = 0
+        self.metrics: dict[str, Any] = {}
+
+    @contextmanager
+    def bind(self):
+        token = _current_model_call.set(self)
+        try:
+            yield
+        finally:
+            _current_model_call.reset(token)
+
+    def observe_response(self, value: Any) -> None:
+        try:
+            usage = _usage_metrics(value)
+            if self.request is not None and not self.request.span._ended:
+                if not self.request.saw_openai_response:
+                    self.request.observe_usage(usage)
+                self.request.observe_output(value)
+            elif not self.count_requests:
+                self.metrics.update(usage)
+                if usage:
+                    self.metrics["usage_known"] = all(
+                        name in self.metrics
+                        for name in ("input_tokens", "output_tokens")
+                    )
+        except Exception:
+            # Evidence capture must not affect the model response.
+            pass
+
+    def end(self, **attributes: Any) -> None:
+        if self.request is not None:
+            self.request.end(**attributes)
+            self.metrics.update(
+                {
+                    name: self.request.metrics[name]
+                    for name in (
+                        "input_tokens",
+                        "output_tokens",
+                        "usage_known",
+                    )
+                    if name in self.request.metrics
+                },
+            )
+        elif self.count_requests and self.started_requests == 0:
+            attributes["no_request_attempts"] = True
+        self.handle.end(metrics=self.metrics, **attributes)
+
+
 def record_model_retry(
     attempt: int,
     error_type: str,
     delay_seconds: float,
 ) -> None:
-    span = _current_model_span.get()
-    if span is None:
+    call = _current_model_call.get()
+    if call is None:
         return
-    _finish_model_request_attempt(
-        status="failed",
-        technical_status="ERROR",
-        has_error=True,
-        error_type=error_type,
-        clear=False,
-    )
-    span.event(
+    if call.request is not None:
+        call.request.end(
+            status="failed",
+            technical_status="ERROR",
+            has_error=True,
+            error_type=error_type,
+        )
+    call.handle.event(
         "model.retry_scheduled",
         retries=attempt,
         error_type=error_type,
@@ -626,54 +716,112 @@ def record_model_retry(
     )
 
 
-def record_model_request_attempt(attempt: int, *, streaming: bool) -> None:
-    logical_span = _current_model_span.get()
-    if logical_span is None:
+def record_model_request_attempt(
+    attempt: int | None,
+    *,
+    streaming: bool,
+    request_model: str | None = None,
+) -> None:
+    call = _current_model_call.get()
+    if call is None:
         return
-    previous = _current_model_request_attempt.get()
+    call.started_requests += 1
+    logical_span = call.handle
+    previous = call.request
     attributes: dict[str, Any] = {
-        "request_attempt_index": attempt,
+        "request_attempt_index": (
+            attempt if attempt is not None else call.started_requests
+        ),
         "streaming": streaming,
     }
     if previous is not None:
-        if not previous._ended:
-            previous.end(
-                status="failed",
-                technical_status="ERROR",
-                has_error=True,
-                error_type="model_retry",
-                phase="model_request",
-            )
+        previous.end(
+            status="failed",
+            technical_status="ERROR",
+            has_error=True,
+            error_type="model_retry",
+            phase="model_request",
+        )
         attributes["links"] = [
-            {"relation_type": "retry_of", "obs_span_id": previous.span_id},
+            {
+                "relation_type": "retry_of",
+                "obs_span_id": previous.span.span_id,
+            },
         ]
     for key in ("provider_key", "request_model_key", "step_index"):
         value = logical_span._base.get(key)
         if value is not None:
             attributes[key] = value
-    attempt_span = Observability().span(
-        "LLM",
-        "request_attempt",
-        name="model.request_attempt",
-        kind="CLIENT",
-        parent_span_id=logical_span.span_id,
-        **attributes,
+    if request_model is not None:
+        attributes["request_model_key"] = request_model
+    with bind_context(logical_span._context):
+        span = Observability().span(
+            "LLM",
+            "request_attempt",
+            name="model.request_attempt",
+            kind="CLIENT",
+            parent_span_id=logical_span.span_id,
+            **attributes,
+        )
+    if span is not None:
+        call.request = _ModelRequest(span)
+
+
+def record_openai_request(*, streaming: bool, request_model: str) -> None:
+    record_model_request_attempt(
+        None,
+        streaming=streaming,
+        request_model=request_model,
     )
-    _current_model_request_attempt.set(attempt_span)
 
 
-def _finish_model_request_attempt(
-    *,
-    clear: bool = True,
-    **attributes: Any,
-) -> None:
-    span = _current_model_request_attempt.get()
-    if span is None:
+def observe_openai_response(value: Any) -> None:
+    """Read safe request facts before the SDK normalizes the response."""
+    call = _current_model_call.get()
+    request = call.request if call is not None else None
+    if request is None or request.span._ended:
         return
-    if not span._ended:
-        span.end(**attributes)
-    if clear:
-        _current_model_request_attempt.set(None)
+    try:
+        request.saw_openai_response = True
+        model = getattr(value, "model", None)
+        if isinstance(model, str) and _TOKEN_PATTERN.fullmatch(model):
+            request.response["response_model_key"] = model
+            request.response["model_key_source"] = "response"
+        usage = getattr(value, "usage", None)
+        request.observe_usage(
+            _token_counts(usage, "prompt_tokens", "completion_tokens"),
+        )
+        choices = getattr(value, "choices", None)
+        request.output_frame = bool(choices)
+        if request.output_frame:
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is not None:
+                request.output_frame = bool(
+                    getattr(delta, "content", None)
+                    or getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                    or getattr(delta, "tool_calls", None)
+                    or getattr(delta, "audio", None)
+                )
+            finish_reason = getattr(choice, "finish_reason", None)
+            if isinstance(finish_reason, str) and finish_reason in {
+                "stop",
+                "length",
+                "tool_calls",
+                "content_filter",
+                "function_call",
+            }:
+                request.response["finish_reason"] = finish_reason
+    except Exception:
+        pass
+
+
+def record_model_response_observation(value: Any) -> None:
+    """Observe the response before retry policy can reject or replace it."""
+    call = _current_model_call.get()
+    if call is not None:
+        call.observe_response(value)
 
 
 class ObservabilityModelWrapper:
@@ -685,7 +833,9 @@ class ObservabilityModelWrapper:
         *,
         provider_key: str,
         model_key: str,
+        count_requests: bool = False,
     ) -> None:
+        self._count_requests = count_requests
         self._model = model
         self._provider_key = provider_key
         self._model_key = model_key
@@ -758,104 +908,57 @@ class ObservabilityModelWrapper:
                 saved_state="not_saved",
                 reference_id=handle.span_id,
             )
-        started = time.monotonic_ns()
-        token = _current_model_span.set(handle)
+        call = _ModelCall(handle, self._count_requests)
         try:
-            result = await self._model(messages, *args, **kwargs)
+            with call.bind():
+                result = await self._model(messages, *args, **kwargs)
             if _is_async_iterable(result):
-                return self._consume_stream(result, handle, started)
-            response_metadata = _model_response_metadata(result)
-            if "model_key_source" not in response_metadata:
-                response_metadata["model_key_source"] = "request_fallback"
-            _remember_model_response_span(
-                handle,
-                getattr(result, "id", None),
-            )
-            _finish_model_request_attempt(status="succeeded")
-            handle.end(
-                status="succeeded",
-                metrics=_usage_metrics(result),
-                **response_metadata,
-            )
+
+                async def close_unstarted() -> None:
+                    call.end(status="cancelled")
+                    await self._close_stream(result)
+
+                return CloseAwareStream(
+                    self._consume_stream(result, call),
+                    close_unstarted,
+                )
+            call.observe_response(result)
+            _remember_model_response_span(handle, getattr(result, "id", None))
+            call.end(status="succeeded")
             return result
         except asyncio.CancelledError:
-            _finish_model_request_attempt(status="cancelled")
-            handle.end(status="cancelled", technical_status="cancelled")
+            call.end(status="cancelled")
             raise
         except Exception as exc:
-            _finish_model_request_attempt(
-                status="failed",
-                technical_status="ERROR",
-                has_error=True,
-                error_type=type(exc).__name__,
-                phase="model_request",
-            )
-            handle.end(
+            call.end(
                 status="failed",
                 technical_status="ERROR",
                 has_error=True,
                 error_type=type(exc).__name__,
             )
             raise
-        finally:
-            _current_model_span.reset(token)
 
-    async def _consume_stream(self, stream, handle: SpanHandle, started: int):
-        first_chunk_us = None
-        first_visible_text_us = None
-        latest_metrics: dict[str, Any] = {}
-        response_metadata: dict[str, Any] = {}
+    async def _consume_stream(self, stream, call: _ModelCall):
         response_id = None
-        token = _current_model_span.set(handle)
         try:
-            async for chunk in stream:
-                response_id = getattr(chunk, "id", None)
-                if first_chunk_us is None and _has_model_output(chunk):
-                    first_chunk_us = max(
-                        0,
-                        (time.monotonic_ns() - started) // 1000,
-                    )
-                if first_visible_text_us is None and _has_visible_model_text(
-                    chunk,
-                ):
-                    first_visible_text_us = max(
-                        0,
-                        (time.monotonic_ns() - started) // 1000,
-                    )
-                latest_metrics = _usage_metrics(chunk) or latest_metrics
-                response_metadata.update(_model_response_metadata(chunk))
+            iterator = aiter(stream)
+            while True:
+                try:
+                    with call.bind():
+                        chunk = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                response_id = getattr(chunk, "id", None) or response_id
+                call.observe_response(chunk)
+                self._observe_logical_latency(call, chunk)
                 yield chunk
-            metrics = dict(latest_metrics)
-            if first_chunk_us is not None:
-                metrics["first_chunk_us"] = first_chunk_us
-            if first_visible_text_us is not None:
-                metrics["first_visible_text_us"] = first_visible_text_us
-            if "model_key_source" not in response_metadata:
-                response_metadata["model_key_source"] = "request_fallback"
-            _remember_model_response_span(handle, response_id)
-            _finish_model_request_attempt(status="succeeded")
-            handle.end(
-                status="succeeded",
-                metrics=metrics,
-                **response_metadata,
-            )
-        except asyncio.CancelledError:
-            _finish_model_request_attempt(status="cancelled")
-            handle.end(status="cancelled", technical_status="cancelled")
-            raise
-        except GeneratorExit:
-            _finish_model_request_attempt(status="cancelled")
-            handle.end(status="cancelled", technical_status="cancelled")
+            _remember_model_response_span(call.handle, response_id)
+            call.end(status="succeeded")
+        except (asyncio.CancelledError, GeneratorExit):
+            call.end(status="cancelled")
             raise
         except Exception as exc:
-            _finish_model_request_attempt(
-                status="failed",
-                technical_status="ERROR",
-                has_error=True,
-                error_type=type(exc).__name__,
-                phase="model_request",
-            )
-            handle.end(
+            call.end(
                 status="failed",
                 technical_status="ERROR",
                 has_error=True,
@@ -863,40 +966,68 @@ class ObservabilityModelWrapper:
             )
             raise
         finally:
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                try:
-                    await close()
-                except Exception:
-                    pass
-            _current_model_span.reset(token)
+            with call.bind():
+                await self._close_stream(stream)
+
+    @staticmethod
+    async def _close_stream(stream: Any) -> None:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _observe_logical_latency(call: _ModelCall, chunk: Any) -> None:
+        try:
+            if not _has_model_output(chunk):
+                return
+            elapsed = max(
+                0,
+                (time.monotonic_ns() - call.handle._started_clock) // 1000,
+            )
+            call.metrics.setdefault("first_chunk_us", elapsed)
+            if _has_visible_model_text(chunk):
+                call.metrics.setdefault("first_visible_text_us", elapsed)
+        except Exception:
+            pass
 
 
 def _has_model_output(value: Any) -> bool:
-    content = getattr(value, "content", None)
-    if content is None and isinstance(value, dict):
-        content = value.get("content")
-    return bool(content)
+    content = _get_field(value, "content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, (list, tuple)):
+        return False
+    for block in content:
+        block_type = _get_field(block, "type")
+        fields = {
+            "text": ("text",),
+            "thinking": ("thinking",),
+            "reasoning": ("reasoning", "text"),
+            "tool_use": ("name", "raw_input", "input"),
+            "audio": ("source", "data"),
+        }.get(block_type, ())
+        if any(
+            field.strip() if isinstance(field, str) else bool(field)
+            for name in fields
+            if (field := _get_field(block, name)) is not None
+        ):
+            return True
+    return False
 
 
 def _has_visible_model_text(value: Any) -> bool:
-    content = getattr(value, "content", None)
-    if content is None and isinstance(value, dict):
-        content = value.get("content")
+    content = _get_field(value, "content")
+    if isinstance(content, str):
+        return bool(content.strip())
     if not isinstance(content, (list, tuple)):
         return False
     return any(
-        (
-            isinstance(block, dict)
-            and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-            and bool(block["text"].strip())
-        )
-        or (
-            getattr(block, "type", None) == "text"
-            and isinstance(getattr(block, "text", None), str)
-            and bool(block.text.strip())
-        )
+        _get_field(block, "type") == "text"
+        and isinstance(text := _get_field(block, "text"), str)
+        and bool(text.strip())
         for block in content
     )
 
@@ -908,38 +1039,34 @@ def _is_async_iterable(value: Any) -> bool:
         return False
 
 
-def _usage_metrics(value: Any) -> dict[str, Any]:
-    usage = getattr(value, "usage", None)
-    if usage is None and isinstance(value, dict):
-        usage = value.get("usage")
-    if usage is None:
-        return {}
-    metrics = {"usage_known": True}
-    for output_key, input_key in (
-        ("input_tokens", "input_tokens"),
-        ("output_tokens", "output_tokens"),
+def _get_field(value: Any, name: str) -> Any:
+    return (
+        value.get(name)
+        if isinstance(value, dict)
+        else getattr(value, name, None)
+    )
+
+
+def _token_counts(
+    usage: Any,
+    input_field: str,
+    output_field: str,
+) -> dict[str, int]:
+    metrics = {}
+    for field, name in (
+        (input_field, "input_tokens"),
+        (output_field, "output_tokens"),
     ):
-        token_value = getattr(usage, input_key, None)
-        if token_value is None and isinstance(usage, dict):
-            token_value = usage.get(input_key)
-        if isinstance(token_value, int) and token_value >= 0:
-            metrics[output_key] = token_value
+        count = _get_field(usage, field)
+        if type(count) is int and count >= 0:
+            metrics[name] = count
     return metrics
 
 
-def _model_response_metadata(value: Any) -> dict[str, Any]:
-    metadata = getattr(value, "metadata", None)
-    if not isinstance(metadata, dict):
-        return {}
-    response_model = metadata.get("model")
-    finish_reason = metadata.get("finish_reason")
-    result = {}
-    if isinstance(response_model, str) and response_model.strip():
-        result["response_model_key"] = response_model[:256]
-        result["model_key_source"] = "response"
-    if isinstance(finish_reason, str) and finish_reason.strip():
-        result["finish_reason"] = finish_reason[:64]
-    return result
+def _usage_metrics(value: Any) -> dict[str, int]:
+    return _token_counts(
+        _get_field(value, "usage"), "input_tokens", "output_tokens"
+    )
 
 
 def _system_prompt_digest(messages: Any) -> str | None:
