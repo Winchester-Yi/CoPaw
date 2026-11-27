@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from .emitter import _project
+from .emitter import COMPACTION_STRATEGIES, _project
 from .store import ObservabilityStore
 
 _MAX_BATCH = 32
@@ -48,6 +48,9 @@ _FIELD_BYTES = {
     "terminal_fact_source": 32,
     "model_key_source": 24,
     "finish_reason": 64,
+    "provider_key": 256,
+    "request_model_key": 256,
+    "response_model_key": 256,
 }
 _UUID_FIELDS = (
     "obs_run_id",
@@ -109,22 +112,20 @@ _APPROVAL_DECISIONS = frozenset(
 _TERMINAL_FACT_SOURCES = frozenset({"business_settlement"})
 
 try:
-    from mysql.connector.errors import (
-        InterfaceError as _InterfaceError,
-        InternalError as _InternalError,
-        OperationalError as _OperationalError,
-        ProgrammingError as _ProgrammingError,
-    )
-
-    # 连接/权限/连接池类错误必须向上抛出，让整批稍后重试。
-    _INFRA_ERRORS: tuple[type[BaseException], ...] = (
-        _InterfaceError,
-        _OperationalError,
-        _InternalError,
-        _ProgrammingError,
-    )
+    from mysql.connector.errors import Error as _MySQLError
 except ImportError:  # 未安装 MySQL 驱动时只保留 Python 内建分类
-    _INFRA_ERRORS = ()
+    _MySQLError = ()
+
+
+# Statement errors tied to the current row's values or constraints.
+_ROW_SQL_ERRORS = {1048, 1062, 1264, 1364, 1366, 1406, 1451, 1452, 3819, 4025}
+
+
+class _RowWriteError(Exception):
+    def __init__(self, ingest_id: int, errno: int):
+        super().__init__(ingest_id, errno)
+        self.ingest_id = ingest_id
+        self.errno = errno
 
 
 def _timestamp(value: Any) -> datetime:
@@ -206,6 +207,10 @@ def _validate_event_fields(event: dict[str, Any]) -> None:
     required = _REQUIRED_EVENT_FIELDS.get(name, ())
     if any(event.get(key) is None for key in required):
         raise ValueError("event_missing_required_field")
+    if name in {"span.started", "span.ended"} and (
+        event["phase_key"] != name.split(".", 1)[1] or event["local_seq"] != 0
+    ):
+        raise ValueError("invalid_span_slot")
     if name == "run.ended":
         if event["status"] not in _RUN_TERMINAL_STATUSES:
             raise ValueError("invalid_run_terminal_status")
@@ -320,6 +325,10 @@ def _validate_lifecycle_event(event: dict[str, Any]) -> None:
     _validate_related_ids(event)
     _validate_scope(event)
     _validate_lifecycle_values(event)
+    if event.get("span_type") in {"Context", "Checkpoint"} or any(
+        key in event for key in ("compaction_strategy", "checkpoint_id")
+    ):
+        _validate_memory_span(event)
 
 
 def _validate_entity_identity(event: dict[str, Any]) -> None:
@@ -388,6 +397,13 @@ def _validate_scope(event: dict[str, Any]) -> None:
 def _validate_lifecycle_values(event: dict[str, Any]) -> None:
     if not isinstance(event.get("capture_enabled"), bool):
         raise ValueError("invalid_capture_snapshot")
+    if event.get("no_request_attempts") is not None and (
+        not isinstance(event["no_request_attempts"], bool)
+        or event.get("event_name") != "span.ended"
+        or event.get("span_type") != "LLM"
+        or event.get("operation") != "chat"
+    ):
+        raise ValueError("invalid_request_attempt_coverage")
     has_error = event.get("has_error")
     if has_error is not None and not isinstance(has_error, bool):
         raise ValueError("invalid_error_flag")
@@ -430,6 +446,27 @@ def _validate_lifecycle_values(event: dict[str, Any]) -> None:
         > 24 * 1024
     ):
         raise ValueError("event_too_large")
+
+
+def _validate_memory_span(event: dict[str, Any]) -> None:
+    span_type = event.get("span_type")
+    operation = event.get("operation")
+    strategy = event.get("compaction_strategy")
+    checkpoint_id = event.get("checkpoint_id")
+    if span_type == "Context":
+        if operation != "compact" or strategy not in COMPACTION_STRATEGIES:
+            raise ValueError("invalid_compaction_strategy")
+    elif strategy is not None:
+        raise ValueError("invalid_compaction_strategy")
+    if span_type == "Checkpoint" and operation not in {"save", "restore"}:
+        raise ValueError("invalid_checkpoint_operation")
+    if checkpoint_id is not None:
+        if span_type != "Checkpoint":
+            raise ValueError("invalid_checkpoint_identity")
+        try:
+            _require_uuid(event, "checkpoint_id")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid_checkpoint_identity") from exc
 
 
 def _validate_span_event_fields(event: dict[str, Any]) -> None:
@@ -581,14 +618,38 @@ def _validate_tool_fields(event: dict[str, Any], tool: Any) -> None:
 
 
 def _semantic_json(event: dict[str, Any]) -> str:
+    provenance = {"event_id", "producer_id", "resource"}
     semantic = {
-        k: v for k, v in event.items() if k not in {"event_id", "producer_id"}
+        key: value for key, value in event.items() if key not in provenance
     }
     return json.dumps(
         semantic,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+    )
+
+
+def _span_shape_conflicts(
+    event: dict[str, Any],
+    projected: dict[str, Any],
+) -> bool:
+    if event["event_name"] not in {"span.started", "span.ended"}:
+        return False
+    if any(
+        event.get(key) != projected[key] for key in ("span_type", "operation")
+    ):
+        return True
+    if event["span_type"] != "LLM" or event["operation"] != "request_attempt":
+        return False
+    previous_index = json.loads(projected["metadata_text"]).get(
+        "request_attempt_index",
+    )
+    index = event.get("request_attempt_index")
+    return (
+        previous_index is not None
+        and index is not None
+        and previous_index != index
     )
 
 
@@ -646,6 +707,21 @@ class InboxProjector:
             await asyncio.sleep(self.poll_seconds)
 
     async def project_batch(self) -> int:
+        try:
+            return await self._project_pending_batch()
+        except _RowWriteError as exc:
+            # The database session invalidates a lease after a statement error.
+            # The failed batch has rolled back. Reject only the failed row in a
+            # fresh transaction and let the next batch retry its healthy peers.
+            async with self.connection.transaction() as session:
+                return await session.execute(
+                    "UPDATE swe_agentobs_inbox SET processing_state=2, "
+                    "processed_at=UTC_TIMESTAMP(6), reason_code=%s, payload_text=NULL "
+                    "WHERE ingest_id=%s AND processing_state=0",
+                    (f"projection_sql_error:{exc.errno}", exc.ingest_id),
+                )
+
+    async def _project_pending_batch(self) -> int:
         async with self.connection.acquire() as session:
             await session.execute(
                 "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
@@ -686,8 +762,9 @@ class InboxProjector:
             reason = None
             try:
                 state = await self._store_event(session, event, ingest_id)
-            except _INFRA_ERRORS:
-                # 连接/权限类错误交给批次重试，不能当作坏行丢弃。
+            except _MySQLError as exc:
+                if exc.errno in _ROW_SQL_ERRORS:
+                    raise _RowWriteError(ingest_id, exc.errno) from exc
                 raise
             except Exception as exc:  # noqa: BLE001 - 行级错误就地隔离
                 await session.execute(
@@ -844,7 +921,8 @@ class InboxProjector:
     async def _span_identity_matches(self, session, event, run_id) -> bool:
         if event.get("obs_span_id"):
             existing_span = await session.fetch_one(
-                "SELECT run_id,attempt_id,parent_span_id FROM swe_agentobs_spans WHERE span_id=%s FOR UPDATE",
+                "SELECT run_id,attempt_id,parent_span_id,span_type,operation,metadata_text "
+                "FROM swe_agentobs_spans WHERE span_id=%s FOR UPDATE",
                 (event["obs_span_id"],),
             )
             if existing_span and (
@@ -852,6 +930,7 @@ class InboxProjector:
                 or existing_span["attempt_id"] != event.get("obs_attempt_id")
                 or existing_span["parent_span_id"]
                 != event.get("parent_obs_span_id")
+                or _span_shape_conflicts(event, existing_span)
             ):
                 return False
         return True
@@ -1055,8 +1134,13 @@ class InboxProjector:
         )
 
     async def _project_span(self, session, event, metadata, run_id) -> None:
-        metrics = event.get("metrics") or {}
         is_end = event["event_name"] == "span.ended"
+        has_start = is_end and await session.fetch_one(
+            "SELECT 1 FROM swe_agentobs_events "
+            "WHERE entity_kind='span' AND entity_id=%s "
+            "AND phase_key='started' AND local_seq=0 AND event_name='span.started'",
+            (event["obs_span_id"],),
+        )
         await session.execute(
             "INSERT INTO swe_agentobs_spans (span_id,run_id,attempt_id,parent_span_id,span_type,operation,kind,name,step_index,"
             "started_at,ended_at,status,technical_status,has_error,error_type,quality,duration_us,time_to_first_chunk_us,"
@@ -1068,7 +1152,8 @@ class InboxProjector:
             "ended_at=COALESCE(ended_at,VALUES(ended_at)),"
             "technical_status=COALESCE(VALUES(technical_status),technical_status),has_error=COALESCE(VALUES(has_error),has_error),"
             "error_type=COALESCE(VALUES(error_type),error_type),"
-            "quality=IF(VALUES(ended_at) IS NOT NULL,VALUES(quality),quality),"
+            "quality=CASE WHEN VALUES(ended_at) IS NOT NULL THEN VALUES(quality) "
+            "WHEN ended_at IS NOT NULL THEN 'observed' ELSE quality END,"
             "duration_us=COALESCE(VALUES(duration_us),duration_us),"
             "time_to_first_chunk_us=COALESCE(VALUES(time_to_first_chunk_us),time_to_first_chunk_us),"
             "time_to_first_visible_text_us=COALESCE(VALUES(time_to_first_visible_text_us),time_to_first_visible_text_us),"
@@ -1078,11 +1163,13 @@ class InboxProjector:
             "provider_key=COALESCE(VALUES(provider_key),provider_key),"
             "request_model_key=COALESCE(VALUES(request_model_key),request_model_key),"
             "response_model_key=COALESCE(VALUES(response_model_key),response_model_key),"
-            "model_key_source=COALESCE(VALUES(model_key_source),model_key_source),"
+            "model_key_source=IF(VALUES(ended_at) IS NOT NULL OR ended_at IS NULL,"
+            "COALESCE(VALUES(model_key_source),model_key_source),model_key_source),"
             "streaming=COALESCE(VALUES(streaming),streaming),"
             "finish_reason=COALESCE(VALUES(finish_reason),finish_reason),"
             "tool_key=COALESCE(VALUES(tool_key),tool_key),"
-            "metadata_text=VALUES(metadata_text)",
+            "metadata_text=IF(VALUES(ended_at) IS NOT NULL OR ended_at IS NULL,"
+            "VALUES(metadata_text),metadata_text)",
             (
                 event["obs_span_id"],
                 run_id,
@@ -1109,12 +1196,12 @@ class InboxProjector:
                     else None
                 ),
                 event.get("error_type"),
-                _span_projection_quality(event, is_end),
-                metrics.get("duration_us"),
-                metrics.get("first_chunk_us"),
-                metrics.get("first_visible_text_us"),
-                metrics.get("input_tokens"),
-                metrics.get("output_tokens"),
+                "observed" if has_start else "partial",
+                (event.get("metrics") or {}).get("duration_us"),
+                (event.get("metrics") or {}).get("first_chunk_us"),
+                (event.get("metrics") or {}).get("first_visible_text_us"),
+                (event.get("metrics") or {}).get("input_tokens"),
+                (event.get("metrics") or {}).get("output_tokens"),
                 event.get("response_model_key")
                 or event.get("request_model_key"),
                 event.get("provider_key"),
@@ -1131,42 +1218,45 @@ class InboxProjector:
                 metadata,
             ),
         )
-        if is_end:
-            await self._refresh_span_totals(session, event, run_id)
+        await self._refresh_span_totals(session, event, run_id, is_end)
 
-    async def _refresh_span_totals(self, session, event, run_id) -> None:
-        await session.execute(
-            "UPDATE swe_agentobs_runs SET "
-            "span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
-            "WHERE run_id=%s), "
-            "error_span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
-            "WHERE run_id=%s AND (has_error=1 OR "
-            "technical_status='ERROR')), "
-            "tool_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
-            "WHERE run_id=%s AND span_type='Tool' "
-            "AND ended_at IS NOT NULL) "
-            "WHERE run_id=%s",
-            (run_id, run_id, run_id, run_id),
-        )
-        if (
-            event.get("span_type") == "LLM"
-            and event.get("operation") == "chat"
-        ):
+    async def _refresh_span_totals(
+        self,
+        session,
+        event,
+        run_id,
+        is_end,
+    ) -> None:
+        if is_end:
             await session.execute(
                 "UPDATE swe_agentobs_runs SET "
-                "llm_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
-                "WHERE run_id=%s AND span_type='LLM' AND operation='chat' "
-                "AND ended_at IS NOT NULL), "
-                "input_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(input_tokens) "
-                "THEN COALESCE(SUM(input_tokens),0) ELSE NULL END "
+                "span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                "WHERE run_id=%s), "
+                "error_span_count=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND (has_error=1 OR "
+                "technical_status='ERROR')), "
+                "tool_calls=(SELECT COUNT(*) FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND span_type='Tool' "
+                "AND ended_at IS NOT NULL) "
+                "WHERE run_id=%s",
+                (run_id, run_id, run_id, run_id),
+            )
+        if event.get("span_type") == "LLM" and event.get("operation") in {
+            "chat",
+            "request_attempt",
+        }:
+            await session.execute(
+                "UPDATE swe_agentobs_runs SET "
+                "llm_calls=(SELECT NULLIF(COUNT(*),0) FROM swe_agentobs_spans "
+                "WHERE run_id=%s AND span_type='LLM' AND operation='chat'), "
+                "input_tokens=(SELECT SUM(input_tokens) "
                 "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
-                "AND operation='chat' AND ended_at IS NOT NULL), "
-                "output_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(output_tokens) "
-                "THEN COALESCE(SUM(output_tokens),0) ELSE NULL END "
+                "AND operation='request_attempt' AND ended_at IS NOT NULL), "
+                "output_tokens=(SELECT SUM(output_tokens) "
                 "FROM swe_agentobs_spans WHERE run_id=%s AND span_type='LLM' "
-                "AND operation='chat' AND ended_at IS NOT NULL), "
+                "AND operation='request_attempt' AND ended_at IS NOT NULL), "
                 "agent_loops=(SELECT CASE "
-                "WHEN COUNT(*)=COUNT(step_index) "
+                "WHEN COUNT(*)>0 AND COUNT(*)=COUNT(step_index) "
                 "THEN COUNT(DISTINCT CONCAT("
                 "COALESCE(parent_span_id,attempt_id), ':', step_index)) "
                 "ELSE NULL END FROM swe_agentobs_spans "
@@ -1175,16 +1265,3 @@ class InboxProjector:
                 "WHERE run_id=%s",
                 (run_id, run_id, run_id, run_id, run_id),
             )
-
-
-def _span_projection_quality(event: dict[str, Any], is_end: bool) -> str:
-    return (
-        "observed"
-        if is_end
-        and (event.get("quality") or {}).get(
-            "start_observed",
-            bool(event.get("started_at")),
-        )
-        and event.get("ended_at")
-        else "partial"
-    )

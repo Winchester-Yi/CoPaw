@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from datetime import datetime
 from typing import Any, AsyncGenerator, Type
 
@@ -62,12 +63,14 @@ class KimiChatModel(OpenAIChatModelCompat):
         response: Any,
         structured_model: Type[BaseModel] | None = None,
     ) -> AsyncGenerator[ChatResponse, None]:
-        async for parsed in super()._parse_openai_stream_response(
+        responses = super()._parse_openai_stream_response(
             start_datetime=start_datetime,
             response=response,
             structured_model=structured_model,
-        ):
-            yield parsed
+        )
+        async with aclosing(responses):
+            async for parsed in responses:
+                yield parsed
 
     def _normalize_kimi_response(
         self,
@@ -130,32 +133,36 @@ class KimiChatModel(OpenAIChatModelCompat):
     ) -> AsyncGenerator[ChatResponse, None]:
         should_inject_open_think = True
 
-        async for parsed in self._iter_base_stream_responses(
+        responses = self._iter_base_stream_responses(
             start_datetime=start_datetime,
             response=response,
             structured_model=structured_model,
-        ):
-            source_has_thinking_started = self._content_has_thinking_started(
-                parsed,
-            )
+        )
+        async with aclosing(responses):
+            async for parsed in responses:
+                source_has_thinking_started = (
+                    self._content_has_thinking_started(
+                        parsed,
+                    )
+                )
 
-            if should_inject_open_think:
-                self._prepend_open_think_tag_to_first_frame(parsed)
+                if should_inject_open_think:
+                    self._prepend_open_think_tag_to_first_frame(parsed)
 
-            if source_has_thinking_started:
-                should_inject_open_think = False
+                if source_has_thinking_started:
+                    should_inject_open_think = False
 
-            yield self._normalize_kimi_response(parsed)
+                yield self._normalize_kimi_response(parsed)
 
-    async def _parse_openai_stream_response(
+    # Return the close-aware stream before its first iteration.
+    def _parse_openai_stream_response(  # pylint: disable=invalid-overridden-method
         self,
         start_datetime: datetime,
         response: Any,
         structured_model: Type[BaseModel] | None = None,
     ) -> AsyncGenerator[ChatResponse, None]:
-        async for parsed in self._iter_kimi_stream_responses(
-            start_datetime=start_datetime,
-            response=response,
-            structured_model=structured_model,
-        ):
-            yield parsed
+        return self._iter_kimi_stream_responses(
+            start_datetime,
+            response,
+            structured_model,
+        )

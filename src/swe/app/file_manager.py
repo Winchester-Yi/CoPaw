@@ -163,7 +163,7 @@ class FileManagerRecycleMutation:
 class _DirectoryCandidate:
     name: str
     entry_stat: os.stat_result
-    sort_key: tuple[int, int, tuple[tuple[int, int | str], ...], str]
+    sort_key: tuple[int, tuple[tuple[int, int | str], ...], str]
 
 
 @dataclass(frozen=True)
@@ -2267,7 +2267,6 @@ class FileManagerService:
         after_sort_key: (
             tuple[
                 int,
-                int,
                 tuple[tuple[int, int | str], ...],
                 str,
             ]
@@ -2472,16 +2471,13 @@ class FileManagerService:
     def _entry_sort_key(
         name: str,
         entry_stat: os.stat_result,
-    ) -> tuple[int, int, tuple[tuple[int, int | str], ...], str]:
-        kind_rank = 0 if stat_module.S_ISDIR(entry_stat.st_mode) else 1
+    ) -> tuple[int, tuple[tuple[int, int | str], ...], str]:
         natural_name = tuple(
             (0, int(part)) if part.isdecimal() else (1, part.casefold())
             for part in _NATURAL_PARTS.split(name)
             if part != ""
         )
-        # Directories retain natural name order; other entries are newest first.
-        modified_order = 0 if kind_rank == 0 else -entry_stat.st_mtime_ns
-        return kind_rank, modified_order, natural_name, name
+        return -entry_stat.st_mtime_ns, natural_name, name
 
     @staticmethod
     def _sort_key_for_cursor(

@@ -20,10 +20,6 @@ from ...config.context import (
     set_current_file_url_network,
 )
 from ...runtime_invocation_claims import runtime_invocation_claims_context
-from ...observability.nas_evidence import (
-    collect_nas_evidence,
-    publish_nas_evidence,
-)
 from ...tracing.models import TraceStatus
 from ...tracing.agent_trace_capture import mark_turn_cancelled
 from ...tracing.agent_trace_sdk import OperationName, start_child_span
@@ -503,6 +499,7 @@ async def _stream_retry_attempt(
     request: AgentRequest,
     session_execution: Any,
     session_id: str,
+    observability_attempt_ref=None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     try:
         async with start_child_span(
@@ -583,6 +580,14 @@ async def _stream_retry_attempt(
                 locals_snapshot=locals(),
             )
             raise
+        if observability_attempt_ref is not None:
+            from ...observability.runner_lifecycle import end_query_attempt
+
+            end_query_attempt(
+                observability_attempt_ref["value"],
+                status="failed",
+            )
+            observability_attempt_ref["value"] = None
         async for item in owner._stream_retryable_query_error(
             exc=exc,
             retry_attempt=retry_attempt,
@@ -611,6 +616,7 @@ async def _stream_retry_attempts(
     observability_attempt_ref=None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     max_retry_attempts, max_retries, backoff_base, backoff_cap = retry_settings
+    previous = None
     for retry_attempt in range(max_retry_attempts):
         if retry_attempt:
             async for item in owner._stream_retry_backoff_notice(
@@ -624,12 +630,9 @@ async def _stream_retry_attempts(
                 yield item
             if observability_attempt_ref is not None:
                 from ...observability.runner_lifecycle import (
-                    end_query_attempt,
                     start_query_retry_attempt,
                 )
 
-                previous = observability_attempt_ref["value"]
-                end_query_attempt(previous, status="failed")
                 next_attempt = start_query_retry_attempt(previous)
                 observability_attempt_ref["value"] = next_attempt
             if observability_context is not None:
@@ -655,6 +658,8 @@ async def _stream_retry_attempts(
         retry_state.session_state_loaded = False
         attempt_state = owner._new_query_attempt_state()
         attempt_state_ref["value"] = attempt_state
+        if observability_attempt_ref is not None:
+            previous = observability_attempt_ref["value"]
         with attempt_binding:
             async for item in _stream_retry_attempt(
                 owner,
@@ -669,6 +674,7 @@ async def _stream_retry_attempts(
                 request=request,
                 session_execution=session_execution,
                 session_id=session_id,
+                observability_attempt_ref=observability_attempt_ref,
             ):
                 yield item
         if attempt_state.should_return or attempt_state.succeeded:
@@ -885,13 +891,6 @@ async def _save_and_close_session_execution(
             session_execution=session_execution,
         )
         if committed:
-            publish_nas_evidence(
-                _get_memory_entry_message(entry)
-                for entry in _get_persisted_memory_entries(
-                    session_execution.state,
-                )
-                or ()
-            )
             (
                 assistant_message_count,
                 persisted_assistant_content,
@@ -1141,16 +1140,13 @@ async def stream_query_after_preflight(
     runtime_start = None
     outcome = None
     try:
-        async with (
-            collect_nas_evidence(),
-            _query_session_execution(
-                owner,
-                session_id,
-                str(getattr(request, "user_id", "") or ""),
-                request=request,
-                session_execution=session_execution,
-            ) as session_execution,
-        ):
+        async with _query_session_execution(
+            owner,
+            session_id,
+            str(getattr(request, "user_id", "") or ""),
+            request=request,
+            session_execution=session_execution,
+        ) as session_execution:
             logger.debug(
                 "AgentRunner.stream_query: request=%s, agent_id=%s",
                 request,

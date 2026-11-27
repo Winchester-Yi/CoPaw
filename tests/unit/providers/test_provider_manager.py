@@ -19,7 +19,6 @@ sys.modules.setdefault("fcntl", fcntl_stub)
 
 import swe.providers.provider_manager as provider_manager_module
 import swe.tenant_models.manager as tenant_models_manager_module
-from swe.providers.anthropic_provider import AnthropicProvider
 from swe.config.context import encode_scope_id, tenant_context
 from swe.providers.models import ModelSlotConfig
 from swe.providers.openai_provider import OpenAIProvider
@@ -128,27 +127,6 @@ def _dashscope_provider() -> OpenAIProvider:
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key_prefix="sk",
         models=[ModelInfo(id="qwen3-max", name="Qwen3 Max")],
-        freeze_url=True,
-    )
-
-
-def _ollama_provider() -> OpenAIProvider:
-    return OpenAIProvider(
-        id="ollama",
-        name="Ollama",
-        base_url="http://localhost:11434",
-        models=[ModelInfo(id="llama3", name="Llama 3")],
-        require_api_key=False,
-    )
-
-
-def _minimax_provider() -> AnthropicProvider:
-    return AnthropicProvider(
-        id="minimax",
-        name="MiniMax (International)",
-        base_url="https://api.minimax.io/anthropic",
-        models=[ModelInfo(id="MiniMax-M2.5", name="MiniMax M2.5")],
-        chat_model="AnthropicChatModel",
         freeze_url=True,
     )
 
@@ -561,8 +539,6 @@ def test_provider_manager_ignores_legacy_providers_json(
         _dashscope_provider(),
         _openai_provider(),
         _azure_openai_provider(),
-        AnthropicProvider(id="anthropic", name="Anthropic"),
-        _ollama_provider(),
     )
     isolated_secret_dir.mkdir(parents=True, exist_ok=True)
     legacy_file = isolated_secret_dir / "providers.json"
@@ -586,8 +562,7 @@ def test_provider_manager_ignores_legacy_providers_json(
 
     assert manager.get_provider("mydash") is None
 
-    legacy_ollama = manager.get_provider("ollama")
-    assert legacy_ollama.base_url != "http://myhost:11434"
+    assert manager.get_provider("ollama") is None
 
     active_model_file = (
         isolated_secret_dir / "default" / "providers" / "active_model.json"
@@ -712,21 +687,6 @@ def test_load_provider_missing_returns_none(isolated_secret_dir) -> None:
     assert loaded is None
 
 
-def test_provider_from_data_dispatch_to_anthropic(isolated_secret_dir) -> None:
-    manager = ProviderManager()
-
-    provider = manager._provider_from_data(
-        {
-            "id": "custom-anthropic",
-            "name": "Custom Anthropic",
-            "chat_model": "AnthropicChatModel",
-            "api_key": "sk-ant-x",
-        },
-    )
-
-    assert isinstance(provider, AnthropicProvider)
-
-
 def test_provider_from_data_fallback_to_openai(isolated_secret_dir) -> None:
     manager = ProviderManager()
 
@@ -739,64 +699,6 @@ def test_provider_from_data_fallback_to_openai(isolated_secret_dir) -> None:
     )
 
     assert isinstance(provider, OpenAIProvider)
-
-
-def test_init_from_storage_migrates_with_different_provider(
-    isolated_secret_dir,
-    monkeypatch,
-) -> None:
-    _patch_builtins(monkeypatch, _minimax_provider(), _ollama_provider())
-    builtin_path = isolated_secret_dir / "default" / "providers" / "builtin"
-    builtin_path.mkdir(parents=True, exist_ok=True)
-
-    legacy_minimax_provider = {
-        "id": "minimax",
-        "name": "MiniMax",
-        "base_url": "https://api.minimax.io/v1",
-        "api_key": "sk-legacy-minimax",
-        "chat_model": "OpenAIChatModel",
-        "models": [{"id": "MiniMax-M2.5", "name": "MiniMax M2.5"}],
-        "generate_kwargs": {"temperature": 1.0},
-    }
-    (builtin_path / "minimax.json").write_text(
-        json.dumps(legacy_minimax_provider, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    manager = ProviderManager()
-
-    provider = manager.get_provider("minimax")
-
-    assert provider is not None
-    assert isinstance(provider, AnthropicProvider)
-    # url / name / chatmodel should be updated
-    assert provider.base_url == "https://api.minimax.io/anthropic"
-    assert provider.chat_model == "AnthropicChatModel"
-    assert provider.name == "MiniMax (International)"
-    # api key should be preserved
-    assert provider.api_key == "sk-legacy-minimax"
-
-    from agentscope.model import AnthropicChatModel
-
-    assert provider.get_chat_model_cls() == AnthropicChatModel
-
-    legacy_ollama_provider = {
-        "id": "ollama",
-        "name": "Ollama New",
-        "base_url": "http://legacy-ollama:11434",
-        "api_key": "sk-legacy-ollama",
-        "chat_model": "OpenAIChatModel",
-        "models": [],
-    }
-    (builtin_path / "ollama.json").write_text(
-        json.dumps(legacy_ollama_provider, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    manager = ProviderManager()
-    assert manager.get_provider("ollama") is not None
-    assert (
-        manager.get_provider("ollama").base_url == "http://legacy-ollama:11434"
-    )
 
 
 def test_openai_provider_can_resolve_kimi_chat_model_cls() -> None:

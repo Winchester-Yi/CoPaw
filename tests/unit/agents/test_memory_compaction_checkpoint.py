@@ -2,6 +2,7 @@
 """Staged checkpoint-compaction budget decision coverage."""
 
 import asyncio
+from io import StringIO
 
 import pytest
 from agentscope.message import Msg
@@ -16,6 +17,10 @@ from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
 from swe.agents.utils.swe_token_counter import SweEstimateTokenCounter
 from swe.config.config import ContextCompactConfig
 from swe.config.config import ToolResultCompactConfig
+from swe.observability import Observability, Scope, bind_context
+from swe.observability.emitter import JsonlEmitter
+from swe.observability.projector import _validate_payload
+from swe.observability.store import _span_for_api
 
 
 def test_budget_stages_follow_confirmed_65_5_80_90_contract() -> None:
@@ -178,14 +183,27 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
 
 
 @pytest.mark.asyncio
-async def test_active_candidate_remeasures_before_one_legacy_fallback() -> (
-    None
-):
+@pytest.mark.parametrize(
+    ("before_tokens", "installed", "strategy"),
+    [
+        (85, False, None),
+        (85, True, "checkpoint_ready"),
+        (90, False, "checkpoint_degraded"),
+    ],
+)
+async def test_active_candidate_remeasures_before_one_legacy_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    before_tokens: int,
+    installed: bool,
+    strategy: str | None,
+) -> None:
+    import json
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     manager = SimpleNamespace(
-        install_ready_precompaction=AsyncMock(return_value=True),
+        install_ready_precompaction=AsyncMock(return_value=installed),
+        install_degraded_checkpoint=AsyncMock(return_value=True),
     )
     hook = MemoryCompactionHook(manager)
     agent = SimpleNamespace(
@@ -197,15 +215,50 @@ async def test_active_candidate_remeasures_before_one_legacy_fallback() -> (
         context_compact=ContextCompactConfig(),
     )
     remeasure = AsyncMock(return_value=80)
-
-    assert not await hook._apply_checkpoint_budget_stage(
-        agent,
-        running,
-        [],
-        80,
-        remeasure,
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
     )
+    context = (
+        Observability()
+        .prepare_run(
+            scope=Scope("swe", "source", "tenant", "agent"),
+            enabled=True,
+        )
+        .new_attempt()
+    )
+
+    with bind_context(context):
+        assert not await hook._apply_checkpoint_budget_stage(
+            agent,
+            running,
+            [],
+            before_tokens,
+            remeasure,
+        )
+
+    assert emitter.close() == 0
+    if strategy is None:
+        remeasure.assert_not_awaited()
+        assert not sink.getvalue()
+        return
     remeasure.assert_awaited_once()
+    started, ended = [
+        _validate_payload(line) for line in sink.getvalue().splitlines()
+    ]
+    assert started["event_name"] == "span.started"
+    assert ended["event_name"] == "span.ended"
+    summary = _span_for_api(
+        {"span_type": "Context", "metadata_text": json.dumps(ended)},
+    )
+    assert summary == {
+        "span_type": "Context",
+        "compaction_strategy": strategy,
+        "context_before_tokens": before_tokens,
+        "context_after_tokens": 80,
+    }
 
 
 @pytest.mark.asyncio

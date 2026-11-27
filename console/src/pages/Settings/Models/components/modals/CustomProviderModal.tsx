@@ -123,10 +123,6 @@ export function CustomProviderModal({
                 value: "KimiChatModel",
                 label: "KimiChatModel",
               },
-              {
-                value: "AnthropicChatModel",
-                label: "AnthropicChatModel",
-              },
             ]}
           />
         </Form.Item>

@@ -644,6 +644,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             namesake_strategy,
             prepared_request_memory=prepared_request_memory,
         )
+        try:
+            from ..observability.instrumentation import attach_evidence_capture
+
+            attach_evidence_capture(self.memory)
+        except Exception:
+            logger.warning("Unable to attach evidence capture")
 
         # Setup command handler
         self.command_handler = CommandHandler(

@@ -4,18 +4,90 @@
 from __future__ import annotations
 
 import json
+from contextlib import aclosing
+from contextvars import ContextVar
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, AsyncGenerator, Literal, Type
+from typing import Any, AsyncGenerator, Type
 
 from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
+from openai import LengthFinishReasonError
 from pydantic import BaseModel
 
 from swe.local_models.tag_parser import (
     parse_tool_calls_from_text,
     text_contains_tool_call_tag,
 )
+from swe.observability.instrumentation import (
+    observe_openai_response,
+    record_openai_request,
+)
+from swe.utils.close_aware_stream import CloseAwareStream
+
+_openai_stream_close: ContextVar[list[Any] | None] = ContextVar(
+    "openai_stream_close",
+    default=None,
+)
+
+
+class _ObservableOpenAICompletions:
+    def __init__(self, completions: Any) -> None:
+        self._completions = completions
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._completions, name)
+
+    async def create(self, **kwargs: Any) -> Any:
+        streaming = bool(kwargs.get("stream"))
+        record_openai_request(
+            streaming=streaming,
+            request_model=kwargs["model"],
+        )
+        response = await self._completions.create(**kwargs)
+        close = getattr(response, "close", None)
+        closers = _openai_stream_close.get()
+        if streaming and closers is not None and callable(close):
+
+            async def close_response() -> None:
+                if not getattr(
+                    getattr(response, "response", None),
+                    "is_closed",
+                    False,
+                ):
+                    await close()
+
+            closers.append(close_response)
+        return response
+
+    async def parse(self, **kwargs: Any) -> Any:
+        record_openai_request(streaming=False, request_model=kwargs["model"])
+        try:
+            return await self._completions.parse(**kwargs)
+        except LengthFinishReasonError as exc:
+            observe_openai_response(exc.completion)
+            raise
+
+    def stream(self, **kwargs: Any) -> Any:
+        return _ObservableStructuredStream(self._completions, kwargs)
+
+
+class _ObservableStructuredStream:
+    def __init__(self, completions: Any, kwargs: dict[str, Any]) -> None:
+        self._completions = completions
+        self._kwargs = kwargs
+        self._manager = None
+
+    async def __aenter__(self) -> Any:
+        self._manager = self._completions.stream(**self._kwargs)
+        record_openai_request(
+            streaming=True,
+            request_model=self._kwargs["model"],
+        )
+        return await self._manager.__aenter__()
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return await self._manager.__aexit__(*exc)
 
 
 def _clone_with_overrides(obj: Any, **overrides: Any) -> Any:
@@ -163,7 +235,12 @@ class _SanitizedStream:
     async def __anext__(self) -> Any:
         if self._ctx_stream is None:
             raise StopAsyncIteration
-        item = await self._ctx_stream.__anext__()
+        try:
+            item = await self._ctx_stream.__anext__()
+        except LengthFinishReasonError as exc:
+            observe_openai_response(exc.completion)
+            raise
+        observe_openai_response(getattr(item, "chunk", item))
         self._capture_extra_content(item)
         return _sanitize_stream_item(item)
 
@@ -328,6 +405,63 @@ class OpenAIChatModelCompat(OpenAIChatModel):
     """OpenAIChatModel with robust parsing for malformed tool-call chunks
     and transparent ``extra_content`` (Gemini thought_signature) relay."""
 
+    observes_provider_requests = True
+
+    @property
+    def client(self) -> Any:
+        return self._client
+
+    @client.setter
+    def client(self, client: Any) -> None:
+        chat = client.chat
+        completions = chat.completions
+        if not isinstance(completions, _ObservableOpenAICompletions):
+            chat.completions = _ObservableOpenAICompletions(completions)
+        self._client = client
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        closers: list[Any] = []
+        token = _openai_stream_close.set(closers)
+        try:
+            result = await super().__call__(*args, **kwargs)
+        except BaseException:
+            if closers:
+                try:
+                    await closers[0]()
+                except Exception:
+                    pass
+            raise
+        finally:
+            _openai_stream_close.reset(token)
+        if not closers or not isinstance(result, AsyncGenerator):
+            return result
+
+        async def consume():
+            try:
+                async with aclosing(result):
+                    async for chunk in result:
+                        yield chunk
+            finally:
+                try:
+                    await closers[0]()
+                except Exception:
+                    pass
+
+        return CloseAwareStream(consume(), closers[0])
+
+    def _parse_openai_completion_response(
+        self,
+        start_datetime: datetime,
+        response: Any,
+        structured_model: Type[BaseModel] | None = None,
+    ) -> ChatResponse:
+        observe_openai_response(response)
+        return super()._parse_openai_completion_response(
+            start_datetime,
+            response,
+            structured_model,
+        )
+
     # pylint: disable=too-many-branches
     async def _parse_openai_stream_response(
         self,
@@ -344,44 +478,35 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         _text_tool_calls: dict[str, dict] = {}
         _strip_leading_think_prefix = False
 
-        async for parsed in super()._parse_openai_stream_response(
+        responses = super()._parse_openai_stream_response(
             start_datetime=start_datetime,
             response=sanitized_response,
             structured_model=structured_model,
-        ):
-            (
-                parsed.content,
-                _strip_leading_think_prefix,
-            ) = _filter_placeholder_thinking_blocks(
-                parsed.content,
-                _strip_leading_think_prefix,
-            )
-            if not parsed.content:
-                continue
-
-            _attach_tool_extra_content(
-                parsed.content,
-                sanitized_response.extra_contents,
-            )
-
-            # Check whether the response already carries structured tool_use
-            # blocks (either from the model or from extra_content above).
-            has_tool_use = any(
-                b.get("type") == "tool_use" for b in parsed.content
-            )
-
-            if has_tool_use:
-                # Structured tool calls arrived — discard any tag-derived
-                # ones, so we don't produce duplicates.
-                _think_tool_calls.clear()
-                _text_tool_calls.clear()
-            else:
+        )
+        async with aclosing(responses):
+            async for parsed in responses:
                 (
                     parsed.content,
-                    _think_tool_calls,
-                    _text_tool_calls,
-                ) = _extract_tagged_tool_call_blocks(
+                    _strip_leading_think_prefix,
+                ) = _filter_placeholder_thinking_blocks(
                     parsed.content,
+                    _strip_leading_think_prefix,
                 )
+                if not parsed.content:
+                    continue
 
-            yield parsed
+                _attach_tool_extra_content(
+                    parsed.content,
+                    sanitized_response.extra_contents,
+                )
+                if any(b.get("type") == "tool_use" for b in parsed.content):
+                    _think_tool_calls.clear()
+                    _text_tool_calls.clear()
+                else:
+                    (
+                        parsed.content,
+                        _think_tool_calls,
+                        _text_tool_calls,
+                    ) = _extract_tagged_tool_call_blocks(parsed.content)
+
+                yield parsed

@@ -102,14 +102,11 @@ mlx = [
     "swe[local]",
     "mlx-lm>=0.10.0; sys_platform == 'darwin'",
 ]
-ollama = [
-    "ollama>=0.6.1",
-]
 whisper = [
     "openai-whisper>=20231117",
 ]
 full = [
-    "swe[local,ollama,llamacpp,whisper]",
+    "swe[local,llamacpp,whisper]",
     "mlx-lm>=0.10.0; sys_platform == 'darwin'",
 ]
 

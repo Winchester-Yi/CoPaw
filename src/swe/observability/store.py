@@ -344,7 +344,9 @@ class ObservabilityStore:
         query += f" ORDER BY {sort_column} DESC, run_id DESC LIMIT %s"
         params.append(limit)
         async with self.connection.acquire() as session:
-            return await session.fetch_all(query, tuple(params))
+            rows = await session.fetch_all(query, tuple(params))
+            await self._add_model_request_summary(session, rows)
+            return rows
 
     async def count_run_candidates(
         self,
@@ -424,7 +426,68 @@ class ObservabilityStore:
             query += " AND tenant_key=%s"
             params.append(tenant_id.encode())
         async with self.connection.acquire() as session:
-            return await session.fetch_one(query, tuple(params))
+            row = await session.fetch_one(query, tuple(params))
+            if row is not None:
+                await self._add_model_request_summary(session, [row])
+            return row
+
+    @staticmethod
+    async def _add_model_request_summary(session, rows: list[dict]) -> None:
+        if not rows:
+            return
+        # Aggregate only the selected authorized page using the unique spans.
+        # The existing span metadata records when a logical call proves zero.
+        placeholders = ",".join(["%s"] * len(rows))
+        summaries = await session.fetch_all(
+            "SELECT /*+ MAX_EXECUTION_TIME(5000) */ run_id,"
+            "COUNT(CASE WHEN operation='chat' THEN 1 END) AS logical_calls,"
+            "COUNT(CASE WHEN operation='chat' AND ended_at IS NOT NULL "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(metadata_text,'$.no_request_attempts'))='true' "
+            "THEN 1 END) AS zero_request_calls,"
+            "COUNT(CASE WHEN operation='request_attempt' THEN 1 END) AS request_count,"
+            "COUNT(CASE WHEN operation='request_attempt' AND ended_at IS NOT NULL "
+            "THEN input_tokens END) AS input_known,"
+            "COUNT(CASE WHEN operation='request_attempt' AND ended_at IS NOT NULL "
+            "THEN output_tokens END) AS output_known,"
+            "SUM(CASE WHEN operation='request_attempt' AND ended_at IS NOT NULL "
+            "THEN input_tokens END) AS request_input_tokens,"
+            "SUM(CASE WHEN operation='request_attempt' AND ended_at IS NOT NULL "
+            "THEN output_tokens END) AS request_output_tokens "
+            "FROM swe_agentobs_spans WHERE run_id IN (" + placeholders + ") "
+            "AND span_type='LLM' AND operation IN ('chat','request_attempt') GROUP BY run_id",
+            tuple(row["run_id"] for row in rows),
+        )
+        by_run = {item["run_id"]: item for item in summaries}
+        for row in rows:
+            summary = by_run.get(row["run_id"], {})
+            logical_calls = summary.get("logical_calls") or None
+            request_count = summary.get("request_count") or None
+            if logical_calls and logical_calls == summary.get(
+                "zero_request_calls",
+            ):
+                request_count = request_count or 0
+            input_total = summary.get("request_input_tokens")
+            output_total = summary.get("request_output_tokens")
+            row.update(
+                llm_calls=logical_calls,
+                request_attempt_count=request_count,
+                input_tokens_known_requests=(
+                    summary["input_known"]
+                    if request_count is not None
+                    else None
+                ),
+                output_tokens_known_requests=(
+                    summary["output_known"]
+                    if request_count is not None
+                    else None
+                ),
+                input_tokens=(
+                    int(input_total) if input_total is not None else None
+                ),
+                output_tokens=(
+                    int(output_total) if output_total is not None else None
+                ),
+            )
 
     async def list_attempts(self, *, run_id: str) -> list[dict[str, Any]]:
         async with self.connection.acquire() as session:
@@ -592,9 +655,7 @@ class ObservabilityStore:
             )
             params.extend([span_id, span_id])
         if links_only:
-            query += (
-                " AND JSON_LENGTH(JSON_EXTRACT(metadata_text,'$.links')) > 0"
-            )
+            query = _deduplicate_event_links(query)
         if before:
             query += " AND (occurred_at < %s OR (occurred_at = %s AND event_id < %s))"
             params.extend([before[0], before[0], before[1]])
@@ -1062,6 +1123,38 @@ _SUBAGENT_API_FIELDS = (
 )
 
 
+def _deduplicate_event_links(scoped_events: str) -> str:
+    # Choose one event per source/type/target before applying the page cursor.
+    # Keep the original event envelope and only replace its links array.
+    return (
+        "WITH scoped_events AS ("
+        + scoped_events
+        + " AND JSON_LENGTH(JSON_EXTRACT(metadata_text,'$.links')) > 0), "
+        "ranked_links AS ("
+        "SELECT event_id, links.link_index, "
+        "ROW_NUMBER() OVER ("
+        "PARTITION BY entity_kind,entity_id,links.relation_type,"
+        "links.target_span_id,links.target_attempt_id "
+        "ORDER BY occurred_at DESC,event_id DESC,links.link_index ASC"
+        ") AS edge_rank "
+        "FROM scoped_events JOIN JSON_TABLE(CAST(metadata_text AS JSON), '$.links[*]' COLUMNS ("
+        "link_index FOR ORDINALITY,"
+        "relation_type VARCHAR(32) PATH '$.relation_type',"
+        "target_span_id CHAR(36) PATH '$.obs_span_id',"
+        "target_attempt_id CHAR(36) PATH '$.obs_attempt_id'"
+        ")) AS links), "
+        "unique_event_links AS ("
+        "SELECT ranked_links.event_id, JSON_ARRAYAGG(JSON_EXTRACT(metadata_text,"
+        "CONCAT('$.links[',link_index-1,']'))) AS links "
+        "FROM ranked_links JOIN scoped_events USING (event_id) "
+        "WHERE edge_rank=1 GROUP BY ranked_links.event_id) "
+        "SELECT /*+ MAX_EXECUTION_TIME(5000) */ event_id,event_name,entity_kind,entity_id,"
+        "attempt_id,phase_key,local_seq,occurred_at,"
+        "JSON_SET(metadata_text,'$.links',unique_event_links.links) AS metadata_text "
+        "FROM scoped_events JOIN unique_event_links USING (event_id) WHERE 1=1"
+    )
+
+
 def _span_search_where(
     run_id: str,
     attempt_id: str | None,
@@ -1145,13 +1238,30 @@ def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
     metadata_text = result.pop("metadata_text", None)
     if isinstance(metadata_text, bytes):
         metadata_text = metadata_text.decode("utf-8", errors="replace")
-    if result.get("span_type") == "LLM":
-        result["usage_known"] = (
-            result.get("input_tokens") is not None
-            and result.get("output_tokens") is not None
-        )
     span_type = result.get("span_type")
-    if span_type not in {"Tool", "Guard", "SubAgent"} or not isinstance(
+    if span_type == "LLM":
+        streaming = result.get("streaming")
+        result["streaming"] = (
+            bool(streaming) if streaming is not None else None
+        )
+        input_tokens = result.get("input_tokens")
+        output_tokens = result.get("output_tokens")
+        result["usage_known"] = (
+            input_tokens is not None and output_tokens is not None
+        )
+        result["total_tokens"] = (
+            input_tokens + output_tokens
+            if input_tokens is not None and output_tokens is not None
+            else None
+        )
+    if span_type not in {
+        "LLM",
+        "Tool",
+        "Guard",
+        "SubAgent",
+        "Context",
+        "Checkpoint",
+    } or not isinstance(
         metadata_text,
         str,
     ):
@@ -1161,6 +1271,25 @@ def _span_for_api(row: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         return result
     if not isinstance(metadata, dict):
+        return result
+    if span_type == "Context":
+        result["compaction_strategy"] = metadata.get("compaction_strategy")
+        metrics = metadata.get("metrics")
+        if isinstance(metrics, dict):
+            for metric in ("context_before_tokens", "context_after_tokens"):
+                result[metric] = metrics.get(metric)
+        return result
+    if span_type == "Checkpoint":
+        result["checkpoint_id"] = metadata.get("checkpoint_id")
+        return result
+    if span_type == "LLM":
+        if result.get("operation") == "request_attempt":
+            ordinal = metadata.get("request_attempt_index")
+            result["request_attempt_index"] = (
+                ordinal
+                if type(ordinal) is int and 0 <= ordinal <= 0xFFFFFFFF
+                else None
+            )
         return result
     if span_type in {"Tool", "Guard"}:
         _add_tool_span_metadata(result, metadata, span_type)

@@ -15,9 +15,8 @@ def test_failure_preserves_error_details_and_resets_binding():
     with bind_prepared_client_tls(PreparedTLSFailure(error)):
         for _ in range(2):
             with pytest.raises(FileNotFoundError) as caught:
-                prepared_http_client_kwargs("openai")
+                prepared_http_client_kwargs()
             assert caught.value.filename == "tenant-ca.pem"
             assert caught.value is not error
             assert error.__traceback__ is None
-        assert prepared_http_client_kwargs("anthropic") == {}
-    assert prepared_http_client_kwargs("openai") == {}
+    assert prepared_http_client_kwargs() == {}

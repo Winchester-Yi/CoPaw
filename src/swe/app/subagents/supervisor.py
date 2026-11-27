@@ -61,6 +61,7 @@ _CONCURRENCY_LIMIT_REASON = "background_subagent_concurrency_limit"
 _WORKER_EXITED_WITHOUT_RESULT = "worker_exited_without_result"
 _GENERIC_FAILURE_MESSAGE = "SubAgent execution failed."
 _NICKNAME_RESERVATION_STALE_SECONDS = 300
+_MAX_WORKER_EVENT_BYTES = 24 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -847,12 +848,6 @@ class BackgroundSubAgentSupervisor:
             handle,
             run_id,
         )
-        if drained:
-            self._emit_worker_end_fallback(
-                handle,
-                run_id,
-                status="cancelled",
-            )
         scope = handle.scope
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
@@ -867,6 +862,8 @@ class BackgroundSubAgentSupervisor:
         record = await PerRunSubAgentRunStore(scope.run_store_dir).cancel(
             run_id,
         )
+        if drained:
+            self._emit_worker_end_fallback(handle, record)
         self._active_for_scope(scope).pop(run_id, None)
         return record
 
@@ -933,14 +930,6 @@ class BackgroundSubAgentSupervisor:
             handle,
             run_id,
         )
-        if drained and not handle.saw_subagent_end:
-            self._emit_worker_end_fallback(
-                handle,
-                run_id,
-                status=(
-                    "failed" if handle.process.returncode != 0 else "succeeded"
-                ),
-            )
         _remove_private_launch_snapshot(
             str(scope.run_store_dir / f".{run_id}.mcp.json"),
             scope.run_store_dir,
@@ -960,6 +949,8 @@ class BackgroundSubAgentSupervisor:
         except KeyError:
             self._active_for_scope(scope).pop(run_id, None)
             return None
+        if drained:
+            self._emit_worker_end_fallback(handle, record)
         if record.status not in TERMINAL_BACKGROUND_RUN_STATUSES:
             message = (
                 f"{_WORKER_EXITED_WITHOUT_RESULT}: "
@@ -1051,25 +1042,33 @@ class BackgroundSubAgentSupervisor:
         return process
 
     def _start_event_reader(self, handle: _ActiveRun, run_id: str) -> None:
-        """把 worker 的 JSONL stdout 转发给父进程 emitter。"""
+        """把 worker stdout 中的观测事件转发给父进程 emitter。"""
+        from ...observability.emitter import (
+            STDOUT_EVENT_PREFIX,
+            default_emitter,
+        )
+
         stream = getattr(handle.process, "stdout", None)
         if stream is None:
             return
+        prefix = STDOUT_EVENT_PREFIX.encode("ascii")
+        read_limit = _MAX_WORKER_EVENT_BYTES + len(prefix) + 1
         span_id = None
         if handle.observability_carrier is not None:
             span_id = handle.observability_carrier.get("obs_span_id")
 
         def pump() -> None:
             try:
-                for line in iter(stream.readline, b""):
-                    if not line:
-                        break
+                while line := stream.readline(read_limit):
+                    if not line.endswith(b"\n"):
+                        while line and not line.endswith(b"\n"):
+                            line = stream.readline(read_limit)
+                        continue
+                    line = line.removeprefix(prefix)
+                    if span_id is None or len(line) > _MAX_WORKER_EVENT_BYTES:
+                        continue
                     forwarded = False
                     try:
-                        from ...observability.emitter import (
-                            default_emitter,
-                        )
-
                         forwarded = default_emitter().emit_raw(line)
                     except Exception:
                         logger.warning(
@@ -1143,28 +1142,46 @@ class BackgroundSubAgentSupervisor:
     @staticmethod
     def _emit_worker_end_fallback(
         handle: _ActiveRun,
-        run_id: str,
-        *,
-        status: str,
+        record: BackgroundSubAgentRunRecord,
     ) -> None:
         """worker 未发出结束事件时，由 launcher 补发终态。
 
         只在确认 worker 没有自行结束时调用，避免与真实结果互相覆盖。
         """
-        if handle.saw_subagent_end or handle.observability_carrier is None:
+        carrier = handle.observability_carrier
+        if handle.saw_subagent_end or carrier is None:
+            return
+        status = {
+            "completed": "succeeded",
+            "partial": "partial",
+            "failed": "failed",
+            "cancelled": "cancelled",
+            "expired": "timed_out",
+        }.get(record.status)
+        if status is None or any(
+            error.code == _WORKER_EXITED_WITHOUT_RESULT
+            for error in record.errors
+        ):
             return
         try:
             from ...observability.instrumentation import Observability
 
-            Observability().end_carried_span(
-                handle.observability_carrier,
+            subagent = {
+                **carrier.get("attributes", {}).get("subagent", {}),
+                "business_subagent_key": record.run_id,
+                "mode": "background",
+            }
+            if record.result is not None:
+                subagent["result_status"] = record.result.status
+            handle.saw_subagent_end = Observability().end_carried_span(
+                carrier,
                 status=status,
-                subagent={"mode": "background"},
+                subagent=subagent,
             )
         except Exception:
             logger.warning(
                 "background_subagent_end_fallback_failed run_id=%s",
-                run_id,
+                record.run_id,
                 exc_info=True,
             )
 

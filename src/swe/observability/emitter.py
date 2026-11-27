@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Bounded, metadata-only JSONL output to stdout."""
+"""Bounded, metadata-only JSON events with a fixed stdout prefix."""
 
 from __future__ import annotations
 
@@ -10,14 +10,23 @@ import threading
 import time
 from collections import deque
 from typing import Any, TextIO
-from uuid import uuid4
 
-from .config import EmitterConfig
-from .models import MetadataEvent
+from .config import EmitterConfig, project_resource
+from .models import MetadataEvent, new_id
 
+STDOUT_EVENT_PREFIX = "AGENTOBS "
+_HEALTH_INTERVAL_SECONDS = 30.0
 _ALLOWED_KEYS = frozenset(
     "schema_version event_id event_name occurred_at producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key local_seq scope business_ref service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid run_started_at attempt_started_at capture_enabled span_type operation kind name step_index started_at ended_at status technical_status has_error reason_code metrics delay_ms quality model tool asset asset_type asset_id asset_version asset_digest asset_source approval_request_id subagent links events predecessor_attempt_id attempt_index terminal_fact_source decision content_ref content_kind saved_state metadata_truncated error_type phase cause_id recovery_id event_kind event_type relation_type duration_us usage_known input_tokens output_tokens total_tokens first_chunk_us first_visible_text_us start_observed end_observed truncated provider_key request_model_key response_model_key model_key_source finish_reason streaming tool_key tool_call_id tool_execution_id executor_kind timeout_budget_ms retry_index exit_code request_attempt_index skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal retries loop_count tool_count".split(),
-)
+) | {
+    "checkpoint_id",
+    "compaction_strategy",
+    "context_before_tokens",
+    "context_after_tokens",
+    "dropped_events",
+    "no_request_attempts",
+    "resource",
+}
 _FORBIDDEN_KEYS = frozenset(
     "prompt messages input output content body text query parameters arguments result exception traceback api_key password secret".split(),
 )
@@ -36,9 +45,13 @@ _REQUIRED_FIELDS = frozenset(
 )
 _TOKEN_FIELDS = frozenset(
     "event_name producer_id obs_run_id obs_attempt_id obs_span_id parent_obs_span_id entity_kind entity_id phase_key service_unit_id source_id tenant_id agent_id chat_id session_id channel root_question_msgid current_question_msgid span_type operation kind name status technical_status reason_code decision error_type phase provider_key request_model_key response_model_key model_key_source finish_reason tool_key tool_call_id tool_execution_id executor_kind event_type relation_type skill_key agent_key prompt_id prompt_version occurrence_id message_id content_type reference_id business_subagent_key result_status mode execution_agent_key attempt_ordinal terminal_fact_source saved_state asset_type asset_id asset_version asset_digest asset_source".split(),
-)
+) | {"checkpoint_id", "compaction_strategy"}
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
+COMPACTION_STRATEGIES = frozenset(
+    {"summary", "checkpoint_ready", "checkpoint_degraded"},
+)
 _ENUM_FIELDS = {
+    "compaction_strategy": COMPACTION_STRATEGIES,
     "span_type": frozenset(
         {
             "Agent",
@@ -46,6 +59,8 @@ _ENUM_FIELDS = {
             "Tool",
             "Guard",
             "Approval",
+            "Checkpoint",
+            "Context",
             "SubAgent",
             "Skill",
             "Memory",
@@ -111,18 +126,22 @@ _REGISTERED_LABELS = {
     "agent.execute",
     "approved",
     "chat",
+    "compact",
     "denied",
     "superseded",
     "execute",
     "model.call",
     "registered.tool",
     "request_attempt",
+    "restore",
+    "save",
     "tool",
     "timed_out",
     "model.request_attempt",
     "shell_policy_denied",
     "policy_denied",
     "hook_denied",
+    "hook_stop",
     "hook_waiting_approval",
 }
 
@@ -142,6 +161,10 @@ def _project(value: Any, depth: int = 0, key: str | None = None) -> Any:
         for child_key, item in value.items():
             normalized = str(child_key).lower()
             if normalized in _FORBIDDEN_KEYS or child_key not in _ALLOWED_KEYS:
+                continue
+            if child_key == "resource":
+                if depth == 0 and (resource := project_resource(item)):
+                    result["resource"] = resource
                 continue
             result[child_key] = _project(item, depth + 1, str(child_key))
         return result
@@ -219,12 +242,17 @@ class JsonlEmitter:
         stream: TextIO | None = None,
     ) -> None:
         self.config = config or EmitterConfig.from_environment()
-        self._stream = stream or sys.stdout
+        self._stream = sys.stdout if stream is None else stream
+        self._prefix = (
+            STDOUT_EVENT_PREFIX if self._stream is sys.stdout else ""
+        )
         self._condition = threading.Condition()
         self._queue: deque[bytes] = deque()
         self._outstanding_bytes = 0
         self._outstanding_events = 0
         self._dropped = 0
+        self._observer_id = new_id()
+        self._health_seq = 0
         self._closed = False
         self._thread = threading.Thread(
             target=self._write_loop,
@@ -246,6 +274,12 @@ class JsonlEmitter:
             projected = _project(raw)
             _validate_projected_event(projected)
             payload = _encode_event(projected)
+            limit = min(
+                self.config.max_event_bytes,
+                self.config.max_queue_bytes,
+            )
+            if len(payload) > limit and projected.pop("resource", None):
+                payload = _encode_event(projected)
             if len(payload) > self.config.max_event_bytes:
                 projected["metadata_truncated"] = True
                 for key in (
@@ -279,6 +313,7 @@ class JsonlEmitter:
                 > self.config.max_queue_bytes
             ):
                 self._dropped += 1
+                self._condition.notify()
                 return False
             self._queue.append(payload)
             self._outstanding_events += 1
@@ -287,65 +322,131 @@ class JsonlEmitter:
             return True
 
     def emit_raw(self, line: bytes) -> bool:
-        """Forward one already-projected JSONL line from a child process.
-
-        worker 子进程已完成白名单投影与序列化；父进程只做单写者转发与预算控制，
-        避免父子进程并发写同一 fd 造成行交错。
-        """
-        if not isinstance(line, (bytes, bytearray)) or not line:
-            self._drop()
-            return False
-        payload = bytes(line)
-        if not payload.endswith(b"\n"):
-            payload += b"\n"
-        if len(payload) > self.config.max_event_bytes:
+        """Validate and forward one child event through the metadata emitter."""
+        if (
+            not isinstance(line, (bytes, bytearray))
+            or not line
+            or len(line) > self.config.max_event_bytes
+        ):
             self._drop()
             return False
         try:
-            if not isinstance(json.loads(payload), dict):
-                self._drop()
-                return False
-        except (UnicodeDecodeError, ValueError):
+            from .projector import _validate_payload
+
+            raw = line.decode("utf-8")
+            if "\n" in raw.removesuffix("\n") or "\r" in raw:
+                raise ValueError("worker event is not a single JSONL record")
+            event = _validate_payload(raw)
+        except (TypeError, ValueError, RecursionError):
             self._drop()
             return False
-        with self._condition:
-            if (
-                self._closed
-                or self._outstanding_events >= self.config.max_queue_events
-                or self._outstanding_bytes + len(payload)
-                > self.config.max_queue_bytes
-            ):
-                self._dropped += 1
-                return False
-            self._queue.append(payload)
-            self._outstanding_events += 1
-            self._outstanding_bytes += len(payload)
-            self._condition.notify()
-            return True
+        return self.emit(event)
 
     def _drop(self) -> None:
         with self._condition:
             self._dropped += 1
+            self._condition.notify()
+
+    def _health_payload(self, dropped: int) -> bytes:
+        try:
+            event = MetadataEvent(
+                event_name="observer.health",
+                obs_context=None,
+                entity_kind="observer",
+                entity_id=self._observer_id,
+                phase_key="health",
+                local_seq=self._health_seq,
+                attributes={"metrics": {"dropped_events": dropped}},
+            )
+            projected = _project(event.to_dict())
+            limit = min(
+                self.config.max_event_bytes,
+                self.config.max_queue_bytes,
+            )
+            for _ in range(2):
+                payload = (
+                    json.dumps(projected, separators=(",", ":")).encode(
+                        "utf-8",
+                    )
+                    + b"\n"
+                )
+                if len(payload) <= limit:
+                    self._health_seq += 1
+                    return payload
+                if projected.pop("resource", None) is None:
+                    break
+        except Exception:
+            return b""
+        return b""
 
     def _write_loop(self) -> None:
+        payload = b""
+        health_count = None
+        final_health = False
+        written = False
+        reported = 0
+        next_health_at = 0.0
         while True:
             with self._condition:
-                while not self._queue and not self._closed:
-                    self._condition.wait()
-                if not self._queue and self._closed:
-                    return
-                payload = self._queue.popleft()
-            try:
-                self._stream.write(payload.decode("utf-8"))
-                self._stream.flush()
-            except Exception:
-                with self._condition:
-                    self._dropped += 1
-            finally:
-                with self._condition:
+                if payload:
                     self._outstanding_events -= 1
                     self._outstanding_bytes -= len(payload)
                     self._condition.notify_all()
+                    if health_count is not None:
+                        if written:
+                            reported = health_count
+                        next_health_at = (
+                            time.monotonic() + _HEALTH_INTERVAL_SECONDS
+                        )
+                    elif not written:
+                        self._dropped += 1
+                if final_health:
+                    return
+                payload, health_count = self._next_write(
+                    reported,
+                    next_health_at,
+                )
+                if not payload:
+                    return
+                final_health = self._closed and health_count is not None
+            written = False
+            try:
+                self._stream.write(self._prefix + payload.decode("utf-8"))
+                self._stream.flush()
+            except Exception:
+                pass
+            else:
+                written = True
+
+    def _next_write(
+        self,
+        reported: int,
+        next_health_at: float,
+    ) -> tuple[bytes, int | None]:
+        """Select the next record with the condition lock held."""
+        while True:
+            delay = None
+            if self._dropped > reported:
+                delay = next_health_at - time.monotonic()
+                final = self._closed and not self._queue
+                due = not self._closed and delay <= 0
+                if (final or due) and (
+                    self._outstanding_events < self.config.max_queue_events
+                ):
+                    health = self._health_payload(self._dropped)
+                    if health and (
+                        self._outstanding_bytes + len(health)
+                        <= self.config.max_queue_bytes
+                    ):
+                        self._outstanding_events += 1
+                        self._outstanding_bytes += len(health)
+                        return health, self._dropped
+                    delay = _HEALTH_INTERVAL_SECONDS
+            if self._queue:
+                return self._queue.popleft(), None
+            if self._closed:
+                return b"", None
+            self._condition.wait(delay)
 
     def close(self, timeout: float | None = None) -> int:
         wait_for = (
@@ -357,11 +458,9 @@ class JsonlEmitter:
         with self._condition:
             self._closed = True
             self._condition.notify_all()
-            while self._outstanding_events and time.monotonic() < deadline:
-                self._condition.wait(deadline - time.monotonic())
-            remaining = self._outstanding_events
         self._thread.join(max(0.0, deadline - time.monotonic()))
-        return remaining
+        with self._condition:
+            return self._outstanding_events
 
 
 _DEFAULT_EMITTER: JsonlEmitter | None = None

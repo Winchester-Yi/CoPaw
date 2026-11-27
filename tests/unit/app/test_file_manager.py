@@ -131,7 +131,7 @@ def test_working_listing_hides_only_sessions_and_governance(
 
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
-    assert [item.name for item in listing.items] == ["notes", ".env"]
+    assert {item.name for item in listing.items} == {"notes", ".env"}
 
 
 def test_delete_directory_removes_nested_entries_without_following_symlinks(
@@ -254,24 +254,26 @@ def test_source_scope_rejects_a_symlinked_tenant_root(tmp_path: Path) -> None:
         service.list_directory("source_scope")
 
 
-def test_listing_sorts_directories_first_with_case_insensitive_natural_order(
+def test_listing_breaks_mtime_ties_with_case_insensitive_natural_order(
     tmp_path: Path,
 ) -> None:
     for name in ("zeta", "Folder10", "folder2"):
         (tmp_path / name).mkdir()
-    for name in ("item10.txt", "Item2.txt", "alpha.txt"):
+        os.utime(tmp_path / name, ns=(1_700_000_000_000_000_000,) * 2)
+    for name in ("item10.txt", "Item2.txt", "alpha.txt", "Folder02"):
         (tmp_path / name).write_text(name, encoding="utf-8")
         os.utime(tmp_path / name, ns=(1_700_000_000_000_000_000,) * 2)
 
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
     assert [item.name for item in listing.items] == [
+        "alpha.txt",
+        "Folder02",
         "folder2",
         "Folder10",
-        "zeta",
-        "alpha.txt",
         "Item2.txt",
         "item10.txt",
+        "zeta",
     ]
     assert listing.first_child_directory == "folder2"
     assert listing.has_child_directory is True
@@ -294,37 +296,38 @@ def test_natural_sort_handles_leading_numeric_and_alphabetic_names(
 
 
 @pytest.mark.parametrize("query", [None, "item"])
-def test_listing_sorts_files_by_mtime_before_paginating(
+def test_listing_sorts_files_and_directories_by_mtime_before_paginating(
     tmp_path: Path,
     query: str | None,
 ) -> None:
-    for name in ("item10", "item2"):
-        (tmp_path / name).mkdir()
-    count = FILE_MANAGER_PAGE_SIZE + 2
+    count = FILE_MANAGER_PAGE_SIZE + 3
+    expected = []
     for index in range(count):
-        path = tmp_path / f"item{index:03d}.txt"
-        path.write_text("x", encoding="utf-8")
+        if index in (1, count - 2):
+            path = tmp_path / f"item{index:03d}"
+            path.mkdir()
+        else:
+            path = tmp_path / f"item{index:03d}.txt"
+            path.write_text("x", encoding="utf-8")
         timestamp = 1_700_000_000_000_000_000 + index * 1_000_000_000
         os.utime(path, ns=(timestamp, timestamp))
+        expected.append(path.name)
 
     service = _service(tmp_path)
     first = service.list_directory("working", query=query)
+    # The existing cursor keeps its order even after an item's own mtime changes.
+    os.utime(tmp_path / "item001", ns=(1_800_000_000_000_000_000,) * 2)
     second = service.list_directory(
         "working",
         query=query,
         cursor=first.next_cursor,
     )
-    expected = ["item2", "item10"] + [
-        f"item{index:03d}.txt" for index in reversed(range(count))
-    ]
-    assert [item.name for item in first.items + second.items] == expected
+    assert len(first.items) == FILE_MANAGER_PAGE_SIZE
+    assert [item.name for item in first.items + second.items] == expected[::-1]
     assert second.next_cursor is None
 
-    # A fresh listing reflects a file edit, while pagination uses its snapshot.
-    oldest = tmp_path / "item000.txt"
-    os.utime(oldest, ns=(1_800_000_000_000_000_000,) * 2)
     refreshed = service.list_directory("working", query=query)
-    assert refreshed.items[2].name == "item000.txt"
+    assert refreshed.items[0].name == "item001"
 
 
 def test_listing_reports_no_child_directory_state(tmp_path: Path) -> None:
@@ -618,7 +621,7 @@ def test_listing_filters_direct_children_case_insensitively(
         query="REpOrT",
     )
 
-    assert [item.name for item in listing.items] == ["reports", "Report.MD"]
+    assert {item.name for item in listing.items} == {"reports", "Report.MD"}
 
 
 @pytest.mark.parametrize(

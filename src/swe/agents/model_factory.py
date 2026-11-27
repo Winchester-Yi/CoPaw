@@ -26,20 +26,6 @@ from urllib.parse import urlparse
 from agentscope.formatter import FormatterBase, OpenAIChatFormatter
 from agentscope.model import ChatModelBase, OpenAIChatModel
 
-try:
-    from agentscope.formatter import AnthropicChatFormatter
-    from agentscope.model import AnthropicChatModel
-except ImportError:  # pragma: no cover - compatibility fallback
-    AnthropicChatFormatter = None
-    AnthropicChatModel = None
-
-try:
-    from agentscope.formatter import GeminiChatFormatter
-    from agentscope.model import GeminiChatModel
-except ImportError:  # pragma: no cover - compatibility fallback
-    GeminiChatFormatter = None
-    GeminiChatModel = None
-
 from .hook_runtime.messages import HOOK_ADDITIONAL_CONTEXT_PREFIX
 from .utils.tool_message_utils import _sanitize_tool_messages
 from ..constant import (
@@ -78,14 +64,6 @@ _NO_TENANT_MODEL_CONFIGURATION = (
     "Multi-tenant isolation requires explicit model config."
 )
 
-_SUPPORTED_IMAGE_EXTENSIONS: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-}
-
 _SUPPORTED_VIDEO_EXTENSIONS: dict[str, str] = {
     ".mp4": "video/mp4",
     ".webm": "video/webm",
@@ -94,72 +72,6 @@ _SUPPORTED_VIDEO_EXTENSIONS: dict[str, str] = {
     ".avi": "video/x-msvideo",
     ".mkv": "video/x-matroska",
 }
-
-
-# TODO: remove after agentscope anthropic formatter updated
-def _format_anthropic_media_block(block: dict) -> dict:
-    """Format an image or video block for Anthropic API.
-
-    If the source is a URLSource pointing to a local file it will be
-    converted to base64.  Web URLs are passed through as-is.
-
-    Args:
-        block (`dict`):
-            A block dict with ``type`` of ``"image"`` or ``"video"``.
-
-    Returns:
-        `dict`: Formatted block for the Anthropic API.
-
-    Raises:
-        `ValueError`:
-            If the source type or media format is not supported.
-    """
-    typ = block["type"]
-    extensions = (
-        _SUPPORTED_IMAGE_EXTENSIONS
-        if typ == "image"
-        else _SUPPORTED_VIDEO_EXTENSIONS
-    )
-
-    source = block["source"]
-
-    if source["type"] == "base64":
-        return {**block}
-
-    url = source["url"]
-    raw_url = _file_url_to_path(url)
-
-    if os.path.exists(raw_url) and os.path.isfile(raw_url):
-        ext = os.path.splitext(raw_url)[1].lower()
-        media_type = extensions.get(ext)
-        if media_type:
-            with open(raw_url, "rb") as f:
-                data = base64.b64encode(f.read()).decode(
-                    "utf-8",
-                )
-            return {
-                "type": typ,
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                },
-            }
-
-    parsed_url = urlparse(raw_url)
-    if parsed_url.scheme not in ("", "file"):
-        return {
-            "type": typ,
-            "source": {
-                "type": "url",
-                "url": url,
-            },
-        }
-
-    raise ValueError(
-        f'Invalid {typ} URL: "{url}". '
-        "It should be a local file or a web URL.",
-    )
 
 
 def _format_openai_video_block(video_block: dict) -> dict:
@@ -247,134 +159,10 @@ def _replace_video_placeholders(
         fmt_msg["content"] = new_content
 
 
-def _format_anthropic_output_items(output: list) -> list:
-    """Format a list of tool_result output blocks for Anthropic API,
-    converting image and video blocks as needed."""
-    return [
-        (
-            _format_anthropic_media_block(item)
-            if item.get("type") in ("image", "video")
-            else item
-        )
-        for item in output
-    ]
-
-
-def _append_to_initial_anthropic_system(
-    messages: list[dict],
-    content_blocks: list[dict],
-) -> None:
-    """把后续 system 上下文合并到 Anthropic 唯一允许的首条 system 消息。"""
-    if not content_blocks:
-        return
-    if messages and messages[0].get("role") == "system":
-        messages[0].setdefault("content", []).extend(content_blocks)
-        return
-    messages.insert(
-        0,
-        {
-            "role": "system",
-            "content": [*content_blocks],
-        },
-    )
-
-
-# TODO: remove after agentscope anthropic formatter updated
-def _format_anthropic_messages(  # pylint: disable=too-many-branches
-    msgs: list,
-) -> list[dict]:
-    """Format messages for Anthropic API with image/video block support.
-
-    This replaces the default ``AnthropicChatFormatter._format`` so that
-    ``_format_anthropic_media_block`` is applied to both top-level media
-    blocks and media blocks nested inside ``tool_result`` outputs.
-    """
-    messages: list[dict] = []
-    for index, msg in enumerate(msgs):
-        content_blocks: list[dict] = []
-
-        for block in msg.get_content_blocks():
-            typ = block.get("type")
-            if typ in ["thinking", "text"]:
-                content_blocks.append({**block})
-
-            elif typ in ("image", "video"):
-                content_blocks.append(
-                    _format_anthropic_media_block(block),
-                )
-
-            elif typ == "tool_use":
-                content_blocks.append(
-                    {
-                        "id": block.get("id"),
-                        "type": "tool_use",
-                        "name": block.get("name"),
-                        "input": block.get("input", {}),
-                    },
-                )
-
-            elif typ == "tool_result":
-                output = block.get("output")
-                if output is None:
-                    content_value: list = [
-                        {"type": "text", "text": None},
-                    ]
-                elif isinstance(output, list):
-                    content_value = _format_anthropic_output_items(output)
-                else:
-                    content_value = [
-                        {"type": "text", "text": str(output)},
-                    ]
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": block.get("id"),
-                                "content": content_value,
-                            },
-                        ],
-                    },
-                )
-
-        if msg.role == "system" and index != 0:
-            if _is_persisted_hook_follow_up_message(
-                {
-                    "role": msg.role,
-                    "content": content_blocks,
-                },
-            ):
-                _append_to_initial_anthropic_system(
-                    messages,
-                    content_blocks,
-                )
-                continue
-            role = "user"
-        else:
-            role = msg.role
-
-        msg_anthropic: dict = {
-            "role": role,
-            "content": content_blocks or None,
-        }
-
-        if msg_anthropic["content"] or msg_anthropic.get(
-            "tool_calls",
-        ):
-            messages.append(msg_anthropic)
-
-    return messages
-
-
 # Mapping from chat model class to formatter class
 _CHAT_MODEL_FORMATTER_MAP: dict[Type[ChatModelBase], Type[FormatterBase]] = {
     OpenAIChatModel: OpenAIChatFormatter,
 }
-if AnthropicChatModel is not None and AnthropicChatFormatter is not None:
-    _CHAT_MODEL_FORMATTER_MAP[AnthropicChatModel] = AnthropicChatFormatter
-if GeminiChatModel is not None and GeminiChatFormatter is not None:
-    _CHAT_MODEL_FORMATTER_MAP[GeminiChatModel] = GeminiChatFormatter
 
 
 def _get_formatter_for_chat_model(
@@ -566,48 +354,15 @@ def _create_file_block_support_formatter(
                         ):
                             source["url"] = _file_url_to_path(source["url"])
 
-            # For Anthropic, fully override formatting to handle
-            # media blocks (top-level & inside tool_result output).
-            # TODO: remove after agentscope anthropic formatter updated
-            if AnthropicChatFormatter is not None and issubclass(
-                base_formatter_class,
-                AnthropicChatFormatter,
-            ):
-                messages = _format_anthropic_messages(msgs)
-            else:
-                # Gemini handles video natively; for others
-                # (OpenAI) we inject it via placeholders.
-                _needs_video = not (
-                    GeminiChatFormatter is not None
-                    and issubclass(
-                        base_formatter_class,
-                        GeminiChatFormatter,
-                    )
-                )
-                video_subs: dict[str, dict] = {}
-                if _needs_video:
-                    video_subs = _substitute_video_blocks(
-                        msgs,
-                    )
+            video_subs = _substitute_video_blocks(msgs)
+            messages = await super()._format(msgs)
 
-                messages = await super()._format(msgs)
+            if video_subs:
+                _replace_video_placeholders(messages, video_subs)
+                _restore_video_blocks(msgs, video_subs)
 
-                if video_subs:
-                    _replace_video_placeholders(
-                        messages,
-                        video_subs,
-                    )
-                    _restore_video_blocks(msgs, video_subs)
-
-                if _needs_video and getattr(
-                    self,
-                    "promote_tool_result_images",
-                    False,
-                ):
-                    messages = _promote_tool_result_videos(
-                        msgs,
-                        messages,
-                    )
+            if getattr(self, "promote_tool_result_images", False):
+                messages = _promote_tool_result_videos(msgs, messages)
 
             if extra_contents:
                 for message in messages:
@@ -1141,11 +896,10 @@ def _prepare_model_config_sync(
         tenant_id,
     )
     from ..providers.openai_provider import OpenAIProvider
-    from ..providers.anthropic_provider import AnthropicProvider
 
     tls_context: SSLContext | PreparedTLSFailure | None = None
     if any(
-        isinstance(candidate, (OpenAIProvider, AnthropicProvider))
+        isinstance(candidate, OpenAIProvider)
         for candidate in (provider, fallback_provider)
     ):
         import httpx
@@ -1153,11 +907,7 @@ def _prepare_model_config_sync(
         try:
             tls_context = httpx.create_ssl_context()
         except (OSError, ValueError) as exc:
-            if any(
-                isinstance(candidate, OpenAIProvider)
-                for candidate in (provider, fallback_provider)
-            ):
-                tls_context = PreparedTLSFailure(copy.copy(exc))
+            tls_context = PreparedTLSFailure(copy.copy(exc))
             # Let the existing model fallback handle an OpenAI failure without
             # repeating certificate I/O on the event loop.
             logger.warning("Unable to prepare SDK TLS context: %s", exc)
@@ -1376,7 +1126,11 @@ def create_model_and_formatter(
             tenant_id=tenant_id,
             agent_id=resolved_agent_id,
             on_retry=on_model_retry,
-            on_request_attempt=on_model_request_attempt,
+            on_request_attempt=(
+                None
+                if getattr(model, "observes_provider_requests", False)
+                else on_model_request_attempt
+            ),
         )
         from ..observability.instrumentation import ObservabilityModelWrapper
 
@@ -1384,6 +1138,7 @@ def create_model_and_formatter(
             wrapped_model,
             provider_key=provider_id,
             model_key=resolved_slot.model,
+            count_requests=True,
         )
 
         return wrapped_model, formatter
@@ -1416,10 +1171,7 @@ def _create_formatter_instance(
         base_formatter_class,
     )
     kwargs: dict[str, Any] = {}
-    if issubclass(
-        base_formatter_class,
-        (OpenAIChatFormatter, GeminiChatFormatter),
-    ):
+    if issubclass(base_formatter_class, OpenAIChatFormatter):
         kwargs["promote_tool_result_images"] = True
     return formatter_class(**kwargs)
 

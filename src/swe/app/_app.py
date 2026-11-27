@@ -19,7 +19,6 @@ from agentscope_runtime.engine.app import AgentApp
 from ..config import load_config  # pylint: disable=no-name-in-module
 from ..config.utils import get_config_path
 from ..constant import (
-    DOCS_ENABLED,
     LOG_LEVEL_ENV,
     CORS_ORIGINS,
     WORKING_DIR,
@@ -353,14 +352,13 @@ async def _initialize_agent_observability_storage(app: FastAPI) -> None:
         await connection.connect()
         store = ObservabilityStore(connection)
         readiness = await store.readiness()
-        app.state.agent_observability_connection = connection
         if readiness["ready"]:
-            app.state.agent_observability_store = store
             from ..observability.projector import InboxProjector
 
             projector = InboxProjector(store)
-            app.state.agent_observability_projector = projector
             await projector.start()
+            app.state.agent_observability_store = store
+            app.state.agent_observability_projector = projector
         else:
             logger.warning(
                 "Agent observability database schema is not ready: tables=%s columns=%s indexes=%s",
@@ -368,6 +366,11 @@ async def _initialize_agent_observability_storage(app: FastAPI) -> None:
                 readiness["missing_columns"],
                 readiness["invalid_indexes"],
             )
+        app.state.agent_observability_connection = connection
+    except asyncio.CancelledError:
+        if connection is not None:
+            await connection.close()
+        raise
     except Exception as exc:
         logger.warning(
             "Agent observability database unavailable: %s",
@@ -839,6 +842,7 @@ async def _shutdown_lifespan_resources_impl(
     transient_cleanup = await _stop_lifespan_background_services(app)
 
     await _stop_lifespan_tracing_and_heartbeat()
+    await _stop_lifespan_evidence_recovery(app)
     manager_stopped = await _stop_multi_agent_manager(app)
     pool_stopped = await _stop_tenant_workspace_pool(app)
     await _stop_lifespan_subagents_and_emitter()
@@ -965,6 +969,29 @@ async def _stop_lifespan_tracing_and_heartbeat() -> None:
         logger.warning("Error stopping service heartbeat: %s", e)
 
 
+async def _stop_lifespan_evidence_recovery(app: FastAPI) -> None:
+    recovery_start = getattr(
+        app.state,
+        "agent_observability_recovery_start",
+        None,
+    )
+    if recovery_start is not None:
+        recovery_start.cancel()
+        await asyncio.gather(recovery_start, return_exceptions=True)
+    try:
+        from ..observability.outbox_runtime import stop_recovery
+
+        await stop_recovery(
+            app,
+            getattr(app.state, "multi_agent_manager", None),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Error stopping evidence recovery: %s",
+            type(exc).__name__,
+        )
+
+
 async def _stop_lifespan_subagents_and_emitter() -> None:
     try:
         from ..agents.tools.subagent_background import (
@@ -1039,6 +1066,49 @@ async def _close_lifespan_observability(app: FastAPI) -> None:
             logger.warning("Error closing Agent observability database: %s", e)
 
 
+async def _supervise_evidence_recovery(app, manager, db_connection):
+    """Retry recovery initialization without delaying conversation startup."""
+    from ..observability.outbox_runtime import start_recovery
+    from ..observability.store import ObservabilityStore
+    from ..observability.projector import InboxProjector
+
+    while True:
+        try:
+            connection = getattr(
+                app.state,
+                "agent_observability_connection",
+                None,
+            )
+            if connection is None:
+                await _initialize_agent_observability_storage(app)
+                connection = getattr(
+                    app.state,
+                    "agent_observability_connection",
+                    None,
+                )
+            if (
+                connection is not None
+                and getattr(app.state, "agent_observability_store", None)
+                is None
+            ):
+                store = ObservabilityStore(connection)
+                if (await store.readiness())["ready"]:
+                    projector = InboxProjector(store)
+                    await projector.start()
+                    app.state.agent_observability_store = store
+                    app.state.agent_observability_projector = projector
+            if await start_recovery(app, manager, db_connection):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Evidence recovery unavailable: %s",
+                type(exc).__name__,
+            )
+        await asyncio.sleep(5)
+
+
 async def _stop_system_cron_tasks(app: FastAPI) -> None:
     """先停止系统业务并留存待核实事实，再关闭工作区与共库连接。"""
     tasks = list(getattr(app.state, "system_cron_tasks", {}).values())
@@ -1111,7 +1181,6 @@ async def lifespan(
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
     app.state.db_connection = db_connection
-    await _initialize_agent_observability_storage(app)
     from .crons.auth_mirror import configure_cron_auth_mirror
 
     configure_cron_auth_mirror(db_connection)
@@ -1120,6 +1189,13 @@ async def lifespan(
         from .conversation_storage.runtime import configure_runtime
 
         await configure_runtime(db_connection)
+        app.state.agent_observability_recovery_start = asyncio.create_task(
+            _supervise_evidence_recovery(
+                app,
+                multi_agent_manager,
+                db_connection,
+            ),
+        )
         await _initialize_tracing_manager(db_connection)
         logger.info("Instance module initialized")
 
@@ -1181,9 +1257,10 @@ async def lifespan(
 
 app = FastAPI(
     lifespan=lifespan,
-    docs_url="/docs" if DOCS_ENABLED else None,
-    redoc_url="/redoc" if DOCS_ENABLED else None,
-    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    swagger_ui_oauth2_redirect_url=None,
 )
 from .conversation_storage.tenant_admission import (
     TenantNotPublished,

@@ -178,6 +178,12 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 - 前端 reconnect 触发：[console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.tsx](/Users/shixiangyi/code/Swe/console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereSessionsContext.tsx)
 - 前端请求 owner 透传：[console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/useChatRequest.tsx](/Users/shixiangyi/code/Swe/console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/useChatRequest.tsx)
 
+## 独立可观测的模型性能与执行终态
+
+- 跨 Run 的模型用量覆盖与首输出分布从已结束的 `LLM/request_attempt` Span 读取。逻辑调用数从 `LLM/chat` 读取。先核对筛选窗口、请求尝试数及两个延迟指标各自的已知样本数。 [性能聚合](../../src/swe/observability/query.py) · [Console 总览](../../console/src/pages/AgentObservability/RunOverview.tsx)
+- Run 活动时间由 Attempt 区间计算。排查 Agent 重试时间时，核对失败 Attempt 的结束事件和下一 Attempt 的开始事件，退避在两者之间。 [Agent 重试](../../src/swe/app/runner/query_attempt.py)
+- PreToolUse STOP 留下 `Guard/rejected` 和 `hook_stop`，本地工具硬超时留下 `Tool/timed_out` 和 `tool_timeout`。 [工具执行与短路](../../src/swe/agents/tool_guard_mixin.py)
+
 ## Console 第二轮提问 / OpenAI system role 顺序
 
 - 后端 query 生命周期：[src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
@@ -612,7 +618,7 @@ NODE_OPTIONS=--max-old-space-size=8192 npm run build
 
 ## 聊天文件管理器排序
 
-- 目录列表排序入口为 `src/swe/app/file_manager.py` 的 `_entry_sort_key`：文件夹优先且按名称自然升序；其余条目按文件系统 `st_mtime_ns` 倒序，同时间按名称自然升序兜底。
+- `src/swe/app/file_manager.py` 的 `_entry_sort_key` 将同层文件和目录按各自的 `st_mtime_ns` 混排，最新的在前。时间相同时按忽略大小写的名称自然升序排列，再以原始名称打破平局。
 - 完整目录先排序再建立分页快照，前端 `FileColumn.tsx` 按接口返回顺序显示；不要仅在前端对当前页排序。刷新重新读取修改时间，翻页沿用同一快照。回收站仍按归档时间倒序。
 - 回归入口：`venv/bin/python -m pytest tests/unit/app/test_file_manager.py -q`。名称排序与分页容量测试应显式固定文件修改时间，避免依赖创建文件时的时钟精度。
 

@@ -6,9 +6,6 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from swe.providers.anthropic_provider import AnthropicProvider
-from swe.providers.gemini_provider import GeminiProvider
-from swe.providers.ollama_provider import OllamaProvider
 from swe.providers.openai_provider import OpenAIProvider
 from swe.providers.provider import ModelRuntimeConfig
 
@@ -134,36 +131,8 @@ def test_chat_model_instance_uses_only_explicit_generation_arguments(
     }
 
 
-@pytest.mark.parametrize(
-    ("provider_type", "model_target", "output_length_key"),
-    [
-        (
-            OpenAIProvider,
-            "swe.providers.openai_chat_model_compat.OpenAIChatModelCompat",
-            "max_tokens",
-        ),
-        (
-            AnthropicProvider,
-            "agentscope.model.AnthropicChatModel",
-            "max_tokens",
-        ),
-        (
-            GeminiProvider,
-            "agentscope.model.GeminiChatModel",
-            "max_output_tokens",
-        ),
-        (
-            OllamaProvider,
-            "swe.providers.openai_chat_model_compat.OpenAIChatModelCompat",
-            "max_tokens",
-        ),
-    ],
-)
-def test_provider_adapters_forward_resolved_model_configuration(
+def test_openai_adapter_forwards_resolved_model_configuration(
     monkeypatch: pytest.MonkeyPatch,
-    provider_type: type,
-    model_target: str,
-    output_length_key: str,
 ) -> None:
     created: list[dict] = []
 
@@ -171,8 +140,11 @@ def test_provider_adapters_forward_resolved_model_configuration(
         def __init__(self, **kwargs) -> None:
             created.append(kwargs)
 
-    monkeypatch.setattr(model_target, FakeChatModel)
-    provider = provider_type(
+    monkeypatch.setattr(
+        "swe.providers.openai_chat_model_compat.OpenAIChatModelCompat",
+        FakeChatModel,
+    )
+    provider = OpenAIProvider(
         id="provider",
         name="Provider",
         base_url="https://api.example.test/v1",
@@ -197,25 +169,15 @@ def test_provider_adapters_forward_resolved_model_configuration(
         ),
     )
 
-    expected_thinking: dict[str, object] = (
-        {
-            "extra_body": {
-                "enable_thinking": True,
-                "reasoning_effort": "high",
-            },
-        }
-        if provider_type in (OpenAIProvider, OllamaProvider)
-        else {
-            "enable_thinking": True,
-            "reasoning_effort": "high",
-        }
-    )
     assert created[0]["generate_kwargs"] == {
         "temperature": 0.2,
         "top_p": 0.8,
         "top_k": 20,
-        output_length_key: 4_096,
-        **expected_thinking,
+        "max_tokens": 4_096,
+        "extra_body": {
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        },
     }
 
 

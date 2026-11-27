@@ -41,14 +41,6 @@ const OPENAI_COMPATIBLE_CHAT_MODELS = [
   },
 ];
 
-const ALL_CHAT_MODEL_OPTIONS = [
-  ...OPENAI_COMPATIBLE_CHAT_MODELS,
-  {
-    value: "AnthropicChatModel",
-    label: "AnthropicChatModel",
-  },
-];
-
 export function ProviderConfigModal({
   provider,
   activeModels,
@@ -62,19 +54,11 @@ export function ProviderConfigModal({
   const [formDirty, setFormDirty] = useState(false);
   const [form] = Form.useForm<ProviderConfigFormValues>();
   const { message } = useAppMessage();
-  const selectedChatModel = Form.useWatch("chat_model", form);
   const canEditBaseUrl = !provider.freeze_url;
   const canEditChatModel =
     provider.is_custom ||
     provider.chat_model === "OpenAIChatModel" ||
     provider.chat_model === "KimiChatModel";
-
-  const effectiveChatModel = useMemo(() => {
-    if (!provider.is_custom) {
-      return provider.chat_model;
-    }
-    return selectedChatModel || provider.chat_model || "OpenAIChatModel";
-  }, [provider.chat_model, provider.is_custom, selectedChatModel]);
 
   const apiKeyPlaceholder = useMemo(() => {
     if (provider.api_key) {
@@ -93,25 +77,17 @@ export function ProviderConfigModal({
     if (provider.id === "azure-openai") {
       return t("models.azureEndpointHint");
     }
-    if (provider.id === "anthropic") {
-      return t("models.anthropicEndpointHint");
-    }
     if (provider.id === "openai") {
       return t("models.openAIEndpoint");
-    }
-    if (provider.id === "ollama") {
-      return t("models.ollamaEndpointHint");
     }
     if (provider.id === "lmstudio") {
       return t("models.lmstudioEndpointHint");
     }
     if (provider.is_custom) {
-      return effectiveChatModel === "AnthropicChatModel"
-        ? t("models.anthropicEndpointHint")
-        : t("models.openAICompatibleEndpoint");
+      return t("models.openAICompatibleEndpoint");
     }
     return t("models.apiEndpointHint");
-  }, [canEditBaseUrl, provider.id, provider.is_custom, effectiveChatModel, t]);
+  }, [canEditBaseUrl, provider.id, provider.is_custom, t]);
 
   const baseUrlPlaceholder = useMemo(() => {
     if (!canEditBaseUrl) {
@@ -120,23 +96,14 @@ export function ProviderConfigModal({
     if (provider.id === "azure-openai") {
       return "https://<resource>.openai.azure.com/openai/v1";
     }
-    if (provider.id === "anthropic") {
-      return "https://api.anthropic.com";
-    }
     if (provider.id === "openai") {
       return "https://api.openai.com/v1";
-    }
-    if (provider.id === "ollama") {
-      return "http://localhost:11434";
     }
     if (provider.id === "lmstudio") {
       return "http://localhost:1234/v1";
     }
-    if (provider.is_custom && effectiveChatModel === "AnthropicChatModel") {
-      return "https://api.anthropic.com";
-    }
     return "https://api.example.com";
-  }, [canEditBaseUrl, provider.id, provider.is_custom, effectiveChatModel]);
+  }, [canEditBaseUrl, provider.id]);
 
   // Sync form when modal opens or provider data changes
   useEffect(() => {
@@ -318,13 +285,7 @@ export function ProviderConfigModal({
             ]}
             extra={t("models.protocolHint")}
           >
-            <Select
-              options={
-                provider.is_custom
-                  ? ALL_CHAT_MODEL_OPTIONS
-                  : OPENAI_COMPATIBLE_CHAT_MODELS
-              }
-            />
+            <Select options={OPENAI_COMPATIBLE_CHAT_MODELS} />
           </Form.Item>
         )}
 

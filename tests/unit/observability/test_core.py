@@ -23,6 +23,8 @@ from swe.observability.instrumentation import (
     _system_prompt_digest,
     record_model_request_attempt,
 )
+from swe.observability.models import MetadataEvent
+from swe.observability.projector import _validate_payload
 from swe.providers.retry_chat_model import (
     RateLimitConfig,
     RetryChatModel,
@@ -319,9 +321,8 @@ async def test_model_wrapper_records_usage_without_payload(monkeypatch):
     assert ended["span_type"] == "LLM"
     assert ended["metrics"]["input_tokens"] == 3
     assert ended["metrics"]["output_tokens"] == 4
-    assert ended["response_model_key"] == "actual-response-model"
-    assert ended["model_key_source"] == "response"
-    assert ended["finish_reason"] == "stop"
+    assert "response_model_key" not in ended
+    assert "finish_reason" not in ended
     assets = [
         json.loads(line)
         for line in payload.splitlines()
@@ -438,10 +439,278 @@ async def test_assistant_evidence_does_not_guess_reused_response_id(
     events = [json.loads(line) for line in stream.getvalue().splitlines()]
     assert not any(
         event.get("event_type") == "evidence.linked"
-        and event.get("content_type") == "assistant_answer"
+        and event.get("content_type") == "tool_output"
         for event in events
     )
     assert "private answer" not in stream.getvalue()
+
+
+def test_pending_tool_evidence_binds_the_concrete_message(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import (
+        bind_tool_span,
+        mark_pending_message_evidence,
+    )
+    from swe.observability.outbox import verify_event
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "key1")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: True,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    message = Msg(
+        "system",
+        [{"type": "tool_result", "id": "call", "name": "tool", "output": []}],
+        "system",
+    )
+    with bind_context(context):
+        span = Observability(emitter).span("tool", "call")
+        with bind_tool_span(span):
+            mark_pending_message_evidence(message)
+            mark_pending_message_evidence(message)
+    emitter.close()
+    record = message.metadata["agent_observability_outbox"]
+    event = verify_event(record)
+    assert (
+        event["reference_id"]
+        == message.metadata["agent_observability_evidence_ref"]
+    )
+    assert event["saved_state"] == "available"
+    assert event["event_type"] == "evidence.linked"
+    assert (
+        sum(
+            '"event_type":"evidence.pending"' in line
+            for line in stream.getvalue().splitlines()
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_pending_evidence_reports_not_saved_when_recovery_unavailable(
+    monkeypatch,
+    registered,
+):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import (
+        bind_tool_span,
+        mark_pending_message_evidence,
+    )
+
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *args: registered,
+    )
+    monkeypatch.delenv("SWE_AGENTOBS_OUTBOX_KEY_ID", raising=False)
+    monkeypatch.delenv("SWE_AGENTOBS_OUTBOX_SECRET", raising=False)
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    message = Msg(
+        "system",
+        [
+            {
+                "type": "tool_result",
+                "id": "call",
+                "name": "tool",
+                "output": ["private-output"],
+            },
+        ],
+        "system",
+    )
+    with bind_context(context):
+        span = Observability(emitter).span("TOOL", "tool.execute")
+        with bind_tool_span(span):
+            mark_pending_message_evidence(message)
+    emitter.close()
+    assert not message.metadata
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence = [
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+        and event.get("content_type") == "tool_output"
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["saved_state"] == "not_saved"
+    assert evidence[0]["content_type"] == "tool_output"
+    assert "private-output" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_pending_answer_uses_model_invocation_span(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import mark_pending_message_evidence
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "key1")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: True,
+    )
+
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="invocation",
+                content=[{"type": "text", "text": "answer"}],
+            )
+
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        response = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="p",
+            model_key="m",
+        )([])
+        message = Msg("assistant", response.content, "assistant")
+        message.invocation_id = response.id
+        mark_pending_message_evidence(message)
+    emitter.close()
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    pending = [
+        event
+        for event in events
+        if event.get("event_type") == "evidence.pending"
+    ]
+    assert len(pending) == 1
+    assert (
+        pending[0]["reference_id"]
+        == message.metadata["agent_observability_evidence_ref"]
+    )
+    assert pending[0]["content_type"] == "assistant_answer"
+    assert "answer" not in json.dumps(
+        pending[0]["metadata"] if "metadata" in pending[0] else {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_unregistered_answer_reports_not_saved(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import mark_pending_message_evidence
+
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: False,
+    )
+    stream = io.StringIO()
+    emitter = JsonlEmitter(EmitterConfig(), stream=stream)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = False
+
+        async def __call__(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="invocation",
+                content=[{"type": "text", "text": "private-answer"}],
+            )
+
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        response = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="p",
+            model_key="m",
+        )([])
+        message = Msg("assistant", response.content, "assistant")
+        message.invocation_id = response.id
+        mark_pending_message_evidence(message)
+    emitter.close()
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    evidence = [
+        event
+        for event in events
+        if event.get("event_type") == "evidence.linked"
+        and event.get("content_type") == "assistant_answer"
+    ]
+    assert len(evidence) == 1
+    assert evidence[0]["saved_state"] == "not_saved"
+    assert evidence[0]["content_type"] == "assistant_answer"
+    assert not message.metadata
+    assert "private-answer" not in stream.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_streamed_answer_retains_its_model_span(monkeypatch):
+    from agentscope.message import Msg
+    from swe.observability.instrumentation import mark_pending_message_evidence
+    from swe.observability.outbox import verify_event
+
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_KEY_ID", "key1")
+    monkeypatch.setenv("SWE_AGENTOBS_OUTBOX_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "swe.observability.outbox_recovery.scope_registered",
+        lambda *_: True,
+    )
+    emitter = JsonlEmitter(EmitterConfig(), stream=io.StringIO())
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+
+    class Model:
+        stream = True
+
+        async def __call__(self, *_args, **_kwargs):
+            async def chunks():
+                yield SimpleNamespace(
+                    id="stream-id",
+                    content=[{"type": "text", "text": "answer"}],
+                )
+
+            return chunks()
+
+    context = Observability().prepare_run(
+        scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+        business_ref={"chat_id": "chat-a"},
+        enabled=True,
+    )
+    with bind_context(context):
+        response = await ObservabilityModelWrapper(
+            Model(),
+            provider_key="p",
+            model_key="m",
+        )([])
+        async for chunk in response:
+            message = Msg("assistant", chunk.content, "assistant")
+            message.invocation_id = chunk.id
+        mark_pending_message_evidence(message)
+    event = verify_event(message.metadata["agent_observability_outbox"])
+    assert event["content_type"] == "assistant_answer"
+    emitter.close()
 
 
 @pytest.mark.asyncio
@@ -643,9 +912,10 @@ async def test_model_retry_projects_request_attempt_spans_without_duplicate_usag
         async def __call__(self, *_args, **_kwargs):
             self.calls += 1
             if self.calls == 1:
-                return SimpleNamespace(content=[])
+                return SimpleNamespace(content=[], usage={"input_tokens": 10})
             return SimpleNamespace(
                 content=[{"type": "text", "text": "private answer"}],
+                usage={"input_tokens": 20, "output_tokens": 0},
             )
 
     async def on_attempt(index, streaming):
@@ -706,8 +976,13 @@ async def test_model_retry_projects_request_attempt_spans_without_duplicate_usag
         and record.get("operation") == "chat"
         and record["event_name"] == "span.ended"
     )
-    assert logical_end["metrics"].get("input_tokens") is None
-    assert logical_end["metrics"].get("output_tokens") is None
+    assert [record["metrics"]["input_tokens"] for record in attempt_ends] == [
+        10,
+        20,
+    ]
+    assert "output_tokens" not in attempt_ends[0]["metrics"]
+    assert attempt_ends[1]["metrics"]["output_tokens"] == 0
+    assert logical_end["metrics"]["input_tokens"] == 20
     assert "private answer" not in stream.getvalue()
 
 
@@ -758,9 +1033,8 @@ async def test_model_wrapper_records_first_nonempty_stream_chunk(monkeypatch):
     assert ended["metrics"]["first_chunk_us"] >= 0
     assert ended["metrics"]["first_visible_text_us"] >= 0
     assert ended["metrics"]["usage_known"] is True
-    assert ended["response_model_key"] == "stream-response-model"
-    assert ended["model_key_source"] == "response"
-    assert ended["finish_reason"] == "stop"
+    assert "response_model_key" not in ended
+    assert "finish_reason" not in ended
 
 
 @pytest.mark.asyncio
@@ -813,7 +1087,7 @@ async def test_model_wrapper_preserves_latest_stream_usage_snapshot(
     assert ended["metrics"]["output_tokens"] == 4
     assert "first_chunk_us" not in ended["metrics"]
     assert "first_visible_text_us" not in ended["metrics"]
-    assert ended["response_model_key"] == "actual-model"
+    assert "response_model_key" not in ended
 
 
 @pytest.mark.asyncio
@@ -1040,7 +1314,7 @@ async def test_model_wrapper_keeps_concurrent_run_spans_isolated(monkeypatch):
             call_id = messages[0]["call_id"]
             return SimpleNamespace(
                 content=[{"type": "text", "text": f"private-{call_id}"}],
-                metadata={"model": f"response-{call_id}"},
+                usage={"input_tokens": 1 if call_id == "first" else 2},
             )
 
     observer = Observability()
@@ -1067,12 +1341,12 @@ async def test_model_wrapper_keeps_concurrent_run_spans_isolated(monkeypatch):
     ended = [
         record for record in records if record["event_name"] == "span.ended"
     ]
-    run_to_response = {
-        record["obs_run_id"]: record["response_model_key"] for record in ended
-    }
-    assert run_to_response == {
-        context.obs_run_id: f"response-{call_id}"
-        for call_id, context in contexts.items()
+    assert {
+        record["obs_run_id"]: record["metrics"]["input_tokens"]
+        for record in ended
+    } == {
+        contexts["first"].obs_run_id: 1,
+        contexts["second"].obs_run_id: 2,
     }
     assert "private-first" not in stream.getvalue()
     assert "private-second" not in stream.getvalue()
@@ -1362,6 +1636,120 @@ def test_queue_budget_counts_in_flight_event_and_shutdown_is_bounded():
     remaining = emitter.close(timeout=0.01)
     assert remaining == 1
     stream.release.set()
+    emitter.close()
+
+
+def test_stdout_prefix_covers_run_and_health_events(capsys):
+    emitter = JsonlEmitter(EmitterConfig())
+    try:
+        Observability(emitter=emitter).admit_run(
+            scope=Scope("svc", "src", "tenant", "agent"),
+            enabled=True,
+        )
+        assert not emitter.emit({"event_name": "observer.health"})
+    finally:
+        assert emitter.close() == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    events = []
+    for line in lines:
+        assert line.startswith("AGENTOBS ")
+        events.append(_validate_payload(line.removeprefix("AGENTOBS ")))
+    assert {event["event_name"] for event in events} == {
+        "run.accepted",
+        "asset.used",
+        "observer.health",
+    }
+
+
+def test_health_reports_accumulated_drops_after_writer_unblocks(monkeypatch):
+    monkeypatch.setattr(
+        "swe.observability.emitter._HEALTH_INTERVAL_SECONDS",
+        600,
+    )
+    health_written = threading.Event()
+
+    class HealthStream(BlockingStream):
+        def write(self, value):
+            written = super().write(value)
+            if json.loads(value)["event_name"] == "observer.health":
+                health_written.set()
+            return written
+
+    stream = HealthStream()
+    emitter = JsonlEmitter(EmitterConfig(max_queue_events=2), stream=stream)
+    try:
+        context = ObservabilityContext.new_run(
+            scope=Scope("unit", "src", "tenant", "agent"),
+            capture_enabled=True,
+        )
+        event = MetadataEvent(
+            "run.accepted",
+            context,
+            "run",
+            context.obs_run_id,
+            "accepted",
+            0,
+            {"started_at": context.run_started_at},
+        )
+        assert emitter.emit(event)
+        assert stream.entered.wait(1)
+        assert emitter.emit(event)
+        assert not emitter.emit({"event_name": "observer.health"})
+        assert not emitter.emit(event)
+        assert emitter.dropped_count == 2
+        stream.release.set()
+        assert health_written.wait(1)
+        assert not emitter.emit_raw(b"invalid")
+        assert emitter.dropped_count == 3
+    finally:
+        stream.release.set()
+        assert emitter.close() == 0
+
+    accepted, first, queued, final = map(
+        _validate_payload,
+        stream.getvalue().splitlines(),
+    )
+    assert accepted["event_name"] == "run.accepted"
+    assert queued == accepted
+    assert [first["local_seq"], final["local_seq"]] == [0, 1]
+    assert first["entity_id"] == final["entity_id"]
+    assert (
+        first["producer_id"] == final["producer_id"] == accepted["producer_id"]
+    )
+    assert first["event_name"] == final["event_name"] == "observer.health"
+    assert first["metrics"] == {"dropped_events": 2}
+    assert final["metrics"] == {"dropped_events": 3}
+    assert "obs_run_id" not in first
+    assert "scope" not in first
+
+
+def test_close_counts_health_frame_reserved_during_shutdown(monkeypatch):
+    stream = BlockingStream()
+    emitter = JsonlEmitter(stream=stream)
+    join = emitter._thread.join
+
+    def join_while_health_is_in_flight(_timeout):
+        # Let the writer reserve the final frame after close sets _closed.
+        emitter._condition.release()
+        try:
+            assert stream.entered.wait(1)
+        finally:
+            emitter._condition.acquire()
+
+    try:
+        with emitter._condition:
+            assert not emitter.emit({"event_name": "observer.health"})
+            monkeypatch.setattr(
+                emitter._thread,
+                "join",
+                join_while_health_is_in_flight,
+            )
+            assert emitter.close(timeout=0.01) == 1
+    finally:
+        monkeypatch.setattr(emitter._thread, "join", join)
+        stream.release.set()
+        assert emitter.close() == 0
 
 
 def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
@@ -1398,19 +1786,32 @@ def test_nested_metrics_preserve_delay_ms_but_drop_unknown_keys():
 
 
 def test_emit_raw_forwards_child_lines_and_rejects_bad_payloads():
-    """worker 转发只接受合法单行 JSON，并计入丢弃计数。"""
+    """worker 转发验证正式协议，并再次应用元数据白名单。"""
     stream = io.StringIO()
     emitter = JsonlEmitter(EmitterConfig(), stream=stream)
-    line = b'{"event_name":"span.ended","obs_span_id":"span-1"}\n'
+    original = io.StringIO()
+    child = JsonlEmitter(EmitterConfig(), stream=original)
+    Observability(child).admit_run(
+        scope=Scope("unit", "source", "tenant", "agent"),
+        enabled=True,
+    )
+    assert child.close() == 0
+    expected = json.loads(original.getvalue().splitlines()[0])
+    line = (
+        json.dumps({**expected, "content": "internal body"}).encode() + b"\n"
+    )
 
     assert emitter.emit_raw(line) is True
+    assert emitter.emit_raw(b'{"content":"internal body"}\n') is False
     assert emitter.emit_raw(b"not-json") is False
     assert emitter.emit_raw(b"") is False
     assert emitter.emit_raw(b'{"ok":1}' + b"x" * (24 * 1024)) is False
     emitter.close()
 
-    assert stream.getvalue() == line.decode("utf-8")
-    assert emitter.dropped_count == 3
+    forwarded, *health = map(json.loads, stream.getvalue().splitlines())
+    assert forwarded == expected
+    assert health[-1]["metrics"] == {"dropped_events": 4}
+    assert emitter.dropped_count == 4
 
 
 def test_service_unit_prefers_business_env_then_legacy(monkeypatch):
@@ -1494,10 +1895,10 @@ def test_events_example_matches_ingest_contract():
 
 
 @pytest.mark.asyncio
-async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
+async def test_legacy_nas_evidence_reads_committed_session_and_archive(
     tmp_path,
 ):
-    from unittest.mock import AsyncMock, Mock
+    from unittest.mock import AsyncMock
     from uuid import uuid4
 
     from agentscope.message import Msg
@@ -1505,16 +1906,8 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
     from swe.agents.memory.conversation_archive import ConversationArchiveStore
     from swe.app.runner.models import ChatSpec
     from swe.app.runner.session import SafeJSONSession
-    from swe.observability.instrumentation import (
-        _remember_model_response_span,
-        bind_tool_span,
-    )
-    from swe.observability.nas_evidence import (
-        collect_nas_evidence,
-        publish_nas_evidence,
-        remember_nas_message,
-    )
-    from swe.observability.query import _nas_message_occurrence
+    from swe.observability.nas_evidence import nas_reference
+    from swe.observability.query import _load_evidence_item
 
     chat = ChatSpec(
         id=str(uuid4()),
@@ -1522,19 +1915,6 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
         session_id="session",
         channel="console",
     )
-    context = ObservabilityContext.new_run(
-        capture_enabled=True,
-        scope=Scope("svc", "source", "tenant", "agent"),
-        business_ref={"chat_id": chat.id},
-    )
-
-    def span():
-        return Mock(
-            _context=context,
-            tool_output_was_compacted=Mock(return_value=False),
-        )
-
-    tool_span, model_span = span(), span()
     answer = Msg(
         "assistant",
         [
@@ -1558,59 +1938,56 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
     )
     session = SafeJSONSession(str(tmp_path / "sessions"))
     archive = ConversationArchiveStore(tmp_path / "dialog")
-    async with collect_nas_evidence():
-        with bind_context(context):
-            _remember_model_response_span(model_span, answer.invocation_id)
-            remember_nas_message(chat.id, answer)
-            with bind_tool_span(tool_span):
-                remember_nas_message(chat.id, tool)
-        publish_nas_evidence([])
-        model_span.event.assert_not_called()
-        tool_span.event.assert_not_called()
-        async with session.execution(
-            chat.session_id,
-            chat.user_id,
-        ) as execution:
-            await execution.commit_state(
-                {"agent": {"memory": {"content": [[answer.to_dict(), []]]}}},
-            )
-            publish_nas_evidence([answer.to_dict()])
-        tool.content[0]["output"] = [{"type": "text", "text": "final output"}]
-        await archive.commit(chat.id, [tool])
-        await archive.commit(
-            chat.id,
-            [Msg("user", f"later {index}", "user") for index in range(501)],
+    async with session.execution(chat.session_id, chat.user_id) as execution:
+        await execution.commit_state(
+            {"agent": {"memory": {"content": [[answer.to_dict(), []]]}}},
         )
-        publish_nas_evidence([tool.to_dict()], chat_id=chat.id)
+    await archive.commit(chat.id, [tool])
+    await archive.commit(
+        chat.id,
+        [Msg("user", f"later {index}", "user") for index in range(501)],
+    )
 
     workspace = SimpleNamespace(
         agent_id="agent",
         source_id="source",
+        tenant_id="tenant",
         workspace_dir=tmp_path,
         runner=SimpleNamespace(session=session),
         chat_manager=SimpleNamespace(get_chat=AsyncMock(return_value=chat)),
     )
     request = SimpleNamespace(state=SimpleNamespace(source_id="source"))
     run = {
+        "service_unit_key": b"svc",
+        "tenant_key": b"tenant",
         "agent_key": b"agent",
         "source_key": b"source",
         "chat_key": chat.id,
         "session_key": chat.session_id,
         "root_question_key": "question",
     }
-    for handle, kind in (
-        (tool_span, "tool_output"),
-        (model_span, "assistant_answer"),
-    ):
-        assert handle.event.call_args.args == ("evidence.linked",)
-        reference = handle.event.call_args.kwargs
-        assert reference["content_type"] == kind
-        result = await _nas_message_occurrence(
-            workspace,
-            request,
-            run,
+
+    async def load(reference, run_row):
+        result, _, _ = await _load_evidence_item(
             reference,
+            request=request,
+            run=run_row,
+            history=object(),
+            workspace=workspace,
+            max_bytes=32 * 1024,
+            authority={},
         )
+        return result
+
+    for message, kind in ((tool, "tool_output"), (answer, "assistant_answer")):
+        reference = {
+            "chat_id": chat.id,
+            "message_id": message.id,
+            "reference_id": nas_reference(message.to_dict()),
+            "content_type": kind,
+            "saved_state": "available",
+        }
+        result = await load(reference, run)
         assert result["status"] == "available"
         payload = json.dumps(result["message"])
         if kind == "assistant_answer":
@@ -1618,11 +1995,12 @@ async def test_nas_evidence_links_only_committed_messages_and_reads_archive(
                 "visible answer" in payload and "private probe" not in payload
             )
         else:
-            assert "final output" in payload and "saved output" not in payload
-        denied = await _nas_message_occurrence(
-            workspace,
-            request,
-            {**run, "source_key": b"other"},
-            reference,
-        )
-        assert denied["status"] == "unavailable"
+            assert "saved output" in payload
+        for wrong_scope in (
+            {"source_key": b"other"},
+            {"tenant_key": b"other"},
+        ):
+            denied = await load(reference, {**run, **wrong_scope})
+            assert denied["status"] == "unavailable"
+        changed = await load({**reference, "reference_id": "nas:invalid"}, run)
+        assert changed["status"] == "unavailable"

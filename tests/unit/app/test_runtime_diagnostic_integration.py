@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from swe.app.middleware.sse_diagnostic import SSEDiagnosticMiddleware
@@ -37,17 +38,12 @@ def test_app_installs_liveness_probe_as_outermost_middleware() -> None:
     assert app.user_middleware[0].cls is LivenessProbeMiddleware
 
 
-def test_lifespan_starts_and_stops_runtime_diagnostic_manager() -> None:
-    from swe.app._app import (
-        _shutdown_lifespan_resources_impl,
-        _start_lifespan_background_services,
-    )
+def test_lifespan_starts_runtime_diagnostic_manager() -> None:
+    from swe.app._app import _start_lifespan_background_services
 
     start_source = inspect.getsource(_start_lifespan_background_services)
-    stop_source = inspect.getsource(_shutdown_lifespan_resources_impl)
 
     assert "await runtime_diagnostic_manager.start()" in start_source
-    assert "await runtime_diagnostic_manager.stop()" in stop_source
 
 
 def test_lifespan_does_not_schedule_batch_dispatch_startup_scan() -> None:
@@ -61,16 +57,8 @@ def test_lifespan_does_not_schedule_batch_dispatch_startup_scan() -> None:
     )
 
 
-def test_shutdown_stops_managed_background_processes() -> None:
-    from swe.app._app import _shutdown_lifespan_resources_impl
-
-    source = inspect.getsource(_shutdown_lifespan_resources_impl)
-
-    assert "managed_background_process_manager.stop_all()" in source
-
-
 @pytest.mark.asyncio
-async def test_shutdown_releases_workspace_metrics_callback(
+async def test_shutdown_stops_services_and_releases_workspace_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from swe.agents.tools import background_process
@@ -93,10 +81,11 @@ async def test_shutdown_releases_workspace_metrics_callback(
         "runtime_diagnostic_manager",
         fake_runtime_diagnostic_manager,
     )
+    stop_managed_processes = Mock()
     monkeypatch.setattr(
         background_process.managed_background_process_manager,
         "stop_all",
-        lambda: None,
+        stop_managed_processes,
     )
     monkeypatch.setattr(
         app_module,
@@ -125,6 +114,7 @@ async def test_shutdown_releases_workspace_metrics_callback(
         db_connection=None,
     )
 
+    stop_managed_processes.assert_called_once_with()
     assert fake_runtime_diagnostic_manager.stop_calls == 1
     assert fake_runtime_diagnostic_manager.workspace_metric_callbacks == [
         None,

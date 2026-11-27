@@ -4,6 +4,7 @@
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -17,6 +18,9 @@ from swe.agents.memory.conversation_archive import (
     attach_conversation_archive,
 )
 from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
+from swe.observability import Observability, Scope, bind_context
+from swe.observability.emitter import JsonlEmitter
+from swe.observability.projector import _validate_payload
 
 
 def _chat_id() -> str:
@@ -81,6 +85,7 @@ async def test_attached_memory_appends_event_after_message_storage(
 @pytest.mark.asyncio
 async def test_projection_exposes_markdown_not_checkpoint_json(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     chat_id = _chat_id()
     memory = _memory()
@@ -91,10 +96,58 @@ async def test_projection_exposes_markdown_not_checkpoint_json(
         evidence_refs=("message:1",),
     )
 
-    await memory.install_checkpoint_projection(record)
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = (
+        Observability()
+        .prepare_run(
+            scope=Scope("swe", "source", "tenant", "agent"),
+            enabled=True,
+            business_ref={"chat_id": chat_id},
+        )
+        .new_attempt()
+    )
+    with bind_context(context):
+        await memory.install_checkpoint_projection()
+        other_chat_id = _chat_id()
+        other_record = CheckpointRecord.new(chat_id=other_chat_id, epoch=1)
+        await memory.chat_checkpoint_store.write_active_checkpoint(
+            other_chat_id,
+            other_record,
+        )
+        await memory.chat_checkpoint_store.write_active_checkpoint(
+            chat_id,
+            record,
+        )
+        restarted_memory = _memory()
+        attach_conversation_archive(
+            restarted_memory,
+            tmp_path / "dialog",
+            chat_id,
+        )
+        restored = await restarted_memory.install_checkpoint_projection()
 
-    assert "## 目标" in memory._compressed_summary
-    assert '"schema_version"' not in memory._compressed_summary
+    assert restored.checkpoint_id == record.checkpoint_id
+    assert "## 目标" in restarted_memory._compressed_summary
+    assert '"schema_version"' not in restarted_memory._compressed_summary
+    assert emitter.close() == 0
+    events = [_validate_payload(line) for line in sink.getvalue().splitlines()]
+    assert [(event["event_name"], event["operation"]) for event in events] == [
+        ("span.started", "save"),
+        ("span.ended", "save"),
+        ("span.started", "restore"),
+        ("span.ended", "restore"),
+    ]
+    assert (
+        events[1]["checkpoint_id"]
+        == events[3]["checkpoint_id"]
+        == record.checkpoint_id
+    )
+    assert "keep API stable" not in sink.getvalue()
 
 
 @pytest.mark.asyncio

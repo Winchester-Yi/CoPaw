@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..utils.close_aware_stream import CloseAwareStream
 from .agent_trace_capture import current_capture, write_payload
 from .chat_projection import project_chat_input
 
@@ -46,7 +47,11 @@ class AgentTraceModelWrapper:
             logger.warning("Agent chat input projection failed", exc_info=True)
         result = await self._model(messages, *args, **kwargs)
         if hasattr(result, "__aiter__"):
-            return self._observe_stream(result, capture)
+            stream = self._observe_stream(result, capture)
+            close = getattr(result, "aclose", None)
+            return (
+                CloseAwareStream(stream, close) if callable(close) else stream
+            )
         self._snapshot(capture, result)
         return result
 

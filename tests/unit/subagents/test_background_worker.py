@@ -1894,15 +1894,6 @@ raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
     assert record.status == "running"
 
 
-class _ForwardRecorder:
-    def __init__(self):
-        self.lines: list[bytes] = []
-
-    def emit_raw(self, line: bytes) -> bool:
-        self.lines.append(bytes(line))
-        return True
-
-
 @pytest.mark.asyncio
 async def test_worker_stdout_events_are_forwarded_by_supervisor(
     monkeypatch,
@@ -1965,6 +1956,7 @@ class OkRuntime:
         )
 
 worker.SubAgentRuntime = OkRuntime
+print('{"content":"internal body"}', flush=True)
 raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
 """
     process = subprocess.Popen(  # pylint: disable=consider-using-with
@@ -1974,7 +1966,8 @@ raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    recorder = _ForwardRecorder()
+    sink = io.StringIO()
+    recorder = JsonlEmitter(EmitterConfig(), stream=sink)
 
     def emitter_factory():
         return recorder
@@ -2001,7 +1994,10 @@ raise SystemExit(asyncio.run(worker.run_worker(Path(sys.argv[1]))))
     assert handle.event_thread is not None
     handle.event_thread.join(5)
 
-    events = [json.loads(line) for line in recorder.lines]
+    assert recorder.close() == 0
+    assert "internal body" not in sink.getvalue()
+    assert recorder.dropped_count == 1
+    events = [json.loads(line) for line in sink.getvalue().splitlines()]
     ends = [
         event
         for event in events

@@ -8,6 +8,7 @@ and the system prompt.
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from math import floor
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
@@ -17,6 +18,7 @@ from agentscope.message import Msg, TextBlock
 from swe.constant import MEMORY_COMPACT_KEEP_RECENT
 
 from ...app.source_system_config import resolve_tool_result_compact_config
+from ...observability.instrumentation import Observability
 from ..utils import (
     check_valid_messages,
     get_swe_token_counter,
@@ -239,15 +241,24 @@ class MemoryCompactionHook:
         remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
     ) -> bool:
         """Install ready or degraded state and decide whether legacy flow stops."""
+        span = Observability().span(
+            "Context",
+            "compact",
+            defer_start=True,
+            compaction_strategy="checkpoint_ready",
+        )
         installed = await self.memory_manager.install_ready_precompaction(
             chat_id=chat_id,
             messages=messages,
             memory=agent.memory,
         )
         if installed:
-            return await self._is_legacy_fallback_avoided(
+            return await self._finish_checkpoint_compaction(
+                span,
                 running_config,
+                decision.projected_tokens,
                 remeasure_projected_tokens,
+                without_measurement=True,
             )
         if decision.stage != "emergency":
             return False
@@ -258,31 +269,59 @@ class MemoryCompactionHook:
         )
         if install_degraded is None:
             return False
-        await install_degraded(
+        span = Observability().span(
+            "Context",
+            "compact",
+            defer_start=True,
+            compaction_strategy="checkpoint_degraded",
+        )
+        installed = await install_degraded(
             chat_id=chat_id,
             messages=messages,
             memory=agent.memory,
         )
-        return await self._is_legacy_fallback_avoided(
+        return await self._finish_checkpoint_compaction(
+            span if installed else None,
             running_config,
+            decision.projected_tokens,
             remeasure_projected_tokens,
-            default_result=False,
+            without_measurement=False,
         )
 
-    @staticmethod
-    async def _is_legacy_fallback_avoided(
+    async def _finish_checkpoint_compaction(
+        self,
+        span: Any,
         running_config: Any,
-        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
+        before_tokens: int,
+        remeasure: Callable[[], Awaitable[int]] | None,
         *,
-        default_result: bool = True,
+        without_measurement: bool,
+    ) -> bool:
+        metrics = {"context_before_tokens": before_tokens}
+        if span is not None:
+            span.start()
+        with span or nullcontext():
+            below_threshold = without_measurement
+            if remeasure is not None:
+                after_tokens = await remeasure()
+                metrics["context_after_tokens"] = after_tokens
+                below_threshold = self._below_fallback_threshold(
+                    running_config,
+                    after_tokens,
+                )
+            if span is not None:
+                span.end(status="succeeded", metrics=metrics)
+            return below_threshold
+
+    @staticmethod
+    def _below_fallback_threshold(
+        running_config: Any,
+        projected_tokens: int,
     ) -> bool:
         """Return whether a checkpoint install brought usage below fallback."""
-        if remeasure_projected_tokens is None:
-            return default_result
-        remeasured = await remeasure_projected_tokens()
         compact_config = running_config.context_compact
         return decide_context_budget(
-            remeasured,
+            projected_tokens,
             running_config.max_input_length,
             compact_config,
         ).stage in ("normal", "governance")
@@ -564,15 +603,17 @@ class MemoryCompactionHook:
             )
 
             async def remeasure_projected_tokens() -> int:
+                nonlocal projected_tokens
                 refreshed_messages = await memory.get_memory(
                     prepend_summary=False,
                 )
-                return await self._count_projected_tokens(
+                projected_tokens = await self._count_projected_tokens(
                     token_counter,
                     refreshed_messages,
                     (agent.sys_prompt or "")
                     + (memory.get_compressed_summary() or ""),
                 )
+                return projected_tokens
 
             if await self._apply_checkpoint_budget_stage(
                 agent,
@@ -600,19 +641,38 @@ class MemoryCompactionHook:
                 running_config,
                 messages_to_compact,
             )
-            compact_content = await self._run_context_compaction(
-                agent,
-                messages_to_compact,
-                running_config,
+            span = Observability().span(
+                "Context",
+                "compact",
+                compaction_strategy="summary",
             )
-            if not compact_content:
-                return None
+            before_tokens = projected_tokens
+            with span or nullcontext():
+                compact_content = await self._run_context_compaction(
+                    agent,
+                    messages_to_compact,
+                    running_config,
+                )
+                if not compact_content:
+                    if span is not None:
+                        span.end(
+                            status="failed",
+                            technical_status="ERROR",
+                            has_error=True,
+                            metrics={"context_before_tokens": before_tokens},
+                        )
+                    return None
 
-            boundary = await self._persist_compaction_result(
-                memory,
-                messages_to_compact,
-                compact_content,
-            )
+                boundary = await self._persist_compaction_result(
+                    memory,
+                    messages_to_compact,
+                    compact_content,
+                )
+                if span is not None:
+                    span.end(
+                        status="succeeded",
+                        metrics={"context_before_tokens": before_tokens},
+                    )
             if boundary is not None:
                 await self._print_status_message(
                     agent,

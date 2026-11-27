@@ -89,7 +89,7 @@ class OpenAIProvider(Provider):
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=timeout,
-            **prepared_http_client_kwargs("openai"),
+            **prepared_http_client_kwargs(),
         )
 
     async def _client_async(self, timeout: float = 5) -> AsyncOpenAI:
@@ -203,7 +203,7 @@ class OpenAIProvider(Provider):
         client_kwargs = {"base_url": self.base_url}
         from .client_tls import prepared_http_client_kwargs
 
-        client_kwargs.update(prepared_http_client_kwargs("openai"))
+        client_kwargs.update(prepared_http_client_kwargs())
 
         if self.base_url == DASHSCOPE_BASE_URL:
             client_kwargs["default_headers"] = {

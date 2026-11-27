@@ -4,6 +4,9 @@
 from types import SimpleNamespace
 from datetime import datetime, timezone
 import json
+import logging
+
+from pydantic import ValidationError
 
 from ...database.prepared import PreparedInsert
 from ..runner.expert_binding import (
@@ -27,9 +30,18 @@ from .metadata_catalog import (
     STATUS_FROM,
     MetadataCatalog,
     _utc,
+    _sql_time,
+    _text,
 )
 from .errors import ConflictError, IntegrityError
-from .identity import SessionIdentity, WorkspaceScope, identity_bytes
+from .identity import (
+    SessionIdentity,
+    WorkspaceScope,
+    identity_bytes,
+    chat_key_bytes,
+)
+
+logger = logging.getLogger(__name__)
 
 WORKSPACES = "swe_conversation_metadata_workspaces"
 SOURCES = "swe_conversation_metadata_sources"
@@ -167,6 +179,73 @@ class MySQLMetadataRepository(MetadataCatalog):
             tuple(params),
         )
         return [self._spec(row) for row in rows]
+
+    async def list_recovery_chats_cursor(self, *, page_size, cursor=None):
+        """Advance using raw SQL ordering even when one Chat is malformed."""
+        if page_size != 1:
+            raise ValueError("recovery page size must be one")
+        where, params = self._where()
+        version, boundary = (
+            self._decode_cursor(cursor) if cursor else ("v2", None)
+        )
+        column = "created_at" if version == "v1" else "updated_at"
+        if boundary:
+            stamp, key = boundary
+            where += (
+                f" AND (c.{column}<%s OR (c.{column}=%s "
+                "AND c.external_chat_key<%s))"
+            )
+            params.extend(
+                [_sql_time(stamp), _sql_time(stamp), chat_key_bytes(key)],
+            )
+        rows = await self.db.fetch_all(
+            self.select_chat
+            + where
+            + f" ORDER BY c.{column} DESC,c.external_chat_key DESC LIMIT %s",
+            (*params, 2),
+        )
+        if not rows:
+            return SimpleNamespace(items=[], next_cursor=None)
+        row = rows[0]
+        # A malformed ordering identity cannot be skipped safely.
+        key = _text(row["external_chat_key"])
+        chat_key_bytes(key)
+        next_cursor = (
+            self._encode_cursor((_utc(row[column]), key), version=version)
+            if len(rows) > 1
+            else None
+        )
+        try:
+            items = [self._spec(row)]
+        except (
+            IntegrityError,
+            ValidationError,
+            ValueError,
+            TypeError,
+            UnicodeError,
+            KeyError,
+        ):
+            logger.warning(
+                "Evidence recovery skipped invalid Chat directory entry",
+            )
+            items = []
+        return SimpleNamespace(items=items, next_cursor=next_cursor)
+
+    async def get_recovery_chat(self, chat_id):
+        try:
+            return await self.get_chat(chat_id)
+        except (
+            IntegrityError,
+            ValidationError,
+            ValueError,
+            TypeError,
+            UnicodeError,
+            KeyError,
+        ):
+            logger.warning(
+                "Evidence recovery skipped invalid Chat directory entry",
+            )
+            return None
 
     async def _session_for(self, spec):
         return await self.claim_session(

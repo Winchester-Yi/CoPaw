@@ -251,6 +251,12 @@ export function createSidebarNavigation(
       icon: <ChartColumn size={size} />,
       children: [
         {
+          key: "agent-observability",
+          label: "Agent 可观测",
+          icon: <Activity size={size} />,
+          visible: visibility.showSourceManagement,
+        },
+        {
           key: "analytics-business-overview",
           label: t("nav.analyticsBusinessOverview", "运营看板"),
           icon: <SparkBarChartLine size={size} />,

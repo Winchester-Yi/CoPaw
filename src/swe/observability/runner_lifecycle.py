@@ -21,6 +21,26 @@ from .instrumentation import Observability
 from .models import ObservabilityContext, Scope
 
 _OBSERVABILITY = Observability()
+
+
+def _trusted_workspace_binding(owner):
+    from pathlib import Path
+    from ..app.conversation_storage.runtime import storage_authority
+
+    workspace_dir = getattr(owner, "workspace_dir", None)
+    if workspace_dir is None:
+        return None
+    try:
+        # Evidence capture compares this configured path to the canonical root
+        # validated by background registration. Never resolve NAS on this path.
+        return (
+            str(Path(workspace_dir).expanduser().absolute()),
+            storage_authority(),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 _APPROVAL_RESOLUTION_OBSERVER: ContextVar[
     Callable[[ObservabilityContext | None, str, bool], None] | None
 ] = ContextVar("agentobs_approval_resolution_observer", default=None)
@@ -88,7 +108,7 @@ def prepare_query_run(
     )
     business_ref = _query_business_ref(request, meta, chat_id, question_id)
     try:
-        return _OBSERVABILITY.prepare_run(
+        context = _OBSERVABILITY.prepare_run(
             scope=Scope(
                 service_unit_id=service_unit_id(),
                 source_id=str(source_id),
@@ -99,6 +119,11 @@ def prepare_query_run(
             ),
             business_ref=business_ref,
         )
+        if context is not None:
+            context = context.with_updates(
+                workspace_binding=_trusted_workspace_binding(owner),
+            )
+        return context
     except Exception:
         return None
 
@@ -200,7 +225,9 @@ def restore_approval_context(
         )
         if actual_scope != carrier_scope:
             return None
-        return context
+        return context.with_updates(
+            workspace_binding=_trusted_workspace_binding(owner),
+        )
     except Exception:
         return None
 
@@ -394,7 +421,7 @@ def start_query_retry_attempt(
     if previous is None:
         return None
     try:
-        return _OBSERVABILITY.start_attempt(previous)
+        return _OBSERVABILITY.start_attempt(previous, retry=True)
     except Exception:
         return None
 
@@ -461,10 +488,15 @@ def defer_query_run_settlement(
     attempt: ObservabilityContext | None,
     *,
     waiting_for_approval: bool,
+    attempt_ref: dict[str, Any] | None = None,
 ) -> None:
     pending = getattr(owner, "_agent_observability_contexts", None)
     if context is not None and isinstance(pending, dict):
-        pending[identity] = (context, attempt, waiting_for_approval)
+        pending[identity] = (
+            context,
+            attempt_ref if attempt_ref is not None else attempt,
+            waiting_for_approval,
+        )
 
 
 def update_deferred_query_run_approval(
@@ -495,7 +527,13 @@ def take_query_run_settlement(owner: Any, identity: Any):
     pending = getattr(owner, "_agent_observability_contexts", None)
     if not isinstance(pending, dict):
         return None
-    return pending.pop(identity, None)
+    observation = pending.pop(identity, None)
+    if observation is None:
+        return None
+    context, attempt, waiting_for_approval = observation
+    if isinstance(attempt, dict):
+        attempt = attempt["value"]
+    return context, attempt, waiting_for_approval
 
 
 def finish_deferred_query_run(

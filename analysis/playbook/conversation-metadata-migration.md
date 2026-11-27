@@ -43,4 +43,4 @@
 
 旧 bundle 存储及迁移命令已移除。`SWE_CONVERSATION_STORAGE_AUTHORITY=mysql` 和 `--mode bundle` 不再受支持。现场 MySQL、共享 NAS、锁及回退需事先演练。
 
-审批审计和 Run/Attempt 追踪随 NAS 会话执行路径工作。业务轮次覆盖率依赖原 bundle 历史读取器，当前存储模式下返回 HTTP 503。新消息证据从 NAS 中已持久化的消息生成引用，详情按 Chat、Session、消息 ID 和内容摘要定位。无法唯一定位到 NAS 消息的旧引用返回 `unavailable`。
+审批审计和 Run/Attempt 追踪随 NAS 会话执行路径工作。业务轮次覆盖率仍依赖原 bundle 历史读取器，当前存储模式下可返回 HTTP 503。用户问题通过已持久化的轮次准入记录核验，新捕获的工具和答案证据通过会话或归档中的签名关联读取。既有 NAS 摘要引用按 Chat、Session、消息 ID 和内容摘要定位。迁移涉及已登记的 workspace 根或 authority 变更时，还须按独立 Agent 可观测正文证据运维流程执行停机 rebind。 [独立 Agent 可观测正文证据运维](../../docs/deployment/agent-observability-operations.md)

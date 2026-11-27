@@ -96,7 +96,9 @@ const expandedLabels = [
   "nav.security",
   "Skill 配置",
   "系统特性配置",
+  "定时任务迁移",
   "系统自检",
+  "Agent 可观测",
   "运营看板",
   "质量工程看板",
   "批调度监控",
@@ -109,9 +111,10 @@ const expandedLabels = [
 ];
 const conditionalLabels = new Set([
   "场景预设管理",
-  "Skill 配置",
   "系统特性配置",
+  "定时任务迁移",
   "系统自检",
+  "Agent 可观测",
   "质量工程看板",
   "批调度监控",
   "批调度看板（新）",
@@ -119,7 +122,13 @@ const conditionalLabels = new Set([
   "Claw技能运行看板",
   "异步任务中心",
 ]);
-const managementLabels = ["场景预设管理", "系统特性配置", "系统自检"];
+const managementLabels = [
+  "场景预设管理",
+  "系统特性配置",
+  "定时任务迁移",
+  "系统自检",
+  "Agent 可观测",
+];
 const governanceLabels = [
   "质量工程看板",
   "批调度监控",
@@ -134,7 +143,7 @@ describe("Sidebar behavior preservation", () => {
     state: Partial<typeof iframeState>;
     visible: string[];
   }[] = [
-    { name: "default", state: {}, visible: ["Skill 配置", "异步任务中心"] },
+    { name: "default", state: {}, visible: ["异步任务中心"] },
     {
       name: "other source",
       state: { source: "OTHER" },
@@ -144,32 +153,22 @@ describe("Sidebar behavior preservation", () => {
     {
       name: "super manager",
       state: { isSuperManager: true },
-      visible: [
-        "Skill 配置",
-        "异步任务中心",
-        ...managementLabels,
-        ...governanceLabels,
-      ],
+      visible: ["异步任务中心", ...managementLabels, ...governanceLabels],
     },
     {
       name: "manager",
       state: { manager: true },
-      visible: [
-        "Skill 配置",
-        "异步任务中心",
-        ...managementLabels,
-        ...governanceLabels,
-      ],
+      visible: ["异步任务中心", ...managementLabels, ...governanceLabels],
     },
     {
       name: "RM space without bbk",
       state: { space: "RM_ASSISTANCE", manager: true },
-      visible: ["Skill 配置", ...managementLabels, ...clawLabels],
+      visible: [...managementLabels, ...clawLabels],
     },
     {
       name: "RM space other bbk",
       state: { space: "RM_ASSISTANCE", bbk: "200", isSuperManager: true },
-      visible: ["Skill 配置", ...managementLabels, ...clawLabels],
+      visible: [...managementLabels, ...clawLabels],
     },
     {
       name: "RM space bbk 100 manager",
@@ -189,7 +188,7 @@ describe("Sidebar behavior preservation", () => {
     {
       name: "RM space bbk 100 regular user",
       state: { space: "RM_ASSISTANCE", bbk: "100" },
-      visible: ["Skill 配置", "异步任务中心", ...clawLabels],
+      visible: ["异步任务中心", ...clawLabels],
     },
   ];
 
@@ -273,7 +272,7 @@ describe("Sidebar skill config visibility", () => {
     expect(screen.getByText("Skill 配置")).toBeInTheDocument();
   });
 
-  it("hides the skill config menu for other sources", () => {
+  it("shows the skill config menu for other sources", () => {
     iframeState.source = "OTHER";
 
     render(
@@ -282,7 +281,7 @@ describe("Sidebar skill config visibility", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText("Skill 配置")).not.toBeInTheDocument();
+    expect(screen.getByText("Skill 配置")).toBeInTheDocument();
   });
 });
 

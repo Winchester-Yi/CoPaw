@@ -13,11 +13,8 @@
 | `src/swe/providers/retry_chat_model.py` | 重试封装 |
 | `src/swe/providers/rate_limiter.py` | 调用节流 |
 | `src/swe/providers/capability_baseline.py` | 能力基线定义 |
-| `src/swe/providers/openai_provider.py` | OpenAI Provider |
+| `src/swe/providers/openai_provider.py` | OpenAI 兼容 Provider，含 Kimi 模型分支 |
 | `src/swe/providers/openai_chat_model_compat.py` | OpenAI 兼容层 |
-| `src/swe/providers/anthropic_provider.py` | Anthropic Provider |
-| `src/swe/providers/gemini_provider.py` | Gemini Provider |
-| `src/swe/providers/ollama_provider.py` | Ollama Provider |
 | `src/swe/providers/kimi_chat_model.py` | Kimi 相关适配 |
 | `src/swe/providers/multimodal_prober.py` | 多模态能力探测 |
 

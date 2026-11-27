@@ -45,28 +45,19 @@ def bind_prepared_client_tls(
         _prepared_tls.reset(token)
 
 
-def prepared_http_client_kwargs(sdk: str) -> dict:
-    """Retain SDK timeout/pool defaults and HTTPX trust-env behavior."""
+def prepared_http_client_kwargs() -> dict:
+    """Retain OpenAI SDK timeout, pool defaults and HTTPX trust-env behavior."""
     context = _prepared_tls.get()
     if context is None:
         return {}
     if isinstance(context, PreparedTLSFailure):
-        if sdk == "openai":
-            # Each construction gets its own traceback; never retain Agent
-            # frames in the request's frozen preparation result.
-            raise copy.copy(context.error)
-        return {}
-    if sdk == "anthropic":
-        from anthropic import DefaultAsyncHttpxClient as AnthropicHttpxClient
+        # Each construction gets its own traceback; never retain Agent
+        # frames in the request's frozen preparation result.
+        raise copy.copy(context.error)
 
-        class AnthropicClient(_ClientCleanup, AnthropicHttpxClient):
-            pass
+    from openai import DefaultAsyncHttpxClient as OpenAIHttpxClient
 
-        return {"http_client": AnthropicClient(verify=context)}
-    else:
-        from openai import DefaultAsyncHttpxClient as OpenAIHttpxClient
+    class OpenAIClient(_ClientCleanup, OpenAIHttpxClient):
+        pass
 
-        class OpenAIClient(_ClientCleanup, OpenAIHttpxClient):
-            pass
-
-        return {"http_client": OpenAIClient(verify=context)}
+    return {"http_client": OpenAIClient(verify=context)}

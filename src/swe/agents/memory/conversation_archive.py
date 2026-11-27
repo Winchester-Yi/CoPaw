@@ -18,6 +18,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
@@ -28,6 +29,8 @@ import fcntl
 from agentscope.message import Msg
 
 from swe.constant import SECRET_DIR
+from swe.observability.context import current_context
+from swe.observability.instrumentation import Observability, SpanHandle
 from swe.performance_metrics import increment, measure_storage_operation
 from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
@@ -60,9 +63,26 @@ _CHECKPOINT_EPOCHS_NAME = "epochs.json"
 _CHECKPOINT_EVIDENCE_EPOCHS_NAME = "evidence-epochs.json"
 _CHECKPOINT_CANDIDATES_DIR = "candidates"
 _MAX_PAGE_SIZE = 50
+_MAX_EVIDENCE_SCAN_BYTES = 64 * 1024 * 1024
 _CURSOR_SIGNATURE_SIZE = hashlib.sha256().digest_size
 _CURSOR_SECRET_ENV_VAR = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
 _CURSOR_SECRET_FILE_NAME = "conversation-archive-cursor-secret"
+
+
+def _checkpoint_span(
+    chat_id: str,
+    operation: str,
+    *,
+    defer_start: bool = False,
+) -> SpanHandle | None:
+    context = current_context()
+    if context is None or context.business_ref.get("chat_id") != chat_id:
+        return None
+    return Observability().span(
+        "Checkpoint",
+        operation,
+        defer_start=defer_start,
+    )
 
 
 async def _durable_thread(function, *args):
@@ -309,16 +329,35 @@ class ConversationArchiveStore:
             )
         return storage
 
-    async def read_checkpoint_head(self, chat_id: str) -> dict[str, Any]:
-        return await _durable_thread(self._checkpoint_head, chat_id)
+    async def read_checkpoint_head(
+        self,
+        chat_id: str,
+        check_persistence: bool = False,
+    ) -> dict[str, Any]:
+        return await _durable_thread(
+            self._checkpoint_head,
+            chat_id,
+            check_persistence,
+        )
 
-    def _checkpoint_head(self, chat_id: str) -> dict[str, Any]:
+    def _checkpoint_head(
+        self,
+        chat_id: str,
+        check_persistence: bool = False,
+    ) -> dict[str, Any]:
         canonical = self._validate_chat_id(chat_id)
         with self._chat_lock(canonical):
             storage = CheckpointStorageV2(self.path_for(canonical))
             if storage.exists:
                 return storage.head()
             state = self._read_checkpoint_state_locked(canonical)
+            persisted = False
+            if check_persistence:
+                try:
+                    persisted = self._checkpoint_path(canonical).is_file()
+                except OSError:
+                    # Missing telemetry must not invalidate a successful read.
+                    pass
             return {
                 "version": 1,
                 "epoch": state.current_epoch,
@@ -328,6 +367,7 @@ class ConversationArchiveStore:
                 ),
                 "applied_event_sequence": state.record.applied_event_sequence,
                 "checkpoint_revision": state.record.revision,
+                "checkpoint_persisted": persisted,
             }
 
     async def read_checkpoint_record(
@@ -1064,7 +1104,7 @@ class ConversationArchiveStore:
                 ].sequence,
                 archived_through=canonical_boundary_id,
             )
-            self._write_checkpoint_locked(canonical_chat_id, record)
+            self._publish_observed_checkpoint(canonical_chat_id, record)
             return record
 
     async def read_checkpoint_state(
@@ -1174,7 +1214,21 @@ class ConversationArchiveStore:
     ) -> None:
         canonical_chat_id = self._validate_chat_id(chat_id)
         with self._chat_lock(canonical_chat_id):
+            self._publish_observed_checkpoint(canonical_chat_id, record)
+
+    def _publish_observed_checkpoint(
+        self,
+        canonical_chat_id: str,
+        record: CheckpointRecord,
+    ) -> None:
+        span = _checkpoint_span(canonical_chat_id, "save")
+        with span or nullcontext():
             self._write_checkpoint_locked(canonical_chat_id, record)
+            if span is not None:
+                span.end(
+                    status="succeeded",
+                    checkpoint_id=record.checkpoint_id,
+                )
 
     async def write_pending_candidate(
         self,
@@ -1248,7 +1302,7 @@ class ConversationArchiveStore:
                 )
                 if not validation.is_valid:
                     continue
-                self._write_checkpoint_locked(
+                self._publish_observed_checkpoint(
                     canonical_chat_id,
                     candidate.record,
                 )
@@ -1366,11 +1420,18 @@ class ConversationArchiveStore:
                 self._evidence_epochs_path(chat_dir),
             )
             try:
-                boundary = self._commit_locked(
-                    canonical_chat_id,
-                    archived_messages,
-                    checkpoint=record,
-                )
+                span = _checkpoint_span(canonical_chat_id, "save")
+                with span or nullcontext():
+                    boundary = self._commit_locked(
+                        canonical_chat_id,
+                        archived_messages,
+                        checkpoint=record,
+                    )
+                    if span is not None:
+                        span.end(
+                            status="succeeded",
+                            checkpoint_id=record.checkpoint_id,
+                        )
             except Exception:
                 # The batch is intentionally still invisible without a manifest
                 # entry. Restore the two derived files so the pending candidate
@@ -1696,6 +1757,128 @@ class ConversationArchiveStore:
             parsed = parsed.replace(tzinfo=timezone.utc)
         start, end = bounds
         return start <= parsed <= end
+
+    async def read_evidence_occurrence(
+        self,
+        chat_id: str,
+        reference_id: str,
+        message_id: str,
+        *,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        """Find one token in a complete, locked archive snapshot.
+
+        The snapshot digest supports a second read across session/archive
+        migration. Callers must also check the online session and Chat identity.
+        """
+        return await _durable_thread(
+            self._read_evidence_occurrence,
+            chat_id,
+            reference_id,
+            message_id,
+            max_bytes,
+        )
+
+    def _read_evidence_occurrence(
+        self,
+        chat_id,
+        reference_id,
+        message_id,
+        max_bytes,
+    ):
+        canonical = self._validate_chat_id(chat_id)
+        if (
+            not isinstance(reference_id, str)
+            or not reference_id
+            or not isinstance(message_id, str)
+            or not message_id
+        ):
+            raise ValueError("Invalid evidence identity or size limit")
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("Invalid evidence identity or size limit")
+        with self._chat_lock(canonical):
+            if self._tombstone_path(canonical).exists():
+                return {"status": "unavailable", "message": None}
+            try:
+                return self._scan_evidence_occurrence(
+                    canonical,
+                    reference_id,
+                    message_id,
+                    max_bytes,
+                )
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+                return {"status": "unavailable", "message": None}
+
+    def _scan_evidence_occurrence(
+        self,
+        chat_id,
+        reference_id,
+        message_id,
+        max_bytes,
+    ):
+        chat_dir = self.path_for(chat_id)
+        manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
+        boundaries = self._visible_boundaries(manifest, chat_id)
+        if len(boundaries) != len(manifest["boundaries"]) or len(
+            {b.id for b in boundaries},
+        ) != len(boundaries):
+            raise ValueError("Invalid evidence manifest")
+        digest = hashlib.sha256(canonical_bytes(manifest))
+        total = 0
+        matched = None
+        for boundary in boundaries:
+            path = chat_dir / f"{boundary.id}.jsonl"
+            with path.open("rb") as handle:
+                count = 0
+                while True:
+                    line = handle.readline(_MAX_EVIDENCE_SCAN_BYTES + 1)
+                    if not line:
+                        break
+                    total += len(line)
+                    if total > _MAX_EVIDENCE_SCAN_BYTES:
+                        raise ValueError("Evidence scan limit exceeded")
+                    digest.update(line)
+                    count += 1
+                    value = json.loads(line)
+                    if not isinstance(value, dict):
+                        raise ValueError("Invalid evidence record")
+                    message = Msg.from_dict(value)
+                    metadata = message.metadata
+                    if (
+                        isinstance(metadata, dict)
+                        and metadata.get("agent_observability_evidence_ref")
+                        == reference_id
+                    ):
+                        if matched is not None or message.id != message_id:
+                            return {"status": "unresolved", "message": None}
+                        matched = redact_hidden_context_for_display(message)
+                if count != boundary.archived_message_count:
+                    raise ValueError("Incomplete evidence batch")
+        snapshot = digest.hexdigest()
+        if matched is None:
+            return {
+                "status": "unavailable",
+                "message": None,
+                "snapshot": snapshot,
+            }
+        if (
+            len(
+                json.dumps(matched.to_dict(), ensure_ascii=False).encode(
+                    "utf-8",
+                ),
+            )
+            > max_bytes
+        ):
+            return {
+                "status": "truncated",
+                "message": None,
+                "snapshot": snapshot,
+            }
+        return {
+            "status": "available",
+            "message": matched,
+            "snapshot": snapshot,
+        }
 
     async def find_messages(
         self,
@@ -2618,22 +2801,23 @@ def attach_conversation_archive(
             if index not in selected_indexes
         ]
 
-    def publish_archived_evidence(messages: Sequence[Msg]) -> None:
-        from ...observability.nas_evidence import publish_nas_evidence
-
-        publish_nas_evidence(
-            (message.to_dict() for message in messages),
-            chat_id=canonical_chat_id,
-        )
-
     async def add(*args: Any, **kwargs: Any) -> Any:
         """Append an event only after ReMe has accepted the message."""
         if original_add is None:
             raise TypeError("Attached memory must expose add")
+        message = args[0] if args else kwargs.get("message")
+        if isinstance(message, Msg):
+            try:
+                from ...observability.instrumentation import (
+                    mark_pending_message_evidence,
+                )
+
+                mark_pending_message_evidence(message)
+            except Exception:
+                pass
         result = original_add(*args, **kwargs)
         if inspect.isawaitable(result):
             result = await result
-        message = args[0] if args else kwargs.get("message")
         if not isinstance(message, Msg):
             return result
         async with append_lock:
@@ -2644,9 +2828,6 @@ def attach_conversation_archive(
                 facts={"message_id": message.id, "role": message.role},
                 source_refs=(f"message:{message.id}",),
             )
-        from ...observability.nas_evidence import remember_nas_message
-
-        remember_nas_message(canonical_chat_id, message)
         return result
 
     async def archive_compacted_messages(
@@ -2654,7 +2835,6 @@ def attach_conversation_archive(
     ) -> ConversationArchiveBoundary:
         advances_event_cursor = archived_messages_are_online_prefix(messages)
         boundary = await archive_store.commit(canonical_chat_id, messages)
-        publish_archived_evidence(messages)
         if advances_event_cursor:
             await archive_store.advance_archived_message_events(
                 canonical_chat_id,
@@ -2674,7 +2854,6 @@ def attach_conversation_archive(
             messages,
             candidate_id,
         )
-        publish_archived_evidence(messages)
         remove_archived_online_messages(messages)
         await install_checkpoint_projection(result.record)
         return result
@@ -2688,7 +2867,39 @@ def attach_conversation_archive(
                 canonical_chat_id,
                 record,
             )
-        head = await archive_store.read_checkpoint_head(canonical_chat_id)
+        span = _checkpoint_span(canonical_chat_id, "restore", defer_start=True)
+        try:
+            head = await archive_store.read_checkpoint_head(
+                canonical_chat_id,
+                check_persistence=span is not None,
+            )
+        except Exception:
+            if span is not None:
+                span.start()
+                span.end(
+                    status="failed",
+                    technical_status="ERROR",
+                    has_error=True,
+                    error_type="checkpoint_read_failed",
+                )
+            raise
+        if head["version"] != 2 and not head.get("checkpoint_persisted"):
+            span = None
+        if span is not None:
+            span.start()
+
+        with span or nullcontext():
+            active = await restore_checkpoint_projection(head)
+            if span is not None:
+                span.end(
+                    status="succeeded",
+                    checkpoint_id=active.checkpoint_id,
+                )
+            return active
+
+    async def restore_checkpoint_projection(
+        head: dict[str, Any],
+    ) -> CheckpointRecord:
         active = await archive_store.read_checkpoint_record(
             canonical_chat_id,
             head,
@@ -2729,7 +2940,6 @@ def attach_conversation_archive(
         )
         if result is None:
             return False
-        publish_archived_evidence(messages)
         remove_archived_online_messages(messages)
         await install_checkpoint_projection()
         return True

@@ -74,14 +74,6 @@ def _all_provider_objects(manager: ProviderManager) -> list[Provider]:
     return objs
 
 
-def _get_ollama_host(tenant_id: str | None = None) -> str:
-    manager = _manager(tenant_id)
-    provider = manager.get_provider("ollama")
-    if provider is None or not provider.base_url:
-        return "http://127.0.0.1:11434"
-    return provider.base_url
-
-
 def _select_provider_interactive(
     prompt_text: str = "Select provider:",
     *,
@@ -214,10 +206,6 @@ def _add_models_interactive(
             ),
         )
         raise SystemExit(1)
-
-    # Ollama models cannot be added manually - they come from Ollama daemon
-    if provider_id == "ollama":
-        return
 
     extra = list(defn.extra_models)
     all_models = list(defn.models) + extra
@@ -413,7 +401,7 @@ def configure_providers_interactive(
     while True:
         pid = configure_provider_api_key_interactive(tenant_id=tenant_id)
 
-        # For local providers (llamacpp, mlx, ollama),
+        # For local providers,
         # skip to model activation directly
         manager = _manager(tenant_id)
         defn = manager.get_provider(pid)
@@ -425,7 +413,7 @@ def configure_providers_interactive(
                 ),
             )
             raise SystemExit(1)
-        if defn.is_local or pid == "ollama":
+        if defn.is_local:
             click.echo(f"\n--- Activate {defn.name} Model ---")
             configure_llm_slot_interactive(tenant_id=tenant_id)
             return
@@ -653,17 +641,6 @@ def add_model_cmd(
     """Add a model to any provider (built-in or custom)."""
     tenant_id = _get_tenant_id(ctx)
     manager = _manager(tenant_id)
-    # Prevent manual model addition for Ollama
-    if provider_id == "ollama":
-        click.echo(
-            click.style(
-                "Error: Ollama models cannot be added manually. "
-                "Use 'ollama pull <model>' to download models.",
-                fg="red",
-            ),
-        )
-        raise SystemExit(1)
-
     try:
         provider = manager.get_provider(provider_id)
         if provider is None:
@@ -692,17 +669,6 @@ def remove_model_cmd(
     """Remove a user-added model from any provider."""
     tenant_id = _get_tenant_id(ctx)
     manager = _manager(tenant_id)
-    # Prevent manual model removal for Ollama
-    if provider_id == "ollama":
-        click.echo(
-            click.style(
-                "Error: Ollama models cannot be removed via this command. "
-                "Use 'ollama rm <model>' to delete models.",
-                fg="red",
-            ),
-        )
-        raise SystemExit(1)
-
     try:
         provider = manager.get_provider(provider_id)
         if provider is None:

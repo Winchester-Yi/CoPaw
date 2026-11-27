@@ -11,6 +11,8 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from .config import deployment_resource
+
 _PRODUCER_PID = os.getpid()
 _PRODUCER_ID = f"{socket.gethostname()[:32]}:{_PRODUCER_PID}:{uuid4()}"
 
@@ -65,6 +67,7 @@ class ObservabilityContext:
     attempt_started_at: str | None = None
     run_started_monotonic_ns: int | None = field(default=None, repr=False)
     run_clock_producer_id: str | None = field(default=None, repr=False)
+    workspace_binding: tuple[str, str] | None = field(default=None, repr=False)
 
     @classmethod
     def new_run(
@@ -124,6 +127,10 @@ class ObservabilityContext:
             run_clock_producer_id=updates.get(
                 "run_clock_producer_id",
                 self.run_clock_producer_id,
+            ),
+            workspace_binding=updates.get(
+                "workspace_binding",
+                self.workspace_binding,
             ),
         )
 
@@ -197,6 +204,11 @@ class MetadataEvent:
     event_id: str = field(default_factory=new_id)
     occurred_at: str = field(default_factory=utc_now)
     producer_id: str = field(default_factory=producer_id)
+    _resource: dict[str, str] = field(
+        default_factory=deployment_resource,
+        init=False,
+        repr=False,
+    )
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -209,6 +221,7 @@ class MetadataEvent:
             "entity_id": self.entity_id,
             "phase_key": self.phase_key,
             "local_seq": self.local_seq,
+            "resource": dict(self._resource),
         }
         context = self.obs_context
         if context is not None:
@@ -242,6 +255,7 @@ class MetadataEvent:
             "capture_enabled",
             "scope",
             "business_ref",
+            "resource",
         }
         result.update(
             (key, value)

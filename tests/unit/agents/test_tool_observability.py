@@ -378,7 +378,7 @@ async def test_tool_hard_timeout_records_controlled_failure(monkeypatch):
         "span.started",
         "span.ended",
     ]
-    assert span_events[-1]["status"] == "failed"
+    assert span_events[-1]["status"] == "timed_out"
     assert span_events[-1]["technical_status"] == "ERROR"
     assert span_events[-1]["error_type"] == "tool_timeout"
     _assert_tool_asset(

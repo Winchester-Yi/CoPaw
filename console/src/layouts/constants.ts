@@ -34,6 +34,7 @@ export const DEFAULT_OPEN_KEYS = [
 ];
 
 export const KEY_TO_PATH: Record<string, string> = {
+  "agent-observability": "/agent-observability/runs",
   chat: "/chat",
   channels: "/channels",
   sessions: "/sessions",

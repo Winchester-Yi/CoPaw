@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ...agents.skill_runtime_snapshot import WorkspaceSkillSnapshot
+from ..answer_turn.models import TurnIdentity
 from .query_contracts import _QueryRuntime
 from .session import (
     SESSION_SKILL_SNAPSHOT_STATE_KEY,
@@ -229,13 +230,23 @@ async def _admit_user_turn(
         turn_states = {}
         state[TURN_STATES_KEY] = turn_states
     existing = turn_states.get(turn_id)
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    identity = channel_meta.get("answer_turn_identity")
+    execution_id = (
+        identity.turn_id
+        if isinstance(identity, TurnIdentity) and identity.msgid == turn_id
+        else None
+    )
+    is_reexecution = (
+        isinstance(existing, dict)
+        and existing.get("status") in _TERMINAL_TURN_STATUSES
+        and execution_id is not None
+        and existing.get("execution_id") != execution_id
+    )
     is_reconnect = (
         isinstance(existing, dict)
         and existing.get("message") == message
-        and (
-            observability_context is None
-            or existing.get("status") not in _TERMINAL_TURN_STATUSES
-        )
+        and not is_reexecution
     )
     if is_reconnect:
         return turn_id, False, None
@@ -247,7 +258,8 @@ async def _admit_user_turn(
     turn_states[turn_id] = _admitted_turn_state(
         existing,
         message,
-        request,
+        channel_meta,
+        execution_id,
         observability_context,
     )
     execution.mark_state_dirty()
@@ -278,7 +290,13 @@ def _link_predecessor_run(existing, observability_context):
     return observability_context
 
 
-def _admitted_turn_state(existing, message, request, observability_context):
+def _admitted_turn_state(
+    existing,
+    message,
+    channel_meta,
+    execution_id,
+    observability_context,
+):
     admitted_state = {
         "status": "admitted",
         "message": message,
@@ -286,9 +304,9 @@ def _admitted_turn_state(existing, message, request, observability_context):
     }
     if isinstance(existing, dict) and "admission_order" in existing:
         admitted_state["admission_order"] = existing["admission_order"]
-    chat_id = (getattr(request, "channel_meta", None) or {}).get(
-        "chat_id",
-    )
+    if execution_id is not None:
+        admitted_state["execution_id"] = execution_id
+    chat_id = channel_meta.get("chat_id")
     if isinstance(chat_id, str) and chat_id:
         admitted_state["chat_id"] = chat_id
     if observability_context is not None:

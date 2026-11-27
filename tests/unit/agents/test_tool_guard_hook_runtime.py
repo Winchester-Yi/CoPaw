@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -1023,9 +1024,27 @@ async def test_pre_tool_hook_block_returns_failed_tool_result_without_stopping(
 )
 async def test_pre_tool_hook_stop_records_terminal_result_and_raises(
     tmp_path,
+    monkeypatch,
     reason: str,
     expected_reason: str,
 ) -> None:
+    from swe.observability import Observability, Scope, bind_context
+    from swe.observability.emitter import JsonlEmitter
+
+    sink = StringIO()
+    emitter = JsonlEmitter(stream=sink)
+    monkeypatch.setattr(
+        "swe.observability.instrumentation.default_emitter",
+        lambda: emitter,
+    )
+    context = (
+        Observability()
+        .prepare_run(
+            scope=Scope("swe", "source-a", "tenant-a", "agent-a"),
+            enabled=True,
+        )
+        .new_attempt()
+    )
     agent = _FakeAgent(tmp_path)
     agent._emit_tool_hook = AsyncMock(
         return_value=MergedHookResult(
@@ -1034,7 +1053,10 @@ async def test_pre_tool_hook_stop_records_terminal_result_and_raises(
         ),
     )
 
-    with pytest.raises(PreToolUseTerminalStop) as exc_info:
+    with (
+        bind_context(context),
+        pytest.raises(PreToolUseTerminalStop) as exc_info,
+    ):
         await agent._acting(
             {
                 "id": "tool-stop",
@@ -1046,6 +1068,12 @@ async def test_pre_tool_hook_stop_records_terminal_result_and_raises(
     assert exc_info.value.reason == expected_reason
     assert "hook_stopped" in str(agent.printed[0].content)
     assert "hook_stopped" in str(agent.memory.content[0][0].content)
+    assert emitter.close() == 0
+    events = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert [event["span_type"] for event in events] == ["Guard", "Guard"]
+    assert events[-1]["status"] == "rejected"
+    assert events[-1]["reason_code"] == "hook_stop"
+    assert expected_reason not in sink.getvalue()
 
 
 @pytest.mark.asyncio

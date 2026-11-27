@@ -14,14 +14,16 @@
 | 范围 | 决定 |
 |---|---|
 | 应用 | SWE 内独立模块/API，Console 独立页面；不另起必须部署的服务 |
-| 产出 | 专用 logger/有界队列，单行 JSON 写 stdout，仅元数据 |
+| 产出 | 有界队列向 stdout 写入 `AGENTOBS ` 前缀与单行 JSON，仅元数据 |
 | 入库 | 用户负责人工采集入库；本项目提供 schema、DDL、INSERT 示例、投影与查询，不设计/实现/验收采集器 |
 | 存储 | 独立 MySQL 表/索引、独立连接配置；不增加 ES/OpenSearch |
 | 清理 | 本期不做合法元数据清理、TTL、归档/分区淘汰任务 |
 | 正文 | 只从现有 NAS 正文经业务定位授权读取，不新增正文副本 |
 | 身份 | 沿用现有身份/manager/admin 判定；manager 当前 Source，admin 显式跨 Source；同范围可读正文 |
 | 开关 | 单一全局开关，默认关闭；新 Run 准入快照，后续 Attempt/SubAgent 继承 |
-| P0 执行 | 主对话、专家主执行、后台 SubAgent 基础关联与终态；Cron/独立 Workflow 放 P1 |
+| P0 执行 | 主对话、专家主执行、后台 SubAgent 基础关联与终态 |
+| 暂排除 | Cron、独立 Workflow 和模型成本统计暂不纳入可观测后续交付，待重新确认范围后再排期 |
+| 模型适配器 | 模型请求埋点覆盖 OpenAI 兼容协议，包含基于该协议的 Kimi 分支。移除产品内置的 Ollama、Anthropic 和 Gemini 专用适配器 |
 | 质量 | 优先业务响应、允许有标记降级，不承诺 Span 零丢失 |
 | 刷新 | 手动刷新/有界轮询，无新实时推送通道 |
 
@@ -30,7 +32,7 @@
 ## 2. 链路与模块
 
 ```text
-真实业务边界 → 独立 obs_context → 白名单元数据 → 有界日志队列 → stdout JSON
+真实业务边界 → 独立 obs_context → 白名单元数据 → 有界日志队列 → stdout AGENTOBS <JSON>
                                                         │
                                   用户负责采集并 INSERT inbox
                                                         ↓
@@ -65,7 +67,7 @@
 
 ## 4. 元数据事件协议 v1
 
-UTF-8 单行 JSON；schema_version=1，命名空间 agentobs。完整单行最大 24 KiB；先白名单投影再按序列化字节预算裁剪可选元数据，保留必需身份和生命周期。必需字段不可保留时丢事件并计数，不输出无效 JSON。数组默认不超过32项，嵌套深度不超过4；截断用明确标志/原因，不截 JSON 字符串中间。
+stdout 上每条事件由固定前缀 `AGENTOBS `（末尾一个空格）和 UTF-8 单行 JSON 组成。采集时移除前缀，将 JSON 写入 inbox。JSON 使用 `schema_version=1`，入库上限 24 KiB。先白名单投影再按序列化字节预算裁剪可选元数据，保留必需身份和生命周期。必需字段不可保留时丢事件并计数，不输出无效 JSON。数组默认不超过32项，嵌套深度不超过4；截断用明确标志/原因，不截 JSON 字符串中间。
 
 | 字段组 | 内容 |
 |---|---|
@@ -131,17 +133,23 @@ NAS保存已提交会话/恢复消息，不保证每次原始模型请求：临�
 
 | 能力 | P0 | 降级或P1 |
 |---|---|---|
-| 过程可观测 | Run/Attempt、真实操作树/瀑布、Events/Links、13类型注册兜底、SubAgent基础状态 | Cron/独立Workflow/P1专项实际埋点；缺父节点标orphan，不猜树 |
+| 过程可观测 | Run/Attempt、真实操作树/瀑布、Events/Links、13类型注册兜底、SubAgent基础状态 | 缺父节点标orphan，不猜树 |
 | 结果可解释 | 已保存问题/回答/工具正文证据与业务定位、采集范围显示 | RAG答案片段→文档/版本/Chunk只有真实映射才显示；不证明内部推理或答案正确 |
 | 过程可追溯 | 实际模型/Provider、Agent/Tool/Skill/Prompt的可信ID/版本/签名 | 外部修订不可得为unknown；版本反查增强/P1，不用当前覆盖历史 |
 | 异常可定位 | error分类/phase、cause、recovery、已恢复子错误与根结果分离 | 原始敏感异常文本不进入新日志；无因果证据不强称根因 |
-| 性能可分析 | 时长P50/P95/P99、TTFT/首可见文本、Token覆盖、AgentLoop、实际Tool次数/失败率与类型热点、丢弃计数 | TPOT/关键路径/CPU分解、价格成本/质量评测/跨执行对比为P1 |
+| 性能可分析 | 时长P50/P95/P99、TTFT/首可见文本、Token覆盖、AgentLoop、实际Tool次数/失败率与类型热点、丢弃计数 | TPOT/关键路径/CPU分解、质量评测/跨执行对比为P1 |
 
 Run elapsed含审批等待，active time为Attempt活动区间并集；操作duration取本地单调计时。模型逻辑调用与底层运行时重试尝试分别统计，Provider内部不可见HTTP重试不冒充已观测请求。首有效chunk从实际逻辑模型调用到非空输出chunk，首可见文本另计；空启动/usage-only不算输出。stream无输出时延迟null，非流式不伪造TTFT。Usage取提供方真实终态/最新累计值，未知不填0，推理Token不是默认额外加到输出总量。
 
 父子时长不相加，热点按操作类型分组并说明可能并行，P95用明确样本集nearest-rank，不平均各组P95。不采用隐蔽抽样：初值每次聚合最多读50000个满足过滤的已结束样本；超出时返回range_too_large提示缩小窗口，不默默抽前N条。取消、失败、成功的耗时分布可分开筛选，已恢复失败的工具仍计工具失败但不计Run失败。
 
+跨 Run 模型性能总览分别统计筛选范围内已结束的逻辑模型调用和 Provider 请求尝试。用量覆盖按已结束请求尝试计算，分别展示输入、输出及两项均已获取的计数。首有效 chunk 和首可见文本分别取请求级已知样本，展示 P50、P95、P99 和样本数。
+
+可重试的 Agent 失败在退避前结算当前 Attempt，新的 Attempt 在等待完成后创建。退避期间取消时保留上一次失败的 Attempt，Run 按实际业务结果结算。PreToolUse STOP 记录 Guard 拒绝事实，原因码为 `hook_stop`。本地工具硬超时记录 `timed_out` 和技术错误 `tool_timeout`。
+
 ## 9. 新 API 与页面
+
+Console 首版已确认 manager 和 admin 都在当前 Source 内完成从列表到证据的排查。交互及当前已实现的 API 映射见 [Swe Agent 可观测页面交互设计](2026-11-23-agent-observability-console-interaction.md)。
 
 前缀/agent-observability；所有数据API先应用现有身份判定和服务端manager当前Source/admin显式Source过滤，普通用户403，越界详情/正文与不存在统一404。admin跨Source须明确all_sources或列表，默认不自动全库。service_unit由后台允许范围约束，不让客户端任意指NAS根。
 
@@ -165,6 +173,8 @@ Console使用独立“Agent可观测”入口：上方筛选/数据质量，执�
 
 页面路径采用 `/agent-observability/runs`、`/agent-observability/runs/{run_id}?attempt={attempt_id}&span={span_id}`，不依赖旧 Monitor 页。项目筛选映射服务端授权 Source，不新增 project 身份。默认 Run 总览，展开所选 Attempt 的真实 Span；Run/Attempt 导航条是 UI 结构，不伪造持久化 Span。父子需同 Run，跨 Attempt 的恢复关系使用 Link；未确认父关系不能按时间、名称或 step 猜。
 
+2026-11-23 已确认从列表打开详情默认展示 Run 最终状态和最近一次已观测的 Attempt。进行中的 Run 展示当前状态，带 Attempt 或 Span 的深链接优先恢复指定位置。
+
 ### 10.2 五表增量与投影字段
 
 保留五表，新列/索引均已进入 [DDL 草案](../../../.scratch/agent-observability/schema-draft.sql)，尚未执行：
@@ -182,6 +192,8 @@ Run的span_count/error_span_count统计已规范投影的唯一Span及has_error=
 请求模型与响应模型是不同字段；二者不同不构成冲突。model_key从请求模型回退值提升为已知响应模型时允许更新，并保留model_key_source=request_fallback|response；只有同一实际请求的同一身份字段出现互斥已知值才标conflict。一个逻辑模型容器跨请求尝试时不把多个实际模型硬合成一个身份，实际模型按请求Span展示。
 
 ### 10.3 埋点字段与事实边界
+
+聊天请求获取工作区时立即继续执行。正文证据恢复服务的初始化和工作区登记由后台完成，登记失败由后台重试。恢复服务就绪且当前工作区登记成功后，新产生的正文证据按现有规则关联。登记前已经持久化且可验证的证据信封仍可恢复，未留存关联的证据记录为 `not_saved`。模型元数据采集独立于正文证据登记。
 
 结束事件仍须自包含开始时间、操作身份、父关系、技术/业务结果及本操作有界摘要，开始丢失也能显示partial。同Span重复包装只生成一个事实槽；保持旧埋点及业务调用次序不变。以下是字段设计，不代表项目现在已经产出这些字段：
 
@@ -234,11 +246,17 @@ Span默认200/最多1000，事件默认100/最多500；单次响应JSON建议最
 
 持久化UTC DATETIME(6)，API给UTC带微秒字符串及相对所选视窗的offset_us；不向JavaScript传纳秒epoch Number。单调duration_us与墙钟起止不一致时分别保留并标clock_skew，end早于start等异常不改写成正常耗时。统一窗口取已知起止边界并包含后台晚结束；进行中延长至服务端observed_at，未知/缺结束用unknown/partial样式，不能仅因无end永远宣称仍在业务执行。浏览器可外推显示估计elapsed但不作为业务裁决。
 
-首有效chunk/首可见文本沿用第8节的真实定义；Provider未证明为首token时UI不将time_to_first_chunk标成精确TTFT。请求模型与实际模型分别展示。Input/Output Usage及合计仅在相应覆盖已知时给值，未知为—；不把父/子模型容器重复相加。成本仍是P1：没有执行时价格版本、币种与实际用量口径，本期隐藏成本列或显示unavailable，不按现价估算。
+首有效chunk/首可见文本沿用第8节的真实定义；Provider未证明为首token时UI不将time_to_first_chunk标成精确TTFT。请求模型与实际模型分别展示。模型成本统计暂时排除，Console 隐藏成本列。
+
+Run 摘要按唯一模型请求尝试分别累加已获取的输入和输出 Token。两次请求中仅一次返回 20 个输入 Token 时，摘要显示 20。部分覆盖时标明数值为已观测用量。某项完全缺失时，API 返回 `null`。请求详情逐字段展示已知值，真实零值显示 `0`，缺失显示「未获取」。单次请求的 Token 合计在输入与输出均已获取时显示。
+
+请求级 Usage 上线前的历史 Run 如缺少请求级用量证据，相应的 Token 字段在 API 中返回 `null`，Console 留空。按已有请求级证据展示已知值，输入和输出分别判断。历史逻辑调用上的用量摘要不用于补算请求级用量，缺失值不计作零。
 
 视图的Tool命令预览、完整Prompt、原始异常堆栈、下载原文件、全部OTel attributes不是本期承诺。Loop/Context/Checkpoint支持安全类型化呈现，但只对项目真实边界埋点。Transcript、关键路径、原生OTel接入/导出、价格成本、反馈评测和新全文搜索不由本次视图对照自动进入P0。Chromium108与hideMenu兼容要求保持不变。
 
 ## 11. 实施顺序与验收
+
+模型请求埋点修复先完成 OpenAI 兼容适配器的请求事实采集、请求侧业务隔离和 MySQL 投影。首批 Console 交付 Run 摘要与单次模型请求详情，用同一条执行链路验收从模型调用到页面展示。后续批次已补齐跨 Run 性能总览中的模型请求次数、用量覆盖和首输出延迟分布。
 
 1. 独立协议/全局配置/上下文/输出：关闭零正文工作量、队满不阻塞、取消不变、JSON白名单/UTF-8限额；旧可观测无导入依赖。
 2. MySQL DDL/readiness/inbox投影：样例导入、重复/不同ID同槽/冲突、乱序、并发、晚提交小ID、事务回滚；先实际数据库验DDL/索引。

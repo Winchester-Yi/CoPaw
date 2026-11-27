@@ -43,6 +43,22 @@ from .tool_status import (
 logger = logging.getLogger(__name__)
 _MISSING_SOURCE_ID_PLACEHOLDER = "(not provided)"
 _RUNTIME_MESSAGE_ROLES = {"assistant", "system", "user", "tool"}
+_INTERNAL_EVIDENCE_FIELDS = frozenset(
+    {"agent_observability_evidence_ref", "agent_observability_outbox"},
+)
+
+
+def _public_metadata(value):
+    """Copy metadata without internal evidence references at any depth."""
+    if isinstance(value, dict):
+        return {
+            key: _public_metadata(item)
+            for key, item in value.items()
+            if key not in _INTERNAL_EVIDENCE_FIELDS
+        }
+    if isinstance(value, list):
+        return [_public_metadata(item) for item in value]
+    return value
 
 
 def legacy_message_id(
@@ -420,7 +436,7 @@ def agentscope_msg_to_message(
         metadata = {
             "original_id": stable_id,
             "original_name": msg.name,
-            "metadata": msg.metadata,
+            "metadata": _public_metadata(msg.metadata),
         }
         role = _normalize_runtime_message_role(msg.role, metadata)
 

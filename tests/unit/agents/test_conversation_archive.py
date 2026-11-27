@@ -365,3 +365,183 @@ async def test_deleted_chat_archive_cannot_be_recreated(
         await store.commit(chat_id, [_message(2)])
     assert not (tmp_path / "dialog" / chat_id).exists()
     assert (tmp_path / "dialog" / ".deleted" / chat_id).is_file()
+
+
+@pytest.mark.asyncio
+async def test_evidence_occurrence_requires_unique_token_and_intact_archive(
+    tmp_path,
+):
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(
+        tmp_path / "dialog",
+        cursor_secret=b"test",
+    )
+    message = _message(1)
+    message.metadata = {"agent_observability_evidence_ref": "ref-1"}
+    boundary = await store.commit(chat_id, [message])
+    found = await store.read_evidence_occurrence(
+        chat_id,
+        "ref-1",
+        message.id,
+        max_bytes=10000,
+    )
+    assert found["status"] == "available"
+    assert found["message"].id == message.id
+    assert (
+        found["snapshot"]
+        == (
+            await store.read_evidence_occurrence(
+                chat_id,
+                "ref-1",
+                message.id,
+                max_bytes=10000,
+            )
+        )["snapshot"]
+    )
+    assert (
+        await store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            "wrong",
+            max_bytes=10000,
+        )
+    )["status"] == "unresolved"
+    assert (
+        await store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            message.id,
+            max_bytes=1,
+        )
+    )["status"] == "truncated"
+    duplicate = _message(2)
+    duplicate.metadata = {"agent_observability_evidence_ref": "ref-1"}
+    await store.commit(chat_id, [duplicate])
+    assert (
+        await store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            message.id,
+            max_bytes=10000,
+        )
+    )["status"] == "unresolved"
+    (store.path_for(chat_id) / f"{boundary.id}.jsonl").unlink()
+    assert (
+        await store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            message.id,
+            max_bytes=10000,
+        )
+    )["status"] == "unavailable"
+    await store.delete_chat(chat_id)
+    assert (
+        await store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            message.id,
+            max_bytes=10000,
+        )
+    )["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_evidence_snapshot_changes_when_archive_changes(tmp_path):
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(
+        tmp_path / "dialog",
+        cursor_secret=b"test",
+    )
+    message = _message(1)
+    message.metadata = {"agent_observability_evidence_ref": "ref-1"}
+    await store.commit(chat_id, [message])
+    before = await store.read_evidence_occurrence(
+        chat_id,
+        "ref-1",
+        message.id,
+        max_bytes=10000,
+    )
+    await store.commit(chat_id, [_message(2)])
+    after = await store.read_evidence_occurrence(
+        chat_id,
+        "ref-1",
+        message.id,
+        max_bytes=10000,
+    )
+    assert before["status"] == after["status"] == "available"
+    assert before["snapshot"] != after["snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_evidence_scan_serializes_with_delete(tmp_path, monkeypatch):
+    import threading
+
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(
+        tmp_path / "dialog",
+        cursor_secret=b"test",
+    )
+    message = _message(1)
+    message.metadata = {"agent_observability_evidence_ref": "ref-1"}
+    await store.commit(chat_id, [message])
+    entered, release = threading.Event(), threading.Event()
+    scan = store._scan_evidence_occurrence
+
+    def blocked(*args):
+        entered.set()
+        assert release.wait(5)
+        return scan(*args)
+
+    monkeypatch.setattr(store, "_scan_evidence_occurrence", blocked)
+    reading = asyncio.create_task(
+        store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            message.id,
+            max_bytes=10000,
+        ),
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    deleting = asyncio.create_task(store.delete_chat(chat_id))
+    await asyncio.sleep(0.05)
+    assert not deleting.done()
+    release.set()
+    assert (await reading)["status"] == "available"
+    await deleting
+    assert (
+        await store.read_evidence_occurrence(
+            chat_id,
+            "ref-1",
+            message.id,
+            max_bytes=10000,
+        )
+    )["status"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_evidence_occurrence_survives_checkpoint_format_migration(
+    tmp_path,
+):
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(
+        tmp_path / "dialog",
+        cursor_secret=b"test",
+    )
+    message = _message(1)
+    message.metadata = {"agent_observability_evidence_ref": "ref-1"}
+    await store.commit(chat_id, [message])
+    before = await store.read_evidence_occurrence(
+        chat_id,
+        "ref-1",
+        message.id,
+        max_bytes=10000,
+    )
+    await asyncio.to_thread(store.migrate_checkpoint_v2, chat_id)
+    after = await store.read_evidence_occurrence(
+        chat_id,
+        "ref-1",
+        message.id,
+        max_bytes=10000,
+    )
+    assert before["status"] == after["status"] == "available"
+    assert before["snapshot"] == after["snapshot"]

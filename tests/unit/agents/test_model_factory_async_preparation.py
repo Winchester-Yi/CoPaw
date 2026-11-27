@@ -505,28 +505,16 @@ async def test_cancelled_preparation_consumes_late_worker_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "provider_name",
-    ["openai", "anthropic", "ollama"],
-)
 async def test_real_sdk_tls_preparation_runs_on_worker(
     monkeypatch,
     model_boundary,
-    provider_name,
 ):
     import ssl
     from swe.providers.openai_provider import OpenAIProvider
-    from swe.providers.anthropic_provider import AnthropicProvider
-    from swe.providers.ollama_provider import OllamaProvider
 
-    classes = {
-        "openai": OpenAIProvider,
-        "anthropic": AnthropicProvider,
-        "ollama": OllamaProvider,
-    }
-    provider = classes[provider_name](
-        id=provider_name,
-        name=provider_name,
+    provider = OpenAIProvider(
+        id="openai",
+        name="OpenAI",
         api_key="test-key",
         base_url="https://example.invalid/v1",
     )
@@ -537,21 +525,16 @@ async def test_real_sdk_tls_preparation_runs_on_worker(
     )
     main_thread = threading.get_ident()
     tls_threads = []
-    import anthropic
     import openai
 
-    sdk = anthropic if provider_name == "anthropic" else openai
-    sdk_class = (
-        sdk.AsyncAnthropic if provider_name == "anthropic" else sdk.AsyncClient
-    )
-    original_init = sdk_class.__init__
+    original_init = openai.AsyncClient.__init__
     constructions = []
 
     def construct(self, *args, **kwargs):
         constructions.append(threading.get_ident())
         return original_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(sdk_class, "__init__", construct)
+    monkeypatch.setattr(openai.AsyncClient, "__init__", construct)
     original = ssl.create_default_context
 
     def create_context(*args, **kwargs):
@@ -565,7 +548,7 @@ async def test_real_sdk_tls_preparation_runs_on_worker(
         prepared = await model_factory.prepare_model_config_async(
             agent_id="agent-a",
             model_slot_override=ModelSlotConfig(
-                provider_id=provider_name,
+                provider_id="openai",
                 model="test-model",
             ),
             model_provider_override=provider,
@@ -584,11 +567,11 @@ async def test_real_sdk_tls_preparation_runs_on_worker(
             pool = model.client._client._transport._pool
             assert (
                 pool._max_connections
-                == sdk.DEFAULT_CONNECTION_LIMITS.max_connections
+                == openai.DEFAULT_CONNECTION_LIMITS.max_connections
             )
             assert (
                 pool._max_keepalive_connections
-                == sdk.DEFAULT_CONNECTION_LIMITS.max_keepalive_connections
+                == openai.DEFAULT_CONNECTION_LIMITS.max_keepalive_connections
             )
         finally:
             await model.client.close()
@@ -641,14 +624,14 @@ async def test_prepared_tls_respects_cert_environment_and_binding_lifecycle(
         )
         assert observed == [(str(cert_file), observed[0][1])]
         assert observed[0][1] != threading.get_ident()
-        assert prepared_http_client_kwargs("openai") == {}
+        assert prepared_http_client_kwargs() == {}
         with (
             pytest.raises(ValueError),
             bind_prepared_client_tls(prepared.tls_context),
         ):
-            http_client = prepared_http_client_kwargs("openai")["http_client"]
+            http_client = prepared_http_client_kwargs()["http_client"]
             raise ValueError("construction failed")
-        assert prepared_http_client_kwargs("openai") == {}
+        assert prepared_http_client_kwargs() == {}
         http_client.__del__()
         await asyncio.sleep(0)
         assert http_client.is_closed
@@ -731,7 +714,7 @@ async def test_tls_failure_preserves_model_fallback(
         model, _ = model_factory.create_model_and_formatter(
             prepared_model_config=prepared,
         )
-        assert model is fallback_model
+        assert model._model is fallback_model
     finally:
         cache.init_executor.shutdown(wait=True)
 
@@ -786,7 +769,7 @@ async def test_failed_tls_preparation_never_reloads_certificates_on_loop(
             model, _ = model_factory.create_model_and_formatter(
                 prepared_model_config=prepared,
             )
-            assert model is fallback_model
+            assert model._model is fallback_model
         else:
             with pytest.raises(OSError):
                 model_factory.create_model_and_formatter(
